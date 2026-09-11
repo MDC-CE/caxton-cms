@@ -68,6 +68,8 @@ function normalizeVideo(
 export default function FeaturesQuadDefault({ data }: FeaturesQuadDefaultProps) {
   const backgroundClass = data.background || "bg-background";
   const images = data.images || [];
+  const cards = data.cards ?? [];
+  const hasCards = cards.length > 0;
   const videoConfig = normalizeVideo(data.video, data.video_ratio, data.video_preview_image);
   const hasVideo = !!videoConfig?.url;
   const hasMedia = hasVideo || images.length > 0;
@@ -187,11 +189,13 @@ export default function FeaturesQuadDefault({ data }: FeaturesQuadDefaultProps) 
             </div>
           )}
           {/* Cards stacked vertically - always compact on mobile */}
-          <div className="grid grid-cols-1 gap-2" data-testid="cards-features-quad-mobile">
-            {data.cards.map((card, index) => (
-              <CompactCard key={index} card={card} index={index} />
-            ))}
-          </div>
+          {hasCards && (
+            <div className="grid grid-cols-1 gap-2" data-testid="cards-features-quad-mobile">
+              {cards.map((card, index) => (
+                <CompactCard key={index} card={card} index={index} />
+              ))}
+            </div>
+          )}
           {data.footer_description && (
             <p className="text-xs text-muted-foreground leading-relaxed italic text-center">{data.footer_description}</p>
           )}
@@ -246,11 +250,13 @@ export default function FeaturesQuadDefault({ data }: FeaturesQuadDefaultProps) 
               )
             )}
           </div>
-          <div className="grid grid-cols-2 gap-4" data-testid="cards-features-quad-tablet">
-            {data.cards.map((card, index) => (
-              <CardComponent key={index} card={card} index={index} />
-            ))}
-          </div>
+          {hasCards && (
+            <div className="grid grid-cols-2 gap-4" data-testid="cards-features-quad-tablet">
+              {cards.map((card, index) => (
+                <CardComponent key={index} card={card} index={index} />
+              ))}
+            </div>
+          )}
           {data.footer_description && (
             <p className="text-sm text-muted-foreground leading-relaxed italic text-left">{data.footer_description}</p>
           )}
@@ -305,11 +311,13 @@ export default function FeaturesQuadDefault({ data }: FeaturesQuadDefaultProps) 
               )
             )}
           </div>
-          <div className="grid grid-cols-2 gap-6" data-testid="cards-features-quad-desktop">
-            {data.cards.map((card, index) => (
-              <CardComponent key={index} card={card} index={index} />
-            ))}
-          </div>
+          {hasCards && (
+            <div className="grid grid-cols-2 gap-6" data-testid="cards-features-quad-desktop">
+              {cards.map((card, index) => (
+                <CardComponent key={index} card={card} index={index} />
+              ))}
+            </div>
+          )}
           {data.footer_description && (
             <p className="text-base text-muted-foreground leading-relaxed italic">{data.footer_description}</p>
           )}

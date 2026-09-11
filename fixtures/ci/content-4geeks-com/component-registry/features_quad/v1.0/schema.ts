@@ -3,7 +3,7 @@ import { videoConfigSchema } from "../../_common/schema";
 
 export const componentMeta = {
   displayName: "Features Quad",
-  description: "Display 4 feature cards in a grid layout with optional images and laptop edge variant",
+  description: "Feature section with optional cards (up to 4), images, and laptop edge variant",
 };
 
 export const featureQuadCardSchema = z.object({
@@ -30,7 +30,7 @@ export const featureQuadSectionSchema = z.object({
   heading: z.string().describe("Section heading"),
   description: z.string().describe("Section description"),
   images: z.array(featureQuadImageSchema).optional().describe("Array of images (up to 4) displayed in the header"),
-  cards: z.array(featureQuadCardSchema).min(4).max(4).describe("Array of exactly 4 feature cards"),
+  cards: z.array(featureQuadCardSchema).max(4).optional().describe("Optional feature cards (up to 4). Omit or leave empty for heading/media/CTA only."),
   footer_description: z.string().optional().describe("Optional footer text (italic)"),
   background: z.string().optional().describe("Background CSS class (e.g., 'bg-muted/30')"),
   text_align: z.enum(["left", "center"]).optional().describe("Alignment for heading + description: 'left' (default when both present) or 'center'"),

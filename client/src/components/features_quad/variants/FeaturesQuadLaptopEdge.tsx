@@ -143,6 +143,8 @@ export default function FeaturesQuadLaptopEdge({ data }: FeaturesQuadLaptopEdgeP
   const isCompact = data.compact !== null ? data.compact : false;
   const CardComponent = isCompact ? CompactCard : FullCard;
   const images = data.images || [];
+  const cards = data.cards ?? [];
+  const hasCards = cards.length > 0;
   const videoConfig = normalizeVideo(
     data.video,
     data.video_ratio,
@@ -250,14 +252,16 @@ export default function FeaturesQuadLaptopEdge({ data }: FeaturesQuadLaptopEdgeP
             )}
           </div>
           {/* Cards stacked vertically - always compact on mobile */}
-          <div
-            className="grid grid-cols-1 gap-2"
-            data-testid="cards-features-quad-mobile"
-          >
-            {data.cards.map((card, index) => (
-              <CompactCard key={index} card={card} index={index} />
-            ))}
-          </div>
+          {hasCards && (
+            <div
+              className="grid grid-cols-1 gap-2"
+              data-testid="cards-features-quad-mobile"
+            >
+              {cards.map((card, index) => (
+                <CompactCard key={index} card={card} index={index} />
+              ))}
+            </div>
+          )}
           {data.footer_description && (
             <p className="text-xs text-muted-foreground leading-relaxed italic text-center">
               {data.footer_description}
@@ -317,14 +321,16 @@ export default function FeaturesQuadLaptopEdge({ data }: FeaturesQuadLaptopEdgeP
                 </div>
               ))}
           </div>
-          <div
-            className="grid grid-cols-2 gap-4"
-            data-testid="cards-features-quad-tablet"
-          >
-            {data.cards.map((card, index) => (
-              <CardComponent key={index} card={card} index={index} />
-            ))}
-          </div>
+          {hasCards && (
+            <div
+              className="grid grid-cols-2 gap-4"
+              data-testid="cards-features-quad-tablet"
+            >
+              {cards.map((card, index) => (
+                <CardComponent key={index} card={card} index={index} />
+              ))}
+            </div>
+          )}
           {data.footer_description && (
             <p className="text-sm text-muted-foreground leading-relaxed italic text-left">
               {data.footer_description}
@@ -393,14 +399,16 @@ export default function FeaturesQuadLaptopEdge({ data }: FeaturesQuadLaptopEdgeP
                     </div>
                   ))}
               </div>
-              <div
-                className="grid grid-cols-2 gap-4"
-                data-testid="cards-features-quad-desktop"
-              >
-                {data.cards.map((card, index) => (
-                  <CardComponent key={index} card={card} index={index} />
-                ))}
-              </div>
+              {hasCards && (
+                <div
+                  className="grid grid-cols-2 gap-4"
+                  data-testid="cards-features-quad-desktop"
+                >
+                  {cards.map((card, index) => (
+                    <CardComponent key={index} card={card} index={index} />
+                  ))}
+                </div>
+              )}
               {data.footer_description && (
                 <p className="text-base text-muted-foreground leading-relaxed italic">
                   {data.footer_description}
