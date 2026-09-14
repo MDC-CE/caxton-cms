@@ -6,6 +6,11 @@ import {
 } from "@/components/sectionRegistry";
 import { queryClient } from "@/lib/queryClient";
 import { isNonNavigableHref } from "@shared/safe-href";
+import {
+  inferPublicPageChunk,
+  type ContentTypeRouteInput,
+} from "@/lib/content-type-routes";
+import { importPublicPageChunk } from "@/lib/preloadPublicPageChunk";
 
 /** Hydrated from SSR initial data (see server/initial-data-middleware.ts). */
 export const NAVIGATION_EAGER_MANIFEST_QUERY_KEY = [
@@ -96,6 +101,19 @@ function tuplesToSectionRefs(tuples: string[][]): SectionRef[] {
   return tuples.map(([type, variant]) => ({ type, variant }));
 }
 
+function contentTypesFromCache(): ContentTypeRouteInput[] | undefined {
+  const data = queryClient.getQueryData<ContentTypeRouteInput[]>(["/api/content-types"]);
+  return Array.isArray(data) ? data : undefined;
+}
+
+async function preloadPageChunkForPath(path: string): Promise<void> {
+  try {
+    await importPublicPageChunk(inferPublicPageChunk(path, contentTypesFromCache()));
+  } catch {
+    // fail-open
+  }
+}
+
 async function preloadPathFromManifest(path: string): Promise<void> {
   if (completedPaths.has(path)) return;
   const existing = inflight.get(path);
@@ -104,16 +122,17 @@ async function preloadPathFromManifest(path: string): Promise<void> {
   const work = (async () => {
     try {
       const entry = getManifestEntry(path);
-      if (!entry?.eager?.length) return;
-
-      const refs = tuplesToSectionRefs(entry.eager);
-      const loads: Promise<unknown>[] = [preloadSections(refs)];
-      if (
-        "leadForm" in entry &&
-        entry.leadForm === true &&
-        hasSectionType("lead_form")
-      ) {
-        loads.push(loadSectionComponent("lead_form", "default"));
+      const loads: Promise<unknown>[] = [preloadPageChunkForPath(path)];
+      if (entry?.eager?.length) {
+        const refs = tuplesToSectionRefs(entry.eager);
+        loads.push(preloadSections(refs));
+        if (
+          "leadForm" in entry &&
+          entry.leadForm === true &&
+          hasSectionType("lead_form")
+        ) {
+          loads.push(loadSectionComponent("lead_form", "default"));
+        }
       }
       await Promise.all(loads);
       completedPaths.add(path);
@@ -128,11 +147,21 @@ async function preloadPathFromManifest(path: string): Promise<void> {
   return work;
 }
 
-/** Hover prefetch: manifest lookup + section chunk imports only (no network). */
+/** Hover prefetch: page chunk + manifest eager sections (no navigation). */
 export function prefetchNavigationHref(href: string): void {
   if (!isPrefetchableHref(href)) return;
   const path = extractPath(href);
   scheduleIdle(() => {
     void preloadPathFromManifest(path);
   });
+}
+
+/**
+ * Await page chunk + eager section modules before SPA navigation so the
+ * previous page stays painted until the next route can render for real.
+ */
+export async function awaitNavigationReady(href: string): Promise<void> {
+  if (!isPrefetchableHref(href)) return;
+  const path = extractPath(href);
+  await preloadPathFromManifest(path);
 }

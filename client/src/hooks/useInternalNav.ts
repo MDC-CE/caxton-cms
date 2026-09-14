@@ -4,6 +4,7 @@ import { usePageSections } from "@/contexts/PageSectionsContext";
 import { isDeviceEmbedPreview, notifyDeviceEmbedNavBlocked, shouldAllowDeviceEmbedHref } from "@/lib/preview-devices";
 import { scrollToSectionWhenReady } from "@/hooks/useScrollToLocationHashWhenReady";
 import { isNonNavigableHref } from "@shared/safe-href";
+import { awaitNavigationReady } from "@/lib/prefetchNavigation";
 
 function isInternalHref(href: string): boolean {
   return href.startsWith("/") && !href.startsWith("//");
@@ -330,12 +331,15 @@ export function useInternalNav(
       e.preventDefault();
       const hashIdx = href.indexOf("#");
       const hashId = hashIdx === -1 ? "" : href.slice(hashIdx + 1).split("?")[0];
-      setLocation(href);
-      // Destination pages run useScrollToLocationHashWhenReady; avoid wiping that with top scroll.
-      if (!hashId) {
-        window.scrollTo(0, 0);
-      }
-      onNavigate?.();
+      // Keep previous page painted until next route chunk + eager sections are ready.
+      void (async () => {
+        await awaitNavigationReady(href);
+        setLocation(href);
+        if (!hashId) {
+          window.scrollTo(0, 0);
+        }
+        onNavigate?.();
+      })();
     } else if (href !== rawHref) {
       // External URL had {qs:} tokens and/or callback — browser would use the raw href.
       e.preventDefault();
@@ -392,11 +396,14 @@ export function useInternalNav(
     if (isInternalHref(resolved)) {
       const hashIdx = resolved.indexOf("#");
       const hashId = hashIdx === -1 ? "" : resolved.slice(hashIdx + 1).split("?")[0];
-      setLocation(resolved);
-      if (!hashId) {
-        window.scrollTo(0, 0);
-      }
-      onNavigate?.();
+      void (async () => {
+        await awaitNavigationReady(resolved);
+        setLocation(resolved);
+        if (!hashId) {
+          window.scrollTo(0, 0);
+        }
+        onNavigate?.();
+      })();
       return null;
     }
 

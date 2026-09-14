@@ -4,6 +4,7 @@ import { Router } from "wouter";
 import { PassThrough } from "node:stream";
 import App from "./App";
 import { preloadSectionsFromInitialData } from "./components/sectionRegistry";
+import { preloadPublicPageChunks } from "./lib/preloadPublicPageChunk";
 
 interface SingleQuery {
   queryKey: unknown[];
@@ -71,7 +72,12 @@ export async function render(
   const restore = suppressLayoutEffectWarnings();
 
   try {
-    await preloadSectionsFromInitialData(initialDataPayload);
+    // Preload lazy route page + section chunks before streaming so Suspense
+    // fallback={null} does not produce an empty #root.
+    await Promise.all([
+      preloadPublicPageChunks(cleanUrl, initialDataPayload),
+      preloadSectionsFromInitialData(initialDataPayload),
+    ]);
 
     const html = await new Promise<string>((resolve, reject) => {
       let chunks = "";

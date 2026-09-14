@@ -214,6 +214,62 @@ export async function preloadSections(sections: SectionRef[]): Promise<void> {
 /** Matches SectionRenderer default when settings.loading.eager_count is unset. */
 const DEFAULT_EAGER_COUNT = 3;
 
+export function getEagerCountFromSettings(
+  settings?: { loading?: { eager_count?: number } } | null,
+): number {
+  const count = settings?.loading?.eager_count;
+  return typeof count === "number" && count >= 0 ? count : DEFAULT_EAGER_COUNT;
+}
+
+/**
+ * Section refs that render without DeferredSection (above-fold / load:eager).
+ * Used to gate Header+Footer until these modules are cached.
+ */
+export function getEagerSectionRefsFromPage(
+  sections: unknown[] | null | undefined,
+  settings?: { loading?: { eager_count?: number } } | null,
+): SectionRef[] {
+  if (!Array.isArray(sections)) return [];
+  const eagerCount = getEagerCountFromSettings(settings);
+  const refs: SectionRef[] = [];
+  for (let index = 0; index < sections.length; index++) {
+    const section = sections[index];
+    if (!section || typeof section !== "object" || !("type" in section)) continue;
+    const s = section as { type: string; variant?: string; load?: string };
+    const load =
+      s.load === "eager" || s.load === "lazy"
+        ? s.load
+        : s.type === "contact_bubble"
+          ? "eager"
+          : index < eagerCount
+            ? "eager"
+            : "lazy";
+    if (load !== "eager") continue;
+    refs.push({ type: s.type, variant: s.variant });
+  }
+  return refs;
+}
+
+export function areEagerSectionsCached(
+  sections: unknown[] | null | undefined,
+  settings?: { loading?: { eager_count?: number } } | null,
+): boolean {
+  const refs = getEagerSectionRefsFromPage(sections, settings);
+  if (refs.length === 0) return true;
+  return refs.every(
+    (r) =>
+      !!getCachedSectionComponent(r.type, r.variant ?? "default") ||
+      !!getCachedSectionComponent(r.type, "default"),
+  );
+}
+
+export async function preloadEagerSectionsFromPage(
+  sections: unknown[] | null | undefined,
+  settings?: { loading?: { eager_count?: number } } | null,
+): Promise<void> {
+  await preloadSections(getEagerSectionRefsFromPage(sections, settings));
+}
+
 function isLeadFormConfig(value: unknown): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -19,6 +19,7 @@ import { MenuVisualContextProvider } from "@/contexts/MenuVisualContext";
 import { getApiPath } from "@shared/api-paths";
 import { useMenuConfig } from "@/hooks/useMenuConfig";
 import { getMenuChromeHeights } from "@/lib/menuChrome";
+import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -109,7 +110,12 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
   } = useMenuConfig({ layout: data?.layout as { menu?: { top?: string | null; bottom?: string | null } } | undefined, locale: effectiveLocale });
   const topChromeHeights = getMenuChromeHeights(topMenuConfig);
 
-  if (isLoading && !IS_SERVER) {
+  const sectionsReady = useEagerSectionsReady(
+    (data?.sections as unknown[] | undefined) ?? undefined,
+    data?.settings as { loading?: { eager_count?: number } } | undefined,
+  );
+
+  if ((isLoading || (data && !sectionsReady)) && !IS_SERVER) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"

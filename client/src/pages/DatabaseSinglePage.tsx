@@ -26,6 +26,7 @@ import LocaleUnavailable, {
 } from "@/components/LocaleUnavailable";
 import Staff404Recovery, { Staff404SwitchToEditHint } from "@/components/editing/Staff404Recovery";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
+import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
 
 interface DatabaseSinglePageProps {
   contentType: string;
@@ -137,7 +138,14 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
   } = useMenuConfig({ layout: (page as any)?.layout, locale });
   const topChromeHeights = getMenuChromeHeights(topMenuConfig);
 
-  if (isLoading && !IS_SERVER) {
+  const sectionsReady = useEagerSectionsReady(
+    page?.sections as unknown[] | undefined,
+    page?.settings as { loading?: { eager_count?: number } } | undefined,
+  );
+
+  // Cold CSR / client nav miss: wait for eager section modules before Header+Footer.
+  // During SSR hydrate, useEagerSectionsReady stays true so we do not blank SSR HTML.
+  if ((isLoading || (page && !sectionsReady)) && !IS_SERVER) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"

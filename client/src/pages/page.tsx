@@ -22,6 +22,7 @@ import { useMenuConfig } from "@/hooks/useMenuConfig";
 import { getMenuChromeHeights } from "@/lib/menuChrome";
 import { normalizeFunnelBlock } from "@shared/funnel";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
+import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
 
 const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditorPanel"));
 
@@ -109,7 +110,12 @@ export default function Page() {
   } = useMenuConfig({ layout: (page as any)?.layout, locale });
   const topChromeHeights = getMenuChromeHeights(topMenuConfig);
 
-  if ((isPending || isLoading) && !IS_SERVER) {
+  const sectionsReady = useEagerSectionsReady(
+    page?.sections as unknown[] | undefined,
+    page?.settings as { loading?: { eager_count?: number } } | undefined,
+  );
+
+  if (((isPending || isLoading) || (page && !sectionsReady)) && !IS_SERVER) {
     return (
       <div 
         className="min-h-screen flex items-center justify-center"

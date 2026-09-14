@@ -33,6 +33,7 @@ import { injectSsrSchemaHtml } from "./ssr-schema";
 import { resolvePublicHtmlStatus } from "./public-html-status";
 import { applyEntryModulePreload } from "./utils/html-transforms";
 import { getEntryAssets, buildEntryPreloadTags, buildEntryLinkHeader } from "./utils/vite-manifest";
+import { isMeaningfulSsrAppHtml } from "./utils/ssr-html";
 import {
   buildHtmlCacheKey,
   setCachedHtml,
@@ -233,12 +234,26 @@ export async function setupVite(app: Express, server: Server): Promise<ViteDevSe
           );
           const { render } = await vite.ssrLoadModule(entryServerAbs);
           appHtml = await render(url, initialDataPayload);
+          if (!isMeaningfulSsrAppHtml(appHtml)) {
+            ssrLogger.warn(
+              { url, appHtmlLength: appHtml?.length ?? 0 },
+              "SSR returned empty body, retrying once",
+            );
+            appHtml = await render(url, initialDataPayload);
+          }
+          if (!isMeaningfulSsrAppHtml(appHtml)) {
+            ssrLogger.warn(
+              { url, appHtmlLength: appHtml?.length ?? 0 },
+              "SSR returned empty body after retry, falling back to client-only",
+            );
+            appHtml = "";
+          }
         } catch (ssrErr) {
           ssrLogger.warn({ err: ssrErr, url }, "render failed, falling back to client-only");
         }
       }
 
-      let html = appHtml
+      let html = isMeaningfulSsrAppHtml(appHtml)
         ? page.replace('<div id="root"></div>', `<div id="root">${appHtml}</div>`)
         : page;
 
@@ -322,7 +337,8 @@ export function serveStatic(app: Express) {
   const entryPreloadTags = buildEntryPreloadTags(entryAssets);
   const entryLinkHeader = buildEntryLinkHeader(entryAssets);
 
-  /** Inject entry-chunk preload tags at the top of <head> and set the Link header. */
+  /** Inject entry-chunk preload tags after the first stylesheet so CSS is
+   * discovered before the modulepreload storm (SSR text paints from CSS). */
   function applyEntryPreloads(html: string, res: import("express").Response): string {
     if (entryLinkHeader) {
       // Merge with any existing Link header set by upstream middleware.
@@ -333,9 +349,14 @@ export function serveStatic(app: Express) {
       res.setHeader("Link", merged);
     }
     if (entryPreloadTags) {
-      // Inject immediately after the opening <head> tag so the browser
-      // discovers these assets before any existing stylesheet or script links.
-      html = html.replace(/(<head[^>]*>)/, `$1\n${entryPreloadTags}`);
+      if (/<link[^>]+rel=["']stylesheet["']/i.test(html)) {
+        html = html.replace(
+          /(<link[^>]+rel=["']stylesheet["'][^>]*>)/i,
+          `$1\n${entryPreloadTags}`,
+        );
+      } else {
+        html = html.replace(/(<head[^>]*>)/i, `$1\n${entryPreloadTags}`);
+      }
     }
     return html;
   }
@@ -391,7 +412,21 @@ export function serveStatic(app: Express) {
               : undefined,
           contentIndex: siteContentIndex(res),
         });
-        const appHtml = await render(url, initialDataPayload);
+        let appHtml = await render(url, initialDataPayload);
+        if (!isMeaningfulSsrAppHtml(appHtml)) {
+          ssrLogger.warn(
+            { url, appHtmlLength: appHtml?.length ?? 0 },
+            "SSR returned empty body, retrying once",
+          );
+          appHtml = await render(url, initialDataPayload);
+        }
+        if (!isMeaningfulSsrAppHtml(appHtml)) {
+          ssrLogger.warn(
+            { url, appHtmlLength: appHtml?.length ?? 0 },
+            "SSR returned empty body after retry — not caching empty #root",
+          );
+          throw new Error("empty_ssr_app_html");
+        }
 
         let html = indexHtml.replace(
           '<div id="root"></div>',

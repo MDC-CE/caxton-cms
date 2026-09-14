@@ -11,9 +11,8 @@ import {
 } from "@/components/sectionRegistry";
 import { injectDevSite, resumePendingDomainNavigation } from "./lib/devSite";
 import {
-  inferPublicPageChunk,
-  type ContentTypeRouteInput,
-} from "./lib/content-type-routes";
+  resolvePublicPageChunkLoads,
+} from "./lib/preloadPublicPageChunk";
 
 // ─── Global fetch interceptor ────────────────────────────────────────────────
 // Injects ?__site=<domain> into every relative /api/ fetch call so that direct
@@ -64,83 +63,11 @@ const rootEl = document.getElementById("root")!;
     const rawPath = window.location.pathname;
     const path = rawPath.length > 1 ? rawPath.replace(/\/$/, "") : rawPath;
 
-    // MAINTENANCE NOTE: When adding a new lazy() route in App.tsx, add a corresponding
-    // preload branch here so the Suspense fallback doesn't blank the page on that route.
-    //
-    // NOTE: DebugBubble, ChatWidget, and VariableModalHost are intentionally excluded
-    // from preloading. They are client-only (rendered inside <ClientOnly> which mounts
-    // only after hydration) and therefore never participate in SSR or hydration. There
-    // is no risk of a Suspense white-flash for these components — they simply appear
-    // after the browser fetches their chunks post-hydration.
-    let chunkLoads: Promise<unknown>[];
-
-    /** Infer which public page component matches SSR initial data. */
-    const pageChunkFromInitialData = (): Promise<unknown> | null => {
-      const queries = initialDataPayload?.queries;
-      if (!queries?.length) return null;
-      for (const { queryKey } of queries) {
-        if (!Array.isArray(queryKey) || queryKey.length === 0) continue;
-        const key0 = queryKey[0];
-        if (key0 === "/api/database-single") {
-          return import("@/pages/DatabaseSinglePage");
-        }
-        if (key0 === "/api/pages" || key0 === "/api/blog/config") {
-          return import("@/pages/page");
-        }
-        // ContentTypeDetail uses getApiPath() keys like "/api/programs", "/api/locations".
-        if (
-          typeof key0 === "string" &&
-          key0.startsWith("/api/") &&
-          key0 !== "/api/menus" &&
-          key0 !== "/api/variables" &&
-          key0 !== "/api/content-types" &&
-          key0 !== "/api/image-registry" &&
-          key0 !== "/api/settings/home-page" &&
-          key0 !== "/api/blog/posts"
-        ) {
-          return import("@/pages/ContentTypeDetail");
-        }
-      }
-      return null;
-    };
-
-    const contentTypesFromInitialData = (): ContentTypeRouteInput[] | undefined => {
-      const queries = initialDataPayload?.queries;
-      if (!queries?.length) return undefined;
-      for (const { queryKey, data } of queries) {
-        if (Array.isArray(queryKey) && queryKey[0] === "/api/content-types" && Array.isArray(data)) {
-          return data as ContentTypeRouteInput[];
-        }
-      }
-      return undefined;
-    };
-
-    const chunkFromRouteKind = (kind: ReturnType<typeof inferPublicPageChunk>) => {
-      if (kind === "database-single") return import("@/pages/DatabaseSinglePage");
-      if (kind === "content-type-detail") return import("@/pages/ContentTypeDetail");
-      return import("@/pages/page");
-    };
-
-    if (path === "/private" || path.startsWith("/private/")) {
-      chunkLoads = [import("@/pages/PrivateRouter")];
-    } else if (path === "/preview-frame") {
-      chunkLoads = [import("@/pages/PreviewFrame")];
-    } else if (
-      path === "/terms-conditions" ||
-      path === "/terminos-condiciones"
-    ) {
-      chunkLoads = [import("@/pages/TermsPage")];
-    } else if (
-      path === "/privacy-policy" ||
-      path === "/politica-privacidad"
-    ) {
-      chunkLoads = [import("@/pages/PrivacyPage")];
-    } else {
-      const fromData = pageChunkFromInitialData();
-      chunkLoads = [
-        fromData ?? chunkFromRouteKind(inferPublicPageChunk(path, contentTypesFromInitialData())),
-      ];
-    }
+    // MAINTENANCE NOTE: When adding a new lazy() route in App.tsx, extend
+    // resolvePublicPageChunkLoads in preloadPublicPageChunk.ts so Suspense
+    // does not blank the page. DebugBubble / ChatWidget / VariableModalHost
+    // stay client-only (ClientOnly) and are intentionally not preloaded.
+    const chunkLoads = resolvePublicPageChunkLoads(path, initialDataPayload);
 
     // Await only eager/above-fold section chunks so hydrateRoot can start sooner.
     // Below-fold sections stay in the SSR HTML (DeferredSection keeps them visible
@@ -169,6 +96,19 @@ const rootEl = document.getElementById("root")!;
     });
   } else {
     clearSSRHydration();
+    // Empty #root (SSR miss / CSR): warm route + eager sections before first paint
+    // so pages do not mount Header+Footer with LazySection null.
+    const rawPath = window.location.pathname;
+    const path = rawPath.length > 1 ? rawPath.replace(/\/$/, "") : rawPath;
+    try {
+      await Promise.all([
+        ...resolvePublicPageChunkLoads(path, initialDataPayload),
+        preloadSectionsFromInitialData(initialDataPayload, { eagerOnly: true }),
+      ]);
+    } catch {
+      // fail-open
+    }
     createRoot(rootEl).render(<App />);
+    prefetchRemainingSectionsFromInitialData(initialDataPayload);
   }
 })();

@@ -119,6 +119,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Above-fold article typography on critical path (avoids CLS when article chunk loads). */
+@import "./components/article/article-prose.css";
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }

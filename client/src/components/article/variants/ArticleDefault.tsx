@@ -25,7 +25,7 @@ import { useOrderedPageSections } from "@/contexts/PageSectionsContext";
 import { useSectionContext } from "@/contexts/SectionContext";
 import { CopyCodeButton } from "../CopyCodeButton";
 import { estimateReadingMinutes } from "@/lib/readingTime";
-import "../article-prose.css";
+import "../article-katex.css";
 
 /** Must match server/markdown-enhance.ts ARTICLE_HTML_MARKER */
 const ARTICLE_HTML_MARKER = "<!--article-html-v1-->";

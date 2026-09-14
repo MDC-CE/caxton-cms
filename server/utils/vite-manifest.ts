@@ -55,12 +55,11 @@ export function getEntryAssets(distPublicPath: string): ManifestEntryAssets {
 }
 
 /** Build `<link>` modulepreload tags for entry chunks.
- * CSS is intentionally NOT preloaded: the blocking <link rel="stylesheet"> in
- * <head> is discovered by the preload scanner anyway, and a duplicate
- * fetchpriority=high preload only competes with LCP resources.
- * JS preloads are marked fetchpriority=low for the same reason: the page is
- * server-rendered, so scripts are only needed for hydration and must not
- * contend with the render-blocking CSS. */
+ * CSS is intentionally NOT preloaded here: the blocking <link rel="stylesheet"> in
+ * <head> must win discovery. serveStatic injects these tags *after* the first
+ * stylesheet so the modulepreload storm does not delay render-blocking CSS.
+ * JS preloads are marked fetchpriority=low: with SSR body HTML, scripts are only
+ * needed for hydration. */
 export function buildEntryPreloadTags(assets: ManifestEntryAssets): string {
   const tags: string[] = [];
   for (const href of assets.js) {

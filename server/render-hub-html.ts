@@ -9,6 +9,7 @@ import {
 } from "./initial-data-middleware";
 import { resolvePublicHtmlStatus } from "./public-html-status";
 import { applyEntryModulePreload } from "./utils/html-transforms";
+import { isMeaningfulSsrAppHtml } from "./utils/ssr-html";
 import {
   buildHtmlCacheKey,
   getCachedHtml,
@@ -146,7 +147,22 @@ export async function renderHubHtml(opts: {
 
   try {
     const indexHtml = await fs.promises.readFile(indexHtmlPath, "utf-8");
-    const appHtml = await render(url, initialDataPayload);
+    let appHtml = await render(url, initialDataPayload);
+    if (!isMeaningfulSsrAppHtml(appHtml)) {
+      log.warn(
+        { pathname: clean, appHtmlLength: appHtml?.length ?? 0 },
+        "SSR returned empty body, retrying once",
+      );
+      appHtml = await render(url, initialDataPayload);
+    }
+    if (!isMeaningfulSsrAppHtml(appHtml)) {
+      log.warn(
+        { pathname: clean, appHtmlLength: appHtml?.length ?? 0 },
+        "SSR returned empty body after retry — not caching empty #root",
+      );
+      return null;
+    }
+
     let html = indexHtml.replace(
       '<div id="root"></div>',
       `<div id="root">${appHtml}</div>`,
