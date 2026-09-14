@@ -81,7 +81,7 @@ On an agentic swarm role connector (`/mcp/role/…`), write policy is enforced:
 
 When caps forbid a write (any connector), call `propose_change` (prefer **edits**, or **idea** for a brief) instead of pasting JSON in chat.
 
-**Worked example:** missing `content_edit_text` on a blog CTA → `propose_change` with that entry’s `updates[]`, then tell the human a **different role** (or staff UI) must `update_proposal` with `action: "apply"`.
+**Worked example:** missing `content_edit_text` on a blog CTA → `propose_change` with that entry’s `updates[]`, then tell the human **Proposal Reviewer** or **Publisher** (or staff UI) must `update_proposal` with `action: "apply"`.
 
 ### 2b. Proposal collaboration (claim vs blocker vs approve)
 

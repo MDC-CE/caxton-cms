@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 12;
+export const PIPELINE_SCHEMA_VERSION = 13;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -294,6 +294,18 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
       if (!tableHasColumn(db, "content_proposals", "related_entries_json")) {
         db.exec(
           "ALTER TABLE content_proposals ADD COLUMN related_entries_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+    },
+  },
+  {
+    version: 13,
+    name: "content_proposals_review_context_snapshot",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "review_context_snapshot_json")) {
+        db.exec(
+          "ALTER TABLE content_proposals ADD COLUMN review_context_snapshot_json TEXT",
         );
       }
     },

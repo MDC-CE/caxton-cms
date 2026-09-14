@@ -6,6 +6,35 @@ window_days: 6
 
 entries:
   - date: "2026-09-14"
+    summary: "agent_session for write roles + Proposal Reviewer (create vs review caps)"
+    agent_impact:
+      - "agent_session is listed for any non-view-only role (Layout/Media/Reviewer). Reconnect those connectors."
+      - "propose_change requires proposals_create; update_proposal actions split — Reviewer decides (apply can change live/draft), authors withdraw/attach only, Publisher has both. Content viewers no longer propose without create cap."
+      - "New swarm role proposal_reviewer (/mcp/role/proposal_reviewer). Before apply, list_proposals(proposal_id) for review_context. explain topic proposals updated."
+    paths:
+      - shared/mcp-tool-catalog.ts
+      - shared/capabilities.ts
+      - shared/agentic-swarm-roles.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - server/user-store.ts
+    tools_changed: true
+  - date: "2026-09-14"
+    summary: "Proposal review_context + create-time refuses"
+    agent_impact:
+      - "propose_change may fail with entry_not_found, mixed_risk_bundle, or competing_entry_edits — split proposals, create/draft first, or join the existing edits proposal (see next_actions)."
+      - "list_proposals(proposal_id) on open|partial returns live review_context (damage_class, undo_cost, staff_summary, agent_preview) and discovery_path from think items. Warnings: situation_changed, target_missing, shared_issue_id, existence_unknown."
+      - "update_proposal apply fails with target_missing when the page no longer exists; reject/withdraw/close still work."
+      - "explain topic reading-proposals documents axes, checklist IDs, and refuses. Reconnect MCP for updated list_proposals / propose_change descriptions."
+    paths:
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - mcp-server/lib/proposal-discovery-path.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/proposals.md
+    tools_changed: true
+  - date: "2026-09-14"
     summary: "LeadForm form_overrides: entry_field_slug (bare entry path)"
     agent_impact:
       - "Conditions: form_field_slug XOR entry_field_slug. entry_field_slug is a bare entry field path looked up on singleEntry at match time — do not use {{ entry.* }} on that key (section resolveDeep would replace templates early)."

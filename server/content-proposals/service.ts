@@ -23,6 +23,17 @@ import {
   isStaffUiActor,
   type AgentActorLike,
 } from "@shared/agent-identity";
+import {
+  classifyProposalReview,
+  collectDamageClassesForMixedCheck,
+  isMixedRiskBundle,
+  parseReviewSnapshot,
+  snapshotFromReviewContext,
+  type EntryExistenceLookup,
+  type RelatedOpenProposal,
+  type ReviewContext,
+} from "./review-context";
+import type { ExistenceState } from "./proposal-review-rules";
 
 const log = child({ module: "content-proposals" });
 
@@ -151,6 +162,8 @@ export type ProposalRecord = {
   related_entries: RelatedEntryRef[];
   entries: ProposalEntryRow[];
   blockers: ProposalBlocker[];
+  /** Snapshot JSON for list badges — persisted. */
+  review_context_snapshot: Record<string, unknown> | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
@@ -183,6 +196,7 @@ type ProposalRow = {
   closed_by: string | null;
   closed_at: number | null;
   related_entries_json: string | null;
+  review_context_snapshot_json: string | null;
 };
 
 type EntryDbRow = {
@@ -397,6 +411,10 @@ function mapProposal(
     closed_by: row.closed_by ?? null,
     closed_at: row.closed_at ?? null,
     related_entries: parseJson(row.related_entries_json ?? null, [] as RelatedEntryRef[]),
+    review_context_snapshot: parseJson(row.review_context_snapshot_json ?? null, null as Record<
+      string,
+      unknown
+    > | null),
     entries,
     blockers,
   };
@@ -568,6 +586,16 @@ export type ProposalServiceDeps = {
       applied_by: string | null;
     }>;
   }) => ResolveRecentActivityResult;
+  /**
+   * Resolve whether live (and optional draft) content exists.
+   * Default assumes exists (tests); production wires getContentForEdit.
+   */
+  resolveExistence?: (entry: {
+    contentType: string;
+    slug: string;
+    locale: string;
+    variant?: string | null;
+  }) => { live: ExistenceState; draftExists: boolean };
 };
 
 export type ProposalStats = {
@@ -674,6 +702,32 @@ function findOpenProposalForVariant(
   return loadProposal(db, rows[0].id);
 }
 
+/** Open/partial edits targeting same type+slug+locale (any variant). */
+function findOpenEditsForEntry(
+  db: Database.Database,
+  site: string,
+  contentType: string,
+  slug: string,
+  locale: string,
+  excludeProposalId?: string,
+): ProposalRecord | null {
+  const entryKey = makeEntryKey(contentType, slug);
+  const rows = db
+    .prepare(
+      `SELECT p.id FROM content_proposals p
+       INNER JOIN content_proposal_entries e ON e.proposal_id = p.id
+       WHERE p.site = ? AND p.kind = 'edits' AND p.status IN ('open','partial')
+         AND e.entry_key = ? AND e.locale = ?
+       LIMIT 5`,
+    )
+    .all(site, entryKey, locale) as Array<{ id: string }>;
+  for (const row of rows) {
+    if (excludeProposalId && row.id === excludeProposalId) continue;
+    return loadProposal(db, row.id);
+  }
+  return null;
+}
+
 /** Open proposals referencing a variant (for delete_variant warnings). */
 export function listOpenProposalsForVariant(
   site: string,
@@ -716,6 +770,114 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }): ResolveRecentActivityResult {
     if (deps.resolveRecentActivity) return deps.resolveRecentActivity(opts);
     return resolveProposalEntryActivity({ site, ...opts });
+  }
+
+  function resolveExistence(entry: {
+    contentType: string;
+    slug: string;
+    locale: string;
+    variant?: string | null;
+  }): { live: ExistenceState; draftExists: boolean } {
+    if (deps.resolveExistence) return deps.resolveExistence(entry);
+    return { live: "exists", draftExists: Boolean(entry.variant?.trim()) };
+  }
+
+  function buildLookupsForProposal(proposal: ProposalRecord): EntryExistenceLookup[] {
+    const lookups: EntryExistenceLookup[] = [];
+    if (proposal.kind === "edits") {
+      for (const e of proposal.entries) {
+        const ex = resolveExistence({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+        });
+        lookups.push({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+          existence: ex.live,
+          draftExists: ex.draftExists,
+        });
+      }
+    } else if (proposal.kind === "idea") {
+      for (const r of proposal.related_entries ?? []) {
+        const locale = r.locale?.trim() || "en";
+        const ex = resolveExistence({
+          contentType: r.contentType,
+          slug: r.slug,
+          locale,
+        });
+        lookups.push({
+          contentType: r.contentType,
+          slug: r.slug,
+          locale,
+          existence: ex.live,
+          draftExists: false,
+        });
+      }
+    }
+    return lookups;
+  }
+
+  function findRelatedOpenByIssues(proposal: ProposalRecord): RelatedOpenProposal[] {
+    const ids = proposal.related_issue_ids ?? [];
+    if (!ids.length) return [];
+    const db = dbFor(site);
+    const rows = db
+      .prepare(
+        `SELECT * FROM content_proposals WHERE site = ? AND status IN ('open','partial') AND id != ?`,
+      )
+      .all(site, proposal.id) as ProposalRow[];
+    const out: RelatedOpenProposal[] = [];
+    for (const row of rows) {
+      const issueIds = parseJson<string[]>(row.related_issue_ids_json, []);
+      const shared = ids.filter((id) => issueIds.includes(id));
+      if (!shared.length) continue;
+      out.push({
+        id: row.id,
+        title: row.title,
+        kind: row.kind,
+        shared_issue_ids: shared,
+      });
+    }
+    return out;
+  }
+
+  function persistSnapshot(proposalId: string, snap: Record<string, unknown>): void {
+    dbFor(site)
+      .prepare(
+        `UPDATE content_proposals SET review_context_snapshot_json = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(JSON.stringify(snap), Date.now(), proposalId);
+  }
+
+  function classifyLive(
+    proposal: ProposalRecord,
+    opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
+  ): ReviewContext | null {
+    if (proposal.status !== "open" && proposal.status !== "partial") return null;
+    const ctx = classifyProposalReview({
+      proposal,
+      lookups: buildLookupsForProposal(proposal),
+      relatedOpen: findRelatedOpenByIssues(proposal),
+      snapshot: proposal.review_context_snapshot
+        ? {
+            damage_class:
+              typeof proposal.review_context_snapshot.damage_class === "string"
+                ? proposal.review_context_snapshot.damage_class
+                : undefined,
+          }
+        : null,
+    });
+    const snap = snapshotFromReviewContext(ctx);
+    if (opts?.refreshSnapshot) {
+      persistSnapshot(proposal.id, snap);
+    } else if (opts?.persistIfMissingSnapshot && !proposal.review_context_snapshot) {
+      persistSnapshot(proposal.id, snap);
+    }
+    return ctx;
   }
 
   function enrichRecentActivity(proposal: ProposalRecord): ProposalRecord {
@@ -943,6 +1105,85 @@ export function createProposalService(deps: ProposalServiceDeps) {
           return { ok: false, code: "updates_required", error: `Entry ${e.contentType}/${e.slug} has no field updates` };
         }
       }
+
+      // Existence + mixed risk + competing entry
+      const classTargets: Array<{
+        contentType: string;
+        category?: ProposalCategory;
+        existence: ExistenceState;
+        draftExists?: boolean;
+      }> = [];
+      for (const e of entriesIn) {
+        const hasVariant = Boolean(e.variant?.trim());
+        const ex = resolveExistence({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+        });
+        const liveOk = ex.live === "exists";
+        const draftOk = hasVariant && ex.draftExists;
+        if (!hasVariant && !liveOk) {
+          return {
+            ok: false,
+            code: "entry_not_found",
+            error: `Page ${e.contentType}/${e.slug} (${e.locale}) does not exist yet. File an idea brief, or create the draft first, then propose edits on that target.`,
+          };
+        }
+        if (hasVariant && !ex.draftExists) {
+          return {
+            ok: false,
+            code: "entry_not_found",
+            error: `Draft variant '${e.variant}' for ${e.contentType}/${e.slug} (${e.locale}) was not found. Create the draft first, or use kind idea for a new-page brief.`,
+          };
+        }
+        classTargets.push({
+          contentType: e.contentType,
+          category:
+            input.category ??
+            ((e.updates ?? []).some(
+              (u) => u.field_path.startsWith("meta.") || u.field_path.startsWith("seo."),
+            )
+              ? "content.seo"
+              : "content.field"),
+          existence: ex.live,
+          draftExists: draftOk,
+        });
+      }
+      const classes = collectDamageClassesForMixedCheck(classTargets);
+      if (isMixedRiskBundle(classes)) {
+        return {
+          ok: false,
+          code: "mixed_risk_bundle",
+          error:
+            "This proposal mixes different risk levels (for example a selling page and a blog metadata fix). Split into separate proposals — one risk class each.",
+        };
+      }
+    }
+
+    if (kind === "idea" && relatedEntries.length > 0) {
+      const classTargets = relatedEntries.map((r) => {
+        const locale = r.locale?.trim() || "en";
+        const ex = resolveExistence({
+          contentType: r.contentType,
+          slug: r.slug,
+          locale,
+        });
+        return {
+          contentType: r.contentType,
+          existence: ex.live,
+          forIdea: true as const,
+        };
+      });
+      const classes = collectDamageClassesForMixedCheck(classTargets);
+      if (isMixedRiskBundle(classes)) {
+        return {
+          ok: false,
+          code: "mixed_risk_bundle",
+          error:
+            "This idea brief mixes different risk levels across related pages. Split into separate ideas — one risk class each.",
+        };
+      }
     }
 
     const db = dbFor(site);
@@ -1002,6 +1243,21 @@ export function createProposalService(deps: ProposalServiceDeps) {
     if (existing) {
       const dup = get(existing.id)!;
       return { ok: true, proposal: dup, duplicate: true };
+    }
+
+    if (kind === "edits") {
+      for (const e of entriesIn) {
+        const competing = findOpenEditsForEntry(db, site, e.contentType, e.slug, e.locale);
+        if (competing) {
+          return {
+            ok: false,
+            code: "competing_entry_edits",
+            error: `An open edits proposal already targets ${e.contentType}/${e.slug} (${e.locale}). Join ${competing.id} instead of creating another.`,
+            duplicate_of: competing.id,
+            existing_proposal: competing,
+          };
+        }
+      }
     }
 
     const searchBlob = [
@@ -1114,8 +1370,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
         id, site, fingerprint, status, kind, category, title, summary, rationale,
         documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
         created_at, updated_at, claim_json, tags_json, search_text,
-        created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
+        review_context_snapshot_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -1139,6 +1396,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       promote_on_apply ? 1 : 0,
       noAutoRetry,
       JSON.stringify(relatedEntries),
+      null,
     );
 
     for (const cap of captured) {
@@ -1159,11 +1417,17 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     const proposal = get(id)!;
+    const reviewCtx = classifyLive(proposal, { refreshSnapshot: true });
+    const withSnap = get(id)!;
     emitProposalEvent(site, "proposal_created", id, proposer.username);
     if (deps.indexSearch) {
-      deps.indexSearch(proposal).catch((err) => log.warn({ err }, "proposal index failed"));
+      deps.indexSearch(withSnap).catch((err) => log.warn({ err }, "proposal index failed"));
     }
-    return { ok: true, proposal };
+    return {
+      ok: true,
+      proposal: withSnap,
+      ...(reviewCtx ? { review_context: reviewCtx } : {}),
+    };
   }
 
   async function update(
@@ -1603,6 +1867,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
       } else {
         db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
       }
+      const afterAttach = getRaw(id)!;
+      classifyLive(afterAttach, { refreshSnapshot: true });
       return { ok: true, proposal: get(id)! };
     }
 
@@ -1630,6 +1896,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
           code: "proposal_blocked",
           error: `Cannot apply while ${proposal.open_blocker_count} open blocker(s) remain`,
           proposal: enrichRecentActivity(proposal),
+        };
+      }
+
+      const reviewForApply = classifyLive(proposal);
+      if (reviewForApply?.block_apply) {
+        return {
+          ok: false,
+          code: "target_missing",
+          error:
+            "The page this proposal edits no longer exists — apply is blocked. Reject or withdraw, or restore the page and file a fresh proposal.",
+          proposal: enrichRecentActivity(proposal),
+          review_context: reviewForApply,
         };
       }
 
@@ -1817,7 +2095,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
-  return { get, list, stats, exportAll, create, update };
+  return { get, list, stats, exportAll, create, update, classifyLive };
 }
 
 /** Full site dump for production → local pull (includes entries + blockers). */
@@ -1862,8 +2140,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
       created_at, updated_at, claim_json, tags_json, search_text,
       created_agent_session_id, promote_on_apply, no_auto_retry,
-      close_reason, close_note, closed_by, closed_at, related_entries_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      close_reason, close_note, closed_by, closed_at, related_entries_json,
+      review_context_snapshot_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -1917,6 +2196,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.closed_by ?? null,
         p.closed_at ?? null,
         JSON.stringify(p.related_entries ?? []),
+        p.review_context_snapshot ? JSON.stringify(p.review_context_snapshot) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
@@ -2108,6 +2388,37 @@ async function findSimilarProposals(site: string, query: string): Promise<Simila
   return hits.map((h) => ({ id: h.slug, title: h.slug, score: h.score }));
 }
 
+export function resolveExistenceFromSite(
+  ctx: SiteContext,
+  entry: { contentType: string; slug: string; locale: string; variant?: string | null },
+): { live: ExistenceState; draftExists: boolean } {
+  const liveLoaded = getContentForEdit(
+    entry.contentType,
+    entry.slug,
+    entry.locale,
+    undefined,
+    undefined,
+    ctx.contentIndex,
+  );
+  let live: ExistenceState = "missing";
+  if (liveLoaded.content) live = "exists";
+  else if (liveLoaded.error && !/not found/i.test(liveLoaded.error)) live = "unknown";
+
+  let draftExists = false;
+  if (entry.variant?.trim()) {
+    const draftLoaded = getContentForEdit(
+      entry.contentType,
+      entry.slug,
+      entry.locale,
+      entry.variant.trim(),
+      undefined,
+      ctx.contentIndex,
+    );
+    draftExists = Boolean(draftLoaded.content);
+  }
+  return { live, draftExists };
+}
+
 export function proposalServiceForSite(ctx: SiteContext) {
   const site = ctx.contentRootName;
   return createProposalService({
@@ -2119,5 +2430,6 @@ export function proposalServiceForSite(ctx: SiteContext) {
     promoteEntry: (entry, author, opts) => promoteEntryOnSite(ctx, entry, author, opts),
     findSimilar: (q) => findSimilarProposals(site, q),
     indexSearch: (p) => indexProposalSearch(site, p),
+    resolveExistence: (entry) => resolveExistenceFromSite(ctx, entry),
   });
 }

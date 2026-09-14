@@ -335,8 +335,27 @@ async function createMcpServer(
   const instructions = opts?.roleDescription?.trim()
     ? opts.roleDescription.trim()
     : undefined;
+  // Icons live in client/public (served by the main app). Prefer CMS base so
+  // URLs resolve even when getBase() is the MCP port alone.
+  const iconBase = getCmsBase();
   const mcp = new McpServer(
-    { name: serverName, version: "1.0.0" },
+    {
+      name: serverName,
+      version: "1.0.0",
+      websiteUrl: iconBase,
+      icons: [
+        {
+          src: `${iconBase}/mcp-icon.png`,
+          mimeType: "image/png",
+          sizes: ["1024x1024"],
+        },
+        {
+          src: `${iconBase}/mcp-icon-128.png`,
+          mimeType: "image/png",
+          sizes: ["128x128"],
+        },
+      ],
+    },
     instructions ? { instructions } : undefined,
   );
   let grants: CatalogGrant[] | undefined;

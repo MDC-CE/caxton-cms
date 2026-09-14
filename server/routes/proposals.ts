@@ -178,7 +178,7 @@ export function registerProposalRoutes(app: Express): void {
       return;
     }
     const stats = svc.stats();
-    const { proposals, total } = svc.list({
+    let { proposals, total } = svc.list({
       issue_id: issueId,
       status: status as never,
       kind: kind as never,
@@ -189,12 +189,23 @@ export function registerProposalRoutes(app: Express): void {
       sort: parsedSort.sort,
       sortDir: parsedSort.sortDir,
     });
+
+    let review_context = null as ReturnType<typeof svc.classifyLive> | null;
+    if (proposalId && proposals.length === 1) {
+      const p = proposals[0]!;
+      review_context = svc.classifyLive(p, { persistIfMissingSnapshot: true });
+      // Refresh list row snapshot fields after lazy fill
+      const refreshed = svc.get(p.id);
+      if (refreshed) proposals = [refreshed];
+    }
+
     res.json({
       proposals,
       total,
       stats,
       sort: parsedSort.sort,
       sort_dir: parsedSort.sortDir,
+      ...(review_context ? { review_context } : {}),
     });
   });
 
@@ -208,7 +219,9 @@ export function registerProposalRoutes(app: Express): void {
       res.status(404).json({ error: "Proposal not found" });
       return;
     }
-    res.json({ proposal });
+    const review_context = svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
+    const fresh = svc.get(req.params.id) ?? proposal;
+    res.json({ proposal: fresh, review_context });
   });
 
   api.post(app, "/api/admin/proposals", { rate: "staffWrite" }, async (req, res) => {
@@ -238,7 +251,9 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "proposal_exists" ||
         result.code === "notes_no_auto_retry" ||
         result.code === "confirm_recent_activity" ||
-        result.code === "activity_unavailable"
+        result.code === "activity_unavailable" ||
+        result.code === "competing_entry_edits" ||
+        result.code === "mixed_risk_bundle"
           ? 409
           : 400;
       res.status(status).json(result);

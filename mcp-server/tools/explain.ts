@@ -31,6 +31,7 @@ const VALID_TOPICS = [
   "lead-forms",
   "redirects",
   "proposals",
+  "reading-proposals",
 ] as const;
 type Topic = (typeof VALID_TOPICS)[number];
 
@@ -63,6 +64,8 @@ const TOPIC_DESC: Record<string, string> = {
     "CMS 301/302: two stores, first-match, test_redirect (read_redirects) + update_redirect (edit_redirects), before_from custom-only",
   proposals:
     "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first",
+  "reading-proposals":
+    "review_context damage/undo axes, checklist IDs, create refuses, target_missing apply block, discovery_path",
 };
 
 type TagResolver = (contentPath: string) => string;
@@ -387,7 +390,8 @@ export function registerExplainTools(
       "'relation-fields' (relation editor, authors CT, listing vs hydrate, delete_entries reassign), " +
       "'lead-forms' (catalog source.content_type/database/related_field, required value_path/label_path, required query on ecommerce catalogs, purchasable vs actively_selling), " +
       "'redirects' (CMS 301/302, two stores, test_redirect / read_redirects, update_redirect / edit_redirects, first-match), " +
-      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity). " +
+      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity), " +
+      "'reading-proposals' (review_context axes, checklist IDs, create refuses, target_missing apply block). " +
       "Requires content_view. " +
       "Calling an unknown topic returns a clear error listing the valid options. " +
       "Multi-site: always pass site. If unsure, call list_sites first.",
@@ -395,7 +399,7 @@ export function registerExplainTools(
       topic: z
         .string()
         .describe(
-          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals.",
+          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, reading-proposals.",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },

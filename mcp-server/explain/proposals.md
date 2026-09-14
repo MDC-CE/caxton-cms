@@ -1,6 +1,6 @@
 # Content proposals
 
-Read-only agents and staff can **propose** entry field changes or **idea** briefs. Live YAML does not change until a **different agent role** (or staff UI) **applies** edits. Notes handoffs stay open as reminders; **close** finishes them with a reason (no content change). Ideas use **accept** to greenlight a brief (still no YAML).
+Agents and staff can **propose** entry field changes or **idea** briefs when they have **`proposals_create`**. Live YAML does not change until a **different agent role** with **`proposals_review`** (Proposal Reviewer or Publisher) — or staff UI — **applies** edits. Notes handoffs stay open as reminders; **close** finishes them with a reason (no content change). Ideas use **accept** to greenlight a brief (still no YAML).
 
 **Identity:** Mutating MCP requires a **role connector** (`/mcp/role/…`), `agent_session` start with exact `model` (`provider/model`), and `agent_session_id` on every mutate. Four-eyes and claims compare **username + role** (staff UI is separate). Exact model is stored for observability.
 
@@ -10,12 +10,33 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 
 | Tool | Caps | Job |
 |---|---|---|
-| `propose_change` | `content_view` or `seo_edit` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
-| `list_proposals` | same | **Stats-first.** Filter with `proposal_id` / `query` / `issue_id` / `status` / `kind` (`edits`\|`notes`\|`idea`). |
-| `update_proposal` | `content_edit_text` or `seo_edit` | `action`: claim \| release \| withdraw \| apply \| **accept** \| close \| acknowledge \| reject \| blockers \| set_no_auto_retry \| attach_variant. |
-| `get_entry_activity` | `content_view` or `seo_edit` | Read recent writes (14 days). Use before `confirm_recent_activity`. |
+| `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
+| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `proposal_id` / `query` / `issue_id` / `status` / `kind` (`edits`\|`notes`\|`idea`). Single-id open\|partial returns live `review_context` + `discovery_path`. |
+
+See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
+
+| `update_proposal` | `proposals_create` and/or `proposals_review` (actions filtered) | See action allowlists below. |
+| `get_entry_activity` | same as list | Read recent writes (14 days). Use before `confirm_recent_activity`. |
 
 Do not invent `get_proposal`, `apply_proposal`, etc.
+
+## Swarm decide seats
+
+| Role | Create | Decide (apply/reject/accept/close/blockers) |
+|---|---|---|
+| Specialists + Orchestrator | yes (`proposals_create`) | no — author toolkit only (claim/release/withdraw/attach/set_no_auto_retry) |
+| **Proposal Reviewer** | no | yes — review toolkit (no withdraw/attach/set_no_auto_retry) |
+| **Publisher** | yes | yes — full toolkit |
+
+Approve (apply) may change **live or draft** content that was already proposed. Reviewer cannot free-edit pages or create proposals.
+
+## `update_proposal` action allowlists
+
+| Caps | Allowed | Denied |
+|---|---|---|
+| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry |
+| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry | apply, reject, accept, close, blockers |
+| both | full set | — |
 
 ## Kinds
 
@@ -67,3 +88,13 @@ Do **not** use notes for new-spoke / config pitches — use `kind:"idea"`.
 
 - **Four-eyes:** apply / reject / accept when caller identity (username+role or UI) ≠ proposer identity. **Close/park is not four-eyes.**
 - **Non-effects:** no GitHub push; no auto-complete issues; accept/close do not create entries.
+
+## Create refuses + review context
+
+- **Refuse create:** `entry_not_found` (missing write target), `mixed_risk_bundle` (mixed selling/new-public/other in one edits or idea related set), `competing_entry_edits` (second open edits on same type+slug+locale).
+- **Allowed shape:** live missing but named draft exists → `new_public_content` (promote later).
+- **Apply block:** `target_missing` when the page was deleted after filing — reject/withdraw/close still work.
+- Live `review_context` on `list_proposals(proposal_id)` for open|partial; snapshot on list rows is a filed hint only.
+- Before apply, prefer `list_proposals(proposal_id)` + `explain` → `reading-proposals`.
+
+Full checklist IDs and axes: `explain` → `reading-proposals`.

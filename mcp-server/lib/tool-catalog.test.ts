@@ -20,6 +20,8 @@ const platformSteward: CatalogGrant[] = [
   { name: "databases_manage" },
   { name: "components_manage" },
   { name: "content_types_manage" },
+  { name: "proposals_create" },
+  { name: "proposals_review" },
 ];
 
 const metricsViewer: CatalogGrant[] = [{ name: "metrics_view" }];
@@ -27,10 +29,30 @@ const contentViewer: CatalogGrant[] = [{ name: "content_view", contentTypes: "*"
 const blogEditor: CatalogGrant[] = [
   { name: "content_view", contentTypes: ["blog"] },
   { name: "content_edit_text", contentTypes: ["blog"] },
+  { name: "proposals_create" },
 ];
-const seoOnly: CatalogGrant[] = [{ name: "seo_edit", contentTypes: "*" }];
+const seoOnly: CatalogGrant[] = [
+  { name: "seo_edit", contentTypes: "*" },
+  { name: "proposals_create" },
+  { name: "proposals_review" },
+];
 const seoBlogOnly: CatalogGrant[] = [{ name: "seo_edit", contentTypes: ["blog"] }];
 const redirectReader: CatalogGrant[] = [{ name: "read_redirects" }];
+const layoutEditor: CatalogGrant[] = [
+  { name: "content_view", contentTypes: "*" },
+  { name: "content_edit_structure", contentTypes: "*" },
+  { name: "proposals_create" },
+];
+const mediaEditor: CatalogGrant[] = [
+  { name: "content_view", contentTypes: "*" },
+  { name: "media_upload" },
+  { name: "content_edit_media", contentTypes: "*" },
+  { name: "proposals_create" },
+];
+const proposalReviewer: CatalogGrant[] = [
+  { name: "content_view", contentTypes: "*" },
+  { name: "proposals_review" },
+];
 
 describe("allowedToolNames", () => {
   it("user_admin and platform_ops see none of the proposal tools", () => {
@@ -89,13 +111,14 @@ describe("allowedToolNames", () => {
     expect(names.has("run_entry_diagnostics")).toBe(true);
     expect(names.has("get_diagnostics_job")).toBe(false);
     expect(names.has("get_validation_issues")).toBe(false);
-    expect(names.has("propose_change")).toBe(true);
+    expect(names.has("propose_change")).toBe(false);
     expect(names.has("list_proposals")).toBe(true);
     expect(names.has("get_entry_activity")).toBe(true);
     expect(names.has("update_proposal")).toBe(false);
+    expect(names.has("agent_session")).toBe(false);
   });
 
-  it("blog-only editor sees reads and text writes, not structure/create", () => {
+  it("blog-only editor with proposals_create sees reads, text writes, propose, author update_proposal", () => {
     const names = new Set(allowedToolNames(blogEditor));
     expect(names.has("list_entries")).toBe(true);
     expect(names.has("update_fields")).toBe(true);
@@ -107,6 +130,31 @@ describe("allowedToolNames", () => {
     expect(names.has("list_proposals")).toBe(true);
     expect(names.has("get_entry_activity")).toBe(true);
     expect(names.has("update_proposal")).toBe(true);
+    expect(names.has("agent_session")).toBe(true);
+  });
+
+  it("layout editor sees agent_session and structure tools, not propose without create cap is covered via fixture", () => {
+    const names = new Set(allowedToolNames(layoutEditor));
+    expect(names.has("agent_session")).toBe(true);
+    expect(names.has("add_section")).toBe(true);
+    expect(names.has("propose_change")).toBe(true);
+    expect(names.has("update_fields")).toBe(false);
+  });
+
+  it("media editor sees agent_session", () => {
+    const names = new Set(allowedToolNames(mediaEditor));
+    expect(names.has("agent_session")).toBe(true);
+    expect(names.has("regenerate_entry_previews")).toBe(true);
+  });
+
+  it("proposal reviewer sees agent_session and update_proposal but not propose_change or writes", () => {
+    const names = new Set(allowedToolNames(proposalReviewer));
+    expect(names.has("agent_session")).toBe(true);
+    expect(names.has("list_proposals")).toBe(true);
+    expect(names.has("update_proposal")).toBe(true);
+    expect(names.has("propose_change")).toBe(false);
+    expect(names.has("update_fields")).toBe(false);
+    expect(names.has("add_section")).toBe(false);
   });
 
   it("platform_steward sees writes and diagnostics", () => {

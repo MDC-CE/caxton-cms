@@ -25,6 +25,7 @@ export const AGENTIC_SWARM_ROLE_IDS = [
   "layout_editor",
   "translator",
   "media_editor",
+  "proposal_reviewer",
   "publisher",
 ] as const;
 
@@ -34,70 +35,87 @@ export const AGENTIC_SWARM_ROLES_BY_ID: Record<AgenticSwarmRoleId, AgenticSwarmR
   swarm_orchestrator: {
     label: "Swarm Orchestrator",
     description:
-      "Plans and inspects content only — read entries, playbooks, and metrics. Not for writes or go-live.",
+      "Plans, inspects, and may file proposals — read entries, playbooks, and metrics. Not for apply/reject, page writes, or go-live.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "metrics_view" },
+      { name: "proposals_create" },
     ],
   },
   copy_editor: {
     label: "Copy Editor",
     description:
-      "Draft and locale body copy — not layout, SEO meta, or publish.",
+      "Draft and locale body copy; may file and withdraw proposals — not layout, SEO meta, apply/reject, or publish.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "content_edit_text", contentTypes: "*" },
       { name: "content_create_variant", contentTypes: "*" },
       { name: "content_edit_variant", contentTypes: "*" },
+      { name: "proposals_create" },
     ],
   },
   seo_specialist: {
     label: "SEO Specialist",
     description:
-      "Per-entry SEO and clusters — not page structure or publish.",
+      "Per-entry SEO and clusters; may file and withdraw proposals — not page structure, apply/reject, or publish.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "seo_edit", contentTypes: "*" },
+      { name: "proposals_create" },
     ],
   },
   layout_editor: {
     label: "Layout Editor",
     description:
-      "Sections and shared-layout shell — not body SEO or go-live.",
+      "Sections and shared-layout shell; may file and withdraw proposals — not body SEO, apply/reject, or go-live.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "content_edit_structure", contentTypes: "*" },
+      { name: "proposals_create" },
     ],
   },
   translator: {
     label: "Translator",
     description:
-      "Locale variants and translation writes — not structure, SEO, or publish.",
+      "Locale variants and translation writes; may file and withdraw proposals — not structure, SEO, apply/reject, or publish.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "content_edit_text", contentTypes: "*" },
       { name: "content_create_variant", contentTypes: "*" },
       { name: "content_edit_variant", contentTypes: "*" },
+      { name: "proposals_create" },
     ],
   },
   media_editor: {
     label: "Media Editor",
     description:
-      "Gallery upload and media fields — not copy, SEO, or publish.",
+      "Gallery upload and media fields; may file and withdraw proposals — not copy, SEO, apply/reject, or publish.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "media_upload" },
       { name: "content_edit_media", contentTypes: "*" },
+      { name: "proposals_create" },
+    ],
+  },
+  proposal_reviewer: {
+    label: "Proposal Reviewer",
+    description:
+      "List and decide proposals (apply/reject/accept/close/blockers). Approve can change live or draft content that was already proposed. Not for creating proposals, withdrawing, attaching drafts, or editing page copy/layout.",
+    capabilities: [
+      { name: "content_view", contentTypes: "*" },
+      { name: "proposals_review" },
     ],
   },
   publisher: {
     label: "Publisher",
     description:
-      "Promote drafts and go-live with SEO diagnostics — not layout or body rewrites.",
+      "Promote drafts, go-live with SEO diagnostics, and full proposal lifecycle — not layout or body rewrites.",
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "content_promote_variant", contentTypes: "*" },
       { name: "seo_edit", contentTypes: "*" },
+      { name: "proposals_create" },
+      { name: "proposals_review" },
     ],
   },
 };
@@ -115,11 +133,13 @@ export const AGENTIC_SWARM_EDGES: ReadonlyArray<{
   { parent: "swarm_orchestrator", child: "layout_editor" },
   { parent: "swarm_orchestrator", child: "translator" },
   { parent: "swarm_orchestrator", child: "media_editor" },
+  { parent: "swarm_orchestrator", child: "proposal_reviewer" },
   { parent: "copy_editor", child: "publisher" },
   { parent: "seo_specialist", child: "publisher" },
   { parent: "layout_editor", child: "publisher" },
   { parent: "translator", child: "publisher" },
   { parent: "media_editor", child: "publisher" },
+  { parent: "proposal_reviewer", child: "publisher" },
 ];
 
 export function isAgenticSwarmRoleId(roleId: string): boolean {

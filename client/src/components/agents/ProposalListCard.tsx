@@ -20,6 +20,7 @@ import {
   proposalCategoryLabel,
   proposalEntryProgress,
 } from "@/lib/proposalCardMeta";
+import { SituationSnapshotBadge } from "@/components/agents/SituationReviewBadge";
 
 export type ProposalCardData = {
   id: string;
@@ -39,6 +40,7 @@ export type ProposalCardData = {
   claim?: { by: string; expiresAt: string; actor?: Record<string, unknown> } | null;
   created_at: number;
   updated_at?: number;
+  review_context_snapshot?: Record<string, unknown> | null;
 };
 
 /** Category badge + optional tag chips (hide entirely when no tags if only tags requested). */
@@ -139,6 +141,9 @@ export function ProposalListCard({
   const blockers = p.open_blocker_count ?? 0;
   const issueCount = p.related_issue_ids?.length ?? 0;
   const goLive = p.review_mode === "draft_backed" || Boolean(p.promote_on_apply);
+  const isTerminal =
+    p.status === "finished" || p.status === "rejected" || p.status === "withdrawn";
+  const showSituationChip = !isTerminal && Boolean(p.review_context_snapshot);
 
   const meta: Array<{ key: string; node: ReactNode }> = [
     {
@@ -219,6 +224,9 @@ export function ProposalListCard({
               {p.title}
             </h3>
             <div className="flex shrink-0 items-center gap-1.5">
+              {showSituationChip ? (
+                <SituationSnapshotBadge snapshot={p.review_context_snapshot} />
+              ) : null}
               {goLive ? (
                 <Badge variant="secondary" className="gap-1 font-normal">
                   <IconRocket className="h-3 w-3 shrink-0" aria-hidden />

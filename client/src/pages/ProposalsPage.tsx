@@ -80,6 +80,10 @@ import {
   ProposalCategoryTags,
 } from "@/components/agents/ProposalListCard";
 import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
+import {
+  SituationReviewBadge,
+  type ReviewContextPayload,
+} from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
@@ -185,6 +189,7 @@ type Proposal = {
   updated_at?: number;
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
+  review_context_snapshot?: Record<string, unknown> | null;
 };
 
 function headers(): Record<string, string> {
@@ -1046,7 +1051,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     queryFn: async () => {
       const res = await apiFetch(`/api/admin/proposals/${id}`, { headers: headers() });
       if (!res.ok) throw new Error("Not found");
-      return res.json() as Promise<{ proposal: Proposal }>;
+      return res.json() as Promise<{ proposal: Proposal; review_context?: ReviewContextPayload | null }>;
     },
   });
 
@@ -1072,7 +1077,21 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       }
     },
     onError: (e: Error & { data?: { code?: string; traffic_siblings?: unknown } }) => {
-      toast({ title: e.message, variant: "destructive" });
+      const code = e.data?.code;
+      const plainByCode: Record<string, string> = {
+        entry_not_found:
+          "That page (or draft) does not exist yet — create the page/draft first, or file an idea instead of edits.",
+        mixed_risk_bundle:
+          "This proposal mixes different risk levels (for example selling pages with other edits). Split into separate proposals.",
+        competing_entry_edits:
+          "Another open edits proposal already targets this same page. Join that one, or reject the weaker proposal first.",
+        target_missing:
+          "The page this proposal edits no longer exists — apply is blocked. Reject or withdraw, or restore the page and file fresh.",
+      };
+      toast({
+        title: (code && plainByCode[code]) || e.message,
+        variant: "destructive",
+      });
       if (e.data?.code === "confirm_end_experiment") {
         setConfirmExperiment(true);
         setApplyOpen(true);
@@ -1133,6 +1152,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   };
 
   const p = data?.proposal;
+  const reviewContext = data?.review_context ?? null;
   const mode = p ? reviewModeBadge(p) : null;
   const ui = p ? proposalStatusUi(p.status) : null;
   const recentActivity = p?.recent_activity ?? [];
@@ -1279,6 +1299,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     className={ui.className}
                   />
                   <ProposalKindBadge kind={p.kind} />
+                  {!isTerminal ? <SituationReviewBadge reviewContext={reviewContext} /> : null}
                   {p.kind === "edits" ? (
                     <ReviewModeBadge proposal={p} label={mode.label} variant={mode.variant} />
                   ) : null}

@@ -20,6 +20,61 @@ import {
 
 const MAIN_SERVER_PORT = process.env.PORT || "5000";
 
+/** Reviewer-only decide toolkit (no withdraw / attach / set_no_auto_retry). */
+export const PROPOSAL_REVIEW_ACTIONS = [
+  "claim",
+  "release",
+  "apply",
+  "reject",
+  "accept",
+  "close",
+  "acknowledge",
+  "add_blocker",
+  "resolve_blocker",
+  "reopen_blocker",
+] as const;
+
+/** Author toolkit when the caller can create but not review. */
+export const PROPOSAL_AUTHOR_ACTIONS = [
+  "claim",
+  "release",
+  "withdraw",
+  "attach_variant",
+  "set_no_auto_retry",
+] as const;
+
+export const PROPOSAL_ALL_UPDATE_ACTIONS = [
+  "claim",
+  "release",
+  "withdraw",
+  "apply",
+  "accept",
+  "acknowledge",
+  "close",
+  "reject",
+  "attach_variant",
+  "add_blocker",
+  "resolve_blocker",
+  "reopen_blocker",
+  "set_no_auto_retry",
+] as const;
+
+export type ProposalUpdateActionName = (typeof PROPOSAL_ALL_UPDATE_ACTIONS)[number];
+
+/**
+ * Allowed update_proposal actions from create vs review caps.
+ * Both → full set; review only → decide toolkit; create only → author toolkit.
+ */
+export function allowedProposalUpdateActions(
+  hasCreate: boolean,
+  hasReview: boolean,
+): ReadonlySet<ProposalUpdateActionName> {
+  if (hasCreate && hasReview) return new Set(PROPOSAL_ALL_UPDATE_ACTIONS);
+  if (hasReview) return new Set(PROPOSAL_REVIEW_ACTIONS);
+  if (hasCreate) return new Set(PROPOSAL_AUTHOR_ACTIONS);
+  return new Set();
+}
+
 function siteQuery(domain: string | null, extra = ""): string {
   const parts: string[] = [];
   if (domain) parts.push(`__site=${encodeURIComponent(domain)}`);
@@ -27,21 +82,53 @@ function siteQuery(domain: string | null, extra = ""): string {
   return parts.length ? `?${parts.join("&")}` : "";
 }
 
+async function hasGrantOrCap(
+  mcpToken: string | undefined,
+  grants: CatalogGrant[] | undefined,
+  cap: string,
+): Promise<boolean> {
+  if (grants) return hasCapAnyScope(grants, cap);
+  if (!mcpToken) return false;
+  return checkCap(mcpToken, cap);
+}
+
 async function requireProposeListCap(mcpToken: string | undefined, grants: CatalogGrant[] | undefined) {
   if (!mcpToken) return null;
-  if (grants && (hasCapAnyScope(grants, "content_view") || hasCapAnyScope(grants, "seo_edit"))) return null;
+  if (
+    grants &&
+    (hasCapAnyScope(grants, "content_view") ||
+      hasCapAnyScope(grants, "proposals_create") ||
+      hasCapAnyScope(grants, "proposals_review"))
+  ) {
+    return null;
+  }
   const okCap =
-    (await checkCap(mcpToken, "content_view")) || (await checkCap(mcpToken, "seo_edit"));
-  if (!okCap) return denyResponse("content_view|seo_edit");
+    (await checkCap(mcpToken, "content_view")) ||
+    (await checkCap(mcpToken, "proposals_create")) ||
+    (await checkCap(mcpToken, "proposals_review"));
+  if (!okCap) return denyResponse("content_view|proposals_create|proposals_review");
+  return null;
+}
+
+async function requireCreateCap(mcpToken: string | undefined, grants: CatalogGrant[] | undefined) {
+  if (!mcpToken) return null;
+  if (grants && hasCapAnyScope(grants, "proposals_create")) return null;
+  const okCap = await checkCap(mcpToken, "proposals_create");
+  if (!okCap) return denyResponse("proposals_create");
   return null;
 }
 
 async function requireUpdateCap(mcpToken: string | undefined, grants: CatalogGrant[] | undefined) {
   if (!mcpToken) return null;
-  if (grants && (hasCapAnyScope(grants, "content_edit_text") || hasCapAnyScope(grants, "seo_edit"))) return null;
+  if (
+    grants &&
+    (hasCapAnyScope(grants, "proposals_create") || hasCapAnyScope(grants, "proposals_review"))
+  ) {
+    return null;
+  }
   const okCap =
-    (await checkCap(mcpToken, "content_edit_text")) || (await checkCap(mcpToken, "seo_edit"));
-  if (!okCap) return denyResponse("content_edit_text|seo_edit");
+    (await checkCap(mcpToken, "proposals_create")) || (await checkCap(mcpToken, "proposals_review"));
+  if (!okCap) return denyResponse("proposals_create|proposals_review");
   return null;
 }
 
@@ -55,14 +142,16 @@ export function registerProposalTools(
 ): void {
   mcp.tool(
     "propose_change",
-    "Create a proposal (does not write live YAML). " +
+    "Create a proposal (does not write live YAML). Requires proposals_create. " +
       "Pass entries[] (or promote_on_apply) → kind edits. " +
       "Pass kind:\"idea\" for a pre-work brief (new page, update, or config pitch) — no YAML until a later edits proposal. " +
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
       "Do not use notes for new-spoke pitches — use kind idea. " +
       "Optional related_entries for idea context (slug need not exist yet). " +
+      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale). " +
+      "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
-      "Four-eyes apply/reject/accept compare human+role (not username alone).",
+      "Four-eyes apply/reject/accept compare human+role (not username alone). Apply/reject need proposals_review (Proposal Reviewer or Publisher).",
     {
       title: z.string().describe("Short title"),
       summary: z.string().describe("Why + what (min 80 chars). For notes, include steps tried."),
@@ -119,7 +208,7 @@ export function registerProposalTools(
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
-      const denied = await requireProposeListCap(mcpToken, grants);
+      const denied = await requireCreateCap(mcpToken, grants);
       if (denied) return denied;
       const siteResult = resolveSiteContext(args.site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
@@ -260,6 +349,50 @@ export function registerProposalTools(
               ],
             );
           }
+          if (data.code === "entry_not_found") {
+            return fail(String(data.error ?? "entry not found"), {
+              code: "entry_not_found",
+              next_actions: [
+                {
+                  tool: "propose_change",
+                  reason: "File kind:\"idea\" for a new-page brief, or create/draft the entry first then propose edits.",
+                  priority: "required",
+                  args_hint: {
+                    kind: "idea",
+                    title: args.title,
+                    summary: args.summary,
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+              ],
+            });
+          }
+          if (data.code === "mixed_risk_bundle") {
+            return fail(String(data.error ?? "mixed risk"), {
+              code: "mixed_risk_bundle",
+              next_actions: [
+                {
+                  tool: "propose_change",
+                  reason: "Split into separate proposals — one risk class each (e.g. selling page vs blog meta).",
+                  priority: "required",
+                },
+              ],
+            });
+          }
+          if (data.code === "competing_entry_edits") {
+            const existing = data.existing_proposal as { id?: string } | undefined;
+            return fail(String(data.error ?? "competing edits"), {
+              code: "competing_entry_edits",
+              next_actions: [
+                {
+                  tool: "list_proposals",
+                  reason: "Join the existing open edits proposal for this page/locale.",
+                  priority: "required",
+                  args_hint: { proposal_id: existing?.id ?? data.duplicate_of },
+                },
+              ],
+            });
+          }
           return fail(String(data.error ?? "propose_change failed"), { code: data.code });
         }
         const proposal = (data as { proposal?: { id?: string; review_mode?: string; promote_on_apply?: boolean } })
@@ -273,7 +406,7 @@ export function registerProposalTools(
           {
             code: "four_eyes",
             message:
-              "A different user with content_edit_text or seo_edit must apply or reject edits. Notes close with a reason (not four-eyes) — close does not fix content.",
+              "A different human+role with proposals_review (Proposal Reviewer or Publisher) must apply or reject edits. Notes close with a reason (not four-eyes) — close does not fix content.",
           },
         ];
         if (proposal?.review_mode === "draft_backed" || proposal?.promote_on_apply) {
@@ -310,9 +443,10 @@ export function registerProposalTools(
   mcp.tool(
     "list_proposals",
     "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only. " +
-      "Pass proposal_id, query, issue_id, status, or kind for paginated proposals[] (includes review_mode, open_blocker_count, blockers). " +
-      "When proposal_id is set and the proposal is open|partial, includes discovery_path (optional research menu — think|tool items; not next_actions; skip does not block apply). " +
-      "Requires content_view or seo_edit.",
+      "Pass proposal_id, query, issue_id, status, or kind for paginated proposals[] (includes review_mode, open_blocker_count, blockers, review_context_snapshot). " +
+      "When proposal_id is set and the proposal is open|partial, includes live review_context (situation classification) and discovery_path " +
+      "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
+      "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
       query: z.string().optional(),
@@ -396,6 +530,16 @@ export function registerProposalTools(
           total?: number;
           stats?: unknown;
           error?: string;
+          review_context?: {
+            summary?: string;
+            damage_class?: string;
+            block_apply?: boolean;
+            situation_changed_since_filed?: boolean;
+            agent_preview?: {
+              think_items?: Array<{ id: string; title: string; why: string; look_for: string[] }>;
+              warnings?: Array<{ code: string; message: string }>;
+            };
+          } | null;
         };
         if (!res.ok) return fail(String(data.error ?? "list_proposals failed"));
 
@@ -424,6 +568,7 @@ export function registerProposalTools(
         }
 
         let discovery_path: ReturnType<typeof buildProposalDiscoveryPath>["discovery_path"] = null;
+        const review_context = data.review_context ?? null;
         const proposalId = args.proposal_id?.trim();
         if (proposalId) {
           const match = (proposals as Array<{
@@ -470,6 +615,7 @@ export function registerProposalTools(
               },
               allowedTools: allowed,
               strategy,
+              reviewContext: review_context,
             });
             discovery_path = built.discovery_path;
             warnings.push(...built.warnings);
@@ -487,6 +633,7 @@ export function registerProposalTools(
             sort,
             sort_dir,
             discovery_path,
+            ...(review_context ? { review_context } : {}),
             next_actions: [],
           },
           { warnings },
@@ -499,12 +646,13 @@ export function registerProposalTools(
 
   mcp.tool(
     "update_proposal",
-    "Lifecycle for a proposal. Actions: claim | release | withdraw | apply | accept (ideas) | close | acknowledge (notes alias) | reject | " +
-      "attach_variant (same creating session only; write-once) | add_blocker (feedback; no claim) | " +
-      "resolve_blocker (active claimant only) | reopen_blocker | set_no_auto_retry (notes; MCP must claim first). " +
-      "accept (ideas): four-eyes by human+role; blockers block; next_step min 20; no YAML. " +
-      "close notes/ideas: close_reason + close_note (min 20 except wont_fix). Idea park: wont_fix | tracked_elsewhere | other. " +
-      "Open blockers block apply/accept only. Four-eyes = username+role. Requires content_edit_text or seo_edit.",
+    "Lifecycle for a proposal. Requires proposals_create and/or proposals_review — actions depend on caps. " +
+      "proposals_review (Reviewer): claim | release | apply | reject | accept | close | acknowledge | blockers. Approve can change live/draft. " +
+      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry — cannot apply/reject/accept. " +
+      "Both (Publisher): full set. " +
+      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; no YAML. " +
+      "close notes/ideas: close_reason + close_note. Open blockers block apply/accept only. Four-eyes = username+role. " +
+      "Before apply, list_proposals(proposal_id) for live review_context.",
     {
       proposal_id: z.string(),
       action: z.enum([
@@ -560,6 +708,21 @@ export function registerProposalTools(
     async (args) => {
       const denied = await requireUpdateCap(mcpToken, grants);
       if (denied) return denied;
+      const hasCreate = await hasGrantOrCap(mcpToken, grants, "proposals_create");
+      const hasReview = await hasGrantOrCap(mcpToken, grants, "proposals_review");
+      const allowed = allowedProposalUpdateActions(hasCreate, hasReview);
+      if (!allowed.has(args.action as ProposalUpdateActionName)) {
+        return fail(
+          `Action '${args.action}' is not allowed for your proposal caps ` +
+            `(create=${hasCreate}, review=${hasReview}). ` +
+            (hasReview && !hasCreate
+              ? "Reviewer cannot withdraw, attach_variant, or set_no_auto_retry."
+              : hasCreate && !hasReview
+                ? "Authors cannot apply, reject, accept, close, or manage blockers — use Proposal Reviewer or Publisher."
+                : "Need proposals_create and/or proposals_review."),
+          { code: "proposal_action_not_allowed", action: args.action },
+        );
+      }
       const siteResult = resolveSiteContext(args.site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       try {
@@ -697,6 +860,23 @@ export function registerProposalTools(
               ],
             });
           }
+          if (data.code === "target_missing") {
+            return fail(String(data.error ?? "target missing"), {
+              code: "target_missing",
+              next_actions: [
+                {
+                  tool: "update_proposal",
+                  reason: "Reject or withdraw — apply is blocked because the page no longer exists.",
+                  priority: "required",
+                  args_hint: {
+                    proposal_id: args.proposal_id,
+                    action: "reject",
+                    site: args.site,
+                  },
+                },
+              ],
+            });
+          }
           if (data.code === "not_claimant") {
             return fail(String(data.error ?? "not claimant"), {
               code: "not_claimant",
@@ -817,7 +997,7 @@ export function registerProposalTools(
     "List recent people/agent writes for a CMS entry (14-day window). " +
       "Use before confirm_recent_activity on propose_change / update_proposal apply. " +
       "events[] is unfiltered history; gate_write_count excludes the current agent_session_id when provided. " +
-      "Does not write YAML. Requires content_view or seo_edit.",
+      "Does not write YAML. Requires content_view, proposals_create, or proposals_review.",
     {
       contentType: z.string(),
       slug: z.string(),

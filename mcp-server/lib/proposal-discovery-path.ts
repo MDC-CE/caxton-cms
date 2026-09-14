@@ -1,6 +1,6 @@
 /**
- * Build discovery_path for list_proposals (first consumer).
- * Same DiscoveryPath shape as respond.ts — proposal-specific = which items.
+ * Build discovery_path for list_proposals (single-id open|partial).
+ * Prefer agent_preview think items from server review_context; fall back to kind-based defaults.
  */
 
 import { parseContentTypeStrategy, type ContentTypeStrategy } from "../../shared/contentTypeStrategy.js";
@@ -69,12 +69,30 @@ export type ProposalDiscoveryInput = {
   blockers?: unknown[];
 };
 
+export type AgentPreviewThink = {
+  id: string;
+  title: string;
+  why: string;
+  look_for: string[];
+};
+
+export type ReviewContextForDiscovery = {
+  summary?: string;
+  damage_class?: string;
+  block_apply?: boolean;
+  situation_changed_since_filed?: boolean;
+  agent_preview?: {
+    think_items?: AgentPreviewThink[];
+    warnings?: McpWarning[];
+  };
+};
+
 export type BuildProposalDiscoveryPathOpts = {
   proposal: ProposalDiscoveryInput;
-  /** Tool names the connector may call (from allowedToolNames(grants)). Empty/undefined = treat all catalog tools as available when grants unknown (dev). */
   allowedTools?: ReadonlySet<string> | readonly string[] | null;
-  /** Content-type strategy for first open entry; null/undefined → generic fit copy. */
   strategy?: ContentTypeStrategy | null;
+  /** Live review_context from admin API (preferred). */
+  reviewContext?: ReviewContextForDiscovery | null;
 };
 
 function allowedSet(
@@ -82,118 +100,6 @@ function allowedSet(
 ): Set<string> | null {
   if (allowedTools == null) return null;
   return allowedTools instanceof Set ? allowedTools : new Set(allowedTools);
-}
-
-function firstOpenEntry(proposal: ProposalDiscoveryInput) {
-  const entries = proposal.entries ?? [];
-  const pending = entries.find((e) => !e.status || e.status === "pending" || e.status === "failed");
-  return pending ?? entries[0] ?? null;
-}
-
-function truncateConstraints(constraints: string[] | undefined, max = 4): string[] {
-  if (!constraints?.length) return [];
-  return constraints.slice(0, max).map((c) => (c.length > 160 ? `${c.slice(0, 157)}…` : c));
-}
-
-function buildEditsThinkItems(
-  proposal: ProposalDiscoveryInput,
-  strategy: ContentTypeStrategy | null | undefined,
-): DiscoveryPathItem[] {
-  const entry = firstOpenEntry(proposal);
-  const entryLabel = entry
-    ? `${entry.contentType}/${entry.slug} (${entry.locale}${entry.variant ? ` · ${entry.variant}` : ""})`
-    : "the linked entries on this proposal";
-
-  const strategyLookFor =
-    strategy != null
-      ? [
-          `purpose: ${strategy.purpose}`,
-          ...truncateConstraints(strategy.constraints).map((c) => `constraint: ${c}`),
-          "reject or block if the change fights this purpose",
-        ]
-      : [
-          "fit the role of this content type on the site",
-          "do not invent a strategy — ask for type strategy if unclear",
-        ];
-
-  return [
-    {
-      kind: "think",
-      id: "read_card",
-      title: "Read what is already on this proposal",
-      why: "Summary, blockers, and entries are already in this response — start here before calling tools.",
-      look_for: [
-        proposal.summary ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}` : "summary and rationale",
-        `open blockers: ${proposal.open_blocker_count ?? (Array.isArray(proposal.blockers) ? proposal.blockers.length : 0)}`,
-        `entries: ${(proposal.entries ?? []).length}`,
-      ],
-    },
-    {
-      kind: "think",
-      id: "deep_read",
-      title: "Deep-read the page vs the proposed change",
-      why: `Compare live/draft content for ${entryLabel} with what this proposal would change. Use page content already in context or MCP reads — do not invent MCP tools.`,
-      look_for: [
-        "does the edit match the stated summary",
-        "regressions in clarity, CTAs, or structure",
-        "you may use other chat capabilities outside this MCP if helpful",
-      ],
-    },
-    {
-      kind: "think",
-      id: "audience_intent",
-      title: "Audience and buyer intent",
-      why: "Judge whether the change helps the intended reader. Host-agnostic — outside research is fine; do not invent an MCP tool for this.",
-      look_for: ["job-to-be-done", "objections the copy should answer", "tone fit for the funnel stage"],
-    },
-    {
-      kind: "think",
-      id: "strategy_fit",
-      title: "Fit to content-type strategy",
-      why:
-        strategy != null
-          ? "Evaluate the proposal against this content type's documented strategy."
-          : "No type strategy on file — use a generic fit check; do not invent strategy text.",
-      look_for: strategyLookFor,
-    },
-    {
-      kind: "think",
-      id: "disposition",
-      title: "Choose a disposition",
-      why: "After optional research, decide apply, reject, or add_blocker — discovery is not a gate.",
-      look_for: [
-        "apply only when you would ship this yourself",
-        "reject with a clear reason",
-        "add_blocker for fixable feedback (min 80 chars: wrong / fixed looks like / why)",
-      ],
-    },
-  ];
-}
-
-function buildNotesThinkItems(proposal: ProposalDiscoveryInput): DiscoveryPathItem[] {
-  return [
-    {
-      kind: "think",
-      id: "read_card",
-      title: "Read the notes card",
-      why: "Notes do not change YAML on close — understand the handoff before closing.",
-      look_for: [
-        proposal.summary ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}` : "what was tried",
-        "related issues and blockers",
-      ],
-    },
-    {
-      kind: "think",
-      id: "close_disposition",
-      title: "Close disposition",
-      why: "Pick a close_reason that matches reality (wont_fix, fixed_elsewhere, tracked_elsewhere, other).",
-      look_for: [
-        "is work truly done elsewhere",
-        "should this stay open for the next agent instead",
-        "close_note when required",
-      ],
-    },
-  ];
 }
 
 function buildToolItems(allowed: Set<string> | null): {
@@ -220,13 +126,69 @@ function buildToolItems(allowed: Set<string> | null): {
   return { items, anyCapped };
 }
 
+function thinkFromPreview(items: AgentPreviewThink[]): DiscoveryPathItem[] {
+  return items.slice(0, 5).map((t) => ({
+    kind: "think" as const,
+    id: t.id,
+    title: t.title,
+    why: t.why,
+    look_for: t.look_for,
+  }));
+}
+
+function fallbackNotesThink(proposal: ProposalDiscoveryInput): DiscoveryPathItem[] {
+  return [
+    {
+      kind: "think",
+      id: "read_card",
+      title: "Read the notes card",
+      why: "Notes do not change YAML on close — understand the handoff before closing.",
+      look_for: [
+        proposal.summary
+          ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}`
+          : "what was tried",
+        "related issues and blockers",
+      ],
+    },
+    {
+      kind: "think",
+      id: "close_disposition",
+      title: "Close disposition",
+      why: "Pick a close_reason that matches reality (wont_fix, fixed_elsewhere, tracked_elsewhere, other).",
+      look_for: [
+        "is work truly done elsewhere",
+        "should this stay open for the next agent instead",
+        "close_note when required",
+      ],
+    },
+  ];
+}
+
+function fallbackIdeaThink(proposal: ProposalDiscoveryInput): DiscoveryPathItem[] {
+  return [
+    {
+      kind: "think",
+      id: "idea_accept",
+      title: "Accept greenlights a brief only",
+      why: "Accept does not create pages or write YAML.",
+      look_for: [
+        proposal.summary
+          ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}`
+          : "brief intent",
+        "next_step is concrete (min 20 characters)",
+        "close/park means no — not yes",
+      ],
+    },
+  ];
+}
+
 /**
  * Returns discovery_path for a decidable single-proposal read, or null.
  */
 export function buildProposalDiscoveryPath(
   opts: BuildProposalDiscoveryPathOpts,
 ): { discovery_path: DiscoveryPath | null; warnings: McpWarning[] } {
-  const { proposal, strategy } = opts;
+  const { proposal, strategy: _strategy, reviewContext } = opts;
   const status = proposal.status;
   if (status !== "open" && status !== "partial") {
     return { discovery_path: null, warnings: [] };
@@ -234,14 +196,54 @@ export function buildProposalDiscoveryPath(
 
   const allowed = allowedSet(opts.allowedTools);
   const warnings: McpWarning[] = [];
-  const kind = proposal.kind === "notes" ? "notes" : "edits";
 
-  let think: DiscoveryPathItem[];
-  let tools: DiscoveryPathToolItem[] = [];
-  if (kind === "notes") {
-    think = buildNotesThinkItems(proposal);
+  if (reviewContext?.agent_preview?.warnings?.length) {
+    warnings.push(...reviewContext.agent_preview.warnings);
+  }
+
+  const kind = proposal.kind === "notes" ? "notes" : proposal.kind === "idea" ? "idea" : "edits";
+
+  let think: DiscoveryPathItem[] = [];
+  const previewThink = reviewContext?.agent_preview?.think_items;
+  if (previewThink?.length) {
+    think = thinkFromPreview(previewThink);
+  } else if (kind === "notes") {
+    think = fallbackNotesThink(proposal);
+  } else if (kind === "idea") {
+    think = fallbackIdeaThink(proposal);
   } else {
-    think = buildEditsThinkItems(proposal, strategy ?? null);
+    think = [
+      {
+        kind: "think",
+        id: "read_card",
+        title: "Read what is already on this proposal",
+        why: "Summary, blockers, and entries are already in this response — start here before calling tools.",
+        look_for: [
+          proposal.summary
+            ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}`
+            : "summary and rationale",
+          `open blockers: ${proposal.open_blocker_count ?? 0}`,
+          reviewContext?.summary ? `situation: ${reviewContext.summary.slice(0, 200)}` : "review situation",
+        ],
+      },
+      {
+        kind: "think",
+        id: "disposition",
+        title: "Choose a disposition",
+        why: "After optional research, decide apply, reject, or add_blocker — discovery is not a gate.",
+        look_for: [
+          "apply only when you would ship this yourself",
+          "reject with a clear reason",
+          "add_blocker for fixable feedback",
+        ],
+      },
+    ];
+  }
+
+  if (think.length > 5) think = think.slice(0, 5);
+
+  let tools: DiscoveryPathToolItem[] = [];
+  if (kind === "edits" && !reviewContext?.block_apply) {
     const built = buildToolItems(allowed);
     tools = built.items;
     if (built.anyCapped) {
@@ -253,18 +255,18 @@ export function buildProposalDiscoveryPath(
     }
   }
 
-  if (think.length > 5) {
-    think = think.slice(0, 5);
-  }
-
-  const items: DiscoveryPathItem[] = [...think, ...tools];
+  const goal =
+    kind === "notes"
+      ? "Optional context before close/withdraw. Not next_actions — you choose; skip does not block."
+      : kind === "idea"
+        ? "Optional context before accept | close. Not next_actions — skip does not block."
+        : reviewContext?.block_apply
+          ? "Target missing — apply is blocked. Prefer reject or withdraw. discovery_path is optional context only."
+          : "Optional context before apply | reject | add_blocker. Not next_actions — you choose; skip does not block apply.";
 
   const discovery_path: DiscoveryPath = {
-    goal:
-      kind === "notes"
-        ? "Optional context before close/withdraw. Not next_actions — you choose; skip does not block."
-        : "Optional context before apply | reject | add_blocker. Not next_actions — you choose; skip does not block apply.",
-    items,
+    goal,
+    items: [...think, ...tools],
     non_effects: [
       "Following discovery_path is optional; skip does not unlock or block update_proposal.",
       "discovery_path is not next_actions — do not treat items as required tool calls.",

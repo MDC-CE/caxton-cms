@@ -44,7 +44,7 @@ export const TOOL_GATES: Record<string, ToolGate> = {
   create_component_section_demo: { kind: "anyCap", caps: ["content_view"] },
   explain_site: { kind: "anyCap", caps: ["content_view"] },
   bootstrap_agent: { kind: "anyCap", caps: ["content_view"] },
-  agent_session: { kind: "anyCap", caps: ["content_edit_text", "seo_edit"] },
+  agent_session: { kind: "canMutateMetrics" },
 
   get_entry_seo: { kind: "anyCap", caps: ["content_view", "seo_edit"] },
   list_entry_seo: { kind: "anyCap", caps: ["content_view", "seo_edit"] },
@@ -99,10 +99,19 @@ export const TOOL_GATES: Record<string, ToolGate> = {
   get_validation_issues: { kind: "anyCap", caps: ["metrics_view"] },
   get_organic_traffic: { kind: "anyCap", caps: ["metrics_view", "seo_edit"] },
   update_issue: { kind: "anyCap", caps: ["content_edit_text", "seo_edit"] },
-  propose_change: { kind: "anyCap", caps: ["content_view", "seo_edit"] },
-  list_proposals: { kind: "anyCap", caps: ["content_view", "seo_edit"] },
-  update_proposal: { kind: "anyCap", caps: ["content_edit_text", "seo_edit"] },
-  get_entry_activity: { kind: "anyCap", caps: ["content_view", "seo_edit"] },
+  propose_change: { kind: "anyCap", caps: ["proposals_create"] },
+  list_proposals: {
+    kind: "anyCap",
+    caps: ["content_view", "proposals_create", "proposals_review"],
+  },
+  update_proposal: {
+    kind: "anyCap",
+    caps: ["proposals_create", "proposals_review"],
+  },
+  get_entry_activity: {
+    kind: "anyCap",
+    caps: ["content_view", "proposals_create", "proposals_review"],
+  },
 };
 
 export function hasCapAnyScope(grants: CatalogGrant[], cap: string): boolean {

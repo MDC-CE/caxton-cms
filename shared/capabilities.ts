@@ -101,6 +101,22 @@ const REGISTRY = [
     description: "Remove images or files from the shared media library.",
   },
   {
+    name: "proposals_create",
+    label: "Create proposals",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "File content proposals (edits, notes, ideas). Does not authorize apply/reject/accept — use Review proposals for that.",
+  },
+  {
+    name: "proposals_review",
+    label: "Review proposals",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Decide on proposals (apply, reject, accept, close, blockers). Does not authorize creating proposals or free-editing pages.",
+  },
+  {
     name: "seo_edit",
     label: "Edit page SEO",
     scoped: true,

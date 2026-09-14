@@ -36,7 +36,26 @@ describe("buildProposalDiscoveryPath", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: baseEdits,
       allowedTools: catalog,
-      strategy: { purpose: "Landing pages that convert warm traffic.", constraints: ["No fake scarcity"] },
+      reviewContext: {
+        summary: "Selling page edit",
+        damage_class: "selling_page",
+        agent_preview: {
+          think_items: [
+            {
+              id: "selling_page_figures",
+              title: "Verify figures",
+              why: "Selling page",
+              look_for: ["hire rate"],
+            },
+            {
+              id: "disposition",
+              title: "Choose a disposition",
+              why: "Decide",
+              look_for: ["apply only when you would ship"],
+            },
+          ],
+        },
+      },
     });
     expect(discovery_path).not.toBeNull();
     const items = discovery_path!.items;
@@ -51,11 +70,8 @@ describe("buildProposalDiscoveryPath", () => {
     expect(tools.every((t) => t.kind === "tool" && t.available)).toBe(true);
     expect(warnings).toEqual([]);
 
-    const strategy = thinks.find((t) => t.id === "strategy_fit");
-    expect(strategy?.kind).toBe("think");
-    if (strategy?.kind === "think") {
-      expect(strategy.look_for.some((l) => l.includes("Landing pages"))).toBe(true);
-    }
+    const figures = thinks.find((t) => t.id === "selling_page_figures");
+    expect(figures?.kind).toBe("think");
 
     const toolNames = tools.map((t) => (t.kind === "tool" ? t.tool : "")).filter(Boolean);
     expect(assertCatalogToolNames(toolNames, catalog)).toEqual({ ok: true });
@@ -76,17 +92,41 @@ describe("buildProposalDiscoveryPath", () => {
     expect(discovery_path!.items.some((i) => i.kind === "think")).toBe(true);
   });
 
-  it("uses generic strategy copy when strategy missing", () => {
+  it("uses agent_preview think items when provided", () => {
     const { discovery_path } = buildProposalDiscoveryPath({
       proposal: baseEdits,
       allowedTools: catalog,
-      strategy: null,
+      reviewContext: {
+        agent_preview: {
+          think_items: [
+            {
+              id: "verify_copy",
+              title: "Check copy",
+              why: "Verify",
+              look_for: ["proposed vs live"],
+            },
+          ],
+        },
+      },
     });
-    const strategy = discovery_path!.items.find((i) => i.kind === "think" && i.id === "strategy_fit");
-    expect(strategy?.kind).toBe("think");
-    if (strategy?.kind === "think") {
-      expect(strategy.look_for.some((l) => /do not invent a strategy/i.test(l))).toBe(true);
-    }
+    const verify = discovery_path!.items.find((i) => i.kind === "think" && i.id === "verify_copy");
+    expect(verify?.kind).toBe("think");
+  });
+
+  it("builds idea path without apply-research tools", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i1",
+        status: "open",
+        kind: "idea",
+        summary: "We should write a new spoke about X with a clear funnel CTA.",
+      },
+      allowedTools: catalog,
+    });
+    expect(discovery_path).not.toBeNull();
+    expect(discovery_path!.items.every((i) => i.kind === "think")).toBe(true);
+    expect(warnings).toEqual([]);
+    expect(discovery_path!.goal.toLowerCase()).toMatch(/accept/);
   });
 
   it("builds short notes path without apply-research tools", () => {

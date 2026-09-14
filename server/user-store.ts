@@ -188,7 +188,7 @@ const BUILT_IN_USER_ADMIN_ROLE: RoleDefinition = {
 const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
   label: "Platform Steward",
   description:
-    "Site health: diagnostics, runtime issues, redirects, SEO settings, content-type schema, and private database definitions. Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
+    "Site health: diagnostics, runtime issues, redirects, SEO settings, content-type schema, private database definitions, and full proposal create/review. Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
   capabilities: [
     { name: "metrics_view" },
     { name: "content_view", contentTypes: "*" },
@@ -200,6 +200,8 @@ const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
     { name: "components_manage" },
     { name: "content_types_manage" },
     { name: "databases_manage" },
+    { name: "proposals_create" },
+    { name: "proposals_review" },
   ],
 };
 
@@ -525,6 +527,30 @@ export function ensureDatabasesEditDataOnAllContentEditors(
   return changed;
 }
 
+/**
+ * Soft-migrate custom roles: text or SEO editors get proposals_create so they can still file proposals.
+ * Does not grant proposals_review — assign Proposal Reviewer or Publisher (or platform_steward) for decide.
+ */
+export function ensureProposalsCreateOnContentEditors(
+  roles: Record<string, RoleDefinition>,
+): boolean {
+  let changed = false;
+  for (const [roleId, role] of Object.entries(roles)) {
+    if (isBuiltInRole(roleId) || role?.agentic || isAgenticSwarmRoleId(roleId)) continue;
+    if (!role?.capabilities) continue;
+    if (role.capabilities.some((g) => g.name === "proposals_create")) continue;
+
+    const hasTextOrSeo = role.capabilities.some(
+      (g) => g.name === "content_edit_text" || g.name === "seo_edit",
+    );
+    if (!hasTextOrSeo) continue;
+
+    role.capabilities = [...role.capabilities, { name: "proposals_create" }];
+    changed = true;
+  }
+  return changed;
+}
+
 /** True when grants include a mutating cap (not only metrics_view / content_view). */
 export function grantsCanMutateMetrics(caps: CapabilityGrant[]): boolean {
   return caps.some((g) => !VIEW_ONLY_CAPABILITIES.has(g.name));
@@ -548,6 +574,9 @@ function finishLoad(persist: "local" | "all"): void {
   }
   if (ensureDatabasesEditDataOnAllContentEditors(state.roles)) {
     log.info("[UserStore] Migrated custom roles: added databases_edit_data from content_edit_text:*");
+  }
+  if (ensureProposalsCreateOnContentEditors(state.roles)) {
+    log.info("[UserStore] Migrated custom roles: added proposals_create from content_edit_text|seo_edit");
   }
   if (ensureAgenticSwarmRoles(state.roles)) {
     log.info("[UserStore] Seeded agentic swarm roles");

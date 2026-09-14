@@ -506,7 +506,7 @@ describe("content proposals", () => {
     );
     expect(second.ok).toBe(false);
     if (!second.ok) {
-      expect(second.code).toBe("proposal_exists");
+      expect(["competing_entry_edits", "proposal_exists"]).toContain(second.code);
       expect(second.existing_proposal?.id).toBe(first.ok ? first.proposal.id : "");
     }
   });
