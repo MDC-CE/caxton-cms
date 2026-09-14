@@ -327,6 +327,13 @@ function FirstEditGate({ children }: { children: React.ReactNode }) {
     resume();
   }, [editMode]);
 
+  /** Close without editing: do not resume the gated action or mark the page prompted. */
+  const handleCancelFirstEdit = useCallback(() => {
+    setModalOpen(false);
+    pendingRef.current = null;
+    setPendingEdit(null);
+  }, []);
+
   const handleSwitchToVariant = useCallback((variantSlug: string) => {
     if (!editMode || !pendingRef.current) return;
     const { contentType, slug, locale, sectionIndex } = pendingRef.current;
@@ -568,6 +575,7 @@ function FirstEditGate({ children }: { children: React.ReactNode }) {
           onCreateVariant={handleCreateVariant}
           onSwitchToVariant={handleSwitchToVariant}
           onEditLive={handleEditLive}
+          onCancel={handleCancelFirstEdit}
         />
       )}
     </>

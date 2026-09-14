@@ -29,6 +29,8 @@ interface FirstEditPromptModalProps {
   onCreateVariant: (name: string) => Promise<void>;
   onSwitchToVariant?: (variantSlug: string) => void;
   onEditLive: () => void;
+  /** Dismiss without editing — X, Escape, or backdrop. */
+  onCancel: () => void;
 }
 
 export function FirstEditPromptModal({
@@ -39,6 +41,7 @@ export function FirstEditPromptModal({
   onCreateVariant,
   onSwitchToVariant,
   onEditLive,
+  onCancel,
 }: FirstEditPromptModalProps) {
   const hasExisting = existingVariants.length > 0;
 
@@ -88,12 +91,13 @@ export function FirstEditPromptModal({
   const confirmDisabled = isCreating || (isCreatingNew && !newVariantName.trim());
 
   return (
-    <Dialog open={isOpen}>
-      <DialogContent
-        className="max-w-md"
-        onInteractOutside={(e) => e.preventDefault()}
-        onEscapeKeyDown={(e) => e.preventDefault()}
-      >
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open && !isCreating) onCancel();
+      }}
+    >
+      <DialogContent className="max-w-md">
         {step === "choose" ? (
           <>
             <DialogHeader>
