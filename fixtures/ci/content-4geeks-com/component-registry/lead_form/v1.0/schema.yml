@@ -72,6 +72,12 @@ props:
         description: >-
           When true, send Authorization Token on delivery (if url) and append ?token= to
           success.url when redirecting.
+      fail_on_error:
+        type: boolean
+        required: false
+        description: >-
+          When true, wait for the upstream webhook and fail the form submit (no success UI /
+          redirect) if delivery errors or returns non-2xx. Default omit/false is fire-and-forget.
     description: >-
       Form-level webhook — highest priority in the three-level chain (form > per-event > global). When set, this webhook
       is always used for this form regardless of tracking settings. Requires url and/or use_visitor_token.

@@ -51,6 +51,7 @@ import {
   type LeadFormOverride,
 } from "@shared/resolveLeadFormOverride";
 import { useAuthUser, getConsumerToken } from "@/hooks/useAuthUser";
+import { useInternalNav } from "@/hooks/useInternalNav";
 import { resolveFormFields, type IdentityField } from "@/lib/resolveFormFields";
 import {
   resolveLeadFormPhase,
@@ -205,6 +206,7 @@ export interface LeadFormData {
     url?: string;
     method?: "POST" | "GET";
     use_visitor_token?: boolean;
+    fail_on_error?: boolean;
   };
   fields?: {
     email?: FieldConfig;
@@ -235,19 +237,26 @@ export interface LeadFormData {
   /** Phase copy for signup forms. Locale defaults apply when a stage is omitted. */
   messages?: {
     guest?: {
+      title?: string | null;
       subtitle?: string | null;
       submit_label?: string;
+      submit_disabled?: boolean;
     } | null;
     login?: {
+      title?: string | null;
       subtitle?: string | null;
       submit_label?: string;
       back_label?: string;
+      submit_disabled?: boolean;
     } | null;
     incomplete?: {
+      title?: string | null;
       subtitle?: string | null;
       submit_label?: string;
+      submit_disabled?: boolean;
     } | null;
     ready?: {
+      title?: string | null;
       subtitle?: string | null;
       submit_label?: string;
       submit_disabled?: boolean;
@@ -610,6 +619,7 @@ type EffectiveWebhook = {
   url?: string;
   method?: "POST" | "GET";
   use_visitor_token?: boolean;
+  fail_on_error?: boolean;
 };
 
 /** Resolve conversion/success/tags/webhook for one submit (override > form root > event). */
@@ -674,6 +684,7 @@ function buildEffectiveSubmitConfig(
           ...(wh.url ? { url: wh.url } : {}),
           method: (wh.method === "GET" ? "GET" : "POST") as "POST" | "GET",
           ...(wh.use_visitor_token ? { use_visitor_token: true } : {}),
+          ...(wh.fail_on_error ? { fail_on_error: true } : {}),
         }
       : null;
   const eventWebhook: EffectiveWebhook | null =
@@ -705,6 +716,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const { session, setConversionPage } = useSession();
   const sessionLocation = useSessionLocation();
   const utm = useUTM();
+  const nav = useInternalNav();
   const [isSuccess, setIsSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
@@ -718,7 +730,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [pendingAutoSubmit, setPendingAutoSubmit] = useState(false);
 
-  const turnstileEnabled = data.turnstile?.enabled ?? true;
+  // TEMP: force off for local testing — revert when asked
+  const turnstileEnabled = false; // data.turnstile?.enabled ?? true;
 
   const { data: turnstileSiteKey, isLoading: turnstileSiteKeyLoading } = useQuery<{ siteKey: string }>({
     queryKey: ["/api/turnstile/site-key"],
@@ -1550,6 +1563,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             url: resolvedUrl,
             method: deliveryOverride.method || "POST",
             ...(effective.use_visitor_token ? { use_visitor_token: true } : {}),
+            ...(deliveryOverride.fail_on_error ? { fail_on_error: true } : {}),
           },
         };
         if (effective.use_visitor_token) {
@@ -1712,7 +1726,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           templated,
           effective.use_visitor_token,
         );
-        window.location.href = successUrl;
+        nav.navigate(successUrl);
       } else {
         setIsSuccess(true);
         setSuccessMessage(effective.success?.message || (locale === "es" 
@@ -2047,6 +2061,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   if (loginMode) {
     return (
       <div className={data.className} data-testid="lead-form-login">
+        {formCopy.title ? (
+          <p
+            className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
+            data-testid="text-login-title"
+          >
+            {formCopy.title}
+          </p>
+        ) : null}
         {(!allowSignup || formCopy.subtitle) && (
           <p
             className="text-sm text-muted-foreground leading-snug mb-3"
@@ -2286,6 +2308,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
 
   return (
     <div className={data.className} data-testid="lead-form">
+      {formCopy.title ? (
+        <p
+          className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
+          data-testid="text-form-title"
+        >
+          {formCopy.title}
+        </p>
+      ) : null}
       {formCopy.subtitle && (
         <p
           className="text-sm text-muted-foreground leading-snug mb-2.5"

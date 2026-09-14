@@ -116,13 +116,15 @@ export function registerWebhooksRoutes(app: Express): void {
   /**
    * POST /api/leads/webhook-delivery
    * Primary lead submission path when any webhook level is configured.
-   * Body: { payload, webhook?: { url, method, use_visitor_token? }, visitor_token? }
+   * Body: { payload, webhook?: { url, method, use_visitor_token?, fail_on_error? }, visitor_token? }
    *   - When `webhook` is omitted → reads URL/method/auth_header from global
    *     settings server-side (credentials never leave the server).
    *   - When `webhook.url` is supplied → uses that URL/method; if
    *     `use_visitor_token` is true, Authorization is `Token <visitor_token>`.
-   * Always returns 200 — delivery failures are non-blocking so the form shows
-   * success regardless of upstream response (except 400 when visitor token required but missing).
+   *   - Default: returns 200 immediately (fire-and-forget). Upstream failures are logged only.
+   *   - When `webhook.fail_on_error` is true: waits for upstream and returns 502 on
+   *     network error / non-2xx / blocked private destination (form must not show success).
+   *   - 400 when visitor token required but missing, or body invalid.
    */
   app.post("/api/leads/webhook-delivery", async (req, res) => {
     const body = req.body;
@@ -144,7 +146,9 @@ export function registerWebhooksRoutes(app: Express): void {
       url?: string;
       method?: string;
       use_visitor_token?: boolean;
+      fail_on_error?: boolean;
     } | undefined;
+    const failOnError = override?.fail_on_error === true;
     let url: string;
     let method: string;
     let auth_header: string | undefined;
@@ -180,11 +184,18 @@ export function registerWebhooksRoutes(app: Express): void {
       }
     }
 
-    // Always respond 200 immediately — delivery is non-blocking
-    res.json({ success: true });
+    if (!failOnError) {
+      // Fire-and-forget: respond before upstream so marketing forms stay non-blocking
+      res.json({ success: true });
+    }
 
     if (isPrivateDestination(url)) {
       log.warn(`[LeadWebhookDelivery] Blocked private/internal destination: ${url}`);
+      if (failOnError) {
+        res.status(502).json({
+          error: "Webhook destination is not allowed (private or internal address)",
+        });
+      }
       return;
     }
 
@@ -210,8 +221,26 @@ export function registerWebhooksRoutes(app: Express): void {
 
       const response = await fetch(fetchUrl, fetchOptions);
       log.info(`[LeadWebhookDelivery] Delivered to ${url} — status ${response.status}`);
+      if (failOnError) {
+        if (!response.ok) {
+          const upstreamBody = await response.text().catch(() => "");
+          res.status(502).json({
+            error: "Upstream webhook returned a non-2xx response",
+            upstream_status: response.status,
+            details: upstreamBody.slice(0, 500),
+          });
+          return;
+        }
+        res.json({ success: true, status: response.status });
+      }
     } catch (err) {
       log.error({ err: err }, "[LeadWebhookDelivery] Failed to deliver:");
+      if (failOnError) {
+        res.status(502).json({
+          error: "Failed to deliver webhook",
+          details: String(err),
+        });
+      }
     }
   });
 

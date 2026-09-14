@@ -157,4 +157,38 @@ describe("resolveLeadFormCopy", () => {
     );
     expect(copy.subtitle).toBe("Legacy login subtitle");
   });
+
+  it("uses messages.guest title when set", () => {
+    const copy = resolveLeadFormCopy(
+      "guest_signup",
+      {
+        messages: {
+          guest: {
+            title: "Live now!",
+            subtitle: "Join the event",
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.title).toBe("Live now!");
+    expect(copy.subtitle).toBe("Join the event");
+  });
+
+  it("omits title when messages.guest.title is null", () => {
+    const copy = resolveLeadFormCopy(
+      "guest_signup",
+      {
+        messages: {
+          guest: {
+            title: null,
+            subtitle: "Only subtitle",
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.title).toBeUndefined();
+    expect(copy.subtitle).toBe("Only subtitle");
+  });
 });

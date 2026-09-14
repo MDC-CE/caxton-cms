@@ -1,9 +1,9 @@
 /**
- * Phase-driven subtitle/submit copy for LeadForm signup flows.
+ * Phase-driven title/subtitle/submit copy for LeadForm signup flows.
  *
  * Nested YAML under `messages` (guest / login / incomplete / ready) carries
- * subtitles and submit labels only. Form headings belong to the parent
- * (e.g. hero `form_card_title`), not the LeadForm itself.
+ * optional title, subtitle, and submit labels. Parent hero `form_card_*` is
+ * optional chrome — leave empty when the form owns the heading (e.g. workshop live).
  */
 
 export type LeadFormPhase =
@@ -15,6 +15,8 @@ export type LeadFormPhase =
 export type LeadFormLocale = "en" | "es";
 
 export interface LeadFormCopyBlock {
+  /** Optional phase heading (e.g. "Live now!"). Null / omit = nothing rendered. */
+  title?: string | null;
   /** Set to null to explicitly hide the phase subtitle. */
   subtitle?: string | null;
   submit_label?: string;
@@ -40,10 +42,17 @@ export interface LeadFormCopySource {
 }
 
 export interface ResolvedLeadFormCopy {
+  title: string | undefined;
   subtitle: string | undefined;
   submit_label: string;
   back_label?: string;
   submit_disabled?: boolean;
+}
+
+function resolvePhaseTitle(block: LeadFormCopyBlock | null | undefined): string | undefined {
+  if (block == null || block.title === null) return undefined;
+  const t = typeof block.title === "string" ? block.title.trim() : "";
+  return t || undefined;
 }
 
 export function resolveLeadFormPhase(opts: {
@@ -126,6 +135,7 @@ export function resolveLeadFormCopy(
   if (phase === "guest_signup") {
     const block = messages.guest;
     return {
+      title: resolvePhaseTitle(block),
       subtitle:
         block === null || block?.subtitle === null
           ? undefined
@@ -139,6 +149,7 @@ export function resolveLeadFormCopy(
     const block =
       messages.login === undefined ? data.login : messages.login;
     return {
+      title: resolvePhaseTitle(block === null ? null : block),
       subtitle:
         block === null || block?.subtitle === null
           ? undefined
@@ -154,6 +165,7 @@ export function resolveLeadFormCopy(
       ? messages.incomplete
       : messages.ready;
   return {
+    title: resolvePhaseTitle(block),
     subtitle:
       block === null || block?.subtitle === null
         ? undefined

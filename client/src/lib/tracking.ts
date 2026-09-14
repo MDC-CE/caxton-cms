@@ -201,6 +201,7 @@ export interface WebhookConfig {
   method?: "POST" | "GET";
   auth_header?: string;
   use_visitor_token?: boolean;
+  fail_on_error?: boolean;
 }
 
 export interface ConsentDefaults {

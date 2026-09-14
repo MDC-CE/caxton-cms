@@ -152,6 +152,11 @@ export const webhookConfigSchema = z
     method: z.enum(["POST", "GET"]).optional(),
     /** When true: Authorization Token on delivery (if url) + append visitor token to success.url */
     use_visitor_token: z.boolean().optional(),
+    /**
+     * When true, `/api/leads/webhook-delivery` waits for upstream and returns 502 on
+     * failure so the form does not show success (Learn-like RSVP). Default / omit = fire-and-forget.
+     */
+    fail_on_error: z.boolean().optional(),
   })
   .refine(
     (w) =>

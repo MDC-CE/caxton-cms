@@ -180,35 +180,42 @@ export interface HeroWorkshopData {
   badge?: string;
   title?: string;
   description?: string;
-  starting_at?: string;
-  ending_at?: string;
-  date_icon?: string;
-  duration_label?: string;
-  duration_suffix?: string;
-  duration_icon?: string;
-  host_name?: string;
-  host_avatar_url?: string;
-  host_bio?: string;
-  /** Section label above the host card (e.g. "Host for this event"). */
-  host_heading?: string;
-  /** Social icon links under the host name; empty urls are hidden. */
-  host_socials?: Array<{ name?: string; url?: string; icon?: string }>;
-  live_now_label?: string;
-  capacity?: number | string;
-  registered_count?: number | string;
-  seats_remaining?: number | string;
-  registrant_avatars?:
-    | string[]
-    | string
-    | Array<{ name?: string; avatar_url?: string; url?: string }>;
-  /** Cycled when a registrant has no avatar_url (image ids or URLs). */
-  fallback_avatars?: string[] | string;
-  /** Single Learn-like line above avatars (template can use {{ entry.* }}). */
-  seats_copy?: string;
-  /** Label for expanding the registrant avatar grid (YAML). */
-  seats_load_more_label?: string;
-  /** Decorative media (e.g. GIF) behind the countdown strip above the form. */
-  countdown_background_image?: string;
+  date?: {
+    starting_at_iso?: string;
+    ending_at_iso?: string;
+    icon?: string;
+  };
+  duration?: {
+    label?: string;
+    suffix?: string;
+    icon?: string;
+  };
+  host?: {
+    heading?: string;
+    name?: string;
+    avatar_url?: string;
+    bio?: string;
+    socials?: Array<{ name?: string; url?: string; icon?: string }>;
+  };
+  seats?: {
+    capacity?: number | string;
+    registered_count?: number | string;
+    remaining?: number | string;
+    registrants?:
+      | string[]
+      | string
+      | Array<{ name?: string; avatar_url?: string; url?: string }>;
+    fallback_avatars?: string[] | string;
+    copy?: string;
+    load_more_label?: string;
+  };
+  live?: {
+    label?: string;
+    images?: string[];
+  };
+  countdown?: {
+    background_image?: string;
+  };
   form_card_title?: string;
   form_card_subtitle?: string;
   form_card_disclaimer?: string;
@@ -239,39 +246,52 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
     () => (description ? splitParagraphs(description) : []),
     [description],
   );
-  const durationLabel = coerceToText(data.duration_label);
-  const durationSuffix = coerceToText(data.duration_suffix);
-  const dateIconName = coerceToText(data.date_icon);
-  const durationIconName = coerceToText(data.duration_icon);
+  const durationLabel = coerceToText(data.duration?.label);
+  const durationSuffix = coerceToText(data.duration?.suffix);
+  const dateIconName = coerceToText(data.date?.icon);
+  const durationIconName = coerceToText(data.duration?.icon);
   const DateIcon = dateIconName ? getIcon(dateIconName) : null;
   const DurationIcon = durationIconName ? getIcon(durationIconName) : null;
-  const hostName = coerceToText(data.host_name);
-  const hostBio = coerceToText(data.host_bio);
-  const hostHeading = coerceToText(data.host_heading);
-  const hostSocials = (data.host_socials || [])
+  const hostName = coerceToText(data.host?.name);
+  const hostBio = coerceToText(data.host?.bio);
+  const hostHeading = coerceToText(data.host?.heading);
+  const hostAvatarUrl = coerceToText(data.host?.avatar_url);
+  const hostSocials = (data.host?.socials || [])
     .map((it) => ({
       name: coerceToText(it?.name),
       url: coerceToText(it?.url),
       icon: coerceToText(it?.icon),
     }))
     .filter((it) => !!it.url);
-  const liveNowLabel = coerceToText(data.live_now_label);
-  const seatsCopy = coerceToText(data.seats_copy);
-  const loadMoreLabel = coerceToText(data.seats_load_more_label);
-  const countdownBg = coerceToText(data.countdown_background_image);
+  const liveNowLabel = coerceToText(data.live?.label);
+  const liveImages = useMemo(
+    () => normalizeStringList(data.live?.images),
+    [data.live?.images],
+  );
+  const liveImagesKey = liveImages.join("|");
+  const [liveImageIndex, setLiveImageIndex] = useState(0);
+  // Learn parity: cycle live.images every 5s while the event is live.
+  useEffect(() => {
+    setLiveImageIndex(0);
+  }, [liveImagesKey]);
+  const seatsCopy = coerceToText(data.seats?.copy);
+  const loadMoreLabel = coerceToText(data.seats?.load_more_label);
+  const countdownBg = coerceToText(data.countdown?.background_image);
 
-  const startMs = parseIso(data.starting_at);
-  const endMs = parseIso(data.ending_at);
+  const startingAtIso = coerceToText(data.date?.starting_at_iso);
+  const endingAtIso = coerceToText(data.date?.ending_at_iso);
+  const startMs = parseIso(startingAtIso || undefined);
+  const endMs = parseIso(endingAtIso || undefined);
   const dateLine =
-    data.starting_at && startMs != null
-      ? formatEventDate(data.starting_at, locale)
+    startingAtIso && startMs != null
+      ? formatEventDate(startingAtIso, locale)
       : "";
 
-  const registered = toNum(data.registered_count);
-  const remaining = toNum(data.seats_remaining);
-  const capacity = toNum(data.capacity);
-  const registrants = normalizeRegistrants(data.registrant_avatars);
-  const fallbackAvatars = normalizeStringList(data.fallback_avatars);
+  const registered = toNum(data.seats?.registered_count);
+  const remaining = toNum(data.seats?.remaining);
+  const capacity = toNum(data.seats?.capacity);
+  const registrants = normalizeRegistrants(data.seats?.registrants);
+  const fallbackAvatars = normalizeStringList(data.seats?.fallback_avatars);
   const hasSeatsInfo =
     !!seatsCopy || registered != null || remaining != null || registrants.length > 0;
   const [showAllSeats, setShowAllSeats] = useState(false);
@@ -312,13 +332,32 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
     else eventState = "upcoming";
   }
 
+  useEffect(() => {
+    if (eventState !== "live" || liveImages.length <= 1) return;
+    const id = window.setInterval(() => {
+      setLiveImageIndex((i) => (i + 1) % liveImages.length);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [eventState, liveImages.length, liveImagesKey]);
+
+  const liveImage =
+    eventState === "live"
+      ? liveImages[liveImageIndex % Math.max(liveImages.length, 1)] ||
+        liveImages[0] ||
+        ""
+      : "";
+
   const countdown =
     eventState === "upcoming" && startMs != null
       ? diffParts(startMs - now)
       : null;
 
+  // Live: cycle `live.images` every 5s. Empty → no media, no countdown fallback.
+  const stripBg = eventState === "live" ? liveImage : countdownBg;
   const showCountdownStrip =
-    !!countdown || (eventState === "live" && !!liveNowLabel) || !!countdownBg;
+    !!countdown ||
+    (eventState === "live" && !!liveImage) ||
+    (eventState === "upcoming" && !!countdownBg);
 
   const form = data.form ?? undefined;
   const hasFormCard =
@@ -367,13 +406,32 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
           data-workshop-cols
         >
           <div className="space-y-4">
-            {badge && (
-              <span
-                className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
-                data-testid="text-workshop-badge"
+            {(badge || (eventState === "live" && liveNowLabel)) && (
+              <div
+                className="flex flex-wrap items-center gap-2"
+                data-testid="workshop-badge-row"
               >
-                {badge}
-              </span>
+                {badge ? (
+                  <span
+                    className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
+                    data-testid="text-workshop-badge"
+                  >
+                    {badge}
+                  </span>
+                ) : null}
+                {eventState === "live" && liveNowLabel ? (
+                  <span
+                    className="inline-flex items-center gap-2 rounded-full bg-destructive/10 text-destructive px-3 py-1 text-xs font-bold tracking-wide"
+                    data-testid="text-workshop-live-label"
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full bg-destructive"
+                      aria-hidden
+                    />
+                    {liveNowLabel}
+                  </span>
+                ) : null}
+              </div>
             )}
 
             {titleHtml && (
@@ -422,75 +480,101 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
           </div>
 
           {showCountdownStrip ? (
-            <div
-              className={`relative min-h-[7.5rem] max-h-48 lg:self-end overflow-hidden bg-muted ${
-                hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
-              }`}
-              style={{
-                border: "1.5px solid hsl(var(--primary) / 0.22)",
-                borderBottom: hasFormCard ? "none" : undefined,
-                boxShadow: hasFormCard
-                  ? undefined
-                  : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-              }}
-              data-testid="workshop-countdown"
-            >
-              {countdownBg && (
-                <div className="absolute inset-0 z-0">
+            eventState === "live" ? (
+              <div
+                className={`relative lg:self-end overflow-hidden bg-muted ${
+                  hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
+                }`}
+                style={{
+                  border: "1.5px solid hsl(var(--primary) / 0.22)",
+                  borderBottom: hasFormCard ? "none" : undefined,
+                  boxShadow: hasFormCard
+                    ? undefined
+                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
+                }}
+                data-testid="workshop-countdown"
+              >
+                {stripBg ? (
                   <UniversalImage
-                    id={countdownBg}
+                    id={stripBg}
                     alt=""
-                    className="w-full h-full object-cover"
-                    fieldContext={{ fieldPath: "countdown_background_image" }}
+                    loading="eager"
+                    className="block w-full leading-none"
+                    style={{
+                      width: "100%",
+                      height: "auto",
+                      objectFit: "contain",
+                      objectPosition: "center center",
+                    }}
+                    fieldContext={{ fieldPath: "live.images" }}
                   />
-                </div>
-              )}
-              <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
-                {eventState === "live" && liveNowLabel && (
-                  <span className="inline-flex items-center gap-2 rounded-full bg-background/90 px-3 py-1.5 text-sm font-bold text-destructive shadow-sm">
-                    <span className="w-2 h-2 rounded-full bg-destructive" aria-hidden />
-                    {liveNowLabel}
-                  </span>
-                )}
-                {countdown && (
-                  <div
-                    className={`flex gap-2 sm:gap-3 font-inter tabu lar-nums items-center py-6 ${
-                      countdownBg ? "text-white drop-shadow-sm" : "text-foreground"
-                    }`}
-                  >
-                    {countdownSlots.map(([label, value], i) => (
-                      <div key={label} className="flex items-center gap-2 sm:gap-3">
-                        {i > 0 && (
-                          <span
-                            className={`text-2xl font-bold leading-none -mt-4 ${
-                              countdownBg ? "text-white/80" : "text-muted-foreground"
-                            }`}
-                            aria-hidden
-                          >
-                            :
-                          </span>
-                        )}
-                        <div
-                          className="flex flex-col items-center min-w-[2.75rem]"
-                          data-testid={`countdown-${label}`}
-                        >
-                          <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
-                            {value}
-                          </span>
-                          <span
-                            className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
-                              countdownBg ? "text-white/90" : "text-muted-foreground"
-                            }`}
-                          >
-                            {label}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
+                ) : null}
+              </div>
+            ) : (
+              <div
+                className={`relative min-h-[7.5rem] max-h-48 lg:self-end overflow-hidden bg-muted ${
+                  hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
+                }`}
+                style={{
+                  border: "1.5px solid hsl(var(--primary) / 0.22)",
+                  borderBottom: hasFormCard ? "none" : undefined,
+                  boxShadow: hasFormCard
+                    ? undefined
+                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
+                }}
+                data-testid="workshop-countdown"
+              >
+                {stripBg && (
+                  <div className="absolute inset-0 z-0">
+                    <UniversalImage
+                      id={stripBg}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      fieldContext={{ fieldPath: "countdown.background_image" }}
+                    />
                   </div>
                 )}
+                <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
+                  {countdown && (
+                    <div
+                      className={`flex gap-2 sm:gap-3 font-inter tabular-nums items-center py-6 ${
+                        stripBg ? "text-white drop-shadow-sm" : "text-foreground"
+                      }`}
+                    >
+                      {countdownSlots.map(([label, value], i) => (
+                        <div key={label} className="flex items-center gap-2 sm:gap-3">
+                          {i > 0 && (
+                            <span
+                              className={`text-2xl font-bold leading-none -mt-4 ${
+                                stripBg ? "text-white/80" : "text-muted-foreground"
+                              }`}
+                              aria-hidden
+                            >
+                              :
+                            </span>
+                          )}
+                          <div
+                            className="flex flex-col items-center min-w-[2.75rem]"
+                            data-testid={`countdown-${label}`}
+                          >
+                            <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
+                              {value}
+                            </span>
+                            <span
+                              className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
+                                stripBg ? "text-white/90" : "text-muted-foreground"
+                              }`}
+                            >
+                              {label}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )
           ) : (
             <div className="hidden lg:block" aria-hidden />
           )}
@@ -523,19 +607,19 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                   {hostHeading}
                 </p>
               )}
-              {(hostName || hostBio || data.host_avatar_url || hostSocials.length > 0) && (
+              {(hostName || hostBio || hostAvatarUrl || hostSocials.length > 0) && (
                 <Card
                   className="w-full rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
                   data-testid="workshop-host"
                 >
                   <div className="flex gap-4 items-center p-5">
-                    {data.host_avatar_url ? (
+                    {hostAvatarUrl ? (
                       <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full overflow-hidden shrink-0 bg-muted">
                         <UniversalImage
-                          id={String(data.host_avatar_url)}
+                          id={hostAvatarUrl}
                           alt={hostName || "Host"}
                           className="w-full h-full object-cover"
-                          fieldContext={{ fieldPath: "host_avatar_url" }}
+                          fieldContext={{ fieldPath: "host.avatar_url" }}
                         />
                       </div>
                     ) : hostName ? (
@@ -629,7 +713,7 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                 </div>
               )}
               {form && (
-                <div className="px-5 pb-3" data-hero-inline-form>
+                <div className="px-5 py-3" data-hero-inline-form>
                   <Suspense
                     fallback={
                       <div className="min-h-24 flex items-center justify-center text-muted-foreground text-sm">

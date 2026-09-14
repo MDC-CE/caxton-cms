@@ -76,7 +76,8 @@ Form / blog `call_to_action.tags` is an optional CRM tag string (comma-separated
 ## Post-submit success
 
 - `success.message` — inline thank-you (stay on page)
-- `success.url` — **optional**; when set, **redirects** the user after a successful submit
+- `success.url` — **optional**; when set, navigates via internal nav after a successful submit (`#section_id` opens modals)
+- `webhook.fail_on_error: true` — wait for webhook upstream; on failure the form shows an error and does **not** run success (default omit = fire-and-forget)
 
 ## Blog `call_to_action`
 
