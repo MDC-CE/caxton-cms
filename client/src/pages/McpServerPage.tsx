@@ -34,10 +34,8 @@ import {
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { McpAgentSetupTabs, MCP_AGENT_SETUP_LABELS } from "@/components/mcp/McpAgentSetupTabs";
 import { McpSetupAgentIcon } from "@/components/mcp/McpSetupAgentIcon";
-import { McpCopyButton } from "@/components/mcp/McpSetupUi";
 import { McpSetupRoleMultiSelect } from "@/components/mcp/McpSetupRoleTabs";
 import {
-  getMcpServerUrl,
   isLocalOrigin,
   type McpSetupTabId,
 } from "@/components/mcp/mcpUrlHelpers";
@@ -352,105 +350,67 @@ function ConnectionPanel({
           and inspect its own permissions — all without leaving its chat interface.
         </p>
 
-        <div className="space-y-2">
-          <p className="text-sm font-medium text-foreground">
-            {roleChosen && setupRoleIds.length > 1 ? "Connection URLs" : "Server URL"}
-          </p>
-          {roleChosen && setupRoleIds.length > 0 ? (
-            <ul className="space-y-2" data-testid="list-mcp-server-urls">
-              {confirmedSetupRoles.map((role) => {
-                const url = getMcpServerUrl(role.id);
-                return (
-                  <li key={role.id} className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1">
-                      {setupRoleIds.length > 1 ? (
-                        <p className="text-xs font-medium text-muted-foreground mb-0.5">{role.label}</p>
-                      ) : null}
-                      <code
-                        className="block text-sm font-mono bg-muted px-3 py-2 rounded-md text-foreground overflow-x-auto whitespace-nowrap"
-                        data-testid={`text-mcp-server-url-${role.id}`}
-                      >
-                        {url}
-                      </code>
-                    </div>
-                    <McpCopyButton text={url} testId={`button-copy-mcp-url-${role.id}`} />
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="text-sm text-muted-foreground" data-testid="text-mcp-server-url-pending">
-              URLs appear after you pick at least one role.
-            </p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Auth is <span className="text-foreground font-medium">OAuth 2.0</span> — agents that
-            support MCP OAuth will open a browser consent flow (no token in your config). You
-            verify identity there via Breathecode login or by pasting a token once. Capabilities
-            stay scoped to your roles. A Breathecode{" "}
-            <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">Authorization</code>{" "}
-            / <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">X-Api-Key</code>{" "}
-            header is still accepted as a legacy fallback (e.g. curl).
-          </p>
+        {(siteUrlMissing || mcpSecretMissing) && (
+          <div className="space-y-2">
+            {siteUrlMissing && (
+              <Alert variant="destructive" data-testid="alert-mcp-site-url-missing">
+                <IconAlertCircle className="h-4 w-4" />
+                <AlertTitle>SITE_URL is not set</AlertTitle>
+                <AlertDescription className="space-y-2">
+                  <p>
+                    Set <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">SITE_URL</code>{" "}
+                    to this server&apos;s public origin (local:{" "}
+                    <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
+                      http://localhost:3000
+                    </code>
+                    ; production:{" "}
+                    <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
+                      https://your-deploy-host
+                    </code>
+                    ). MCP uses it for OAuth issuer / authorize / token / callback URLs. Without it,
+                    agents can hit SSL or redirect failures during login.
+                  </p>
+                  <p>
+                    This is <span className="font-medium">not</span> related to multisite. Content
+                    sites still come from domains in{" "}
+                    <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
+                      sites.yml
+                    </code>
+                    . <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">SITE_URL</code>{" "}
+                    is only the public URL of this running app for MCP authentication.
+                    {readiness?.replitDevDomain
+                      ? ` Replit can fall back to https://${readiness.replitDevDomain} in the workspace, but production deploys should set SITE_URL explicitly.`
+                      : ""}
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
 
-          {siteUrlMissing && (
-            <Alert variant="destructive" data-testid="alert-mcp-site-url-missing">
-              <IconAlertCircle className="h-4 w-4" />
-              <AlertTitle>SITE_URL is not set</AlertTitle>
-              <AlertDescription className="space-y-2">
-                <p>
-                  Set <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">SITE_URL</code>{" "}
-                  to this server&apos;s public origin (local:{" "}
+            {mcpSecretMissing && (
+              <Alert variant="destructive" data-testid="alert-mcp-secret-missing">
+                <IconAlertCircle className="h-4 w-4" />
+                <AlertTitle>MCP_SERVER_SECRET is not set</AlertTitle>
+                <AlertDescription>
+                  The MCP process exits at startup without{" "}
                   <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                    http://localhost:3000
-                  </code>
-                  ; production:{" "}
+                    MCP_SERVER_SECRET
+                  </code>{" "}
+                  (or legacy{" "}
                   <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                    https://your-deploy-host
+                    MCP_API_KEY
                   </code>
-                  ). MCP uses it for OAuth issuer / authorize / token / callback URLs. Without it,
-                  agents can hit SSL or redirect failures during login.
-                </p>
-                <p>
-                  This is <span className="font-medium">not</span> related to multisite. Content
-                  sites still come from domains in{" "}
+                  ). Set it in Secrets /{" "}
+                  <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">.env</code>{" "}
+                  so production{" "}
                   <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                    sites.yml
-                  </code>
-                  . <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">SITE_URL</code>{" "}
-                  is only the public URL of this running app for MCP authentication.
-                  {readiness?.replitDevDomain
-                    ? ` Replit can fall back to https://${readiness.replitDevDomain} in the workspace, but production deploys should set SITE_URL explicitly.`
-                    : ""}
-                </p>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {mcpSecretMissing && (
-            <Alert variant="destructive" data-testid="alert-mcp-secret-missing">
-              <IconAlertCircle className="h-4 w-4" />
-              <AlertTitle>MCP_SERVER_SECRET is not set</AlertTitle>
-              <AlertDescription>
-                The MCP process exits at startup without{" "}
-                <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                  MCP_SERVER_SECRET
-                </code>{" "}
-                (or legacy{" "}
-                <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                  MCP_API_KEY
-                </code>
-                ). Set it in Secrets /{" "}
-                <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">.env</code>{" "}
-                so production{" "}
-                <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">
-                  start-production.sh
-                </code>{" "}
-                can keep MCP running beside the website.
-              </AlertDescription>
-            </Alert>
-          )}
-        </div>
+                    start-production.sh
+                  </code>{" "}
+                  can keep MCP running beside the website.
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
 
         <div className="space-y-3" data-testid="mcp-setup-wizard">
           <p className="text-sm font-medium text-foreground">Which agent you want to connect?</p>
@@ -458,7 +418,7 @@ function ConnectionPanel({
           {setupPhase === "role" && (
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                Select the roles this agent should use. Each role gets its own connector URL.
+                Select the agent roles to connect. Each role gets its own connector URL in the next steps.
               </p>
               <McpSetupRoleMultiSelect
                 value={pendingRoleIds}
@@ -496,7 +456,7 @@ function ConnectionPanel({
               )}
               {pendingRoleIds.length === 0 && mySetupRoles.length > 0 && (
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Pick at least one role for write access. Each role filters tools to that connector.
+                  Pick at least one agent role. Each role filters tools to that connector.
                 </p>
               )}
               {localDev && pendingRoleIds.length > 0 && (
@@ -824,7 +784,7 @@ export default function McpServerPage() {
 
   const roles = data?.roles ?? [];
   const mySetupRoles = useMemo(
-    () => roles.filter((r) => myRoleIds.includes(r.id)),
+    () => roles.filter((r) => r.agentic && myRoleIds.includes(r.id)),
     [roles, myRoleIds],
   );
   const selectedRole = roles.find((r) => r.id === roleFilter);

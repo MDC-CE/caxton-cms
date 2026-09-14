@@ -93,7 +93,8 @@ export function McpSetupRoleMultiSelect({
   if (roles.length === 0) {
     return (
       <p className="text-sm text-muted-foreground" data-testid={`${listTestId}-empty`}>
-        No roles assigned to your account. Ask an administrator to assign at least one role.
+        No agent roles assigned to your account. Ask a user admin to grant swarm agent roles
+        (for example Copy Editor or Media Editor), then refresh this page.
       </p>
     );
   }
