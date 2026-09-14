@@ -153,11 +153,8 @@ export function McpRequiredForAiModal({
             </p>
             <McpSetupRoleTabs
               value={setupRoleId}
-              onValueChange={(id) => {
-                if (id) setSetupRoleId(id);
-              }}
+              onValueChange={setSetupRoleId}
               roles={agentSetupRoles}
-              includeAllOption={false}
               placeholder="Select an agent role"
               listTestId="tabs-mcp-required-setup-role"
             />
@@ -166,7 +163,8 @@ export function McpRequiredForAiModal({
             <McpAgentSetupTabs
               key={`${defaultTab}-${setupRoleId}`}
               onlyTab={defaultTab}
-              roleId={setupRoleId}
+              roleIds={[setupRoleId]}
+              roleLabels={{ [setupRoleId]: agentSetupRoles.find((r) => r.id === setupRoleId)?.label ?? setupRoleId }}
             />
           ) : null}
         </div>

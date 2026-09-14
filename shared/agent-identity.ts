@@ -24,7 +24,7 @@ export const AGENT_SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 
 /** Staff-facing path to pick a role connector. */
 export const ROLE_CONNECTOR_UI_HINT =
-  "Private → MCP Server → Connection → choose a role (e.g. Copy Editor) → Choose this Role. " +
+  "Private → MCP Server → Connection → choose one or more roles (e.g. Copy Editor) → Choose this Role / Choose these Roles. " +
   "Reconnect to a role URL such as /mcp/role/copy_editor (local example: http://localhost:3001/mcp/role/copy_editor). " +
   "Plain /mcp is read-only.";
 

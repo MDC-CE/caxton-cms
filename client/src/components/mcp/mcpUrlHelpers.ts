@@ -27,6 +27,23 @@ export function getPublicConnectorUrl(roleId?: string | null): string {
   return `${window.location.origin}${mcpPath(roleId)}`;
 }
 
+export type McpRoleConnector = {
+  roleId: string;
+  label: string;
+  url: string;
+};
+
+/** Build local MCP URLs for one or more role connectors. */
+export function getMcpRoleConnectors(
+  roles: { id: string; label: string }[],
+): McpRoleConnector[] {
+  return roles.map((r) => ({
+    roleId: r.id,
+    label: r.label,
+    url: getMcpServerUrl(r.id),
+  }));
+}
+
 export function buildHttpMcpConfig(mcpUrl: string, roleId?: string | null): string {
   const key = mcpServerConfigKey(roleId);
   return JSON.stringify(
@@ -40,6 +57,15 @@ export function buildHttpMcpConfig(mcpUrl: string, roleId?: string | null): stri
     null,
     2,
   );
+}
+
+/** Merge several role connectors into one mcpServers JSON blob. */
+export function buildHttpMcpConfigForRoles(connectors: McpRoleConnector[]): string {
+  const mcpServers: Record<string, { url: string }> = {};
+  for (const c of connectors) {
+    mcpServers[mcpServerConfigKey(c.roleId)] = { url: c.url };
+  }
+  return JSON.stringify({ mcpServers }, null, 2);
 }
 
 export function buildClaudeDesktopConfig(mcpUrl: string, roleId?: string | null): string {
@@ -58,9 +84,22 @@ export function buildClaudeDesktopConfig(mcpUrl: string, roleId?: string | null)
   );
 }
 
+export function buildClaudeDesktopConfigForRoles(connectors: McpRoleConnector[]): string {
+  const mcpServers: Record<string, { type: string; url: string }> = {};
+  for (const c of connectors) {
+    mcpServers[mcpServerConfigKey(c.roleId)] = { type: "http", url: c.url };
+  }
+  return JSON.stringify({ mcpServers }, null, 2);
+}
+
 export function buildClaudeCodeCli(mcpUrl: string, roleId?: string | null): string {
   const key = mcpServerConfigKey(roleId);
   return `claude mcp add --transport http ${key} ${mcpUrl}`;
+}
+
+/** One CLI add line per role connector. */
+export function buildClaudeCodeCliForRoles(connectors: McpRoleConnector[]): string {
+  return connectors.map((c) => buildClaudeCodeCli(c.url, c.roleId)).join("\n");
 }
 
 export type McpSetupTabId =
@@ -102,4 +141,29 @@ export function resolveCloudConnectorUrl(opts: {
   }
   if (!opts.localDev) return opts.publicUrl;
   return null;
+}
+
+/** Resolve public cloud URLs for each role (null entries when SITE_URL missing in local). */
+export function resolveCloudConnectorUrls(
+  opts: {
+    siteUrl?: string | null;
+    siteDomain?: string | null;
+    localDev: boolean;
+  },
+  roles: { id: string; label: string }[],
+): { roleId: string; label: string; url: string | null }[] {
+  return roles.map((r) => {
+    const path = mcpPath(r.id);
+    const publicUrl =
+      typeof window !== "undefined" ? `${window.location.origin}${path}` : path;
+    return {
+      roleId: r.id,
+      label: r.label,
+      url: resolveCloudConnectorUrl({
+        ...opts,
+        publicUrl,
+        roleId: r.id,
+      }),
+    };
+  });
 }

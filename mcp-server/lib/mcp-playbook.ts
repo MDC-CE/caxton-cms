@@ -34,7 +34,7 @@ For remote chat agents (Claude.ai, Grok, custom connectors). Conversation style 
 - Call \`agent_session\` \`start\` with exact \`model\` as \`provider/model\` (e.g. \`claude/sonnet-4.5\` or \`xai/grok-4\`). Family-only labels like \`claude\` fail. There is no \`MCP_AGENT_MODEL\` env.
 - Every mutating tool requires \`agent_session_id\` from that start (no unscoped writes). Sessions are per site; scope is username + role + OAuth client.
 - If an open session already exists for that scope: \`action_required: session_conflict\` — retry with \`resume:true\` (same model) or \`force_new:true\` + report (abandon). Idle 24h fully expires a session.
-- Staff path: Private → MCP Server → Connection → choose a role → reconnect.
+- Staff path: Private → MCP Server → Connection → choose one or more roles → reconnect.
 - Ownership / four-eyes = username + role (not model). Exact model is stored for staff observability.
 
 ## Session order

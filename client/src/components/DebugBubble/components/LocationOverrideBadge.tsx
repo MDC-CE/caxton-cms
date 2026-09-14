@@ -3,6 +3,7 @@ import { MapPin } from "lucide-react";
 import { LocationOverrideModal } from "./LocationOverrideModal";
 import { badgeVariants } from "@/components/ui/badge";
 import { useSession } from "@/contexts/SessionContext";
+import { useToast } from "@/hooks/use-toast";
 import { locations } from "@/lib/locations";
 import { cn } from "@/lib/utils";
 
@@ -13,9 +14,11 @@ const REGION_LABELS: Record<string, string> = {
 };
 
 export function LocationOverrideBadge() {
-  const { session } = useSession();
+  const { session, refreshGeo } = useSession();
+  const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [selectedLocationSlug, setSelectedLocationSlug] = useState("");
+  const [isResetting, setIsResetting] = useState(false);
 
   const currentLocationOverride =
     typeof window !== "undefined"
@@ -48,6 +51,31 @@ export function LocationOverrideBadge() {
     window.location.href = url.toString();
   };
 
+  const handleResetLocation = async () => {
+    setIsResetting(true);
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("location")) {
+        url.searchParams.delete("location");
+        window.history.replaceState({}, "", url.toString());
+      }
+      await refreshGeo();
+      toast({
+        title: "Location auto-detected",
+        description: "Campus was recalculated like an anonymous visitor. URL override removed if present.",
+      });
+      setOpen(false);
+    } catch {
+      toast({
+        title: "Could not auto-detect location",
+        description: "Re-detect failed. Try again or reload the page.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   return (
     <>
       <button
@@ -73,11 +101,14 @@ export function LocationOverrideBadge() {
       <LocationOverrideModal
         open={open}
         onOpenChange={setOpen}
+        currentLocation={session.location}
         selectedLocationSlug={selectedLocationSlug}
         setSelectedLocationSlug={setSelectedLocationSlug}
         currentLocationOverride={currentLocationOverride}
         handleLocationOverride={handleLocationOverride}
         handleClearLocationOverride={handleClearLocationOverride}
+        handleResetLocation={handleResetLocation}
+        isResetting={isResetting}
         locationsByRegion={locationsByRegion}
         regionLabels={REGION_LABELS}
       />

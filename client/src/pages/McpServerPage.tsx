@@ -35,7 +35,7 @@ import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-
 import { McpAgentSetupTabs, MCP_AGENT_SETUP_LABELS } from "@/components/mcp/McpAgentSetupTabs";
 import { McpSetupAgentIcon } from "@/components/mcp/McpSetupAgentIcon";
 import { McpCopyButton } from "@/components/mcp/McpSetupUi";
-import { McpSetupRoleTabs } from "@/components/mcp/McpSetupRoleTabs";
+import { McpSetupRoleMultiSelect } from "@/components/mcp/McpSetupRoleTabs";
 import {
   getMcpServerUrl,
   isLocalOrigin,
@@ -267,24 +267,34 @@ function ConnectionPanel({
 }) {
   const [setupPhase, setSetupPhase] = useState<SetupPhase>("role");
   const [roleChosen, setRoleChosen] = useState(false);
-  /** null = all roles once chosen; ignored until roleChosen */
-  const [setupRoleId, setSetupRoleId] = useState<string | null>(null);
-  /** Draft selection in the role dropdown before "Choose this Role". */
-  const [pendingRoleId, setPendingRoleId] = useState<string | null | undefined>(undefined);
+  /** Confirmed role ids for connector setup (one URL each). */
+  const [setupRoleIds, setSetupRoleIds] = useState<string[]>([]);
+  /** Draft multi-select before confirming roles. */
+  const [pendingRoleIds, setPendingRoleIds] = useState<string[]>([]);
   const [setupAgentId, setSetupAgentId] = useState<McpSetupTabId | null>(null);
   /** Draft selection in the agent dropdown before "Choose Agent". */
   const [pendingAgentId, setPendingAgentId] = useState<McpSetupTabId | null>(null);
 
   const localDev = isLocalOrigin(window.location.origin);
-  const mcpUrl = roleChosen ? getMcpServerUrl(setupRoleId) : getMcpServerUrl(null);
-  const selectedSetupRole =
-    roleChosen && setupRoleId
-      ? mySetupRoles.find((r) => r.id === setupRoleId) ?? null
-      : null;
-  const pendingSetupRole =
-    pendingRoleId != null
-      ? mySetupRoles.find((r) => r.id === pendingRoleId) ?? null
-      : null;
+  const selectedSetupRoles = useMemo(
+    () =>
+      (roleChosen ? setupRoleIds : pendingRoleIds)
+        .map((id) => mySetupRoles.find((r) => r.id === id))
+        .filter((r): r is McpRoleFilter => Boolean(r)),
+    [roleChosen, setupRoleIds, pendingRoleIds, mySetupRoles],
+  );
+  const confirmedSetupRoles = useMemo(
+    () =>
+      setupRoleIds
+        .map((id) => mySetupRoles.find((r) => r.id === id))
+        .filter((r): r is McpRoleFilter => Boolean(r)),
+    [setupRoleIds, mySetupRoles],
+  );
+  const roleLabels = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const r of mySetupRoles) map[r.id] = r.label;
+    return map;
+  }, [mySetupRoles]);
   const agentLabel =
     setupAgentId != null
       ? MCP_AGENT_SETUP_LABELS.find((a) => a.id === setupAgentId)?.label ?? setupAgentId
@@ -294,15 +304,15 @@ function ConnectionPanel({
       ? MCP_AGENT_SETUP_LABELS.find((a) => a.id === pendingAgentId)?.label ?? pendingAgentId
       : null;
   const roleSummaryLabel =
-    roleChosen && !setupRoleId
-      ? "All roles"
-      : selectedSetupRole
-        ? `Only ${selectedSetupRole.label}`
-        : null;
+    confirmedSetupRoles.length === 0
+      ? null
+      : confirmedSetupRoles.length === 1
+        ? confirmedSetupRoles[0].label
+        : `${confirmedSetupRoles.length} roles`;
 
   function handleConfirmRole() {
-    if (pendingRoleId === undefined) return;
-    setSetupRoleId(pendingRoleId);
+    if (pendingRoleIds.length === 0) return;
+    setSetupRoleIds(pendingRoleIds);
     setRoleChosen(true);
     setSetupAgentId(null);
     setPendingAgentId(null);
@@ -312,7 +322,7 @@ function ConnectionPanel({
   function handleChangeRole() {
     setSetupAgentId(null);
     setPendingAgentId(null);
-    setPendingRoleId(setupRoleId);
+    setPendingRoleIds(setupRoleIds);
     setSetupPhase("role");
   }
 
@@ -343,20 +353,34 @@ function ConnectionPanel({
         </p>
 
         <div className="space-y-2">
-          <p className="text-sm font-medium text-foreground">Server URL</p>
-          {roleChosen ? (
-            <div className="flex items-center gap-2">
-              <code
-                className="flex-1 text-sm font-mono bg-muted px-3 py-2 rounded-md text-foreground overflow-x-auto whitespace-nowrap"
-                data-testid="text-mcp-server-url"
-              >
-                {mcpUrl}
-              </code>
-              <McpCopyButton text={mcpUrl} testId="button-copy-mcp-url" />
-            </div>
+          <p className="text-sm font-medium text-foreground">
+            {roleChosen && setupRoleIds.length > 1 ? "Connection URLs" : "Server URL"}
+          </p>
+          {roleChosen && setupRoleIds.length > 0 ? (
+            <ul className="space-y-2" data-testid="list-mcp-server-urls">
+              {confirmedSetupRoles.map((role) => {
+                const url = getMcpServerUrl(role.id);
+                return (
+                  <li key={role.id} className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      {setupRoleIds.length > 1 ? (
+                        <p className="text-xs font-medium text-muted-foreground mb-0.5">{role.label}</p>
+                      ) : null}
+                      <code
+                        className="block text-sm font-mono bg-muted px-3 py-2 rounded-md text-foreground overflow-x-auto whitespace-nowrap"
+                        data-testid={`text-mcp-server-url-${role.id}`}
+                      >
+                        {url}
+                      </code>
+                    </div>
+                    <McpCopyButton text={url} testId={`button-copy-mcp-url-${role.id}`} />
+                  </li>
+                );
+              })}
+            </ul>
           ) : (
             <p className="text-sm text-muted-foreground" data-testid="text-mcp-server-url-pending">
-              URL appears after you pick a role.
+              URLs appear after you pick at least one role.
             </p>
           )}
           <p className="text-xs text-muted-foreground">
@@ -429,69 +453,53 @@ function ConnectionPanel({
         </div>
 
         <div className="space-y-3" data-testid="mcp-setup-wizard">
-          <p className="text-sm font-medium text-foreground">Setup by agent</p>
+          <p className="text-sm font-medium text-foreground">Which agent you want to connect?</p>
 
           {setupPhase === "role" && (
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                Choose how much this connector can do.
+                Select the roles this agent should use. Each role gets its own connector URL.
               </p>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <McpSetupRoleTabs
-                  value={pendingRoleId}
-                  onValueChange={setPendingRoleId}
-                  roles={mySetupRoles}
-                />
-                <Button
-                  type="button"
-                  disabled={pendingRoleId === undefined}
-                  onClick={handleConfirmRole}
-                  data-testid="button-choose-mcp-role"
-                  className="shrink-0"
-                >
-                  Choose this Role
-                </Button>
-              </div>
-              {pendingSetupRole && (
+              <McpSetupRoleMultiSelect
+                value={pendingRoleIds}
+                onValueChange={setPendingRoleIds}
+                roles={mySetupRoles}
+              />
+              <Button
+                type="button"
+                disabled={pendingRoleIds.length === 0}
+                onClick={handleConfirmRole}
+                data-testid="button-choose-mcp-role"
+                className="shrink-0"
+              >
+                {pendingRoleIds.length > 1 ? "Choose these Roles" : "Choose this Role"}
+              </Button>
+              {selectedSetupRoles.length === 1 && (
                 <p className="text-xs text-muted-foreground leading-relaxed" data-testid="text-setup-role-hint">
-                  <span className="text-foreground font-medium">{pendingSetupRole.label}</span>
+                  <span className="text-foreground font-medium">{selectedSetupRoles[0].label}</span>
                   {" — "}
-                  {pendingSetupRole.description?.trim()
-                    ? pendingSetupRole.description
+                  {selectedSetupRoles[0].description?.trim()
+                    ? selectedSetupRoles[0].description
                     : "No description set for this role."}
                   {" "}
-                  ({pendingSetupRole.allowedTools.length} tools
-                  {pendingSetupRole.allowedTools.length <= 3 ? " — limited connector" : ""}).
+                  ({selectedSetupRoles[0].allowedTools.length} tools
+                  {selectedSetupRoles[0].allowedTools.length <= 3 ? " — limited connector" : ""}).
                   Agents use this description to choose the connector. You must be assigned this role
                   (OAuth will refuse otherwise).
                 </p>
               )}
-              {pendingRoleId === null && (
-                <p className="text-xs text-muted-foreground leading-relaxed" data-testid="text-setup-role-hint-all">
-                  Plain{" "}
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">/mcp</code>{" "}
-                  is <span className="text-foreground font-medium">read-only</span> (list/explain).
-                  Agents that need to write must use a role connector (
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">/mcp/role/…</code>
-                  ), start an{" "}
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">agent_session</code>
-                  {" "}with an exact model (
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">provider/model</code>
-                  ), and pass{" "}
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">agent_session_id</code>
-                  {" "}on mutates. Pick <span className="text-foreground font-medium">Only …</span> for a focused
-                  Claude.ai / agent connector URL.
+              {selectedSetupRoles.length > 1 && (
+                <p className="text-xs text-muted-foreground leading-relaxed" data-testid="text-setup-role-hint-multi">
+                  {selectedSetupRoles.length} role connectors — your agent will need one connection per URL.
+                  OAuth will refuse any role you are not assigned.
                 </p>
               )}
-              {pendingRoleId === undefined && (
+              {pendingRoleIds.length === 0 && mySetupRoles.length > 0 && (
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Pick a role for write access, or{" "}
-                  <span className="text-foreground font-medium">All roles</span> for a read-only
-                  connector. Prefer <span className="text-foreground font-medium">Only …</span> for
-                  agents that edit content.
+                  Pick at least one role for write access. Each role filters tools to that connector.
                 </p>
               )}
-              {localDev && pendingRoleId !== undefined && (
+              {localDev && pendingRoleIds.length > 0 && (
                 <p className="text-xs text-muted-foreground">
                   Local note: role URLs filter tools by that role and allow mutates after{" "}
                   <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">agent_session</code>{" "}
@@ -499,9 +507,7 @@ function ConnectionPanel({
                   <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">provider/model</code>
                   {" "}(pass{" "}
                   <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">agent_session_id</code>
-                  {" "}on every write). Plain{" "}
-                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">/mcp</code> stays
-                  read-only.
+                  {" "}on every write).
                 </p>
               )}
             </div>
@@ -518,19 +524,30 @@ function ConnectionPanel({
                   valueTestId="text-setup-role-summary"
                 />
               </div>
-              {selectedSetupRole && (
+              {confirmedSetupRoles.length === 1 && (
                 <p className="text-xs text-muted-foreground leading-relaxed" data-testid="text-setup-role-hint">
-                  <span className="text-foreground font-medium">{selectedSetupRole.label}</span>
+                  <span className="text-foreground font-medium">{confirmedSetupRoles[0].label}</span>
                   {" — "}
-                  {selectedSetupRole.description?.trim()
-                    ? selectedSetupRole.description
+                  {confirmedSetupRoles[0].description?.trim()
+                    ? confirmedSetupRoles[0].description
                     : "No description set for this role."}
                   {" "}
-                  ({selectedSetupRole.allowedTools.length} tools
-                  {selectedSetupRole.allowedTools.length <= 3 ? " — limited connector" : ""}).
+                  ({confirmedSetupRoles[0].allowedTools.length} tools
+                  {confirmedSetupRoles[0].allowedTools.length <= 3 ? " — limited connector" : ""}).
                   Agents use this description to choose the connector. You must be assigned this role
                   (OAuth will refuse otherwise).
                 </p>
+              )}
+              {confirmedSetupRoles.length > 1 && (
+                <ul className="text-xs text-muted-foreground space-y-1" data-testid="text-setup-roles-list">
+                  {confirmedSetupRoles.map((r) => (
+                    <li key={r.id}>
+                      <span className="text-foreground font-medium">{r.label}</span>
+                      {" — "}
+                      {r.allowedTools.length} tools
+                    </li>
+                  ))}
+                </ul>
               )}
               <p className="text-sm text-muted-foreground">
                 Choose which AI app you&apos;re connecting.
@@ -605,7 +622,11 @@ function ConnectionPanel({
                   valueTestId="text-setup-agent-summary"
                 />
               </div>
-              <McpAgentSetupTabs onlyTab={setupAgentId} roleId={setupRoleId} />
+              <McpAgentSetupTabs
+                onlyTab={setupAgentId}
+                roleIds={setupRoleIds}
+                roleLabels={roleLabels}
+              />
             </div>
           )}
         </div>

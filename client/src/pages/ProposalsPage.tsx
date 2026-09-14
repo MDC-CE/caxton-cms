@@ -575,7 +575,7 @@ function IdeaKindBadge() {
               is always a different identity from MCP roles, so Accept stays available here.
             </p>
             <p>
-              Role connectors: Private → MCP Server → Connection → choose a role → Choose this Role.
+              Role connectors: Private → MCP Server → Connection → choose one or more roles → Choose this Role / Choose these Roles.
             </p>
           </div>
         ) : null}
