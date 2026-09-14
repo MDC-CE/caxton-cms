@@ -3,12 +3,13 @@ version: "1.0"
 component: FeaturesQuad
 file: client/src/components/FeaturesQuad.tsx
 description: >-
-  A 4-card feature grid with optional images or laptop mockup. Supports default (images on right)  and laptopEdge
-  (laptop image with content) variants. Use compact mode for icon+title only.
+  A feature section with optional cards (up to 4), images, or laptop mockup. Supports default (images on right) and
+  laptopEdge (laptop image with content) variants. Use compact mode for icon+title only. Cards may be omitted for
+  heading/media/CTA-only layouts.
 when_to_use: >
-  Use this component when you need to display exactly 4 feature cards in a visually appealing grid layout. The default
-  variant shows feature cards with optional header images. The laptopEdge variant displays a laptop mockup with the
-  feature cards.
+  Use this component when you need a features section with optional cards (up to 4) in a grid layout. The default
+  variant shows optional feature cards with optional header images. The laptopEdge variant displays a laptop mockup
+  with the content. Omit cards when you only need heading, media, and/or CTA.
 image_sizes:
   laptopEdge.laptop_image.image_id: 100vw
 props:
@@ -43,7 +44,7 @@ props:
     description: Array of images (up to 4) displayed in the header area
   cards:
     type: array
-    required: true
+    required: false
     items:
       icon:
         type: string
@@ -54,7 +55,7 @@ props:
       description:
         type: string
         required: true
-    description: Array of exactly 4 feature cards with icon, title, and description
+    description: Optional feature cards (up to 4). Omit or leave empty for heading/media/CTA only.
   footer_description:
     type: string
     required: false

@@ -9,8 +9,10 @@ import {
 const TEMPLATE_REGEX = /\{\{\s*([^|}]+?)\s*(?:\|\s*([\s\S]*?))?\s*\}\}/g;
 const META_PREFIX = "meta.";
 const PARAM_PREFIX = "param.";
+const VISITOR_PREFIX = "visitor.";
 const EXACT_META_VAR_PATTERN = /^\{\{\s*meta\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 const EXACT_PARAM_VAR_PATTERN = /^\{\{\s*param\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
+const EXACT_VISITOR_VAR_PATTERN = /^\{\{\s*visitor\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 
 export interface VariableCondition {
   query: Record<string, string>;
@@ -36,7 +38,7 @@ export interface ResolvedVariable {
   original: string;
   variableName: string;
   resolvedValue: string;
-  source: "condition" | "location" | "region" | "locale" | "default" | "inline" | "single" | "meta" | "param";
+  source: "condition" | "location" | "region" | "locale" | "default" | "inline" | "single" | "meta" | "param" | "visitor";
   defaultValue: string;
 }
 
@@ -47,6 +49,8 @@ export interface ResolveOptions {
   meta?: Record<string, unknown>;
   /** Unified URL path + querystring params for {{ param.* }} */
   param?: Record<string, unknown>;
+  /** Logged-in consumer profile (AuthUserProfile-shaped) for {{ visitor.* }} */
+  visitor?: Record<string, unknown>;
 }
 
 function getNestedValue(obj: Record<string, unknown>, dotPath: string): unknown {
@@ -128,6 +132,17 @@ function resolveParamVariable(
   return null;
 }
 
+function resolveVisitorVariable(
+  fieldPath: string,
+  visitor: Record<string, unknown>,
+): { value: unknown; source: "visitor" } | null {
+  const value = getNestedValue(visitor, fieldPath);
+  if (value !== undefined && value !== null) {
+    return { value, source: "visitor" };
+  }
+  return null;
+}
+
 function bagValueToDisplay(value: unknown): string {
   return String(typeof value === "object" ? JSON.stringify(value) : value);
 }
@@ -145,6 +160,7 @@ export function resolveTemplateString(
   const singleEntry = options?.singleEntry;
   const meta = options?.meta;
   const param = options?.param;
+  const visitor = options?.visitor;
 
   const resolved = text.replace(regex, (match, expression: string, inlineDefault: string) => {
     const name = expression.trim();
@@ -249,6 +265,39 @@ export function resolveTemplateString(
       return paramValue;
     }
 
+    if (name.startsWith(VISITOR_PREFIX)) {
+      if (!visitor) {
+        return match;
+      }
+      const fieldPath = name.slice(VISITOR_PREFIX.length);
+      const visitorResult = resolveVisitorVariable(fieldPath, visitor);
+
+      if (preserveTemplate) {
+        if (!visitorResult && !defVal) {
+          return match;
+        }
+        const displayValue = visitorResult ? bagValueToDisplay(visitorResult.value) : defVal;
+        variables.push({
+          original: match,
+          variableName: name,
+          resolvedValue: displayValue,
+          source: visitorResult ? "visitor" : "inline",
+          defaultValue: defVal,
+        });
+        return `{{ ${name} | ${displayValue} }}`;
+      }
+
+      const visitorValue = visitorResult ? bagValueToDisplay(visitorResult.value) : defVal || name;
+      variables.push({
+        original: match,
+        variableName: name,
+        resolvedValue: visitorValue,
+        source: visitorResult ? "visitor" : "inline",
+        defaultValue: defVal,
+      });
+      return visitorValue;
+    }
+
     const result = resolveVariable(name, definitions, context);
     const value = result?.value || defVal || name;
     const source = result?.source || "inline";
@@ -283,6 +332,7 @@ export function resolveDeep(
   const singleEntry = options?.singleEntry;
   const meta = options?.meta;
   const param = options?.param;
+  const visitor = options?.visitor;
 
   function walk(value: unknown): unknown {
     if (typeof value === "string") {
@@ -361,6 +411,33 @@ export function resolveDeep(
               variableName: `param.${fieldPath}`,
               resolvedValue: displayValue,
               source: resolved !== undefined && resolved !== null ? "param" : "inline",
+              defaultValue: fallback || "",
+            });
+
+            return resolvedValue;
+          }
+        }
+
+        if (visitor) {
+          const exactVisitor = value.match(EXACT_VISITOR_VAR_PATTERN);
+          if (exactVisitor) {
+            const fieldPath = exactVisitor[1];
+            const hasFallback = exactVisitor[2] !== undefined;
+            const fallback = exactVisitor[2]?.trim();
+            const resolved = getNestedValue(visitor, fieldPath);
+            const resolvedValue =
+              resolved !== undefined && resolved !== null
+                ? resolved
+                : hasFallback
+                  ? parsePipeFallback(fallback ?? "")
+                  : value;
+            const displayValue = typeof resolvedValue === "object" ? JSON.stringify(resolvedValue) : String(resolvedValue);
+
+            allVariables.push({
+              original: value,
+              variableName: `visitor.${fieldPath}`,
+              resolvedValue: displayValue,
+              source: resolved !== undefined && resolved !== null ? "visitor" : "inline",
               defaultValue: fallback || "",
             });
 

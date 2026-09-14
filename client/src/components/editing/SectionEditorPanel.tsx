@@ -7964,7 +7964,7 @@ export function SectionEditorPanel({
                           updatePropertiesWithValues({
                             conversion_name: undefined,
                             fields: undefined,
-                            routes: undefined,
+                            form_overrides: undefined,
                             webhook: undefined,
                             success: undefined,
                             consent: undefined,
@@ -7990,23 +7990,23 @@ export function SectionEditorPanel({
                         | undefined);
                 if (!formNode || typeof formNode !== "object") return null;
                 const rootVal = formNode.conversion_name;
-                const routes = formNode.routes;
-                let routeHasName = false;
-                if (Array.isArray(routes)) {
-                  for (const r of routes) {
+                const overrides = formNode.form_overrides;
+                let overrideHasName = false;
+                if (Array.isArray(overrides)) {
+                  for (const r of overrides) {
                     if (
                       r &&
                       typeof r === "object" &&
                       typeof (r as Record<string, unknown>).conversion_name === "string" &&
                       String((r as Record<string, unknown>).conversion_name).trim()
                     ) {
-                      routeHasName = true;
+                      overrideHasName = true;
                       break;
                     }
                   }
                 }
                 const missing =
-                  !("conversion_name" in formNode) && !routeHasName;
+                  !("conversion_name" in formNode) && !overrideHasName;
                 if (!missing) return null;
                 return (
                   <div
@@ -8689,6 +8689,11 @@ export function SectionEditorPanel({
                 const rawSectionWebhookUrl = String(
                   getValueAtFieldPath(parsedSection, formProp("webhook.url")) ?? ""
                 );
+                const sectionUseVisitorToken =
+                  getValueAtFieldPath(
+                    parsedSection,
+                    formProp("webhook.use_visitor_token"),
+                  ) === true;
                 const storedConversionName = String(
                   getValueAtFieldPath(parsedSection, formProp("conversion_name")) ?? ""
                 );
@@ -8699,7 +8704,8 @@ export function SectionEditorPanel({
                       )?.webhook?.url ?? "")
                     : "";
                 const globalWebhookUrl = trackingSettings?.webhook?.url ?? "";
-                const webhookSource: WebhookSource = rawSectionWebhookUrl
+                const webhookSource: WebhookSource =
+                  rawSectionWebhookUrl || sectionUseVisitorToken
                   ? "section"
                   : eventWebhookUrl
                   ? "event"
@@ -8708,12 +8714,12 @@ export function SectionEditorPanel({
                   : "none";
                 const webhookHint =
                   webhookSource === "section"
-                    ? "This section overrides the event default and global webhook. Clear the URL to fall back to the next level."
+                    ? "This section overrides the event default and global webhook. Clear the URL to fall back to the next level. Use visitor login token for event check-in and to add ?token= on success redirects."
                     : webhookSource === "event"
                     ? "No section URL set — currently falling back to the event default. Enter a URL here to override it for this section only."
                     : webhookSource === "global"
                     ? "No section URL set — currently falling back to the global webhook. Enter a URL here to override it for this section only."
-                    : "No webhook configured at any level. Enter a URL to receive form submissions via webhook.";
+                    : "No webhook configured at any level. Enter a URL and/or enable visitor login token.";
                 const sectionSource = resolvedParsedSection ?? parsedSection ?? {};
                 const webhookSamplePayload = buildWebhookSamplePayload(
                   sectionSource,
@@ -8736,20 +8742,33 @@ export function SectionEditorPanel({
                         formProp("webhook.auth_header")
                       ) ?? ""
                     )}
+                    useVisitorToken={sectionUseVisitorToken}
                     editing={webhookEditing}
                     onEditingChange={setWebhookEditing}
                     onChange={(field, value) => {
                       if (field === "url") {
-                        if (!value) {
-                          // Clear the entire webhook block to avoid orphaned keys (method, auth_header)
+                        if (!value && !sectionUseVisitorToken) {
                           updatePropertyWithValue(formProp("webhook"), undefined);
+                        } else if (!value) {
+                          updatePropertyWithValue(formProp("webhook.url"), undefined);
                         } else {
-                          updateProperty(formProp("webhook.url"), value);
+                          updateProperty(formProp("webhook.url"), value as string);
                         }
                       } else if (field === "method") {
-                        updateProperty(formProp("webhook.method"), value);
+                        updateProperty(formProp("webhook.method"), value as string);
                       } else if (field === "authHeader") {
-                        updateProperty(formProp("webhook.auth_header"), value);
+                        updateProperty(formProp("webhook.auth_header"), value as string);
+                      } else if (field === "useVisitorToken") {
+                        if (value === true) {
+                          updateProperty(formProp("webhook.use_visitor_token"), true);
+                        } else if (!rawSectionWebhookUrl) {
+                          updatePropertyWithValue(formProp("webhook"), undefined);
+                        } else {
+                          updatePropertyWithValue(
+                            formProp("webhook.use_visitor_token"),
+                            undefined,
+                          );
+                        }
                       }
                     }}
                     hint={webhookHint}

@@ -19,6 +19,8 @@ export interface LeadFormCopyBlock {
   subtitle?: string | null;
   submit_label?: string;
   back_label?: string;
+  /** When true, primary submit control is disabled (e.g. already registered, event not live). */
+  submit_disabled?: boolean;
 }
 
 export interface LeadFormMessages {
@@ -41,6 +43,7 @@ export interface ResolvedLeadFormCopy {
   subtitle: string | undefined;
   submit_label: string;
   back_label?: string;
+  submit_disabled?: boolean;
 }
 
 export function resolveLeadFormPhase(opts: {
@@ -128,6 +131,7 @@ export function resolveLeadFormCopy(
           ? undefined
           : block?.subtitle ?? data.subtitle,
       submit_label: block?.submit_label || data.submit_label || defaults.submit_label,
+      submit_disabled: block?.submit_disabled === true,
     };
   }
 
@@ -141,6 +145,7 @@ export function resolveLeadFormCopy(
           : block?.subtitle ?? defaults.subtitle,
       submit_label: block?.submit_label || defaults.submit_label,
       back_label: block?.back_label || defaults.back_label,
+      submit_disabled: block?.submit_disabled === true,
     };
   }
 
@@ -158,5 +163,6 @@ export function resolveLeadFormCopy(
       messages.guest?.submit_label ||
       data.submit_label ||
       defaults.submit_label,
+    submit_disabled: block?.submit_disabled === true,
   };
 }

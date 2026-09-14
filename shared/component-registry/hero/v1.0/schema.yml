@@ -3367,6 +3367,11 @@ variant_props:
     seats_copy:
       type: string
       required: false
+    seats_load_more_label:
+      type: string
+      required: false
+      description: Label for expanding the registrant avatar grid (e.g. Load more / Ver más)
+      example: Load more
     registered_suffix:
       type: string
       required: false

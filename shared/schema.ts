@@ -1067,7 +1067,7 @@ export const featureQuadSectionSchema = z.object({
   description: z.string().optional(),
   cta: featureQuadCtaSchema.optional(),
   images: z.array(featureQuadImageSchema).optional(),
-  cards: z.array(featureQuadCardSchema),
+  cards: z.array(featureQuadCardSchema).max(4).optional(),
   footer_description: z.string().optional(),
   background: z.string().optional(),
   text_align: z.enum(["left", "center"]).optional(),

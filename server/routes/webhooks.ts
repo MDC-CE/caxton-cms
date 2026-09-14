@@ -39,7 +39,8 @@ const conversionWebhookBodySchema = z.object({
   payload: z.record(z.unknown()),
 });
 
-export { isPrivateDestination } from "../../shared/ssrf";
+import { isPrivateDestination } from "../../shared/ssrf";
+export { isPrivateDestination };
 
 export function registerWebhooksRoutes(app: Express): void {
   /**
@@ -115,13 +116,13 @@ export function registerWebhooksRoutes(app: Express): void {
   /**
    * POST /api/leads/webhook-delivery
    * Primary lead submission path when any webhook level is configured.
-   * Body: { payload, webhook?: { url, method } }
+   * Body: { payload, webhook?: { url, method, use_visitor_token? }, visitor_token? }
    *   - When `webhook` is omitted → reads URL/method/auth_header from global
    *     settings server-side (credentials never leave the server).
-   *   - When `webhook.url` is supplied → uses that URL/method as-is; intended
-   *     for per-form and per-event webhooks which have no auth credentials.
+   *   - When `webhook.url` is supplied → uses that URL/method; if
+   *     `use_visitor_token` is true, Authorization is `Token <visitor_token>`.
    * Always returns 200 — delivery failures are non-blocking so the form shows
-   * success regardless of upstream response.
+   * success regardless of upstream response (except 400 when visitor token required but missing).
    */
   app.post("/api/leads/webhook-delivery", async (req, res) => {
     const body = req.body;
@@ -139,7 +140,11 @@ export function registerWebhooksRoutes(app: Express): void {
     const payload = buildLeadPayload(incoming as Record<string, unknown>);
 
     // Resolve webhook config: use supplied override or fall back to global settings
-    const override = body.webhook as { url?: string; method?: string } | undefined;
+    const override = body.webhook as {
+      url?: string;
+      method?: string;
+      use_visitor_token?: boolean;
+    } | undefined;
     let url: string;
     let method: string;
     let auth_header: string | undefined;
@@ -147,7 +152,17 @@ export function registerWebhooksRoutes(app: Express): void {
     if (override?.url) {
       url = override.url;
       method = override.method || "POST";
-      // Per-form / per-event webhooks have no auth credentials
+      if (override.use_visitor_token === true) {
+        const visitorToken =
+          typeof body.visitor_token === "string" ? body.visitor_token.trim() : "";
+        if (!visitorToken) {
+          res.status(400).json({
+            error: "visitor_token is required when webhook.use_visitor_token is true",
+          });
+          return;
+        }
+        auth_header = `Token ${visitorToken}`;
+      }
     } else {
       const globalWebhook = getTrackingSettings().webhook;
       const envUrl = process.env.DEFAULT_WEBHOOK_URL;

@@ -28,10 +28,11 @@ import { ChevronDown } from "lucide-react";
 /** Solid soft blue behind the title + countdown row (full-bleed). */
 const TOP_ROW_BG = "hsl(var(--primary) / 0.09)";
 
-/** Learn-like seats: ~5 per row, load-more then scroll. */
-const SEATS_INITIAL = 15;
+/** Learn-like seats: fixed (grid + load-more) height; after expand, button gone and grid fills that space. */
+const SEATS_VISIBLE_THRESHOLD = 16; // beyond this → clamp the grid+button region
 const SEATS_COLS = 4;
-const SEATS_GRID_MAX_H = "10rem"; // ~2–3 rows when expanded
+/** Shared height for avatar grid + optional load-more row (box does not grow/shrink on expand). */
+const SEATS_LIST_REGION_H = "12.1rem";
 const SEATS_PLACEHOLDER_MIN_H = "5.5rem";
 const AVATAR_SIZE = "2.5rem";
 
@@ -204,6 +205,8 @@ export interface HeroWorkshopData {
   fallback_avatars?: string[] | string;
   /** Single Learn-like line above avatars (template can use {{ entry.* }}). */
   seats_copy?: string;
+  /** Label for expanding the registrant avatar grid (YAML). */
+  seats_load_more_label?: string;
   /** Decorative media (e.g. GIF) behind the countdown strip above the form. */
   countdown_background_image?: string;
   form_card_title?: string;
@@ -254,6 +257,7 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
     .filter((it) => !!it.url);
   const liveNowLabel = coerceToText(data.live_now_label);
   const seatsCopy = coerceToText(data.seats_copy);
+  const loadMoreLabel = coerceToText(data.seats_load_more_label);
   const countdownBg = coerceToText(data.countdown_background_image);
 
   const startMs = parseIso(data.starting_at);
@@ -271,11 +275,9 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
   const hasSeatsInfo =
     !!seatsCopy || registered != null || remaining != null || registrants.length > 0;
   const [showAllSeats, setShowAllSeats] = useState(false);
-  const visibleRegistrants = showAllSeats
-    ? registrants
-    : registrants.slice(0, SEATS_INITIAL);
-  const canLoadMoreSeats = registrants.length > SEATS_INITIAL && !showAllSeats;
-  const loadMoreLabel = pageLocale().startsWith("es") ? "Ver más" : "Load more";
+  const seatsOverflow =
+    registrants.length > SEATS_VISIBLE_THRESHOLD && !!loadMoreLabel;
+  const canLoadMoreSeats = seatsOverflow && !showAllSeats;
 
   const calendarHeading = coerceToText(data.calendar_cta?.heading);
   const calendarCtaLabel = coerceToText(data.calendar_cta?.text);
@@ -338,6 +340,20 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
 
   return (
     <section className="relative" data-testid="section-hero-workshop">
+      {/*
+        Force lg two-column tracks via CSS (same as Tailwind
+        lg:grid-cols-[minmax(0,1fr)_minmax(0,23rem)] + lg:gap-x-16).
+        Arbitrary grid-cols utilities have failed to apply in the browser
+        even when the viewport is ≥1024px — same pattern as SplitCardsDefault.
+      */}
+      <style>{`
+        @media (min-width: 1024px) {
+          [data-workshop-cols] {
+            grid-template-columns: minmax(0, 1fr) minmax(0, 23rem) !important;
+            column-gap: 4rem !important;
+          }
+        }
+      `}</style>
       {/* Row 1: title block + countdown — solid blue band (full-bleed) */}
       <div className="relative">
         {/* <div
@@ -346,7 +362,10 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
           style={{ background: TOP_ROW_BG }}
           data-testid="workshop-top-row-bg"
         /> */}
-        <div className="relative z-10 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,23rem)] lg:gap-x-16 gap-y-8">
+        <div
+          className="relative z-10 grid grid-cols-1 gap-y-8"
+          data-workshop-cols
+        >
           <div className="space-y-4">
             {badge && (
               <span
@@ -479,10 +498,13 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
       </div>
 
       {/* Row 2: description/host | form + seats — same column tracks as row 1 */}
-      <div className="ps-3 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,23rem)] lg:items-start lg:gap-x-16 gap-y-8 lg:pt-0">
-        <div className="min-w-0 space-y-4 lg:pt-10">
+      <div
+        className="ps-3 grid grid-cols-1 lg:items-start gap-y-8 lg:pt-0"
+        data-workshop-cols
+      >
+        <div className="min-w-0 space-y-4 pt-8 lg:pt-8">
           {paragraphs.length > 0 && (
-            <div className="space-y-3 text-[15px] leading-relaxed text-muted-foreground" data-testid="text-workshop-description">
+            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70" data-testid="text-workshop-description">
               {paragraphs.map((p, i) => (
                 <p key={i} className="whitespace-pre-line">
                   {p}
@@ -593,7 +615,7 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
             data-testid="workshop-form-card"
           >
               {hasFormCard && (data.form_card_title || data.form_card_subtitle) && (
-                <div className="pb-1 px-5 pt-5">
+                <div className="pb-1 px-5 pt-5 text-center">
                   {data.form_card_title && (
                     <p className="font-inter text-[19px] font-semibold tracking-tight text-foreground">
                       {data.form_card_title}
@@ -638,35 +660,46 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                     <>
                       {seatsCopy ? (
                         <p
-                          className="text-xs mb-3 fon text-foreground text-center leading-snug"
+                          className="text-xs mb-3 font-medium text-foreground text-center leading-snug"
                           data-testid="text-workshop-seats-copy"
                         >
                           {seatsCopy}
                         </p>
                       ) : null}
                       {registrants.length > 0 ? (
-                        <>
+                        <div
+                          className={
+                            seatsOverflow
+                              ? "flex min-h-0 flex-col"
+                              : undefined
+                          }
+                          style={
+                            seatsOverflow
+                              ? { height: SEATS_LIST_REGION_H }
+                              : undefined
+                          }
+                          data-testid="workshop-seats-viewport"
+                        >
                           <div
                             className={
-                              showAllSeats
-                                ? "overflow-y-auto overscroll-contain pr-0.5"
-                                : undefined
-                            }
-                            style={
-                              showAllSeats
-                                ? { maxHeight: SEATS_GRID_MAX_H }
+                              seatsOverflow
+                                ? `min-h-0 flex-1 ${
+                                    showAllSeats
+                                      ? "overflow-y-auto overscroll-contain pr-0.5"
+                                      : "overflow-hidden"
+                                  }`
                                 : undefined
                             }
                           >
                             <TooltipProvider delayDuration={200}>
                               <div
-                                className="grid gap-2 justify-items-center"
+                                className="grid gap-x-2 gap-y-4 justify-items-center"
                                 style={{
                                   gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
                                 }}
                                 data-testid="workshop-seats-grid"
                               >
-                                {visibleRegistrants.map((person, i) => {
+                                {registrants.map((person, i) => {
                                   const label = person.name || `Participant ${i + 1}`;
                                   const resolvedAvatar =
                                     person.avatar_url ||
@@ -733,14 +766,14 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                           {canLoadMoreSeats && (
                             <button
                               type="button"
-                              className="self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
+                              className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
                               onClick={() => setShowAllSeats(true)}
                               data-testid="button-workshop-seats-load-more"
                             >
                               {loadMoreLabel}
                             </button>
                           )}
-                        </>
+                        </div>
                       ) : (
                         <div
                           className="rounded-md bg-background/50"
@@ -748,6 +781,7 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                           aria-hidden
                         />
                       )}
+
                     </>
                   ) : (
                     <div

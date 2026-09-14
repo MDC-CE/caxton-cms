@@ -123,12 +123,43 @@ Live submit builds the body from the map only (no legacy payload merge). `conver
 
 No magic aliases: `payload.course` ← `form.program` only if that mapping row exists.
 
+## Continuous `form_overrides` + `{{ visitor.* }}`
+
+First matching override overlays the form root for **UI and submit** (not submit-only). Plain objects (`messages`, `success`, `webhook`) deep-merge.
+
+```yaml
+form_overrides:
+  - conditions:
+      - entry_field_slug: registered_attendee_ids
+        match_method: contains   # equals (default) | contains
+        value: "{{ visitor.id }}"
+      - entry_field_slug: event_started
+        value: "true"
+    messages:
+      ready:
+        subtitle: You have already signed up…
+        submit_label: Join
+        submit_disabled: true   # optional — disables submit in this phase
+    webhook:
+      use_visitor_token: true
+    success:
+      url: https://…/join
+```
+
+- **`form_field_slug`:** compare against a submitted form field (e.g. `program`).
+- **`entry_field_slug`:** bare entry field path looked up on `singleEntry` at match time (e.g. `event_started`). Do **not** use `{{ entry.* }}` here — section `resolveDeep` would replace the template before LeadForm runs. Listing `item_property_slug` is unrelated.
+- **`match_method: contains`:** substring on strings; membership on arrays of scalars/ids. Not deep object search.
+- **Condition `value`:** `resolveDeep` — literals or `{{ visitor.* }}` (logged-in auth profile). Logged out → unresolved → contains fails → normal form.
+- **Order matters:** put already-registered overrides before generic live/upcoming.
+- **Resolver:** `shared/resolveLeadFormOverride.ts`. Example: `stacked_with_routes.yml`. Detail: `explain_site` sections → Lead form form_overrides.
+
 ## Paths
 
 - Parse: `shared/parseFormFieldSource.ts`
 - Catalog API: `server/query-options.ts`
 - Index: `server/ecommerce/ecommerce-index.ts`
 - Runtime: `client/src/components/lead_form/variants/LeadFormDefault.tsx`
+- Form overrides: `shared/resolveLeadFormOverride.ts` / `client/src/lib/variable-manager.ts` (`visitor` bag)
 - Signup field map: `shared/authSignupFieldMap.ts`
 - Auth conversion events: `shared/authConversionEvents.ts`
 - Staff UI: `client/src/components/editing/FormFieldsCard.tsx` / `RequireSignupCard.tsx` / `client/src/components/settings/AuthTab.tsx` / Conversions page

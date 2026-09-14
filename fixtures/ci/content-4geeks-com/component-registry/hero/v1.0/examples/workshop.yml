@@ -40,6 +40,7 @@ yaml: |
     registered_count: 101
     seats_remaining: 49
     seats_copy: 101 people are already registered in this event. 49 more spots available
+    seats_load_more_label: Load more
     countdown_background_image: /static/videos/bubbles_2.gif
     registrant_avatars:
       - woman-profile-headshot-1-608aff01

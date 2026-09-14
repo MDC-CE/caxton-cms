@@ -134,20 +134,23 @@ Always reference images by `image_id` (registry ID), never by raw path. The `Uni
 
 Sections may contain template variables like `{{ entry.title }}` (legacy `{{ single.title }}` still resolves on delivery; saves require `entry.*`). Always load section YAML through the safe loader (`safeYamlLoad` / `safeLoad`) — never raw `yaml.load()`. The `entry` namespace is the current entry’s field bag — not the shared shell filename `template.{locale}.yml`.
 
-## Lead form submit routes
+## Lead form form_overrides (continuous)
 
-Lead forms (`lead_form` / embedded `form:` on hero, cta_banner, etc.) may include a top-level `routes` array on the form settings.
+Lead forms (`lead_form` / embedded `form:` on hero, cta_banner, etc.) may include a top-level `form_overrides` array on the form settings.
 
-- **Trigger:** presence of `routes` (no `advanced` flag).
-- **Match:** first route whose `conditions` all match (AND). Each condition is `field_property_slug` (form field name, e.g. `program`) + `value` (must equal the submitted value, e.g. program `bc_slug`).
-- **Outcome:** may override `conversion_name`, `success` (`url` / `message`), `tags`, `automations`, `webhook`.
+- **Trigger:** presence of `form_overrides` (no `advanced` flag).
+- **Match:** first override whose `conditions` all match (AND). Each condition uses **either** `form_field_slug` (submitted form field) **or** `entry_field_slug` (bare entry path on `singleEntry`, e.g. `event_started`) + `value`.
+- **`match_method`:** `equals` (default, string equality) or `contains` (substring on strings; **membership** on arrays of scalars/ids — not deep search in objects).
+- **Condition `value`:** resolved with `resolveDeep` so `{{ visitor.id }}` can keep numbers. `entry_field_slug` is looked up on entry at match time (not a template — avoids section resolveDeep eating arrays).
+- **Outcome:** may overlay `conversion_name`, `success`, `tags`, `automations`, `webhook`, `messages` (and other plain keys). Plain objects are **deep-merged** onto the form root (partial `messages.ready` keeps other phases). `messages.ready.submit_disabled: true` disables the submit button.
+- **When applied:** continuously for **UI copy and submit** (not submit-only).
 - **Fallback:** if nothing matches, root form props apply.
-- **Precedence:** route match > form root > conversion event defaults (`resolveFormDefaults`).
-- **Root `conversion_name`:** optional. Routes may set it per match; if neither root nor a matching route provides one, tracking is skipped (runtime console warning). Validators only reject *invalid* names when a name is set (root or route), not missing root.
-- **Non-effects:** does not change field visibility or consents; does not add arbitrary payload keys beyond those overrides.
-- **Side effects:** changes conversion tracking, webhook event resolution, and success redirect/message for that submit only.
-- **Resolver:** `shared/resolveLeadFormRoute.ts`. Example corpus path: `site_4geeks-com/component-registry/lead_form/v1.0/examples/stacked_with_routes.yml` (confirm on the target site).
-- **Next actions for agents:** add `routes` with `conditions`, ensure `value` matches submitted field values (`source.value_path`, typically program `bc_slug`). See topic `lead-forms`.
+- **Precedence:** override match > form root > conversion event defaults (`resolveFormDefaults`).
+- **Root `conversion_name`:** optional. Overrides may set it per match; if neither root nor a matching override provides one, tracking is skipped (runtime console warning). Validators only reject *invalid* names when a name is set (root or override), not missing root.
+- **Non-effects:** does not change field visibility or consents; does not add arbitrary payload keys beyond those overlays; does not invent visitor fields beyond the auth profile.
+- **Side effects:** changes visible phase copy, conversion tracking, webhook delivery, and success redirect/message for the matched state.
+- **Resolver:** `shared/resolveLeadFormOverride.ts`. Example corpus path: `site_4geeks-com/component-registry/lead_form/v1.0/examples/stacked_with_routes.yml` (confirm on the target site). Workshop RSVP: `entry_field_slug: registered_attendee_ids` + `match_method: contains` + `value: "{{ visitor.id }}"`.
+- **Next actions for agents:** add `form_overrides` with `conditions`; put already-registered overrides **before** generic live/upcoming; ensure `value` matches submitted field values or resolved templates. See topic `lead-forms`.
 
 ### Lead form Fields card (Conversion tab)
 
@@ -155,6 +158,6 @@ Staff UI lists keys already under form `fields` in YAML and edits `visible`, `re
 
 **How it works:** Leave `component_renderer` unset to use LeadForm runtime defaults (`email`/`first_name`/… → `text`, `phone` → `phone`, `client_comments` → `textarea`, `program`/`plan`/`location`/`region` → `select`). Enum: `text` | `phone` | `textarea` | `select` | `cards` | `simple-list` | `grouped-list`. Rich layouts open a modal using the same menu dropdown components (`client/src/components/menus/Dropdown.tsx` with `onSelect`). Optional YAML `fields.*.options[]` (require `value`) merge over form-options/source pools for marketing label/description — programs have no content `description`. (`columns` is navbar-only — not a form renderer.)
 
-**Non-effects:** does not add arbitrary field names to the runtime form; does not edit consents or routes; does not provide a UI editor for `options[]`. `options[]` does not filter the catalog. Which programs appear is `fields.*.source` + `query` — see `explain_site` topic `lead-forms`. `mergeLeadFormOptions` only overlays YAML labels.
+**Non-effects:** does not add arbitrary field names to the runtime form; does not edit consents or form_overrides; does not provide a UI editor for `options[]`. `options[]` does not filter the catalog. Which programs appear is `fields.*.source` + `query` — see `explain_site` topic `lead-forms`. `mergeLeadFormOptions` only overlays YAML labels.
 
 **Agents:** field widgets live in `LeadFormFieldControl.tsx`. Catalog vs relation playbook: topic `lead-forms`. Example corpus paths (confirm on the target site): `site_4geeks-com/component-registry/lead_form/v1.0/examples/stacked_with_routes.yml`. Schema: `leadFormFieldConfigSchema` in that site's `component-registry/_common/schema.ts`.

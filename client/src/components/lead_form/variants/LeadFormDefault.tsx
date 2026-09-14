@@ -35,7 +35,7 @@ import {
   type AuthSignupFieldMapEntry,
 } from "@shared/authSignupFieldMap";
 import { useVariableDefinitions, useVariableContext } from "@/hooks/useVariables";
-import { resolveVariable } from "@/lib/variable-manager";
+import { resolveTemplateString, resolveDeep, resolveVariable } from "@/lib/variable-manager";
 import {
   isAuthConversionName,
   parseAuthConversionEventConfig,
@@ -44,11 +44,12 @@ import { resolveFormDefaults } from "@shared/resolveFormDefaults";
 import { resolveConsentCopy, extraConsentYamlFieldsFromObject, consentKeyFromYamlField, isBlankConsentHtml, parseConsentSettingsResponse, shouldShowFallbackConsent } from "@shared/consent-settings";
 import { RichTextContent } from "@/components/ui/rich-text-content";
 import {
-  applyLeadFormRouteOutcome,
+  applyLeadFormOverrideOutcome,
+  appendVisitorTokenToUrl,
   normalizeLeadFormTags,
-  resolveLeadFormRoute,
-  type LeadFormRoute,
-} from "@shared/resolveLeadFormRoute";
+  resolveLeadFormOverride,
+  type LeadFormOverride,
+} from "@shared/resolveLeadFormOverride";
 import { useAuthUser, getConsumerToken } from "@/hooks/useAuthUser";
 import { resolveFormFields, type IdentityField } from "@/lib/resolveFormFields";
 import {
@@ -138,18 +139,18 @@ function mergeLeadFormOptions(
   return merged;
 }
 
-/** For is_signup success redirects: pass auth token to external destinations only. */
-function resolveSignupSuccessUrl(url: string): string {
+/**
+ * When use_visitor_token is set on the effective webhook, append the visitor
+ * token as a query param (Learn-compatible join URLs). Otherwise leave URL as-is.
+ */
+function resolveSuccessRedirectUrl(
+  url: string,
+  useVisitorToken: boolean,
+): string {
+  if (!useVisitorToken) return url;
   const token = getConsumerToken();
   if (!token) return url;
-  try {
-    const target = new URL(url, window.location.origin);
-    if (target.origin === window.location.origin) return url;
-    target.searchParams.set("token", token);
-    return target.href;
-  } catch {
-    return url;
-  }
+  return appendVisitorTokenToUrl(url, token);
 }
 
 interface FieldConfig {
@@ -201,8 +202,9 @@ export interface LeadFormData {
   tags?: string;
   automations?: string;
   webhook?: {
-    url: string;
+    url?: string;
     method?: "POST" | "GET";
+    use_visitor_token?: boolean;
   };
   fields?: {
     email?: FieldConfig;
@@ -224,10 +226,12 @@ export interface LeadFormData {
     message?: string;
   };
   /**
-   * Submit-time routes. First matching conditions (AND) overrides conversion/success/tags.
-   * No match → root form props. See shared/resolveLeadFormRoute.ts.
+   * Continuous form_overrides: first matching conditions (AND) overlays form props for UI + submit
+   * (messages, webhook, success, tags, …). Condition values support {{ entry.* }} / {{ visitor.* }}
+   * via resolveTemplateString. match_method: equals (default) | contains.
+   * No match → root form props. See shared/resolveLeadFormOverride.ts.
    */
-  routes?: LeadFormRoute[];
+  form_overrides?: LeadFormOverride[];
   /** Phase copy for signup forms. Locale defaults apply when a stage is omitted. */
   messages?: {
     guest?: {
@@ -246,6 +250,7 @@ export interface LeadFormData {
     ready?: {
       subtitle?: string | null;
       submit_label?: string;
+      submit_disabled?: boolean;
     } | null;
   };
   consent?: {
@@ -601,23 +606,36 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, c
   );
 }
 
-/** Resolve conversion/success/tags/webhook for one submit (route > form root > event). */
+type EffectiveWebhook = {
+  url?: string;
+  method?: "POST" | "GET";
+  use_visitor_token?: boolean;
+};
+
+/** Resolve conversion/success/tags/webhook for one submit (override > form root > event). */
 function buildEffectiveSubmitConfig(
   formData: LeadFormData,
   values: Record<string, unknown>,
   trackingSettings: TrackingSettingsResponse | null | undefined,
+  resolveValue?: (raw: string) => unknown,
+  entry?: Record<string, unknown> | null,
 ): {
   conversion_name?: string;
   success?: { url?: string; message?: string };
   tags: string;
   automations: string;
-  formWebhook: { url: string; method?: "POST" | "GET" } | null;
-  eventWebhook: { url: string; method?: "POST" | "GET" } | null;
+  /** Delivery override when url is set; may also carry use_visitor_token alone. */
+  formWebhook: EffectiveWebhook | null;
+  eventWebhook: EffectiveWebhook | null;
+  use_visitor_token: boolean;
 } {
-  const route = resolveLeadFormRoute(values, formData.routes);
-  const overlaid = applyLeadFormRouteOutcome(
+  const override = resolveLeadFormOverride(values, formData.form_overrides, {
+    resolveValue,
+    entry,
+  });
+  const overlaid = applyLeadFormOverrideOutcome(
     formData as Record<string, unknown>,
-    route,
+    override,
   ) as LeadFormData;
 
   const conversionName = overlaid.conversion_name;
@@ -627,6 +645,7 @@ function buildEffectiveSubmitConfig(
 
   let resolved: LeadFormData = overlaid;
   if (eventEntry) {
+    const eventWebhookUrl = eventEntry.webhook?.url;
     const wrapped = resolveFormDefaults(
       { _f: overlaid } as Record<string, unknown>,
       {
@@ -634,7 +653,13 @@ function buildEffectiveSubmitConfig(
         automations: eventEntry.automations,
         tags: eventEntry.tags,
         consent: eventEntry.consent,
-        webhook: eventEntry.webhook,
+        webhook: eventWebhookUrl
+          ? {
+              url: eventWebhookUrl,
+              method: eventEntry.webhook?.method,
+              auth_header: eventEntry.webhook?.auth_header,
+            }
+          : undefined,
         success: eventEntry.success,
       },
       "_f",
@@ -642,13 +667,16 @@ function buildEffectiveSubmitConfig(
     resolved = wrapped._f as LeadFormData;
   }
 
-  const formWebhook = resolved.webhook?.url
-    ? {
-        url: resolved.webhook.url,
-        method: (resolved.webhook.method === "GET" ? "GET" : "POST") as "POST" | "GET",
-      }
-    : null;
-  const eventWebhook =
+  const wh = resolved.webhook;
+  const formWebhook: EffectiveWebhook | null =
+    wh && (wh.url || wh.use_visitor_token)
+      ? {
+          ...(wh.url ? { url: wh.url } : {}),
+          method: (wh.method === "GET" ? "GET" : "POST") as "POST" | "GET",
+          ...(wh.use_visitor_token ? { use_visitor_token: true } : {}),
+        }
+      : null;
+  const eventWebhook: EffectiveWebhook | null =
     eventEntry?.webhook?.url
       ? {
           url: eventEntry.webhook.url,
@@ -663,6 +691,7 @@ function buildEffectiveSubmitConfig(
     automations: resolved.automations || "strong",
     formWebhook,
     eventWebhook,
+    use_visitor_token: formWebhook?.use_visitor_token === true,
   };
 }
 
@@ -810,6 +839,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
 
   const resolvedData: LeadFormData = (() => {
     if (!eventEntry) return data;
+    const eventWebhookUrl = eventEntry.webhook?.url;
     const wrapped = resolveFormDefaults(
       { _f: data } as Record<string, unknown>,
       {
@@ -817,7 +847,13 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         automations: eventEntry.automations,
         tags: eventEntry.tags,
         consent: eventEntry.consent,
-        webhook: eventEntry.webhook,
+        webhook: eventWebhookUrl
+          ? {
+              url: eventWebhookUrl,
+              method: eventEntry.webhook?.method,
+              auth_header: eventEntry.webhook?.auth_header,
+            }
+          : undefined,
         success: eventEntry.success,
       },
       "_f"
@@ -1360,7 +1396,18 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       const { consent_email, consent_sms, consent_whatsapp, ...restValues } = values;
 
       const fields = resolveEffectiveFieldValues(values);
-      const effective = buildEffectiveSubmitConfig(data, fields, trackingSettings);
+      const effective = buildEffectiveSubmitConfig(
+        data,
+        fields,
+        trackingSettings,
+        resolveConditionValue,
+        singleEntry as Record<string, unknown> | undefined,
+      );
+
+      const resolveTemplatedUrl = (raw: string | undefined): string | undefined => {
+        if (!raw) return undefined;
+        return resolveTemplateValue(raw);
+      };
       
       // When marketing consent is enabled, derive both email and whatsapp from consent_email checkbox
       const effectiveEmailConsent = consent_email || false;
@@ -1483,35 +1530,68 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       // Webhook priority: per-form (YAML) → per-event → global.
-      // Any configured level sends the full lead payload instead of Breathecode.
-      // Global webhook: server reads credentials from settings (auth_header never exposed to client).
-      // Per-form / per-event: client supplies the URL; no auth credentials at those levels.
+      // use_visitor_token without url skips delivery (token only applies to success redirect).
       const formWebhook = effective.formWebhook;
       const eventWebhook = effective.eventWebhook;
       const globalWebhook = trackingSettings?.webhook?.url ? trackingSettings.webhook : null;
 
-      const webhookOverride = formWebhook ?? eventWebhook ?? null;
+      const deliveryOverride = formWebhook?.url
+        ? formWebhook
+        : eventWebhook?.url
+          ? eventWebhook
+          : null;
 
       let response: Response;
-      if (webhookOverride || globalWebhook) {
-        const body: Record<string, unknown> = { payload };
-        if (webhookOverride) {
-          // Pass URL/method for per-form or per-event webhooks; server needs no credentials
-          body.webhook = { url: webhookOverride.url, method: webhookOverride.method || "POST" };
+      if (deliveryOverride?.url) {
+        const resolvedUrl = resolveTemplatedUrl(deliveryOverride.url) || deliveryOverride.url;
+        const body: Record<string, unknown> = {
+          payload,
+          webhook: {
+            url: resolvedUrl,
+            method: deliveryOverride.method || "POST",
+            ...(effective.use_visitor_token ? { use_visitor_token: true } : {}),
+          },
+        };
+        if (effective.use_visitor_token) {
+          const visitorToken = getConsumerToken();
+          if (!visitorToken) {
+            throw new Error(
+              "400: " +
+                JSON.stringify({
+                  error: "Login or signup required before this form can submit.",
+                }),
+            );
+          }
+          body.visitor_token = visitorToken;
         }
-        // When no override, server reads global URL/method/auth_header from settings
         response = await fetch("/api/leads/webhook-delivery", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
+        if (!response.ok) {
+          const errText = await response.text().catch(() => "");
+          throw new Error(`${response.status}: ${errText || response.statusText}`);
+        }
+      } else if (formWebhook?.use_visitor_token && !formWebhook.url) {
+        // Flag-only: no outbound webhook; success redirect will append token.
+        response = new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } else if (globalWebhook) {
+        response = await fetch("/api/leads/webhook-delivery", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ payload }),
+        });
       } else {
         response = await apiRequest("POST", "/api/leads", payload);
       }
 
-      return { response, fields, effective };
+      return { response, fields, effective, resolveTemplatedUrl };
     },
-    onSuccess: async ({ fields, effective }, variables) => {
+    onSuccess: async ({ fields, effective, resolveTemplatedUrl }, variables) => {
       setSubmitError(null);
       setConversionPage(window.location.pathname);
       // Track conversion if conversion_name is defined (skip auth events — fired on signup/login)
@@ -1584,14 +1664,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         // are unconfigured (i.e., primary submission went to Breathecode).
         // When any webhook level was used above, the full payload was already delivered.
         const hasAnyWebhook = !!(
-          effective.formWebhook ||
-          effective.eventWebhook ||
+          effective.formWebhook?.url ||
+          effective.eventWebhook?.url ||
           trackingSettings?.webhook?.url
         );
         if (!hasAnyWebhook) {
           try {
             const resolvedWebhook = resolveWebhook(
-              effective.formWebhook ?? null,
+              effective.formWebhook?.url ? effective.formWebhook : null,
               effective.conversion_name,
               trackingSettings ?? null,
             );
@@ -1626,9 +1706,12 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       if (effective.success?.url) {
-        const successUrl = isSignupRequested
-          ? resolveSignupSuccessUrl(effective.success.url)
-          : effective.success.url;
+        const templated =
+          resolveTemplatedUrl(effective.success.url) || effective.success.url;
+        const successUrl = resolveSuccessRedirectUrl(
+          templated,
+          effective.use_visitor_token,
+        );
         window.location.href = successUrl;
       } else {
         setIsSuccess(true);
@@ -1782,6 +1865,48 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   // Watch form values to determine if required visible fields are filled
   const watchedValues = form.watch();
 
+  const visitorBag = useMemo((): Record<string, unknown> | undefined => {
+    if (!isLoggedIn || !authProfile) return undefined;
+    const { valid: _valid, ...rest } = authProfile;
+    return rest as Record<string, unknown>;
+  }, [isLoggedIn, authProfile]);
+
+  const resolveTemplateValue = useMemo(() => {
+    const defs = variableDefinitions ?? {};
+    const entry = (singleEntry as Record<string, unknown> | undefined) ?? undefined;
+    return (raw: string) =>
+      resolveTemplateString(raw, defs, variableContext, {
+        singleEntry: entry,
+        visitor: visitorBag,
+      }).text;
+  }, [variableDefinitions, variableContext, singleEntry, visitorBag]);
+
+  /** Condition values: resolveDeep so exact {{ entry.* }} / {{ visitor.* }} keep arrays/numbers. */
+  const resolveConditionValue = useMemo(() => {
+    const defs = variableDefinitions ?? {};
+    const entry = (singleEntry as Record<string, unknown> | undefined) ?? undefined;
+    return (raw: string): unknown =>
+      resolveDeep(raw, defs, variableContext, {
+        singleEntry: entry,
+        visitor: visitorBag,
+      }).data;
+  }, [variableDefinitions, variableContext, singleEntry, visitorBag]);
+
+  const effectiveData = useMemo(() => {
+    const override = resolveLeadFormOverride(
+      watchedValues as Record<string, unknown>,
+      data.form_overrides,
+      {
+        resolveValue: resolveConditionValue,
+        entry: (singleEntry as Record<string, unknown> | undefined) ?? undefined,
+      },
+    );
+    return applyLeadFormOverrideOutcome(
+      data as Record<string, unknown>,
+      override,
+    ) as LeadFormData;
+  }, [watchedValues, data, resolveConditionValue, singleEntry]);
+
   const isFieldValueFilled = (field: keyof FormValues): boolean => {
     const value = watchedValues[field];
     if (typeof value === "string") {
@@ -1823,7 +1948,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     isLoggedIn,
     allRequiredFieldsFilled,
   });
-  const formCopy = resolveLeadFormCopy(formPhase, data, locale);
+  const formCopy = resolveLeadFormCopy(formPhase, effectiveData, locale);
 
   const showField = (name: keyof NonNullable<LeadFormData["fields"]>) => {
     const hideOptionals =
@@ -2072,7 +2197,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
               )}
               <Button 
                 type="submit" 
-                disabled={submitMutation.isPending}
+                variant={formCopy.submit_disabled === true ? "secondary" : "default"}
+                disabled={submitMutation.isPending || formCopy.submit_disabled === true}
                 data-testid="button-submit"
               >
                 {submitMutation.isPending ? (
@@ -2626,8 +2752,9 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
 
           <Button 
             type="submit" 
+            variant={formCopy.submit_disabled === true ? "secondary" : "default"}
             className={`w-full ${data.button_className || ""}`}
-            disabled={submitMutation.isPending}
+            disabled={submitMutation.isPending || formCopy.submit_disabled === true}
             data-testid="button-submit"
           >
             {submitMutation.isPending ? (

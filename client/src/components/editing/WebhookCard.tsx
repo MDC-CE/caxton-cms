@@ -38,9 +38,14 @@ export interface WebhookCardProps {
   url: string;
   method: "POST" | "GET";
   authHeader: string;
+  /** When true, delivery uses the visitor login token and success redirects append ?token= */
+  useVisitorToken?: boolean;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
-  onChange: (field: "url" | "method" | "authHeader", value: string) => void;
+  onChange: (
+    field: "url" | "method" | "authHeader" | "useVisitorToken",
+    value: string | boolean,
+  ) => void;
   hint?: string;
   testIdPrefix?: string;
   source?: WebhookSource;
@@ -124,6 +129,7 @@ export function WebhookCard({
   url,
   method,
   authHeader,
+  useVisitorToken = false,
   editing,
   onEditingChange,
   onChange,
@@ -255,12 +261,13 @@ export function WebhookCard({
             <p className="text-xs text-muted-foreground">{hint}</p>
             <div className="space-y-1.5">
               <Label htmlFor={`${testIdPrefix}-url`} className="text-xs text-muted-foreground">
-                URL
+                URL{" "}
+                <span className="font-normal">(optional if using visitor token only)</span>
               </Label>
               <Input
                 id={`${testIdPrefix}-url`}
-                type="url"
-                placeholder="https://hooks.example.com/..."
+                type="text"
+                placeholder="https://…/event/{{ entry.id }}/checkin"
                 value={url}
                 onChange={(e) => onChange("url", e.target.value)}
                 data-testid={`input-${testIdPrefix}-url`}
@@ -288,10 +295,32 @@ export function WebhookCard({
                 </SelectContent>
               </Select>
             </div>
+            <div className="flex items-start gap-2 rounded-md border bg-background/60 p-2.5">
+              <input
+                id={`${testIdPrefix}-visitor-token`}
+                type="checkbox"
+                className="mt-0.5 h-3.5 w-3.5 accent-primary"
+                checked={useVisitorToken}
+                onChange={(e) => onChange("useVisitorToken", e.target.checked)}
+                data-testid={`checkbox-${testIdPrefix}-visitor-token`}
+              />
+              <div className="min-w-0 space-y-0.5">
+                <Label
+                  htmlFor={`${testIdPrefix}-visitor-token`}
+                  className="text-xs font-medium cursor-pointer"
+                >
+                  Use visitor login token
+                </Label>
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  After signup or login, call this URL as that user (Authorization header).
+                  If the form redirects on success, also add their token to the success URL query.
+                </p>
+              </div>
+            </div>
             <div className="space-y-1.5">
               <Label htmlFor={`${testIdPrefix}-auth`} className="text-xs text-muted-foreground">
                 Authorization header{" "}
-                <span className="font-normal">(optional)</span>
+                <span className="font-normal">(optional; ignored when visitor token is on)</span>
               </Label>
               <Input
                 id={`${testIdPrefix}-auth`}
@@ -307,6 +336,15 @@ export function WebhookCard({
           </div>
         ) : (
           <div className="space-y-1.5">
+            {useVisitorToken && (
+              <Badge
+                variant="secondary"
+                className="text-[11px] px-1.5 py-0 leading-4 font-normal"
+                data-testid={`badge-${testIdPrefix}-visitor-token`}
+              >
+                Visitor token
+              </Badge>
+            )}
             <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
               {url ? (
                 <div className="flex items-center gap-1.5 w-full">

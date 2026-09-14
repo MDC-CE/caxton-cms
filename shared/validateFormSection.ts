@@ -67,20 +67,20 @@ export function conversionNameForValidation(raw: string): string | null {
   return name;
 }
 
-/** Collect non-empty conversion_name from form root and routes[].conversion_name. */
+/** Collect non-empty conversion_name from form root and form_overrides[].conversion_name. */
 export function collectConversionNames(form: Record<string, unknown>): string[] {
   const names: string[] = [];
   const rootName = form.conversion_name;
   if (typeof rootName === "string" && rootName.trim()) {
     names.push(rootName.trim());
   }
-  const routes = form.routes;
-  if (Array.isArray(routes)) {
-    for (const route of routes) {
-      if (!route || typeof route !== "object" || Array.isArray(route)) continue;
-      const routeName = (route as Record<string, unknown>).conversion_name;
-      if (typeof routeName === "string" && routeName.trim()) {
-        names.push(routeName.trim());
+  const overrides = form.form_overrides;
+  if (Array.isArray(overrides)) {
+    for (const override of overrides) {
+      if (!override || typeof override !== "object" || Array.isArray(override)) continue;
+      const overrideName = (override as Record<string, unknown>).conversion_name;
+      if (typeof overrideName === "string" && overrideName.trim()) {
+        names.push(overrideName.trim());
       }
     }
   }
@@ -90,7 +90,7 @@ export function collectConversionNames(form: Record<string, unknown>): string[] 
 /**
  * When a section has a form-settings bind **and** the form object is present,
  * require an explicit conversion decision:
- * - non-empty conversion_name on form root or any route → on
+ * - non-empty conversion_name on form root or any form_override → on
  * - root `conversion_name: null` → explicit off
  * - key missing (e.g. after duplicate wipe) → invalid
  *
@@ -108,7 +108,7 @@ export function validateRequiredConversionName(
   const form = getFormSettingsObject(section, formSettingsPath);
   // Optional presence for nested form-settings (CTA-only heroes, etc.).
   if (!form) return null;
-  // Account gate does not waive conversion — name, route name, or explicit null required.
+  // Account gate does not waive conversion — name, override name, or explicit null required.
   if (collectConversionNames(form).length > 0) return null;
 
   const label = formSettingsPath ? `${formSettingsPath}.conversion_name` : "conversion_name";
@@ -126,7 +126,7 @@ export function validateRequiredConversionName(
 
   return (
     `${label} is required (set a name from conversion_events Intent matching this section’s CTA, ` +
-    `a route conversion_name, or null to turn off). ` +
+    `a form_override conversion_name, or null to turn off). ` +
     `Duplicating clears conversion names on purpose — choose again from visitor intent; ` +
     `never copy the source page’s conversion_name.`
   );
@@ -136,7 +136,7 @@ export function validateRequiredConversionName(
  * Validates a section's `form` config.
  *
  * Returns null if the section has no `form` key or the config is valid.
- * When a name is set (root or any route), it must be in `conversionNames` if that list is provided.
+ * When a name is set (root or any form_override), it must be in `conversionNames` if that list is provided.
  * Use {@link validateRequiredConversionName} to require a name when form-settings is bound.
  */
 export function validateFormSection(
