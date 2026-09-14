@@ -56,17 +56,25 @@ props:
     properties:
       url:
         type: string
-        required: true
-        description: Destination URL to POST/GET the conversion payload
+        required: false
+        description: >-
+          Destination URL to POST/GET the conversion payload. May include {{ entry.* }} /
+          {{ visitor.* }} templates. Optional when only use_visitor_token is set.
         example: https://hooks.zapier.com/hooks/catch/xxxxx/yyyyy/
       method:
         type: string
-        required: true
+        required: false
         description: HTTP method (default POST)
         example: POST
+      use_visitor_token:
+        type: boolean
+        required: false
+        description: >-
+          When true, send Authorization Token on delivery (if url) and append ?token= to
+          success.url when redirecting.
     description: >-
       Form-level webhook — highest priority in the three-level chain (form > per-event > global). When set, this webhook
-      is always used for this form regardless of tracking settings.
+      is always used for this form regardless of tracking settings. Requires url and/or use_visitor_token.
   fields:
     type: object
     required: false
@@ -783,6 +791,76 @@ props:
         description: Success message to display (if no url)
         example: Thanks! We'll contact you within 24 hours.
     description: What happens after successful submission
+  form_overrides:
+    type: array
+    required: false
+    description: >-
+      Continuous form_overrides: the first entry whose conditions all match (AND) overlays this
+      form for both UI copy and submit (messages, webhook, success, tags, conversion_name).
+      Partial message/success/webhook objects are deep-merged onto the form root. No match
+      → root form props. Conditions use form_field_slug or entry_field_slug (bare entry path).
+      Condition values may use {{ visitor.* }} templates (visitor = logged-in profile).
+      match_method equals (default) or contains (substring on strings; membership on arrays).
+    items:
+      type: object
+      required: false
+      properties:
+        conditions:
+          type: array
+          required: true
+          items:
+            type: object
+            required: false
+            properties:
+              form_field_slug:
+                type: string
+                required: false
+                description: Form field key to compare (submitted value)
+              entry_field_slug:
+                type: string
+                required: false
+                description: >-
+                  Bare entry field path looked up on singleEntry at match time
+                  (e.g. event_started, registered_attendee_ids). Do not use {{ entry.* }}
+                  here — section resolveDeep would replace templates before LeadForm runs.
+              match_method:
+                type: string
+                required: false
+                options:
+                  - equals
+                  - contains
+                description: >-
+                  equals (default) string equality; contains = substring on strings or
+                  membership in arrays of scalars (e.g. registered_attendee_ids + {{ visitor.id }})
+              value:
+                type: string
+                required: true
+                description: Expected value; may be a template e.g. "{{ visitor.id }}"
+        conversion_name:
+          type: string
+          required: false
+        tags:
+          type: string
+          required: false
+        automations:
+          type: string
+          required: false
+        webhook:
+          type: object
+          required: false
+        success:
+          type: object
+          required: false
+        messages:
+          type: object
+          required: false
+          description: Partial phase copy (guest/login/incomplete/ready); deep-merged onto form messages
+  messages:
+    type: object
+    required: false
+    description: >-
+      Phase copy for signup forms (guest, login, incomplete, ready). Routes may override
+      individual phases/fields via deep merge.
   terms_url:
     type: string
     required: false

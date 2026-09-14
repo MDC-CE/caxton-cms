@@ -137,10 +137,18 @@ export const leadFormFieldConfigSchema = z.object({
 });
 
 // Webhook configuration — used at form-level, per-event, and global tracking level
-export const webhookConfigSchema = z.object({
-  url: z.string().url(),
-  method: z.enum(["POST", "GET"]).default("POST"),
-});
+export const webhookConfigSchema = z
+  .object({
+    url: z.string().optional(),
+    method: z.enum(["POST", "GET"]).optional(),
+    use_visitor_token: z.boolean().optional(),
+  })
+  .refine(
+    (w) =>
+      (typeof w.url === "string" && w.url.trim().length > 0) ||
+      w.use_visitor_token === true,
+    { message: "webhook requires url and/or use_visitor_token: true" },
+  );
 
 export type WebhookConfig = z.infer<typeof webhookConfigSchema>;
 

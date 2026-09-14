@@ -545,6 +545,7 @@ export const heroWorkshopSchema = z.object({
   fallback_avatars: z.union([z.array(z.string()), z.string()]).optional(),
   /** Learn-like seats sentence; bind {{ entry.registered_count }} etc. in YAML. */
   seats_copy: z.string().optional(),
+  seats_load_more_label: z.string().optional(),
   registered_suffix: z.string().optional(),
   remaining_prefix: z.string().optional(),
   /** Decorative media (e.g. GIF) behind the countdown strip above the form. */

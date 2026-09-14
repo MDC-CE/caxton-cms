@@ -110,6 +110,7 @@ export const fieldEditors: Record<string, EditorType> = {
   "workshop:duration_icon": "icon-picker",
   "workshop:countdown_background_image": "image-picker",
   "workshop:fallback_avatars[]": "image-picker",
+  "workshop:seats_load_more_label": "text-input",
   "workshop:host_socials[].icon": "icon-picker",
   "workshop:host_socials[].url": "link-picker",
   "workshop:form": "form-settings",

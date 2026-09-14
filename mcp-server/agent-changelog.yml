@@ -5,6 +5,91 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-14"
+    summary: "LeadForm form_overrides: entry_field_slug (bare entry path)"
+    agent_impact:
+      - "Conditions: form_field_slug XOR entry_field_slug. entry_field_slug is a bare entry field path looked up on singleEntry at match time — do not use {{ entry.* }} on that key (section resolveDeep would replace templates early)."
+      - "item_property_slug on form_overrides conditions is no longer read. Listing permanent_filters item_property_slug unchanged."
+      - "Condition value still uses resolveDeep for {{ visitor.* }}."
+    paths:
+      - shared/resolveLeadFormOverride.ts
+      - shared/component-registry/_common/schema.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - site_4geeks-com/workshop/template.en.yml
+      - site_4geeks-com/workshop/template.es.yml
+      - mcp-server/explain/sections.md
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
+  - date: "2026-09-14"
+    summary: "LeadForm routes → form_overrides; form_field_slug + item_property_slug"
+    agent_impact:
+      - "YAML key routes is now form_overrides. Resolver: shared/resolveLeadFormOverride.ts (resolveLeadFormOverride / applyLeadFormOverrideOutcome)."
+      - "Conditions: form_field_slug (form values) XOR item_property_slug (resolveDeep string — use {{ entry.* }} / {{ visitor.* }}; no bare entry-path shortcut)."
+      - "messages.ready.submit_disabled: true disables the submit button for that phase."
+      - "property_slug / routes are no longer read. Listing permanent_filters item_property_slug unchanged."
+    paths:
+      - shared/resolveLeadFormOverride.ts
+      - shared/component-registry/_common/schema.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - site_4geeks-com/workshop/template.en.yml
+      - site_4geeks-com/workshop/template.es.yml
+      - site_4geeks-com/pages/apply/en.yml
+      - site_4geeks-com/pages/apply/es.yml
+      - mcp-server/explain/sections.md
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
+  - date: "2026-09-14"
+    summary: "LeadForm routes: property_slug only (drop field_/item_ aliases)"
+    agent_impact:
+      - "Route conditions use property_slug only (form field keys first, else entry). field_property_slug / item_property_slug are no longer read."
+      - "Listing permanent_filters still use item_property_slug — unchanged."
+    paths:
+      - shared/resolveLeadFormRoute.ts
+      - shared/component-registry/_common/schema.ts
+      - mcp-server/explain/sections.md
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
+  - date: "2026-09-14"
+    summary: "LeadForm route property_slug (form→entry) + resolveDeep condition values"
+    agent_impact:
+      - "Prefer property_slug on route conditions (form field keys first, else entry). Legacy field_property_slug / item_property_slug still accepted."
+      - "Condition value resolves via resolveDeep so exact {{ entry.* }} / {{ visitor.* }} can keep arrays/numbers (contains on registered_attendee_ids)."
+      - "Workshop CT: event_started + registered_attendee_ids computed fields; quote value: \"{{ visitor.id }}\"."
+    paths:
+      - shared/resolveLeadFormRoute.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - site_4geeks-com/content-types.yml
+      - site_4geeks-com/workshop/template.en.yml
+      - site_4geeks-com/workshop/template.es.yml
+    tools_changed: false
+  - date: "2026-09-13"
+    summary: "LeadForm continuous routes + match_method contains + {{ visitor.* }}"
+    agent_impact:
+      - "routes overlay form root for UI + submit (not submit-only). messages/success/webhook deep-merge."
+      - "Condition match_method: equals (default) | contains (substring on strings; membership on arrays of scalar ids)."
+      - "Condition value, webhook.url, success.url resolve via resolveTemplateString — {{ entry.* }} and {{ visitor.* }} (AuthUserProfile when logged in)."
+      - "Workshop already-registered: registered_attendee_ids + contains + {{ visitor.id }}; put those routes before live/upcoming."
+      - "Non-effects: no deep object contains; logged-out visitor → contains fails → root form. Reconnect MCP / re-bootstrap_agent for explain."
+    paths:
+      - shared/resolveLeadFormRoute.ts
+      - client/src/lib/variable-manager.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - shared/component-registry/_common/schema.ts
+      - mcp-server/explain/sections.md
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
+  - date: "2026-09-11"
+    summary: "LeadForm use_visitor_token + entry route conditions + templated webhook/success URLs"
+    agent_impact:
+      - "Form/route webhook may set use_visitor_token: true (Authorization Token on delivery; success.url gets ?token= when that flag is set). URL optional when flag-only (join redirect)."
+      - "webhook.url and success.url resolve {{ entry.* }} via resolveTemplateString + singleEntry before POST/redirect."
+      - "Route conditions may use item_property_slug (entry/singleEntry) as well as field_property_slug (form values). Workshop templates branch on event_started."
+      - "Side effect: browser may navigate to apiv2 /join?token=… (Learn-compatible). Do not put tokens in dataLayer."
+    paths:
+      - shared/resolveLeadFormRoute.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - server/routes/webhooks.ts
+      - shared/component-registry/_common/schema.ts
   - date: "2026-09-12"
     summary: "New list_media MCP tool — paginated gallery inventory with Media Gallery filters/sorts"
     agent_impact:
@@ -98,7 +183,6 @@ entries:
     paths:
       - mcp-server/tools/product.ts
       - server/product/product-audience-io.ts
-    tools_changed: false
   - date: "2026-09-10"
     summary: "Proposal recent-activity gate + get_entry_activity"
     agent_impact:

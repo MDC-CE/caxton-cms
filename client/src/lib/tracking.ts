@@ -197,9 +197,10 @@ export interface VisitorContext {
 }
 
 export interface WebhookConfig {
-  url: string;
+  url?: string;
   method?: "POST" | "GET";
   auth_header?: string;
+  use_visitor_token?: boolean;
 }
 
 export interface ConsentDefaults {

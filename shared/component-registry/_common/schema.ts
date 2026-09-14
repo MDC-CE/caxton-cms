@@ -143,13 +143,65 @@ export const leadFormFieldConfigSchema = z.object({
   options: z.array(leadFormFieldOptionSchema).optional(),
 });
 
-// Webhook configuration — used at form-level, per-event, and global tracking level
-export const webhookConfigSchema = z.object({
-  url: z.string().url(),
-  method: z.enum(["POST", "GET"]).default("POST"),
-});
+// Webhook configuration — used at form-level, per-event, and global tracking level.
+// `url` is a plain string (may include {{ entry.* }} templates). Optional when only
+// `use_visitor_token` is set (success redirect gets ?token= without a delivery URL).
+export const webhookConfigSchema = z
+  .object({
+    url: z.string().optional(),
+    method: z.enum(["POST", "GET"]).optional(),
+    /** When true: Authorization Token on delivery (if url) + append visitor token to success.url */
+    use_visitor_token: z.boolean().optional(),
+  })
+  .refine(
+    (w) =>
+      (typeof w.url === "string" && w.url.trim().length > 0) ||
+      w.use_visitor_token === true,
+    { message: "webhook requires url and/or use_visitor_token: true" },
+  );
 
 export type WebhookConfig = z.infer<typeof webhookConfigSchema>;
+
+/** Override condition: form_field_slug XOR entry_field_slug. See shared/resolveLeadFormOverride.ts */
+export const leadFormOverrideConditionSchema = z
+  .object({
+    form_field_slug: z.string().optional(),
+    /** Bare entry field path (e.g. event_started); looked up on singleEntry at match time. */
+    entry_field_slug: z.string().optional(),
+    /** Default equals. contains = substring on strings; membership on arrays of scalars. */
+    match_method: z.enum(["equals", "contains"]).optional(),
+    /** Compared value; {{ visitor.* }} / templates via resolveDeep may keep numbers. */
+    value: z.unknown(),
+  })
+  .passthrough();
+
+/** First matching form_override overlays form root for UI + submit (deep-merge messages/success/webhook). */
+export const leadFormOverrideSchema = z
+  .object({
+    conditions: z.array(leadFormOverrideConditionSchema).min(1),
+    conversion_name: z.string().optional(),
+    ecommerce_product_field: z.string().optional(),
+    success: z
+      .object({
+        url: z.string().optional(),
+        message: z.string().optional(),
+      })
+      .optional(),
+    tags: z.string().optional(),
+    automations: z.string().optional(),
+    webhook: webhookConfigSchema.optional(),
+    messages: z.record(z.unknown()).optional(),
+  })
+  .passthrough();
+
+export type LeadFormOverrideSchema = z.infer<typeof leadFormOverrideSchema>;
+
+/** @deprecated Use leadFormOverrideConditionSchema */
+export const leadFormRouteConditionSchema = leadFormOverrideConditionSchema;
+/** @deprecated Use leadFormOverrideSchema */
+export const leadFormRouteSchema = leadFormOverrideSchema;
+/** @deprecated Use LeadFormOverrideSchema */
+export type LeadFormRouteSchema = LeadFormOverrideSchema;
 
 // Lead Form data schema
 export const leadFormDataSchema = z.object({
@@ -183,6 +235,15 @@ export const leadFormDataSchema = z.object({
     url: z.string().optional(),
     message: z.string().optional(),
   }).optional(),
+  /**
+   * Continuous form_overrides: first match overlays form props for UI + submit.
+   * Conditions use form_field_slug or entry_field_slug; values may use {{ visitor.* }}.
+   */
+  form_overrides: z.array(leadFormOverrideSchema).optional(),
+  /** Phase copy for signup forms (guest/login/incomplete/ready). Override messages deep-merge here. */
+  messages: z.record(z.unknown()).optional(),
+  is_signup: z.boolean().optional(),
+  allow_signup: z.boolean().optional(),
   terms_url: z.string().optional(),
   privacy_url: z.string().optional(),
   consent: z.object({

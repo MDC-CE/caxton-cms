@@ -12,12 +12,12 @@ import {
 import { validateCtaTracking, resolveBoundCtaPaths } from "../shared/validateCtaTracking";
 
 describe("wipeSectionOnDuplicate", () => {
-  it("removes nested and routes[].conversion_name", () => {
+  it("removes nested and form_overrides[].conversion_name", () => {
     const { section, cleared } = wipeSectionOnDuplicate(
       {
         type: "lead_form",
         conversion_name: "newsletter",
-        routes: [
+        form_overrides: [
           { conditions: [], conversion_name: "route_a" },
           { conditions: [], conversion_name: "route_b" },
         ],
@@ -26,14 +26,14 @@ describe("wipeSectionOnDuplicate", () => {
       { ".": "form-settings" },
     );
     expect(section.conversion_name).toBeUndefined();
-    expect((section.routes as Array<Record<string, unknown>>)[0].conversion_name).toBeUndefined();
-    expect((section.routes as Array<Record<string, unknown>>)[1].conversion_name).toBeUndefined();
+    expect((section.form_overrides as Array<Record<string, unknown>>)[0].conversion_name).toBeUndefined();
+    expect((section.form_overrides as Array<Record<string, unknown>>)[1].conversion_name).toBeUndefined();
     expect(section.title).toBe("Keep me");
     expect(cleared).toEqual(
       expect.arrayContaining([
         "conversion_name",
-        "routes[0].conversion_name",
-        "routes[1].conversion_name",
+        "form_overrides[0].conversion_name",
+        "form_overrides[1].conversion_name",
       ]),
     );
   });
@@ -121,7 +121,7 @@ describe("wipeDocumentSectionsOnDuplicate", () => {
 describe("validateRequiredConversionName", () => {
   it("fails when form-settings bind exists and names are missing after wipe", () => {
     const { section } = wipeSectionOnDuplicate(
-      { type: "lead_form", conversion_name: "x", routes: [{ conversion_name: "y" }] },
+      { type: "lead_form", conversion_name: "x", form_overrides: [{ conversion_name: "y" }] },
       { ".": "form-settings" },
     );
     const formPath = resolveBoundFormSettingsPath({ ".": "form-settings" });
@@ -139,12 +139,12 @@ describe("validateRequiredConversionName", () => {
     ).toBeNull();
   });
 
-  it("passes when only a route has conversion_name", () => {
+  it("passes when only a form_override has conversion_name", () => {
     expect(
       validateRequiredConversionName(
         {
           type: "cta_banner",
-          form: { routes: [{ conversion_name: "apply_now" }] },
+          form: { form_overrides: [{ conversion_name: "apply_now" }] },
         },
         "form",
       ),

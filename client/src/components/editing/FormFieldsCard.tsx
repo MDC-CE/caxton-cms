@@ -391,7 +391,7 @@ export function FormFieldsCard({ fields, onFieldChange }: FormFieldsCardProps) {
           <code className="font-mono text-[10px]">value_path</code> (property used as the option
           value) and <code className="font-mono text-[10px]">label_path</code> (visible text) —
           not the form field name and not{" "}
-          <code className="font-mono text-[10px]">routes[].conditions.value</code>. Ecommerce
+          <code className="font-mono text-[10px]">form_overrides[].conditions.value</code>. Ecommerce
           catalogs must set <code className="font-mono text-[10px]">query: purchasable=true</code>{" "}
           unless this is a non-product program page (that slug / related_field only).{" "}
           <code className="font-mono text-[10px]">purchasable</code> on the Fields tab is read-only;{" "}
