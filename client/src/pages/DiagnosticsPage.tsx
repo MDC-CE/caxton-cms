@@ -277,7 +277,8 @@ function DiagnosticsHowItWorksPopover() {
           <strong className="text-foreground font-medium">background worker</strong>; starting a new job asks for
           confirm and shows the last full site-wide duration. The job panel shows milestones (fixed height, scrolls).
           Cached issues refresh when the job finishes. Delete cache wipes the store until the next refresh.
-          Remove Legacy Issues drops v4→v5 migration orphans (`validator: legacy`) that normal re-checks never clear.
+          Remove Legacy Issues forces a persist of the finished v4→v5 migration (drops `validator: legacy` /
+          synthetic `legacy__` keys). Load and flush already strip these so diagnostics cannot republish them.
           {isDev
             ? " In development, Sync with production issues copies the GCS sidecar into local validation-cache.json (never uploads)."
             : ""}{" "}
@@ -1970,8 +1971,10 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
           <DialogHeader>
             <DialogTitle>Remove legacy issues?</DialogTitle>
             <DialogDescription>
-              Removes only issues tagged <code className="text-xs">validator: legacy</code>{" "}
-              (orphans from the v4→v5 cache migration). Other issues and run metadata stay.
+              Drops migration orphans (<code className="text-xs">validator: legacy</code> or synthetic{" "}
+              <code className="text-xs">legacy__</code> entry keys) and saves the cache. Load and flush already
+              finish this migration so a diagnostics run cannot bring them back; use this only if the UI still
+              shows a leftover count.
               {legacyIssueCount > 0
                 ? ` Currently ${legacyIssueCount} legacy issue${legacyIssueCount === 1 ? "" : "s"} in this cache.`
                 : null}{" "}

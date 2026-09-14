@@ -620,7 +620,7 @@ export function registerValidationRoutes(app: Express): void {
     }
   });
 
-  /** Remove v4→v5 migration orphans (`validator: "legacy"`) without wiping the rest of the cache. */
+  /** Finish v4→v5: drop migration orphans (`validator: "legacy"` / synthetic keys). Load+flush already do this. */
   app.post("/api/validation/purge-legacy-issues", async (req, res) => {
     const auth = await requireMutatingStaff(req, res);
     if (!auth.authorized) return;

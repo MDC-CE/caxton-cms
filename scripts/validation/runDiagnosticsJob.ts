@@ -367,8 +367,15 @@ export async function runDiagnosticsJob(
     });
   }
 
+  // Refresh / Hard refresh: no slug/url scope and full default validator set (!partial).
+  // Always bump lastSiteWideRunAt here — do not rely only on the site-wide validator
+  // apply path (markSiteWide), which can be skipped when that phase does not run.
   if (!partial) {
-    cache.markFullRunAt(nowIso());
+    const ts = nowIso();
+    cache.markFullRunAt(ts);
+    if (!slugFiltered) {
+      cache.markSiteWideRunAt(ts);
+    }
   }
   await cache.flush();
 

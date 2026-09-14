@@ -332,7 +332,7 @@ describe("validation issue store v5", () => {
     expect(cache.getAllIssues().filter((i) => i.validator === "section-variants")).toHaveLength(0);
   });
 
-  it("purgeLegacyIssues removes only validator:legacy rows", async () => {
+  it("load and flush finish v4→v5 migration (drop orphans; cannot republish)", async () => {
     const fileA = makeFile({
       type: "program",
       slug: "alpha",
@@ -374,6 +374,24 @@ describe("validation issue store v5", () => {
       lastSeenAt: now,
       lastRunAt: now,
     };
+    // Real validator name but synthetic entry key — also an orphan.
+    raw.issues["meta-on-legacy-key"] = {
+      id: "meta-on-legacy-key",
+      code: "MISSING_DESCRIPTION",
+      severity: "error",
+      message: "Missing description",
+      validator: "meta",
+      scopes: ["entry"],
+      targets: [
+        {
+          type: "entry",
+          entryKey: "legacy__en__blog__best-online-coding-bootcamp",
+          url: "/en/blog/best-online-coding-bootcamp",
+        },
+      ],
+      lastSeenAt: now,
+      lastRunAt: now,
+    };
     const ek = buildEntryKey("program", "alpha", "en");
     raw.runMeta = raw.runMeta ?? { byEntry: {} };
     raw.runMeta.byEntry = raw.runMeta.byEntry ?? {};
@@ -385,15 +403,41 @@ describe("validation issue store v5", () => {
         meta: now,
       },
     };
+    raw.runMeta.byEntry["legacy__en__blog__orphan"] = {
+      lastRunAt: now,
+      byValidator: { legacy: now },
+      dirty: false,
+    };
     fs.writeFileSync(path.join(tmp, "validation-cache.json"), JSON.stringify(raw, null, 2));
-    cache.reloadFromDisk();
 
-    expect(cache.getAllIssues().some((i) => i.validator === "legacy")).toBe(true);
+    // Load finishes migration — orphans never enter memory.
+    cache.reloadFromDisk();
+    expect(cache.getAllIssues().some((i) => i.validator === "legacy")).toBe(false);
+    expect(cache.getAllIssues().some((i) => i.id === "meta-on-legacy-key")).toBe(false);
     expect(cache.getAllIssues().some((i) => i.validator === "meta")).toBe(true);
 
+    // Explicit purge is a no-op once load stripped them.
     const { removed } = await cache.purgeLegacyIssues();
-    expect(removed).toBe(1);
-    expect(cache.getAllIssues().filter((i) => i.validator === "legacy")).toHaveLength(0);
+    expect(removed).toBe(0);
+
+    // Poison memory like a stale replica, then flush — must not republish orphans.
+    const poisoned = cache as unknown as {
+      issues: Record<string, unknown>;
+    };
+    poisoned.issues["legacy:GHOST"] = {
+      id: "legacy:GHOST",
+      code: "MISSING_PAGE_TITLE",
+      severity: "error",
+      message: "ghost",
+      validator: "legacy",
+      scopes: ["entry"],
+      targets: [{ type: "entry", entryKey: "legacy__en__ghost", url: "/en/ghost" }],
+      lastSeenAt: now,
+      lastRunAt: now,
+    };
+    await cache.flush();
+    cache.reloadFromDisk();
+    expect(cache.getAllIssues().some((i) => i.id === "legacy:GHOST")).toBe(false);
     expect(cache.getAllIssues().some((i) => i.validator === "meta")).toBe(true);
 
     const again = await cache.purgeLegacyIssues();

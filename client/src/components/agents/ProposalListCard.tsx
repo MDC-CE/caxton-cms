@@ -20,7 +20,7 @@ import {
   proposalCategoryLabel,
   proposalEntryProgress,
 } from "@/lib/proposalCardMeta";
-import { SituationSnapshotBadge } from "@/components/agents/SituationReviewBadge";
+import { SituationSnapshotBadge, resolveSituationDisplay } from "@/components/agents/SituationReviewBadge";
 
 export type ProposalCardData = {
   id: string;
@@ -144,6 +144,12 @@ export function ProposalListCard({
   const isTerminal =
     p.status === "finished" || p.status === "rejected" || p.status === "withdrawn";
   const showSituationChip = !isTerminal && Boolean(p.review_context_snapshot);
+  const situationLine = !isTerminal
+    ? resolveSituationDisplay({
+        snapshot: p.review_context_snapshot,
+        kind: p.kind,
+      })?.staff_summary?.situation_description
+    : null;
 
   const meta: Array<{ key: string; node: ReactNode }> = [
     {
@@ -225,7 +231,7 @@ export function ProposalListCard({
             </h3>
             <div className="flex shrink-0 items-center gap-1.5">
               {showSituationChip ? (
-                <SituationSnapshotBadge snapshot={p.review_context_snapshot} />
+                <SituationSnapshotBadge snapshot={p.review_context_snapshot} kind={p.kind} />
               ) : null}
               {goLive ? (
                 <Badge variant="secondary" className="gap-1 font-normal">
@@ -251,6 +257,15 @@ export function ProposalListCard({
           </div>
           {p.summary ? (
             <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{p.summary}</p>
+          ) : null}
+          {situationLine ? (
+            <p
+              className="line-clamp-1 text-[11px] leading-4 text-muted-foreground/90"
+              data-testid={`text-proposal-situation-${p.id}`}
+            >
+              <span className="font-medium text-muted-foreground">Situation · </span>
+              {situationLine}
+            </p>
           ) : null}
           <ProposalCategoryTags
             category={p.category}

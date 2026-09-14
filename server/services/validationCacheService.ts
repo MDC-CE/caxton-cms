@@ -33,7 +33,11 @@ import {
   isEntryLocalValidator,
   isMediaValidator,
 } from "../../scripts/validation/shared/runClass";
-import { buildEntryKey, entryKeyFromContentFile } from "../../scripts/validation/shared/entryKey";
+import {
+  buildEntryKey,
+  entryKeyFromContentFile,
+  isLegacySyntheticEntryKey,
+} from "../../scripts/validation/shared/entryKey";
 import { getCanonicalUrl } from "../../scripts/validation/shared/canonicalUrls";
 import { isIssueCodeCodingAgentOnly } from "../../scripts/validation/shared/issueCodeRegistry";
 import { siteSyncGcsKey, SYNC_FILENAMES, validationCacheReadKeys } from "@shared/gcsKeys";
@@ -168,68 +172,29 @@ function migratePagesToV4(
   return out;
 }
 
+/**
+ * v4 page rows used synthetic `legacy__…` entry keys that cannot be completed.
+ * Do not carry them forward — preserve DB health + run timestamps only.
+ * The next diagnostics run recreates real issues under type/slug/locale keys.
+ */
 function migrateV4ToV5(v4: {
   meta: { lastFullRunAt: string | null; version: number };
   pages: Record<string, PageCacheEntry>;
   databases?: Record<string, DatabaseCacheEntry>;
 }): ValidationCacheFileV5 {
-  const nowIso = new Date().toISOString();
-  const issues: Record<string, StoredValidationIssue> = {};
-  const byUrl: Record<string, string> = {};
-  const runMetaByEntry: Record<string, EntryRunMeta> = {};
-
-  for (const [url, entry] of Object.entries(v4.pages ?? {})) {
-    const entryKey = `legacy${url.replace(/\//g, "__")}`;
-    byUrl[url] = entryKey;
-    const byValidator: Record<string, string> = {};
-
-    const add = (raw: ValidationIssue, severity: "error" | "warning") => {
-      const validator = raw.validator || "legacy";
-      const id = `${validator}:${raw.code}:${entryKey}:${severity}`.slice(0, 64);
-      const stored: StoredValidationIssue = {
-        id,
-        code: raw.code,
-        severity,
-        message: raw.message,
-        suggestion: raw.suggestion,
-        validator,
-        scopes: validator === "redirects" ? ["site", "entry", "redirects"] : ["entry"],
-        targets: [{ type: "entry", entryKey, url, file: raw.file }],
-        file: raw.file,
-        line: raw.line,
-        category: raw.category,
-        lastSeenAt: entry.lastRunAt || nowIso,
-        lastRunAt: entry.lastRunAt || nowIso,
-      };
-      let finalId = id;
-      let n = 0;
-      while (issues[finalId] && issues[finalId]!.message !== stored.message) {
-        finalId = `${id}:${++n}`;
-      }
-      stored.id = finalId;
-      issues[finalId] = stored;
-      byValidator[validator] = entry.lastRunAt || nowIso;
-    };
-
-    for (const e of entry.errors ?? []) add(e, "error");
-    for (const w of entry.warnings ?? []) add(w, "warning");
-
-    runMetaByEntry[entryKey] = {
-      lastRunAt: entry.lastRunAt || nowIso,
-      byValidator,
-      dirty: false,
-    };
-  }
-
+  void v4.pages;
+  log.info(
+    "[ValidationCache] v4→v5: discarding per-URL page issues (synthetic legacy keys); databases kept",
+  );
   return {
     meta: {
       version: 5,
       lastFullRunAt: v4.meta?.lastFullRunAt ?? null,
       lastSiteWideRunAt: v4.meta?.lastFullRunAt ?? null,
     },
-    issues,
-    indexes: rebuildIndexes(issues, byUrl),
-    runMeta: { byEntry: runMetaByEntry, byScope: {} },
+    issues: {},
+    indexes: emptyIndexes(),
+    runMeta: { byEntry: {}, byScope: {} },
     completions: {},
     claims: {},
     attempts: {},
@@ -237,11 +202,87 @@ function migrateV4ToV5(v4: {
   };
 }
 
+/** True when an issue is a v4→v5 migration orphan (uncompletable synthetic key or validator tag). */
+export function isMigrationOrphanIssue(issue: StoredValidationIssue): boolean {
+  if (issue.validator === "legacy") return true;
+  return issue.targets.some(
+    (t) => t.type === "entry" && isLegacySyntheticEntryKey(t.entryKey),
+  );
+}
+
+/**
+ * Finish v4→v5: drop migration orphans from a cache file.
+ * Policy: always drop (real validators recreate under real ids on the next run if still valid).
+ */
+export function stripMigrationOrphans(
+  data: ValidationCacheFileV5,
+): { data: ValidationCacheFileV5; removed: number } {
+  const toDelete = Object.values(data.issues ?? {}).filter(isMigrationOrphanIssue);
+  if (toDelete.length === 0) return { data, removed: 0 };
+
+  const issues = { ...(data.issues ?? {}) };
+  const completions = { ...(data.completions ?? {}) };
+  const claims = { ...(data.claims ?? {}) };
+  const attempts = { ...(data.attempts ?? {}) };
+  for (const issue of toDelete) {
+    delete issues[issue.id];
+    delete completions[issue.id];
+    delete claims[issue.id];
+    delete attempts[issue.id];
+  }
+
+  const prevByUrl = data.indexes?.byUrl ?? {};
+  const byUrl: Record<string, string> = {};
+  for (const [url, ek] of Object.entries(prevByUrl)) {
+    if (!isLegacySyntheticEntryKey(ek)) byUrl[url] = ek;
+  }
+
+  const byEntryIn: Record<string, EntryRunMeta> = {
+    ...(data.runMeta?.byEntry ?? {}),
+  };
+  const byEntry: Record<string, EntryRunMeta> = {};
+  for (const [ek, meta] of Object.entries(byEntryIn)) {
+    if (isLegacySyntheticEntryKey(ek)) continue;
+    if (meta?.byValidator?.legacy) {
+      const { legacy: _drop, ...rest } = meta.byValidator;
+      byEntry[ek] = { ...meta, byValidator: rest };
+    } else {
+      byEntry[ek] = meta;
+    }
+  }
+
+  const byScopeIn = { ...(data.runMeta?.byScope ?? {}) };
+  const byScope: typeof byScopeIn = {};
+  for (const [scope, meta] of Object.entries(byScopeIn)) {
+    if (!meta) continue;
+    if (meta.byValidator?.legacy) {
+      const { legacy: _drop, ...rest } = meta.byValidator;
+      byScope[scope] = { ...meta, byValidator: rest };
+    } else {
+      byScope[scope] = meta;
+    }
+  }
+
+  return {
+    removed: toDelete.length,
+    data: {
+      ...data,
+      issues,
+      indexes: rebuildIndexes(issues, byUrl),
+      runMeta: { byEntry, byScope },
+      completions,
+      claims,
+      attempts,
+    },
+  };
+}
+
 function migrateCache(parsed: ValidationCacheFile): ValidationCacheFileV5 {
   const version = parsed.meta?.version ?? 0;
+  let next: ValidationCacheFileV5;
   if (version >= 5 && "issues" in parsed && (parsed as ValidationCacheFileV5).issues) {
     const v5 = parsed as ValidationCacheFileV5;
-    return {
+    next = {
       ...v5,
       meta: {
         version: 5,
@@ -255,14 +296,12 @@ function migrateCache(parsed: ValidationCacheFile): ValidationCacheFileV5 {
       attempts: v5.attempts ?? {},
       databases: v5.databases ?? {},
     };
-  }
-
-  if (version === 4 || version === 3 || version === 2) {
+  } else if (version === 4 || version === 3 || version === 2) {
     log.info(`[ValidationCache] Migrating v${version} cache to v5`);
     const pages = migratePagesToV4(
       (parsed as { pages: Record<string, PageCacheEntry> }).pages,
     );
-    return migrateV4ToV5({
+    next = migrateV4ToV5({
       meta: {
         lastFullRunAt: parsed.meta?.lastFullRunAt ?? null,
         version: 4,
@@ -270,10 +309,18 @@ function migrateCache(parsed: ValidationCacheFile): ValidationCacheFileV5 {
       pages,
       databases: (parsed as { databases?: Record<string, DatabaseCacheEntry> }).databases,
     });
+  } else {
+    log.info("[ValidationCache] Stale cache version — discarding and starting fresh");
+    next = emptyCache();
   }
 
-  log.info("[ValidationCache] Stale cache version — discarding and starting fresh");
-  return emptyCache();
+  const stripped = stripMigrationOrphans(next);
+  if (stripped.removed > 0) {
+    log.info(
+      `[ValidationCache] Finished migration: dropped ${stripped.removed} orphan issue(s) (validator:legacy or legacy__ entry keys)`,
+    );
+  }
+  return stripped.data;
 }
 
 function readFromDisk(cacheFile: string): ValidationCacheFileV5 {
@@ -1263,10 +1310,13 @@ export class ValidationCacheService {
   }
 
   setByUrl(url: string, entry: PageCacheEntry): void {
-    let entryKey = this.indexes.byUrl[url];
-    if (!entryKey) {
-      entryKey = `legacy${url.replace(/\//g, "__")}`;
-      this.indexes.byUrl[url] = entryKey;
+    const entryKey = this.indexes.byUrl[url];
+    if (!entryKey || isLegacySyntheticEntryKey(entryKey)) {
+      log.warn(
+        { url, entryKey },
+        "[ValidationCache] setByUrl skipped — no real type/slug/locale entry key for URL (refusing synthetic legacy keys)",
+      );
+      return;
     }
 
     const existingIds = [...(this.indexes.byEntry[entryKey] ?? [])];
@@ -1279,7 +1329,14 @@ export class ValidationCacheService {
     const byValidator: Record<string, string> = {};
 
     const add = (raw: ValidationIssue, severity: "error" | "warning") => {
-      const validator = raw.validator || "legacy";
+      if (!raw.validator) {
+        log.warn(
+          { url, code: raw.code },
+          "[ValidationCache] setByUrl skipped issue without validator name",
+        );
+        return;
+      }
+      const validator = raw.validator;
       const stored = issueToStored(
         { ...raw, type: severity, validator },
         validator,
@@ -1337,6 +1394,11 @@ export class ValidationCacheService {
 
   markFullRunAt(ts: string): void {
     this.lastFullRunAt = ts;
+  }
+
+  /** Stamp used by Global Health "last site-wide run" (Refresh / Hard refresh). */
+  markSiteWideRunAt(ts: string): void {
+    this.lastSiteWideRunAt = ts;
   }
 
   getLastFullRunAt(): string | null {
@@ -1397,38 +1459,43 @@ export class ValidationCacheService {
   }
 
   /**
-   * Drop v4→v5 migration orphans tagged `validator: "legacy"`.
-   * Replace-by-validator never clears these when real validators re-run.
-   * Does not touch other issues or wipe run metadata (only removes `legacy` stamps).
+   * Drop v4→v5 migration orphans (`validator: "legacy"` or synthetic `legacy__` entry keys).
+   * Load/flush already finish the migration; this forces an immediate persist for staff UI.
    */
   async purgeLegacyIssues(): Promise<{ removed: number }> {
-    const toDelete = Object.values(this.issues).filter(
-      (issue) => issue.validator === "legacy",
-    );
-    this.dropCompletions(toDelete.map((i) => i.id));
-    this.dropClaims(toDelete.map((i) => i.id));
-    this.dropAttempts(toDelete.map((i) => i.id));
-    for (const issue of toDelete) delete this.issues[issue.id];
-
-    for (const meta of Object.values(this.runMetaByEntry)) {
-      if (meta.byValidator?.legacy) {
-        delete meta.byValidator.legacy;
-      }
-    }
-    for (const meta of Object.values(this.runMetaByScope)) {
-      if (meta?.byValidator?.legacy) {
-        delete meta.byValidator.legacy;
-      }
-    }
-
-    if (toDelete.length > 0) {
-      this.indexes = rebuildIndexes(this.issues, this.indexes.byUrl);
+    const removed = this.dropMigrationOrphansInMemory();
+    if (removed > 0) {
       await this.flush();
-      log.info(
-        `[ValidationCache] Purged ${toDelete.length} legacy validator issue(s)`,
-      );
+      log.info(`[ValidationCache] Purged ${removed} migration orphan issue(s)`);
     }
-    return { removed: toDelete.length };
+    return { removed };
+  }
+
+  /** Apply stripMigrationOrphans to in-memory state. Returns how many issues were removed. */
+  private dropMigrationOrphansInMemory(): number {
+    const { data, removed } = stripMigrationOrphans({
+      meta: {
+        version: CACHE_VERSION,
+        lastFullRunAt: this.lastFullRunAt,
+        lastSiteWideRunAt: this.lastSiteWideRunAt,
+      },
+      issues: this.issues,
+      indexes: this.indexes,
+      runMeta: { byEntry: this.runMetaByEntry, byScope: this.runMetaByScope },
+      completions: this.completions,
+      claims: this.claims,
+      attempts: this.attempts,
+      databases: Object.fromEntries(this.dbMap.entries()),
+    });
+    if (removed === 0) return 0;
+    this.issues = data.issues;
+    this.indexes = data.indexes;
+    this.runMetaByEntry = data.runMeta?.byEntry ?? {};
+    this.runMetaByScope = data.runMeta?.byScope ?? {};
+    this.completions = data.completions ?? {};
+    this.claims = data.claims ?? {};
+    this.attempts = data.attempts ?? {};
+    return removed;
   }
 
   flush(): Promise<void> {
@@ -1478,6 +1545,13 @@ export class ValidationCacheService {
 
   private async doFlush(): Promise<void> {
     try {
+      // Never republish migration orphans (stale replica / pre-deploy memory).
+      const dropped = this.dropMigrationOrphansInMemory();
+      if (dropped > 0) {
+        log.info(
+          `[ValidationCache] Flush dropped ${dropped} migration orphan(s) before persist`,
+        );
+      }
       this.writeLocalFile();
       log.info(
         `[ValidationCache] Flushed ${Object.keys(this.issues).length} issues, ${this.dbMap.size} database entries to disk`,

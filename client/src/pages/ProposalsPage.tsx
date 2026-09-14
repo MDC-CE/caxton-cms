@@ -81,7 +81,7 @@ import {
 } from "@/components/agents/ProposalListCard";
 import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
 import {
-  SituationReviewBadge,
+  ProposalSituationCallout,
   type ReviewContextPayload,
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
@@ -1299,7 +1299,6 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     className={ui.className}
                   />
                   <ProposalKindBadge kind={p.kind} />
-                  {!isTerminal ? <SituationReviewBadge reviewContext={reviewContext} /> : null}
                   {p.kind === "edits" ? (
                     <ReviewModeBadge proposal={p} label={mode.label} variant={mode.variant} />
                   ) : null}
@@ -1320,6 +1319,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   ) : null}
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
+                {!isTerminal ? (
+                  <ProposalSituationCallout
+                    reviewContext={reviewContext}
+                    snapshot={p.review_context_snapshot}
+                    kind={p.kind}
+                  />
+                ) : null}
                 <div
                   className="flex flex-wrap items-center gap-2"
                   data-testid="proposal-identity-row"

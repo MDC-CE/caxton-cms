@@ -47,21 +47,174 @@ export type ReviewContextPayload = {
   }>;
 };
 
+/** Mirrors server DAMAGE_CLASS_META for snapshot-only fallbacks. */
+const DAMAGE_CLASS_FALLBACK: Record<
+  string,
+  { badge_label: string; situation_description: string; risk: string }
+> = {
+  none: {
+    badge_label: "Handoff",
+    situation_description: "Reminder or wall — closing does not change the live site.",
+    risk: "No live content change on close or accept.",
+  },
+  existing_metadata: {
+    badge_label: "Metadata fix",
+    situation_description:
+      "Small change on an existing page (title, description, etc.). Easy to undo; still check the copy is accurate.",
+    risk: "Low — metadata on a page that already exists.",
+  },
+  existing_content: {
+    badge_label: "Content edit",
+    situation_description:
+      "Changes copy or fields on a page that already exists. Confirm the edit matches the summary before apply.",
+    risk: "Medium — body or field changes on a live page.",
+  },
+  selling_page: {
+    badge_label: "Selling page",
+    situation_description:
+      "This proposal changes a page that sells a program or offer. Wrong outcome claims (hire rate, salary, price) can cost real leads — verify figures before apply.",
+    risk: "High — selling page; outcome claims affect leads.",
+  },
+  new_public_content: {
+    badge_label: "New public content",
+    situation_description:
+      "New or proposed public page. Judge angle, facts, and funnel — not only whether apply is easy.",
+    risk: "High — brand and spam risk for new public content.",
+  },
+};
+
+/** Kind badge copy — situation chip that repeats this is redundant. */
+function kindDisplayLabel(kind?: string): string | null {
+  if (kind === "notes") return "Handoff";
+  if (kind === "idea") return "Idea";
+  if (kind === "edits") return "Edits";
+  return null;
+}
+
+function fallbackFromDamageClass(damageClass?: string) {
+  if (!damageClass) return null;
+  return DAMAGE_CLASS_FALLBACK[damageClass] ?? null;
+}
+
+/** Build a display payload from live review_context, else persisted snapshot. */
+export function resolveSituationDisplay(opts: {
+  reviewContext?: ReviewContextPayload | null;
+  snapshot?: Record<string, unknown> | null;
+  /** Used when neither live nor snapshot has situation (e.g. open handoff). */
+  kind?: string;
+}): ReviewContextPayload | null {
+  const live = opts.reviewContext;
+  if (live?.staff_summary?.badge_label && live.staff_summary.situation_description) {
+    return live;
+  }
+  if (live?.staff_summary?.badge_label) {
+    const fb = fallbackFromDamageClass(live.damage_class);
+    if (fb || live.staff_summary.situation_description) {
+      return {
+        ...live,
+        staff_summary: {
+          ...live.staff_summary,
+          situation_description:
+            live.staff_summary.situation_description ||
+            fb?.situation_description ||
+            "Open Details for risk and undo guidance.",
+          risk: live.staff_summary.risk || fb?.risk || "—",
+          undo: live.staff_summary.undo || "—",
+        },
+      };
+    }
+  }
+
+  const snap = opts.snapshot;
+  if (snap && typeof snap === "object") {
+    const damage_class =
+      typeof snap.damage_class === "string" ? snap.damage_class : live?.damage_class;
+    const fb = fallbackFromDamageClass(damage_class);
+    const badge_label =
+      typeof snap.badge_label === "string"
+        ? snap.badge_label
+        : fb?.badge_label ?? (typeof damage_class === "string" ? damage_class : null);
+    const situation_description =
+      typeof snap.situation_description === "string"
+        ? snap.situation_description
+        : fb?.situation_description ?? null;
+    if (badge_label || situation_description) {
+      return {
+        ...live,
+        damage_class,
+        undo_cost: typeof snap.undo_cost === "string" ? snap.undo_cost : live?.undo_cost,
+        block_apply:
+          typeof snap.block_apply === "boolean" ? snap.block_apply : live?.block_apply,
+        active_checklists: Array.isArray(snap.active_checklists)
+          ? (snap.active_checklists as string[])
+          : live?.active_checklists,
+        staff_summary: {
+          badge_label: badge_label || fb?.badge_label || "Situation",
+          situation_description:
+            situation_description ||
+            live?.staff_summary?.situation_description ||
+            fb?.situation_description ||
+            "Open Details for risk and undo guidance.",
+          risk: live?.staff_summary?.risk || fb?.risk || "—",
+          undo: live?.staff_summary?.undo || "—",
+          ...(live?.staff_summary?.related ? { related: live.staff_summary.related } : {}),
+        },
+      };
+    }
+  }
+
+  if (live?.damage_class) {
+    const fb = fallbackFromDamageClass(live.damage_class);
+    if (fb) {
+      return {
+        ...live,
+        staff_summary: {
+          badge_label: fb.badge_label,
+          situation_description: fb.situation_description,
+          risk: fb.risk,
+          undo: "—",
+        },
+      };
+    }
+  }
+
+  // Open handoffs / ideas with no snapshot yet still get a plain-English situation.
+  if (opts.kind === "notes" || opts.kind === "idea") {
+    const fb = DAMAGE_CLASS_FALLBACK.none;
+    return {
+      damage_class: "none",
+      undo_cost: "none",
+      staff_summary: {
+        badge_label: opts.kind === "idea" ? "Idea" : fb.badge_label,
+        situation_description:
+          opts.kind === "idea"
+            ? "Idea to accept or decline — accepting does not change the live site by itself."
+            : fb.situation_description,
+        risk: fb.risk,
+        undo: "No live change.",
+      },
+    };
+  }
+
+  return live ?? null;
+}
+
 /** List chip from persisted snapshot (no modal — open detail for live audit). */
 export function SituationSnapshotBadge({
   snapshot,
+  kind,
   className,
 }: {
   snapshot?: Record<string, unknown> | null;
+  /** When set, hide chip if label duplicates the kind badge. */
+  kind?: string;
   className?: string;
 }) {
-  const label =
-    typeof snapshot?.badge_label === "string"
-      ? snapshot.badge_label
-      : typeof snapshot?.damage_class === "string"
-        ? snapshot.damage_class
-        : null;
+  const resolved = resolveSituationDisplay({ snapshot });
+  const label = resolved?.staff_summary?.badge_label ?? null;
   if (!label) return null;
+  const kindLabel = kindDisplayLabel(kind);
+  if (kindLabel && label === kindLabel) return null;
   return (
     <Badge
       variant="outline"
@@ -73,18 +226,171 @@ export function SituationSnapshotBadge({
   );
 }
 
+function SituationDialogBody({
+  reviewContext,
+  staff,
+}: {
+  reviewContext: ReviewContextPayload;
+  staff: NonNullable<ReviewContextPayload["staff_summary"]>;
+}) {
+  const [advanced, setAdvanced] = useState(false);
+
+  return (
+    <div className="space-y-3 text-sm">
+      {reviewContext.situation_changed_since_filed ? (
+        <p
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-100"
+          data-testid="banner-situation-changed"
+        >
+          Situation changed since this was filed
+          {reviewContext.filed_damage_class
+            ? ` (was ${reviewContext.filed_damage_class}, now ${reviewContext.damage_class}).`
+            : "."}
+        </p>
+      ) : null}
+
+      {reviewContext.block_apply ? (
+        <p
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive"
+          data-testid="banner-target-missing"
+        >
+          The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or
+          restore the page and file fresh.
+        </p>
+      ) : null}
+
+      <div className="space-y-1">
+        <p className="font-medium text-foreground">Risk</p>
+        <p className="text-muted-foreground leading-5">{staff.risk}</p>
+      </div>
+      <div className="space-y-1">
+        <p className="font-medium text-foreground">Undo</p>
+        <p className="text-muted-foreground leading-5">{staff.undo}</p>
+      </div>
+      {staff.related ? (
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Related proposals</p>
+          <p className="text-muted-foreground leading-5">{staff.related}</p>
+          {reviewContext.related_open_proposals?.length ? (
+            <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+              {reviewContext.related_open_proposals.map((r) => (
+                <li key={r.id}>
+                  <Link
+                    href={`/private/agents/proposals/${r.id}`}
+                    className="text-primary hover:underline"
+                  >
+                    {r.title || r.id}
+                  </Link>{" "}
+                  ({r.kind})
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {reviewContext.agent_preview?.think_items?.length ? (
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Checklist</p>
+          <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+            {reviewContext.agent_preview.think_items.map((t) => (
+              <li key={t.id}>{t.title}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-auto px-0 text-xs text-primary"
+        data-testid="button-proposal-situation-advanced"
+        onClick={() => setAdvanced((v) => !v)}
+      >
+        {advanced ? "Hide advanced" : "Read more (advanced)"}
+      </Button>
+
+      {advanced ? (
+        <div
+          className="space-y-3 border-t pt-3 text-xs text-muted-foreground"
+          data-testid="panel-proposal-situation-advanced"
+        >
+          <p>
+            <span className="font-medium text-foreground">damage_class:</span>{" "}
+            {reviewContext.damage_class ?? "—"}
+          </p>
+          <p>
+            <span className="font-medium text-foreground">undo_cost:</span>{" "}
+            {reviewContext.undo_cost ?? "—"}
+          </p>
+          <p>
+            <span className="font-medium text-foreground">active_checklists:</span>{" "}
+            {(reviewContext.active_checklists ?? []).join(", ") || "—"}
+          </p>
+          {reviewContext.entries?.length ? (
+            <div>
+              <p className="font-medium text-foreground">entries</p>
+              <ul className="mt-1 space-y-1 font-mono">
+                {reviewContext.entries.map((e) => (
+                  <li key={`${e.contentType}/${e.slug}/${e.locale}`}>
+                    {e.contentType}/{e.slug} ({e.locale}) · {e.existence} · {e.damage_class}
+                    {e.target_missing ? " · target_missing" : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {reviewContext.agent_preview?.think_items?.map((t) => (
+            <div key={t.id} className="space-y-1 rounded-md border p-2">
+              <p className="font-mono text-foreground">{t.id}</p>
+              <p className="font-medium text-foreground">{t.title}</p>
+              <p>{t.why}</p>
+              <ul className="list-disc pl-4">
+                {t.look_for.map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {reviewContext.agent_preview?.warnings?.length ? (
+            <div>
+              <p className="font-medium text-foreground">warnings</p>
+              <ul className="mt-1 space-y-1">
+                {reviewContext.agent_preview.warnings.map((w) => (
+                  <li key={w.code}>
+                    <span className="font-mono">{w.code}</span>: {w.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <pre className="max-h-48 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-4">
+            {JSON.stringify(reviewContext, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** Clickable situation badge → audit dialog (live review_context). */
 export function SituationReviewBadge({
   reviewContext,
+  kind,
   className,
 }: {
   reviewContext: ReviewContextPayload | null | undefined;
+  /** When set, hide chip if label duplicates the kind badge. */
+  kind?: string;
   className?: string;
 }) {
-  const [advanced, setAdvanced] = useState(false);
   if (!reviewContext?.staff_summary?.badge_label) return null;
 
   const staff = reviewContext.staff_summary;
+  const kindLabel = kindDisplayLabel(kind);
+  if (kindLabel && staff.badge_label === kindLabel) return null;
+
   const destructive = Boolean(reviewContext.block_apply);
 
   return (
@@ -114,142 +420,103 @@ export function SituationReviewBadge({
             {staff.situation_description}
           </DialogDescription>
         </DialogHeader>
+        <SituationDialogBody reviewContext={reviewContext} staff={staff} />
+      </DialogContent>
+    </Dialog>
+  );
+}
 
-        <div className="space-y-3 text-sm">
-          {reviewContext.situation_changed_since_filed ? (
-            <p
-              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-100"
-              data-testid="banner-situation-changed"
+/**
+ * Always-visible situation on proposal detail: short description + optional chip.
+ * Falls back to review_context_snapshot when live review_context is missing.
+ */
+export function ProposalSituationCallout({
+  reviewContext,
+  snapshot,
+  kind,
+  className,
+}: {
+  reviewContext?: ReviewContextPayload | null;
+  snapshot?: Record<string, unknown> | null;
+  kind?: string;
+  className?: string;
+}) {
+  const resolved = resolveSituationDisplay({ reviewContext, snapshot, kind });
+  const staff = resolved?.staff_summary;
+  if (!resolved || !staff?.situation_description) return null;
+
+  const kindLabel = kindDisplayLabel(kind);
+  const showChip = Boolean(staff.badge_label && (!kindLabel || staff.badge_label !== kindLabel));
+  const destructive = Boolean(resolved.block_apply);
+
+  return (
+    <Dialog>
+      <div
+        className={cn(
+          "rounded-md border border-card-border bg-muted/30 px-3 py-2.5 space-y-1.5",
+          className,
+        )}
+        data-testid="callout-proposal-situation"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Situation
+          </span>
+          {showChip ? (
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="inline-flex shrink-0"
+                data-testid="badge-proposal-situation"
+                aria-label={`${staff.badge_label} — what this situation means`}
+              >
+                <Badge
+                  variant={destructive ? "destructive" : "outline"}
+                  className="cursor-pointer font-normal hover-elevate"
+                >
+                  {staff.badge_label}
+                </Badge>
+              </button>
+            </DialogTrigger>
+          ) : (
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="text-[11px] text-primary hover:underline"
+                data-testid="button-proposal-situation-details"
+              >
+                Details
+              </button>
+            </DialogTrigger>
+          )}
+          {resolved.situation_changed_since_filed ? (
+            <Badge
+              variant="outline"
+              className="font-normal border-amber-500/40 text-amber-200"
+              data-testid="badge-situation-changed"
             >
-              Situation changed since this was filed
-              {reviewContext.filed_damage_class
-                ? ` (was ${reviewContext.filed_damage_class}, now ${reviewContext.damage_class}).`
-                : "."}
-            </p>
-          ) : null}
-
-          {reviewContext.block_apply ? (
-            <p
-              className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive"
-              data-testid="banner-target-missing"
-            >
-              The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or
-              restore the page and file fresh.
-            </p>
-          ) : null}
-
-          <div className="space-y-1">
-            <p className="font-medium text-foreground">Risk</p>
-            <p className="text-muted-foreground leading-5">{staff.risk}</p>
-          </div>
-          <div className="space-y-1">
-            <p className="font-medium text-foreground">Undo</p>
-            <p className="text-muted-foreground leading-5">{staff.undo}</p>
-          </div>
-          {staff.related ? (
-            <div className="space-y-1">
-              <p className="font-medium text-foreground">Related proposals</p>
-              <p className="text-muted-foreground leading-5">{staff.related}</p>
-              {reviewContext.related_open_proposals?.length ? (
-                <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                  {reviewContext.related_open_proposals.map((r) => (
-                    <li key={r.id}>
-                      <Link
-                        href={`/private/agents/proposals/${r.id}`}
-                        className="text-primary hover:underline"
-                      >
-                        {r.title || r.id}
-                      </Link>{" "}
-                      ({r.kind})
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          ) : null}
-
-          {reviewContext.agent_preview?.think_items?.length ? (
-            <div className="space-y-1">
-              <p className="font-medium text-foreground">Checklist</p>
-              <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                {reviewContext.agent_preview.think_items.map((t) => (
-                  <li key={t.id}>{t.title}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-auto px-0 text-xs text-primary"
-            data-testid="button-proposal-situation-advanced"
-            onClick={() => setAdvanced((v) => !v)}
-          >
-            {advanced ? "Hide advanced" : "Read more (advanced)"}
-          </Button>
-
-          {advanced ? (
-            <div
-              className="space-y-3 border-t pt-3 text-xs text-muted-foreground"
-              data-testid="panel-proposal-situation-advanced"
-            >
-              <p>
-                <span className="font-medium text-foreground">damage_class:</span>{" "}
-                {reviewContext.damage_class ?? "—"}
-              </p>
-              <p>
-                <span className="font-medium text-foreground">undo_cost:</span>{" "}
-                {reviewContext.undo_cost ?? "—"}
-              </p>
-              <p>
-                <span className="font-medium text-foreground">active_checklists:</span>{" "}
-                {(reviewContext.active_checklists ?? []).join(", ") || "—"}
-              </p>
-              {reviewContext.entries?.length ? (
-                <div>
-                  <p className="font-medium text-foreground">entries</p>
-                  <ul className="mt-1 space-y-1 font-mono">
-                    {reviewContext.entries.map((e) => (
-                      <li key={`${e.contentType}/${e.slug}/${e.locale}`}>
-                        {e.contentType}/{e.slug} ({e.locale}) · {e.existence} · {e.damage_class}
-                        {e.target_missing ? " · target_missing" : ""}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {reviewContext.agent_preview?.think_items?.map((t) => (
-                <div key={t.id} className="space-y-1 rounded-md border p-2">
-                  <p className="font-mono text-foreground">{t.id}</p>
-                  <p className="font-medium text-foreground">{t.title}</p>
-                  <p>{t.why}</p>
-                  <ul className="list-disc pl-4">
-                    {t.look_for.map((l) => (
-                      <li key={l}>{l}</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-              {reviewContext.agent_preview?.warnings?.length ? (
-                <div>
-                  <p className="font-medium text-foreground">warnings</p>
-                  <ul className="mt-1 space-y-1">
-                    {reviewContext.agent_preview.warnings.map((w) => (
-                      <li key={w.code}>
-                        <span className="font-mono">{w.code}</span>: {w.message}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              <pre className="max-h-48 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-4">
-                {JSON.stringify(reviewContext, null, 2)}
-              </pre>
-            </div>
+              Changed since filed
+            </Badge>
           ) : null}
         </div>
+        <p
+          className="text-sm leading-5 text-foreground/90"
+          data-testid="text-proposal-situation-description"
+        >
+          {staff.situation_description}
+        </p>
+      </div>
+      <DialogContent
+        className="max-h-[85vh] max-w-lg overflow-y-auto"
+        data-testid="dialog-proposal-situation"
+      >
+        <DialogHeader>
+          <DialogTitle>{staff.badge_label}</DialogTitle>
+          <DialogDescription className="text-left text-sm leading-5 text-muted-foreground">
+            {staff.situation_description}
+          </DialogDescription>
+        </DialogHeader>
+        <SituationDialogBody reviewContext={resolved} staff={staff} />
       </DialogContent>
     </Dialog>
   );
