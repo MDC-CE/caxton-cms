@@ -718,9 +718,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [pendingAutoSubmit, setPendingAutoSubmit] = useState(false);
 
-  // TEMP: disable Turnstile on localhost so workshop RSVP can be tested without captcha.
-  // Revert when local testing is done.
-  const turnstileEnabled = false; // was: data.turnstile?.enabled ?? true;
+  const turnstileEnabled = data.turnstile?.enabled ?? true;
 
   const { data: turnstileSiteKey, isLoading: turnstileSiteKeyLoading } = useQuery<{ siteKey: string }>({
     queryKey: ["/api/turnstile/site-key"],
