@@ -5,6 +5,10 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   sort: "sort",
   sortDir: "sort_dir",
   q: "q",
+  proposerUsername: "proposer_username",
+  proposerActorType: "proposer_actor_type",
+  proposerActorRole: "proposer_actor_role",
+  agentSessionId: "agent_session_id",
 } as const;
 
 export type ProposalListStatus =
@@ -20,11 +24,21 @@ export type ProposalListKind = "all" | "edits" | "notes" | "idea";
 export type ProposalListSortField = "created_at" | "updated_at";
 export type ProposalListSortDir = "asc" | "desc";
 
+/** `all` = no actor-type filter (omitted from API). */
+export type ProposalListActorType = "all" | "ui" | "mcp" | "system";
+
 export type ProposalListFilters = {
   status: ProposalListStatus;
   kind: ProposalListKind;
   sort: ProposalListSortField;
   sortDir: ProposalListSortDir;
+  /** Exact case-insensitive proposer username; empty = no filter. */
+  proposerUsername: string;
+  proposerActorType: ProposalListActorType;
+  /** Exact swarm role id; empty = no filter. */
+  proposerActorRole: string;
+  /** Exact created_agent_session_id; empty = no filter. */
+  agentSessionId: string;
 };
 
 export type ProposalListViewState = {
@@ -37,6 +51,10 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   kind: "all",
   sort: "updated_at",
   sortDir: "desc",
+  proposerUsername: "",
+  proposerActorType: "all",
+  proposerActorRole: "",
+  agentSessionId: "",
 };
 
 export const DEFAULT_PROPOSAL_LIST_VIEW: ProposalListViewState = {
@@ -54,6 +72,8 @@ const STATUS_VALUES = new Set<ProposalListStatus>([
 ]);
 
 const KIND_VALUES = new Set<ProposalListKind>(["all", "edits", "notes", "idea"]);
+
+const ACTOR_TYPE_VALUES = new Set<ProposalListActorType>(["all", "ui", "mcp", "system"]);
 
 function parseStatus(raw: string | null): ProposalListStatus {
   if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.status;
@@ -79,6 +99,13 @@ function parseSortDir(raw: string | null): ProposalListSortDir {
   return DEFAULT_PROPOSAL_LIST_FILTERS.sortDir;
 }
 
+function parseActorType(raw: string | null): ProposalListActorType {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorType;
+  return ACTOR_TYPE_VALUES.has(raw as ProposalListActorType)
+    ? (raw as ProposalListActorType)
+    : DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorType;
+}
+
 export function parseProposalListSearch(search: string): ProposalListViewState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return {
@@ -87,6 +114,10 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       kind: parseKind(params.get(PROPOSAL_LIST_SEARCH_KEYS.kind)),
       sort: parseSort(params.get(PROPOSAL_LIST_SEARCH_KEYS.sort)),
       sortDir: parseSortDir(params.get(PROPOSAL_LIST_SEARCH_KEYS.sortDir)),
+      proposerUsername: params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerUsername) ?? "",
+      proposerActorType: parseActorType(params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerActorType)),
+      proposerActorRole: params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerActorRole) ?? "",
+      agentSessionId: params.get(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId) ?? "",
     },
     q: params.get(PROPOSAL_LIST_SEARCH_KEYS.q) ?? "",
   };
@@ -128,6 +159,33 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.sortDir, filters.sortDir);
   }
 
+  const trimmedUser = filters.proposerUsername.trim();
+  if (!trimmedUser) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.proposerUsername);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.proposerUsername, trimmedUser);
+  }
+
+  if (filters.proposerActorType === d.proposerActorType) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.proposerActorType);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.proposerActorType, filters.proposerActorType);
+  }
+
+  const trimmedRole = filters.proposerActorRole.trim();
+  if (!trimmedRole) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.proposerActorRole);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.proposerActorRole, trimmedRole);
+  }
+
+  const trimmedSession = filters.agentSessionId.trim();
+  if (!trimmedSession) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId, trimmedSession);
+  }
+
   const trimmedQ = q.trim();
   if (!trimmedQ) {
     params.delete(PROPOSAL_LIST_SEARCH_KEYS.q);
@@ -144,15 +202,23 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   let n = 0;
   if (filters.status !== d.status) n += 1;
   if (filters.kind !== d.kind) n += 1;
+  if (filters.proposerUsername.trim()) n += 1;
+  if (filters.proposerActorType !== d.proposerActorType) n += 1;
+  if (filters.proposerActorRole.trim()) n += 1;
+  if (filters.agentSessionId.trim()) n += 1;
   return n;
 }
 
-/** Reset status/kind to defaults; leave sort as-is. */
+/** Reset status/kind/proposer dims to defaults; leave sort as-is. */
 export function clearProposalListFilters(filters: ProposalListFilters): ProposalListFilters {
   return {
     ...filters,
     status: DEFAULT_PROPOSAL_LIST_FILTERS.status,
     kind: DEFAULT_PROPOSAL_LIST_FILTERS.kind,
+    proposerUsername: DEFAULT_PROPOSAL_LIST_FILTERS.proposerUsername,
+    proposerActorType: DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorType,
+    proposerActorRole: DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorRole,
+    agentSessionId: DEFAULT_PROPOSAL_LIST_FILTERS.agentSessionId,
   };
 }
 
@@ -162,9 +228,13 @@ export type ProposalListApiQuery = {
   sort: ProposalListSortField;
   sort_dir: ProposalListSortDir;
   q?: string;
+  proposer_username?: string;
+  proposer_actor_type?: string;
+  proposer_actor_role?: string;
+  agent_session_id?: string;
 };
 
-/** Map UI filters to API query params. status/kind `all` → omit. */
+/** Map UI filters to API query params. status/kind/actor type `all` → omit. */
 export function toProposalListApiQuery(
   filters: ProposalListFilters,
   q: string,
@@ -177,6 +247,13 @@ export function toProposalListApiQuery(
   if (filters.kind !== "all") out.kind = filters.kind;
   const trimmed = q.trim();
   if (trimmed) out.q = trimmed;
+  const user = filters.proposerUsername.trim();
+  if (user) out.proposer_username = user;
+  if (filters.proposerActorType !== "all") out.proposer_actor_type = filters.proposerActorType;
+  const role = filters.proposerActorRole.trim();
+  if (role) out.proposer_actor_role = role;
+  const session = filters.agentSessionId.trim();
+  if (session) out.agent_session_id = session;
   return out;
 }
 
@@ -187,6 +264,10 @@ export function proposalListApiSearchParams(query: ProposalListApiQuery): string
   params.set("sort", query.sort);
   params.set("sort_dir", query.sort_dir);
   if (query.q) params.set("q", query.q);
+  if (query.proposer_username) params.set("proposer_username", query.proposer_username);
+  if (query.proposer_actor_type) params.set("proposer_actor_type", query.proposer_actor_type);
+  if (query.proposer_actor_role) params.set("proposer_actor_role", query.proposer_actor_role);
+  if (query.agent_session_id) params.set("agent_session_id", query.agent_session_id);
   return params.toString();
 }
 
@@ -210,6 +291,16 @@ export const PROPOSAL_KIND_OPTIONS: Array<{ value: ProposalListKind; label: stri
   { value: "edits", label: "Edits" },
   { value: "notes", label: "Notes" },
   { value: "idea", label: "Idea" },
+];
+
+export const PROPOSAL_ACTOR_TYPE_OPTIONS: Array<{
+  value: ProposalListActorType;
+  label: string;
+}> = [
+  { value: "all", label: "Anyone" },
+  { value: "ui", label: "Staff" },
+  { value: "mcp", label: "Agent" },
+  { value: "system", label: "System" },
 ];
 
 export type ProposalSortPreset = {

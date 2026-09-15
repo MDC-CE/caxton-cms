@@ -26,7 +26,7 @@ Fact-staleness class for **substantive** content refreshes — **not** GSC traff
 - Mirrored on `seo-index.json` when the entry has an SEO signal; tier alone does not create an inventory row.
 - Does not bump `updated_at`. Not a publish gate for pages outside inventory.
 - **Pick help:** `get_entry_fields` → `seo.refresh_tier` `fill_intent`; this topic for the full tree.
-- **List:** `list_entries` `refresh_tier: fast|medium|evergreen|unset` filters **seo-index only** (`unset` = inventory row missing a tier).
+- **List:** `list_entries` `refresh_tier: fast|medium|evergreen|unset` filters **seo-index only** (`unset` = inventory row missing a tier). Zero index matches → empty list (never the unfiltered catalog).
 
 ## Tools
 

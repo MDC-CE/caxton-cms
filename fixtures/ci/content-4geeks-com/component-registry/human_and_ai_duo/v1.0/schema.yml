@@ -16,7 +16,9 @@ props:
   description:
     type: string
     required: true
-    description: Section description text
+    description: >-
+      Section description. Accepts rich-text HTML from the editor, or light
+      markdown in YAML ([text](url), newlines, **bold**, *italic*).
     example: Learning works best when human expertise and AI support come together.
   bullet_groups:
     type: array
@@ -33,7 +35,9 @@ props:
       description:
         type: string
         required: false
-        description: Optional description for the group
+        description: >-
+          Optional group description. Accepts rich-text HTML or light markdown
+          ([text](url), newlines, **bold**, *italic*).
       image:
         type: string
         required: false
@@ -79,7 +83,9 @@ props:
   footer_description:
     type: string
     required: false
-    description: Optional italic footer text below the bullet groups
+    description: >-
+      Optional italic footer text below the bullet groups. Accepts rich-text HTML
+      or light markdown ([text](url), newlines, **bold**, *italic*).
     example: Together, human mentorship and AI-powered tools accelerate your learning.
   images:
     type: array

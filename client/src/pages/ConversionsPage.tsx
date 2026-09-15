@@ -304,7 +304,7 @@ function ConversionsPageInner() {
   const [signupEventNameDraft, setSignupEventNameDraft] = useState("sign_up");
   const [loginEventNameDraft, setLoginEventNameDraft] = useState("login");
 
-  const { data: trackingSettings } = useQuery<TrackingSettingsResponse>({
+  const { data: trackingSettings, isLoading: trackingSettingsLoading } = useQuery<TrackingSettingsResponse>({
     queryKey: ["/api/settings/tracking"],
   });
   const conversionEventEntries = trackingSettings?.conversion_events ?? [];
@@ -1123,7 +1123,14 @@ function ConversionsPageInner() {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            {conversionEventEntries.length === 0 ? (
+            {trackingSettingsLoading ? (
+              <div
+                className="flex items-center justify-center py-8"
+                data-testid="loading-conversion-events"
+              >
+                <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : conversionEventEntries.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4 text-center">
                 No conversion events configured yet.
               </p>

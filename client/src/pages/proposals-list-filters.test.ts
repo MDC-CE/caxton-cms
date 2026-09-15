@@ -30,17 +30,34 @@ describe("parseProposalListSearch", () => {
         kind: "notes",
         sort: "created_at",
         sortDir: "asc",
+        proposerUsername: "",
+        proposerActorType: "all",
+        proposerActorRole: "",
+        agentSessionId: "",
       },
       q: "hero",
     });
   });
 
+  it("parses proposer filters", () => {
+    const view = parseProposalListSearch(
+      "proposer_username=alice%40x.com&proposer_actor_type=mcp&proposer_actor_role=copy_editor&agent_session_id=sess-1",
+    );
+    expect(view.filters.proposerUsername).toBe("alice@x.com");
+    expect(view.filters.proposerActorType).toBe("mcp");
+    expect(view.filters.proposerActorRole).toBe("copy_editor");
+    expect(view.filters.agentSessionId).toBe("sess-1");
+  });
+
   it("coerces invalid values per field without wiping siblings", () => {
-    const view = parseProposalListSearch("status=banana&kind=notes&sort=title&sort_dir=sideways&q=ok");
+    const view = parseProposalListSearch(
+      "status=banana&kind=notes&sort=title&sort_dir=sideways&proposer_actor_type=staff&q=ok",
+    );
     expect(view.filters.status).toBe("open");
     expect(view.filters.kind).toBe("notes");
     expect(view.filters.sort).toBe("updated_at");
     expect(view.filters.sortDir).toBe("desc");
+    expect(view.filters.proposerActorType).toBe("all");
     expect(view.q).toBe("ok");
   });
 });
@@ -65,13 +82,17 @@ describe("serializeProposalListSearch", () => {
     expect(params.get("status")).toBeNull();
   });
 
-  it("round-trips non-default view", () => {
+  it("round-trips non-default view including proposer filters", () => {
     const view = {
       filters: {
         status: "all" as const,
         kind: "edits" as const,
         sort: "created_at" as const,
         sortDir: "asc" as const,
+        proposerUsername: "bob@x.com",
+        proposerActorType: "ui" as const,
+        proposerActorRole: "copy_editor",
+        agentSessionId: "sess-9",
       },
       q: "pricing",
     };
@@ -100,32 +121,44 @@ describe("countActiveProposalFilters", () => {
     ).toBe(0);
   });
 
-  it("counts status and kind only", () => {
+  it("counts status, kind, and proposer dims", () => {
     expect(
       countActiveProposalFilters({
         status: "finished",
         kind: "notes",
         sort: "created_at",
         sortDir: "desc",
+        proposerUsername: "a@x.com",
+        proposerActorType: "mcp",
+        proposerActorRole: "seo_specialist",
+        agentSessionId: "s1",
       }),
-    ).toBe(2);
+    ).toBe(6);
   });
 });
 
 describe("clearProposalListFilters", () => {
-  it("resets status and kind but keeps sort", () => {
+  it("resets status, kind, and proposer dims but keeps sort", () => {
     expect(
       clearProposalListFilters({
         status: "finished",
         kind: "notes",
         sort: "created_at",
         sortDir: "asc",
+        proposerUsername: "a@x.com",
+        proposerActorType: "ui",
+        proposerActorRole: "copy_editor",
+        agentSessionId: "sess",
       }),
     ).toEqual({
       status: "open",
       kind: "all",
       sort: "created_at",
       sortDir: "asc",
+      proposerUsername: "",
+      proposerActorType: "all",
+      proposerActorRole: "",
+      agentSessionId: "",
     });
   });
 });
@@ -149,17 +182,53 @@ describe("toProposalListApiQuery", () => {
     });
   });
 
+  it("maps proposer filters to API keys", () => {
+    expect(
+      toProposalListApiQuery(
+        {
+          ...DEFAULT_PROPOSAL_LIST_FILTERS,
+          proposerUsername: "  alice@x.com ",
+          proposerActorType: "mcp",
+          proposerActorRole: "copy_editor",
+          agentSessionId: "sess-1",
+        },
+        "",
+      ),
+    ).toEqual({
+      status: "open",
+      sort: "updated_at",
+      sort_dir: "desc",
+      proposer_username: "alice@x.com",
+      proposer_actor_type: "mcp",
+      proposer_actor_role: "copy_editor",
+      agent_session_id: "sess-1",
+    });
+  });
+
   it("builds search params string", () => {
     const qs = proposalListApiSearchParams(
       toProposalListApiQuery(
-        { status: "partial", kind: "edits", sort: "created_at", sortDir: "asc" },
+        {
+          status: "partial",
+          kind: "edits",
+          sort: "created_at",
+          sortDir: "asc",
+          proposerUsername: "u",
+          proposerActorType: "ui",
+          proposerActorRole: "",
+          agentSessionId: "",
+        },
         "x",
       ),
     );
-    expect(new URLSearchParams(qs).get("status")).toBe("partial");
-    expect(new URLSearchParams(qs).get("kind")).toBe("edits");
-    expect(new URLSearchParams(qs).get("sort")).toBe("created_at");
-    expect(new URLSearchParams(qs).get("sort_dir")).toBe("asc");
-    expect(new URLSearchParams(qs).get("q")).toBe("x");
+    const params = new URLSearchParams(qs);
+    expect(params.get("status")).toBe("partial");
+    expect(params.get("kind")).toBe("edits");
+    expect(params.get("sort")).toBe("created_at");
+    expect(params.get("sort_dir")).toBe("asc");
+    expect(params.get("q")).toBe("x");
+    expect(params.get("proposer_username")).toBe("u");
+    expect(params.get("proposer_actor_type")).toBe("ui");
+    expect(params.get("proposer_actor_role")).toBeNull();
   });
 });

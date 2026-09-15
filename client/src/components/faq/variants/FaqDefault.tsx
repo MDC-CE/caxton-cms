@@ -13,6 +13,8 @@ import { useInternalNav } from "@/hooks/useInternalNav";
 import { faqItemKey, normalizeFaqEntries, applyFaqHideOnLocations } from "@shared/faq-listing";
 import { useSession } from "@/contexts/SessionContext";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
+import { RichTextContent } from "@/components/ui/rich-text-content";
+import { inlineMarkdownToHtml } from "@/lib/inline-markdown";
 
 interface FAQSectionProps {
   data: FAQSectionType;
@@ -125,10 +127,13 @@ export function FAQSection({ data }: FAQSectionProps) {
                   {item.question}
                 </AccordionTrigger>
                 <AccordionContent
-                  className="text-muted-foreground pb-4 leading-relaxed whitespace-pre-line"
+                  className="text-muted-foreground pb-4 leading-relaxed"
                   data-testid={`text-faq-answer-${index}`}
                 >
-                  {item.answer}
+                  <RichTextContent
+                    html={inlineMarkdownToHtml(item.answer)}
+                    className="text-muted-foreground leading-relaxed"
+                  />
                 </AccordionContent>
               </AccordionItem>
             ))}

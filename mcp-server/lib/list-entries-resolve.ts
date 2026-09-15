@@ -195,7 +195,8 @@ export function filterSlugRows(
   if (opts.locale) {
     out = out.filter((r) => r.locales.includes(opts.locale!));
   }
-  if (opts.slugs && opts.slugs.length > 0) {
+  // undefined = no slug filter; [] = match nothing (e.g. refresh_tier with zero index hits).
+  if (opts.slugs !== undefined) {
     const set = new Set(opts.slugs);
     out = out.filter((r) => set.has(r.slug));
   }

@@ -44,6 +44,9 @@ props:
       answer:
         type: string
         required: true
+        description: >-
+          Answer body. Accepts light markdown ([text](url), newlines, **bold**,
+          *italic*) or rich-text HTML.
         example: No prior experience is required. We start from the fundamentals.
     description: >-
       Runtime-resolved Q&A pairs from dynamic_entries (not authored). Prefer dynamic_entries / hardcoded_entries for
@@ -83,6 +86,9 @@ props:
           answer:
             type: string
             required: true
+            description: >-
+              Answer body. Accepts light markdown ([text](url), newlines, **bold**,
+              *italic*) or rich-text HTML.
       permanent_filters:
         type: array
         required: false
@@ -140,6 +146,9 @@ props:
       answer:
         type: string
         required: true
+        description: >-
+          Answer body. Accepts light markdown ([text](url), newlines, **bold**,
+          *italic*) or rich-text HTML.
     description: >-
       Authored Q&A pairs used when there is no dynamic database/content_type, or merged ahead of dynamic results (also
       allowed under dynamic_entries).
