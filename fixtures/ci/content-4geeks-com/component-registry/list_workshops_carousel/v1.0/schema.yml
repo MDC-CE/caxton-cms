@@ -105,13 +105,13 @@ props:
       cta_url:
         type: string
         required: false
-        description: Link to the workshop detail / register page
+        description: >-
+          Link to the workshop detail page. Prefer {{ entry._resolved_url }} when
+          dynamic_entries uses content_type: workshop (url_pattern).
       slug:
         type: string
         required: false
-        description: >-
-          Workshop slug — used to build https://learn.4geeks.com/.../workshops/:slug
-          when cta_url is empty
+        description: Optional workshop slug (informational); prefer cta_url from _resolved_url
       technology_image_ids:
         type: array
         required: false
@@ -133,6 +133,13 @@ props:
       content_type:
         type: string
         required: false
+      filter_by_locale:
+        type: boolean
+        required: false
+        description: >-
+          When false, include workshops of every language (mixed listing). Default
+          true filters to the page locale. With false, cta_url from
+          {{ entry._resolved_url }} uses each entry's own lang.
       limit:
         type: number
         required: false

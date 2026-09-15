@@ -70,6 +70,20 @@ entries:
       - mcp-server/explain/proposals.md
     tools_changed: true
   - date: "2026-09-14"
+    summary: "LeadForm webhook.fail_on_error (blocking delivery)"
+    agent_impact:
+      - "webhook.fail_on_error: true makes /api/leads/webhook-delivery await upstream and return 502 on failure so the form does not show success. Default/omit stays fire-and-forget."
+      - "Workshop RSVP checkin override sets fail_on_error: true (Learn-like). Marketing webhooks should leave it off."
+      - "Reconnect not required for catalog; re-bootstrap_agent for explain."
+    paths:
+      - shared/component-registry/_common/schema.ts
+      - shared/resolveLeadFormOverride.ts
+      - server/routes/webhooks.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/component-behaviors.md
+    tools_changed: false
+  - date: "2026-09-14"
     summary: "LeadForm form_overrides: entry_field_slug (bare entry path)"
     agent_impact:
       - "Conditions: form_field_slug XOR entry_field_slug. entry_field_slug is a bare entry field path looked up on singleEntry at match time — do not use {{ entry.* }} on that key (section resolveDeep would replace templates early)."

@@ -152,6 +152,11 @@ export const webhookConfigSchema = z
     method: z.enum(["POST", "GET"]).optional(),
     /** When true: Authorization Token on delivery (if url) + append visitor token to success.url */
     use_visitor_token: z.boolean().optional(),
+    /**
+     * When true, `/api/leads/webhook-delivery` waits for upstream and returns 502 on
+     * failure so the form does not show success (Learn-like RSVP). Default / omit = fire-and-forget.
+     */
+    fail_on_error: z.boolean().optional(),
   })
   .refine(
     (w) =>
@@ -185,6 +190,11 @@ export const leadFormOverrideSchema = z
       .object({
         url: z.string().optional(),
         message: z.string().optional(),
+        /**
+         * Non-blocking: invalidate the current entry page query after submit success
+         * so computed entry fields refresh while success.url / message still run.
+         */
+        reload_entry: z.boolean().optional(),
       })
       .optional(),
     tags: z.string().optional(),
@@ -234,6 +244,11 @@ export const leadFormDataSchema = z.object({
   success: z.object({
     url: z.string().optional(),
     message: z.string().optional(),
+    /**
+     * Non-blocking: invalidate the current entry page query after submit success
+     * so computed entry fields refresh while success.url / message still run.
+     */
+    reload_entry: z.boolean().optional(),
   }).optional(),
   /**
    * Continuous form_overrides: first match overlays form props for UI + submit.

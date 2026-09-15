@@ -32,21 +32,6 @@ function resolveLangDisplay(item: WorkshopCarouselItem): {
   return null;
 }
 
-function resolveWorkshopCtaUrl(item: WorkshopCarouselItem): string {
-  const direct =
-    coerceToText(item.cta_url) ||
-    coerceToText((item as { url?: unknown }).url);
-  if (direct) return direct;
-
-  const slug = coerceToText((item as { slug?: unknown }).slug);
-  if (!slug) return "";
-
-  // Learn hosts workshop detail pages (API url is often null).
-  const lang = coerceToText(item.lang).toLowerCase();
-  const path = lang === "es" ? `/es/workshops/${slug}` : `/workshops/${slug}`;
-  return `https://learn.4geeks.com${path}`;
-}
-
 function isItemLive(item: WorkshopCarouselItem, now: number): boolean {
   if (typeof item.is_live === "boolean") return item.is_live;
   if (!item.starting_at) return false;
@@ -77,7 +62,7 @@ function WorkshopCard({
   const title = coerceToText(item.title);
   const description = coerceToText(item.description);
   const ctaLabel = coerceToText(item.cta_label) || coerceToText(ctaFallback);
-  const ctaUrl = resolveWorkshopCtaUrl(item);
+  const ctaUrl = coerceToText(item.cta_url);
   const hostName = coerceToText(item.host_name);
   const langDisplay = resolveLangDisplay(item);
   const durationLabel = coerceToText(item.duration_label);

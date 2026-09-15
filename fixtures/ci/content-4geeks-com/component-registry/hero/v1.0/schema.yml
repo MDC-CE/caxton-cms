@@ -3303,84 +3303,115 @@ variant_props:
     description:
       type: string
       required: false
-    starting_at:
-      type: string
+    date:
+      type: object
       required: false
-    ending_at:
-      type: string
-      required: false
-    date_icon:
-      type: string
-      required: false
-    duration_label:
-      type: string
-      required: false
-    duration_suffix:
-      type: string
-      required: false
-    duration_icon:
-      type: string
-      required: false
-    host_name:
-      type: string
-      required: false
-    host_avatar_url:
-      type: string
-      required: false
-    host_bio:
-      type: string
-      required: false
-    host_heading:
-      type: string
-      required: false
-    host_socials:
-      type: array
-      required: false
-      items:
-        name:
+      properties:
+        starting_at_iso:
           type: string
           required: false
-        url:
+        ending_at_iso:
           type: string
           required: false
         icon:
           type: string
           required: false
-    live_now_label:
-      type: string
+    duration:
+      type: object
       required: false
-    capacity:
-      type: string
+      properties:
+        label:
+          type: string
+          required: false
+        suffix:
+          type: string
+          required: false
+        icon:
+          type: string
+          required: false
+    host:
+      type: object
       required: false
-    registered_count:
-      type: string
+      properties:
+        heading:
+          type: string
+          required: false
+        name:
+          type: string
+          required: false
+        avatar_url:
+          type: string
+          required: false
+        bio:
+          type: string
+          required: false
+        socials:
+          type: array
+          required: false
+          items:
+            name:
+              type: string
+              required: false
+            url:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+    seats:
+      type: object
       required: false
-    seats_remaining:
-      type: string
+      properties:
+        capacity:
+          type: string
+          required: false
+        registered_count:
+          type: string
+          required: false
+        remaining:
+          type: string
+          required: false
+        registrants:
+          type: string
+          required: false
+        fallback_avatars:
+          type: string
+          required: false
+        copy:
+          type: string
+          required: false
+        load_more_label:
+          type: string
+          required: false
+          description: Label for expanding the registrant avatar grid (e.g. Load more / Ver más)
+          example: Load more
+    live:
+      type: object
       required: false
-    registrant_avatars:
-      type: string
+      description: >-
+        Live event UI: label beside the badge; optional media strip above the form
+        (no countdown). Empty images → strip without media.
+      properties:
+        label:
+          type: string
+          required: false
+          description: Shown to the right of the event badge when the event is live
+        images:
+          type: array
+          required: false
+          description: >-
+            Background GIFs/images for the live strip; cycles every 5s while live.
+            Empty / omitted → no media (does not fall back to countdown.background_image).
+          items:
+            type: string
+    countdown:
+      type: object
       required: false
-    fallback_avatars:
-      type: string
-      required: false
-    seats_copy:
-      type: string
-      required: false
-    seats_load_more_label:
-      type: string
-      required: false
-      description: Label for expanding the registrant avatar grid (e.g. Load more / Ver más)
-      example: Load more
-    registered_suffix:
-      type: string
-      required: false
-    remaining_prefix:
-      type: string
-      required: false
-    countdown_background_image:
-      type: string
-      required: false
+      description: Upcoming-only countdown strip
+      properties:
+        background_image:
+          type: string
+          required: false
     form_card_title:
       type: string
       required: false

@@ -279,7 +279,11 @@ export {
 // modal
 export {
   modalSectionSchema,
+  modalDefaultSectionSchema,
+  modalTwoColumnSectionSchema,
   type ModalSection,
+  type ModalDefaultSection,
+  type ModalTwoColumnSection,
 } from "../site_4geeks-com/component-registry/modal/v1.0/schema";
 
 // numbered_steps

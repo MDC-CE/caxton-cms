@@ -19,7 +19,8 @@ import {
 } from "@/components/ui/form";
 import { useSession, useLocation as useSessionLocation, useUTM } from "@/contexts/SessionContext";
 import { useSectionContext } from "@/contexts/SectionContext";
-import { apiRequest, apiFetch } from "@/lib/queryClient";
+import { apiRequest, apiFetch, queryClient } from "@/lib/queryClient";
+import { getApiPath } from "@shared/api-paths";
 import type { Country } from "react-phone-number-input";
 import { trackFormSubmission, trackConversion, resolveWebhook, hashEmail, getEcommerceProductLookup, type ConversionName, type TrackingSettingsResponse } from "@/lib/tracking";
 import { ensureEcommerceProductLookup } from "@/lib/ecommerceProductMap";
@@ -51,10 +52,13 @@ import {
   type LeadFormOverride,
 } from "@shared/resolveLeadFormOverride";
 import { useAuthUser, getConsumerToken } from "@/hooks/useAuthUser";
+import { useInternalNav } from "@/hooks/useInternalNav";
 import { resolveFormFields, type IdentityField } from "@/lib/resolveFormFields";
 import {
   resolveLeadFormPhase,
   resolveLeadFormCopy,
+  leadFormSubtitleClassName,
+  type LeadFormSubtitleStyle,
 } from "@/lib/resolveLeadFormCopy";
 import {
   LeadFormFieldControl,
@@ -205,6 +209,7 @@ export interface LeadFormData {
     url?: string;
     method?: "POST" | "GET";
     use_visitor_token?: boolean;
+    fail_on_error?: boolean;
   };
   fields?: {
     email?: FieldConfig;
@@ -224,6 +229,8 @@ export interface LeadFormData {
   success?: {
     url?: string;
     message?: string;
+    /** Invalidate entry page query in background after success (non-blocking). */
+    reload_entry?: boolean;
   };
   /**
    * Continuous form_overrides: first matching conditions (AND) overlays form props for UI + submit
@@ -235,20 +242,31 @@ export interface LeadFormData {
   /** Phase copy for signup forms. Locale defaults apply when a stage is omitted. */
   messages?: {
     guest?: {
+      title?: string | null;
       subtitle?: string | null;
+      subtitle_style?: LeadFormSubtitleStyle;
       submit_label?: string;
+      submit_disabled?: boolean;
     } | null;
     login?: {
+      title?: string | null;
       subtitle?: string | null;
+      subtitle_style?: LeadFormSubtitleStyle;
       submit_label?: string;
       back_label?: string;
+      submit_disabled?: boolean;
     } | null;
     incomplete?: {
+      title?: string | null;
       subtitle?: string | null;
+      subtitle_style?: LeadFormSubtitleStyle;
       submit_label?: string;
+      submit_disabled?: boolean;
     } | null;
     ready?: {
+      title?: string | null;
       subtitle?: string | null;
+      subtitle_style?: LeadFormSubtitleStyle;
       submit_label?: string;
       submit_disabled?: boolean;
     } | null;
@@ -610,6 +628,7 @@ type EffectiveWebhook = {
   url?: string;
   method?: "POST" | "GET";
   use_visitor_token?: boolean;
+  fail_on_error?: boolean;
 };
 
 /** Resolve conversion/success/tags/webhook for one submit (override > form root > event). */
@@ -621,7 +640,7 @@ function buildEffectiveSubmitConfig(
   entry?: Record<string, unknown> | null,
 ): {
   conversion_name?: string;
-  success?: { url?: string; message?: string };
+  success?: { url?: string; message?: string; reload_entry?: boolean };
   tags: string;
   automations: string;
   /** Delivery override when url is set; may also carry use_visitor_token alone. */
@@ -674,6 +693,7 @@ function buildEffectiveSubmitConfig(
           ...(wh.url ? { url: wh.url } : {}),
           method: (wh.method === "GET" ? "GET" : "POST") as "POST" | "GET",
           ...(wh.use_visitor_token ? { use_visitor_token: true } : {}),
+          ...(wh.fail_on_error ? { fail_on_error: true } : {}),
         }
       : null;
   const eventWebhook: EffectiveWebhook | null =
@@ -705,6 +725,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const { session, setConversionPage } = useSession();
   const sessionLocation = useSessionLocation();
   const utm = useUTM();
+  const nav = useInternalNav();
   const [isSuccess, setIsSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
@@ -778,6 +799,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     isLoggedIn,
     isLoading: authProfileLoading,
     setToken: setConsumerToken,
+    clearToken: clearConsumerAuth,
   } = useAuthUser({
     enabled: isSignupRequested,
   });
@@ -800,7 +822,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     >
       {locale === "es" ? "¿Ya tienes una cuenta? " : "Already have an account? "}
       <button
-        type="button" 
+        type="button"
         onClick={() => {
           setLoginError(null);
           setLoginPassword("");
@@ -813,6 +835,43 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       </button>
     </p>
   ) : null;
+
+  // Always when logged in on a signup form (mirrors the guest login prompt chrome).
+  const switchAccountName =
+    (authProfile?.first_name || "").trim() ||
+    (authProfile?.email || "").trim() ||
+    (authProfile?.username || "").trim();
+
+  const switchAccountPrompt =
+    isSignupRequested && isLoggedIn ? (
+      <p
+        className="text-sm text-center text-muted-foreground mt-3"
+        data-testid="text-switch-account-prompt"
+      >
+        {switchAccountName
+          ? locale === "es"
+            ? `¿No eres ${switchAccountName}? `
+            : `Not ${switchAccountName}? `
+          : locale === "es"
+            ? "¿No eres tú? "
+            : "Not you? "}
+        <button
+          type="button"
+          onClick={() => {
+            clearConsumerAuth();
+            setLoginMode(false);
+            setLoginError(null);
+            setLoginPassword("");
+            setPendingAutoSubmit(false);
+            setSubmitError(null);
+          }}
+          className="underline hover:text-foreground font-medium text-primary"
+          data-testid="button-switch-account-logout"
+        >
+          {locale === "es" ? "Cerrar sesión" : "Log out"}
+        </button>
+      </p>
+    ) : null;
 
   // Identity fields already known from the logged-in profile: hidden from the UI
   // but prefilled so they are still part of the submitted payload.
@@ -1550,6 +1609,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             url: resolvedUrl,
             method: deliveryOverride.method || "POST",
             ...(effective.use_visitor_token ? { use_visitor_token: true } : {}),
+            ...(deliveryOverride.fail_on_error ? { fail_on_error: true } : {}),
           },
         };
         if (effective.use_visitor_token) {
@@ -1705,6 +1765,16 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         }
       }
 
+      if (effective.success?.reload_entry && contentType && slug) {
+        // Non-blocking: refresh entry page data so overrides re-resolve (e.g. registered).
+        void queryClient.invalidateQueries({
+          queryKey: ["/api/database-single", contentType, slug, locale],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: [getApiPath(contentType), slug, locale],
+        });
+      }
+
       if (effective.success?.url) {
         const templated =
           resolveTemplatedUrl(effective.success.url) || effective.success.url;
@@ -1712,7 +1782,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           templated,
           effective.use_visitor_token,
         );
-        window.location.href = successUrl;
+        nav.navigate(successUrl);
       } else {
         setIsSuccess(true);
         setSuccessMessage(effective.success?.message || (locale === "es" 
@@ -1726,6 +1796,18 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       const defaultErrorMessage = locale === "es"
         ? "Hubo un problema al enviar tu información. Por favor intenta de nuevo."
         : "There was a problem submitting your information. Please try again.";
+
+      const isTechnicalErrorMessage = (msg: string) =>
+        /upstream webhook returned a non-2xx/i.test(msg) ||
+        /failed to deliver webhook/i.test(msg) ||
+        /failed to deliver/i.test(msg);
+
+      const preferUserFacing = (msg: string | undefined | null): string | null => {
+        if (typeof msg !== "string") return null;
+        const trimmed = msg.trim();
+        if (!trimmed || isTechnicalErrorMessage(trimmed)) return null;
+        return trimmed;
+      };
 
       let errorMessage = defaultErrorMessage;
       try {
@@ -1741,14 +1823,19 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             } else {
               try {
                 const details = JSON.parse(parsed.details) as { detail?: unknown; message?: unknown };
-                const fromDetails = details.detail ?? details.message;
-                if (typeof fromDetails === "string") {
+                const fromDetails = preferUserFacing(
+                  typeof details.detail === "string"
+                    ? details.detail
+                    : typeof details.message === "string"
+                      ? details.message
+                      : null,
+                );
+                if (fromDetails) {
                   errorMessage = fromDetails;
-                } else if (typeof parsed.error === "string") {
-                  errorMessage = parsed.error;
                 }
               } catch {
-                errorMessage = parsed.details;
+                const fromRawDetails = preferUserFacing(parsed.details);
+                if (fromRawDetails) errorMessage = fromRawDetails;
               }
             }
           } else if (
@@ -1757,10 +1844,11 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             "detail" in parsed.details &&
             typeof (parsed.details as { detail: unknown }).detail === "string"
           ) {
-            errorMessage = (parsed.details as { detail: string }).detail;
-          } else if (typeof parsed.error === "string") {
-            errorMessage = parsed.error;
+            const fromObj = preferUserFacing((parsed.details as { detail: string }).detail);
+            if (fromObj) errorMessage = fromObj;
           }
+          // Never surface internal webhook labels (e.g. "Upstream webhook returned a non-2xx…")
+          // — keep default unless details already provided a user-facing message.
         }
       } catch {
         // keep default
@@ -1957,6 +2045,20 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     return !!cfg.visible && !(hideOptionals && !cfg.required);
   };
 
+  // Avoid an empty space-y wrapper pushing the submit button away from the message.
+  const hasVisibleStackedFields =
+    showField("first_name") ||
+    showField("last_name") ||
+    showField("phone") ||
+    showField("email") ||
+    showField("region") ||
+    showField("location") ||
+    showField("program") ||
+    showField("plan") ||
+    showField("coupon") ||
+    showField("referral_key") ||
+    showField("current_download");
+
   // Legal notice + marketing consent: show for guests (lead submit or signup).
   // Non-signup forms also resolve to guest_signup phase; hide once logged in.
   const showLegalAndConsent = formPhase === "guest_signup";
@@ -2047,9 +2149,17 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   if (loginMode) {
     return (
       <div className={data.className} data-testid="lead-form-login">
+        {formCopy.title ? (
+          <p
+            className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
+            data-testid="text-login-title"
+          >
+            {formCopy.title}
+          </p>
+        ) : null}
         {(!allowSignup || formCopy.subtitle) && (
           <p
-            className="text-sm text-muted-foreground leading-snug mb-3"
+            className={`${leadFormSubtitleClassName(formCopy.subtitle_style)} mb-3`}
             data-testid="text-login-subtitle"
           >
             {!allowSignup
@@ -2280,15 +2390,24 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           </form>
         </Form>
         {signupLoginPrompt}
+        {switchAccountPrompt}
       </div>
     );
   }
 
   return (
     <div className={data.className} data-testid="lead-form">
+      {formCopy.title ? (
+        <p
+          className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
+          data-testid="text-form-title"
+        >
+          {formCopy.title}
+        </p>
+      ) : null}
       {formCopy.subtitle && (
         <p
-          className="text-sm text-muted-foreground leading-snug mb-2.5"
+          className={`${leadFormSubtitleClassName(formCopy.subtitle_style)} mb-2.5`}
           data-testid="text-form-subtitle"
         >
           {formCopy.subtitle}
@@ -2296,6 +2415,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       )}
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+          {hasVisibleStackedFields ? (
           <div className="space-y-4">
             {/* First + Last name on same row - NEW ORDER: Name -> Phone -> Email */}
             {(showField("first_name") || showField("last_name")) && (
@@ -2676,6 +2796,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
               />
             )}
           </div>
+          ) : null}
 
           {showField("client_comments") && (
             <FormField
@@ -2791,6 +2912,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         </form>
       </Form>
       {signupLoginPrompt}
+      {switchAccountPrompt}
     </div>
   );
 }

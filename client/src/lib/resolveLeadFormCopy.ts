@@ -1,9 +1,9 @@
 /**
- * Phase-driven subtitle/submit copy for LeadForm signup flows.
+ * Phase-driven title/subtitle/submit copy for LeadForm signup flows.
  *
  * Nested YAML under `messages` (guest / login / incomplete / ready) carries
- * subtitles and submit labels only. Form headings belong to the parent
- * (e.g. hero `form_card_title`), not the LeadForm itself.
+ * optional title, subtitle, and submit labels. Parent hero `form_card_*` is
+ * optional chrome — leave empty when the form owns the heading (e.g. workshop live).
  */
 
 export type LeadFormPhase =
@@ -14,9 +14,21 @@ export type LeadFormPhase =
 
 export type LeadFormLocale = "en" | "es";
 
+/** Presentation for the phase subtitle only (title stays hard-coded in the form). */
+export interface LeadFormSubtitleStyle {
+  /** Default: left. */
+  align?: "left" | "center";
+  /** default = muted sm; strong = larger, bolder, foreground. */
+  emphasis?: "default" | "strong";
+}
+
 export interface LeadFormCopyBlock {
+  /** Optional phase heading (e.g. "Live now!"). Null / omit = nothing rendered. */
+  title?: string | null;
   /** Set to null to explicitly hide the phase subtitle. */
   subtitle?: string | null;
+  /** Optional per-phase subtitle presentation (align / emphasis). */
+  subtitle_style?: LeadFormSubtitleStyle;
   submit_label?: string;
   back_label?: string;
   /** When true, primary submit control is disabled (e.g. already registered, event not live). */
@@ -40,10 +52,39 @@ export interface LeadFormCopySource {
 }
 
 export interface ResolvedLeadFormCopy {
+  title: string | undefined;
   subtitle: string | undefined;
+  subtitle_style?: LeadFormSubtitleStyle;
   submit_label: string;
   back_label?: string;
   submit_disabled?: boolean;
+}
+
+function resolvePhaseTitle(block: LeadFormCopyBlock | null | undefined): string | undefined {
+  if (block == null || block.title === null) return undefined;
+  const t = typeof block.title === "string" ? block.title.trim() : "";
+  return t || undefined;
+}
+
+function resolveSubtitleStyle(
+  block: LeadFormCopyBlock | null | undefined,
+): LeadFormSubtitleStyle | undefined {
+  const style = block?.subtitle_style;
+  if (!style || typeof style !== "object") return undefined;
+  const align = style.align === "center" || style.align === "left" ? style.align : undefined;
+  const emphasis =
+    style.emphasis === "strong" || style.emphasis === "default" ? style.emphasis : undefined;
+  if (!align && !emphasis) return undefined;
+  return { ...(align ? { align } : {}), ...(emphasis ? { emphasis } : {}) };
+}
+
+/** Tailwind classes for a resolved subtitle_style (spacing left to the caller). */
+export function leadFormSubtitleClassName(style?: LeadFormSubtitleStyle): string {
+  const align = style?.align === "center" ? "text-center" : "text-left";
+  if (style?.emphasis === "strong") {
+    return `${align} text-md leading-snug`;
+  }
+  return `${align} text-sm text-muted-foreground leading-snug`;
 }
 
 export function resolveLeadFormPhase(opts: {
@@ -126,10 +167,12 @@ export function resolveLeadFormCopy(
   if (phase === "guest_signup") {
     const block = messages.guest;
     return {
+      title: resolvePhaseTitle(block),
       subtitle:
         block === null || block?.subtitle === null
           ? undefined
           : block?.subtitle ?? data.subtitle,
+      subtitle_style: resolveSubtitleStyle(block),
       submit_label: block?.submit_label || data.submit_label || defaults.submit_label,
       submit_disabled: block?.submit_disabled === true,
     };
@@ -139,10 +182,12 @@ export function resolveLeadFormCopy(
     const block =
       messages.login === undefined ? data.login : messages.login;
     return {
+      title: resolvePhaseTitle(block === null ? null : block),
       subtitle:
         block === null || block?.subtitle === null
           ? undefined
           : block?.subtitle ?? defaults.subtitle,
+      subtitle_style: resolveSubtitleStyle(block === null ? null : block),
       submit_label: block?.submit_label || defaults.submit_label,
       back_label: block?.back_label || defaults.back_label,
       submit_disabled: block?.submit_disabled === true,
@@ -154,10 +199,12 @@ export function resolveLeadFormCopy(
       ? messages.incomplete
       : messages.ready;
   return {
+    title: resolvePhaseTitle(block),
     subtitle:
       block === null || block?.subtitle === null
         ? undefined
         : block?.subtitle ?? defaults.subtitle,
+    subtitle_style: resolveSubtitleStyle(block),
     submit_label:
       block?.submit_label ||
       messages.guest?.submit_label ||

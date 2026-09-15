@@ -142,6 +142,8 @@ export const webhookConfigSchema = z
     url: z.string().optional(),
     method: z.enum(["POST", "GET"]).optional(),
     use_visitor_token: z.boolean().optional(),
+    /** When true, wait for upstream and fail the submit on non-2xx / network error. */
+    fail_on_error: z.boolean().optional(),
   })
   .refine(
     (w) =>

@@ -151,6 +151,7 @@ form_overrides:
 - **`match_method: contains`:** substring on strings; membership on arrays of scalars/ids. Not deep object search.
 - **Condition `value`:** `resolveDeep` — literals or `{{ visitor.* }}` (logged-in auth profile). Logged out → unresolved → contains fails → normal form.
 - **Order matters:** put already-registered overrides before generic live/upcoming.
+- **`webhook.fail_on_error`:** when true, delivery waits for upstream and the form does **not** show success on 502/network/non-2xx (default remains fire-and-forget).
 - **Resolver:** `shared/resolveLeadFormOverride.ts`. Example: `stacked_with_routes.yml`. Detail: `explain_site` sections → Lead form form_overrides.
 
 ## Paths

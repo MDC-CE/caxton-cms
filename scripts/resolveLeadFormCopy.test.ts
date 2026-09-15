@@ -157,4 +157,73 @@ describe("resolveLeadFormCopy", () => {
     );
     expect(copy.subtitle).toBe("Legacy login subtitle");
   });
+
+  it("uses messages.guest title when set", () => {
+    const copy = resolveLeadFormCopy(
+      "guest_signup",
+      {
+        messages: {
+          guest: {
+            title: "Live now!",
+            subtitle: "Join the event",
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.title).toBe("Live now!");
+    expect(copy.subtitle).toBe("Join the event");
+  });
+
+  it("omits title when messages.guest.title is null", () => {
+    const copy = resolveLeadFormCopy(
+      "guest_signup",
+      {
+        messages: {
+          guest: {
+            title: null,
+            subtitle: "Only subtitle",
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.title).toBeUndefined();
+    expect(copy.subtitle).toBe("Only subtitle");
+  });
+
+  it("passes through per-phase subtitle_style (option B)", () => {
+    const copy = resolveLeadFormCopy(
+      "guest_signup",
+      {
+        messages: {
+          guest: {
+            subtitle: "Centered",
+            subtitle_style: { align: "center", emphasis: "strong" },
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.subtitle_style).toEqual({ align: "center", emphasis: "strong" });
+  });
+
+  it("does not inherit subtitle_style across phases", () => {
+    const copy = resolveLeadFormCopy(
+      "logged_in_ready",
+      {
+        messages: {
+          guest: {
+            subtitle_style: { align: "center", emphasis: "strong" },
+          },
+          ready: {
+            subtitle: "Ready subtitle",
+          },
+        },
+      },
+      "en",
+    );
+    expect(copy.subtitle).toBe("Ready subtitle");
+    expect(copy.subtitle_style).toBeUndefined();
+  });
 });

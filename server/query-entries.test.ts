@@ -206,6 +206,32 @@ describe("queryEntries static content type", () => {
     expect(alpha?._resolved_url).toBe("/en/blog/ai/post-alpha");
   });
 
+  it("keeps all locales and per-entry _resolved_url when filterByLocale is false", async () => {
+    const { items } = await queryEntries(
+      {
+        from: { contentType: "blog" },
+        locale: "en",
+        filterByLocale: false,
+      },
+      { contentIndex: ci, contentRoot },
+    );
+    const slugs = items.map((i) => i.slug).sort();
+    expect(slugs).toEqual(["post-alpha", "post-beta", "post-gamma-es"]);
+
+    const alpha = items.find((i) => i.slug === "post-alpha");
+    const gamma = items.find((i) => i.slug === "post-gamma-es");
+    expect(alpha?._resolved_url).toBe("/en/blog/ai/post-alpha");
+    expect(gamma?._resolved_url).toBe("/es/blog/ai/post-gamma-es");
+  });
+
+  it("still filters to page locale when filterByLocale is omitted", async () => {
+    const { items } = await queryEntries(
+      { from: { contentType: "blog" }, locale: "en" },
+      { contentIndex: ci, contentRoot },
+    );
+    expect(items.map((i) => i.slug).sort()).toEqual(["post-alpha", "post-beta"]);
+  });
+
   it("hydrates omitted content bodies for OG live preview", async () => {
     const { items } = await queryEntries(
       { from: { contentType: "blog" }, locale: "en" },

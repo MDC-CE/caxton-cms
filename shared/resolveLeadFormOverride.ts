@@ -32,12 +32,19 @@ export interface LeadFormOverrideCondition {
 export interface LeadFormOverrideSuccess {
   url?: string;
   message?: string;
+  /**
+   * When true, after a successful submit invalidate the current entry page query
+   * (non-blocking) so computed fields like registered_attendee_ids refresh.
+   */
+  reload_entry?: boolean;
 }
 
 export interface LeadFormOverrideWebhook {
   url?: string;
   method?: "POST" | "GET";
   use_visitor_token?: boolean;
+  /** When true, webhook delivery must succeed before form success UI/redirect. */
+  fail_on_error?: boolean;
 }
 
 /** Fields a matched override may set on the form. New keys pass through automatically. */
@@ -258,10 +265,12 @@ export function applyLeadFormOverrideOutcome<T extends Record<string, unknown>>(
 /** Append visitor token as query param (Learn-compatible join URLs). */
 export function appendVisitorTokenToUrl(url: string, token: string): string {
   if (!token) return url;
+  // Keep in-page hashes as `#id` so useInternalNav can open modals.
+  if (url.startsWith("#")) return url;
   try {
     const target = new URL(
       url,
-      typeof window !== "undefined" ? window.location.origin : "https://example.com",
+      typeof window !== "undefined" ? window.location.href : "https://example.com/",
     );
     target.searchParams.set("token", token);
     return target.href;

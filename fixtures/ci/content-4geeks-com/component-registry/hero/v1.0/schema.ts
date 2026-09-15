@@ -500,56 +500,82 @@ export const heroWorkshopSchema = z.object({
   badge: z.string().optional(),
   title: z.string().optional(),
   description: z.string().optional(),
-  starting_at: z.string().optional(),
-  ending_at: z.string().optional(),
-  /** Icon for the formatted date/time line (icon-picker). */
-  date_icon: z.string().optional(),
-  duration_label: z.string().optional(),
-  duration_suffix: z.string().optional(),
-  /** Icon for the duration badge (icon-picker). */
-  duration_icon: z.string().optional(),
-  host_name: z.string().optional(),
-  host_avatar_url: z.string().optional(),
-  host_bio: z.string().optional(),
-  /** Label above the host card, e.g. "Host for this event". */
-  host_heading: z.string().optional(),
-  /** Social links under host name (icon-picker + url); empty urls hidden. */
-  host_socials: z
-    .array(
-      z.object({
-        name: z.string().optional(),
-        url: z.string().optional(),
-        icon: z.string().optional(),
-      }),
-    )
+  /** Event schedule (ISO datetimes + optional date-line icon). */
+  date: z
+    .object({
+      starting_at_iso: z.string().optional(),
+      ending_at_iso: z.string().optional(),
+      icon: z.string().optional(),
+    })
     .optional(),
-  live_now_label: z.string().optional(),
-  capacity: z.union([z.number(), z.string()]).optional(),
-  registered_count: z.union([z.number(), z.string()]).optional(),
-  seats_remaining: z.union([z.number(), z.string()]).optional(),
-  registrant_avatars: z
-    .union([
-      z.array(z.string()),
-      z.array(
-        z
-          .object({
+  duration: z
+    .object({
+      label: z.string().optional(),
+      suffix: z.string().optional(),
+      icon: z.string().optional(),
+    })
+    .optional(),
+  host: z
+    .object({
+      heading: z.string().optional(),
+      name: z.string().optional(),
+      avatar_url: z.string().optional(),
+      bio: z.string().optional(),
+      socials: z
+        .array(
+          z.object({
             name: z.string().optional(),
-            avatar_url: z.string().optional(),
             url: z.string().optional(),
-          })
-          .passthrough(),
-      ),
-      z.string(),
-    ])
+            icon: z.string().optional(),
+          }),
+        )
+        .optional(),
+    })
     .optional(),
-  fallback_avatars: z.union([z.array(z.string()), z.string()]).optional(),
-  /** Learn-like seats sentence; bind {{ entry.registered_count }} etc. in YAML. */
-  seats_copy: z.string().optional(),
-  seats_load_more_label: z.string().optional(),
-  registered_suffix: z.string().optional(),
-  remaining_prefix: z.string().optional(),
-  /** Decorative media (e.g. GIF) behind the countdown strip above the form. */
-  countdown_background_image: z.string().optional(),
+  /** Registrant / capacity block inside the form card. */
+  seats: z
+    .object({
+      capacity: z.union([z.number(), z.string()]).optional(),
+      registered_count: z.union([z.number(), z.string()]).optional(),
+      remaining: z.union([z.number(), z.string()]).optional(),
+      registrants: z
+        .union([
+          z.array(z.string()),
+          z.array(
+            z
+              .object({
+                name: z.string().optional(),
+                avatar_url: z.string().optional(),
+                url: z.string().optional(),
+              })
+              .passthrough(),
+          ),
+          z.string(),
+        ])
+        .optional(),
+      fallback_avatars: z.union([z.array(z.string()), z.string()]).optional(),
+      copy: z.string().optional(),
+      load_more_label: z.string().optional(),
+    })
+    .optional(),
+  /** Strip content when the event is live (no countdown). */
+  live: z
+    .object({
+      /** Shown next to the event badge when live (not on the media strip). */
+      label: z.string().optional(),
+      /**
+       * Background GIFs/images for the strip above the form.
+       * While live, cycles every 5s (Learn parity). Empty / omitted → no media.
+       */
+      images: z.array(z.string()).optional(),
+    })
+    .optional(),
+  /** Upcoming-only countdown strip. */
+  countdown: z
+    .object({
+      background_image: z.string().optional(),
+    })
+    .optional(),
   form_card_title: z.string().optional(),
   form_card_subtitle: z.string().optional(),
   form_card_disclaimer: z.string().optional(),

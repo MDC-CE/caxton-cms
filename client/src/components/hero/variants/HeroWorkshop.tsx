@@ -10,7 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { UniversalImage } from "@/components/UniversalImage";
 import { getIcon } from "@/lib/icons";
-import { coerceToText } from "@/lib/variable-manager";
+import { coerceToText, resolveTemplateFallback } from "@/lib/variable-manager";
 import {
   Tooltip,
   TooltipContent,
@@ -24,9 +24,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChevronDown } from "lucide-react";
-
-/** Solid soft blue behind the title + countdown row (full-bleed). */
-const TOP_ROW_BG = "hsl(var(--primary) / 0.09)";
 
 /** Learn-like seats: fixed (grid + load-more) height; after expand, button gone and grid fills that space. */
 const SEATS_VISIBLE_THRESHOLD = 16; // beyond this → clamp the grid+button region
@@ -180,35 +177,42 @@ export interface HeroWorkshopData {
   badge?: string;
   title?: string;
   description?: string;
-  starting_at?: string;
-  ending_at?: string;
-  date_icon?: string;
-  duration_label?: string;
-  duration_suffix?: string;
-  duration_icon?: string;
-  host_name?: string;
-  host_avatar_url?: string;
-  host_bio?: string;
-  /** Section label above the host card (e.g. "Host for this event"). */
-  host_heading?: string;
-  /** Social icon links under the host name; empty urls are hidden. */
-  host_socials?: Array<{ name?: string; url?: string; icon?: string }>;
-  live_now_label?: string;
-  capacity?: number | string;
-  registered_count?: number | string;
-  seats_remaining?: number | string;
-  registrant_avatars?:
-    | string[]
-    | string
-    | Array<{ name?: string; avatar_url?: string; url?: string }>;
-  /** Cycled when a registrant has no avatar_url (image ids or URLs). */
-  fallback_avatars?: string[] | string;
-  /** Single Learn-like line above avatars (template can use {{ entry.* }}). */
-  seats_copy?: string;
-  /** Label for expanding the registrant avatar grid (YAML). */
-  seats_load_more_label?: string;
-  /** Decorative media (e.g. GIF) behind the countdown strip above the form. */
-  countdown_background_image?: string;
+  date?: {
+    starting_at_iso?: string;
+    ending_at_iso?: string;
+    icon?: string;
+  };
+  duration?: {
+    label?: string;
+    suffix?: string;
+    icon?: string;
+  };
+  host?: {
+    heading?: string;
+    name?: string;
+    avatar_url?: string;
+    bio?: string;
+    socials?: Array<{ name?: string; url?: string; icon?: string }>;
+  };
+  seats?: {
+    capacity?: number | string;
+    registered_count?: number | string;
+    remaining?: number | string;
+    registrants?:
+      | string[]
+      | string
+      | Array<{ name?: string; avatar_url?: string; url?: string }>;
+    fallback_avatars?: string[] | string;
+    copy?: string;
+    load_more_label?: string;
+  };
+  live?: {
+    label?: string;
+    images?: string[];
+  };
+  countdown?: {
+    background_image?: string;
+  };
   form_card_title?: string;
   form_card_subtitle?: string;
   form_card_disclaimer?: string;
@@ -239,39 +243,58 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
     () => (description ? splitParagraphs(description) : []),
     [description],
   );
-  const durationLabel = coerceToText(data.duration_label);
-  const durationSuffix = coerceToText(data.duration_suffix);
-  const dateIconName = coerceToText(data.date_icon);
-  const durationIconName = coerceToText(data.duration_icon);
+  const durationLabel = coerceToText(data.duration?.label);
+  const durationSuffix = coerceToText(data.duration?.suffix);
+  const dateIconName = coerceToText(data.date?.icon);
+  const durationIconName = coerceToText(data.duration?.icon);
   const DateIcon = dateIconName ? getIcon(dateIconName) : null;
   const DurationIcon = durationIconName ? getIcon(durationIconName) : null;
-  const hostName = coerceToText(data.host_name);
-  const hostBio = coerceToText(data.host_bio);
-  const hostHeading = coerceToText(data.host_heading);
-  const hostSocials = (data.host_socials || [])
+  const hostName = coerceToText(data.host?.name);
+  const hostBio = coerceToText(data.host?.bio);
+  const hostHeading = coerceToText(data.host?.heading);
+  const hostAvatarUrl = coerceToText(data.host?.avatar_url);
+  const hostSocials = (data.host?.socials || [])
     .map((it) => ({
       name: coerceToText(it?.name),
       url: coerceToText(it?.url),
       icon: coerceToText(it?.icon),
     }))
     .filter((it) => !!it.url);
-  const liveNowLabel = coerceToText(data.live_now_label);
-  const seatsCopy = coerceToText(data.seats_copy);
-  const loadMoreLabel = coerceToText(data.seats_load_more_label);
-  const countdownBg = coerceToText(data.countdown_background_image);
+  const liveNowLabel = coerceToText(data.live?.label);
+  const liveImages = useMemo(
+    () => normalizeStringList(data.live?.images),
+    [data.live?.images],
+  );
+  const liveImagesKey = liveImages.join("|");
+  const [liveImageIndex, setLiveImageIndex] = useState(0);
+  // Learn parity: cycle live.images every 5s while the event is live.
+  useEffect(() => {
+    setLiveImageIndex(0);
+  }, [liveImagesKey]);
+  const seatsCopy = coerceToText(data.seats?.copy);
+  const loadMoreLabel = coerceToText(data.seats?.load_more_label);
+  const countdownBg = coerceToText(data.countdown?.background_image);
 
-  const startMs = parseIso(data.starting_at);
-  const endMs = parseIso(data.ending_at);
+  // Edit mode preserveTemplate wraps entry fields as "{{ entry.x | value }}";
+  // strip to the fallback ISO so Date.parse / live strip work like read mode.
+  const startingAtIso = resolveTemplateFallback(
+    coerceToText(data.date?.starting_at_iso),
+  );
+  const endingAtIso = resolveTemplateFallback(
+    coerceToText(data.date?.ending_at_iso),
+  );
+  const startMs = parseIso(startingAtIso || undefined);
+  const endMs = parseIso(endingAtIso || undefined);
   const dateLine =
-    data.starting_at && startMs != null
-      ? formatEventDate(data.starting_at, locale)
+    startingAtIso && startMs != null
+      ? formatEventDate(startingAtIso, locale)
       : "";
 
-  const registered = toNum(data.registered_count);
-  const remaining = toNum(data.seats_remaining);
-  const capacity = toNum(data.capacity);
-  const registrants = normalizeRegistrants(data.registrant_avatars);
-  const fallbackAvatars = normalizeStringList(data.fallback_avatars);
+  const registered = toNum(data.seats?.registered_count);
+  const remaining = toNum(data.seats?.remaining);
+  const capacity = toNum(data.seats?.capacity);
+  const registrants = normalizeRegistrants(data.seats?.registrants);
+  const fallbackAvatars = normalizeStringList(data.seats?.fallback_avatars);
   const hasSeatsInfo =
     !!seatsCopy || registered != null || remaining != null || registrants.length > 0;
   const [showAllSeats, setShowAllSeats] = useState(false);
@@ -312,13 +335,32 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
     else eventState = "upcoming";
   }
 
+  useEffect(() => {
+    if (eventState !== "live" || liveImages.length <= 1) return;
+    const id = window.setInterval(() => {
+      setLiveImageIndex((i) => (i + 1) % liveImages.length);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [eventState, liveImages.length, liveImagesKey]);
+
+  const liveImage =
+    eventState === "live"
+      ? liveImages[liveImageIndex % Math.max(liveImages.length, 1)] ||
+        liveImages[0] ||
+        ""
+      : "";
+
   const countdown =
     eventState === "upcoming" && startMs != null
       ? diffParts(startMs - now)
       : null;
 
+  // Live: cycle `live.images` every 5s. Empty → no media, no countdown fallback.
+  const stripBg = eventState === "live" ? liveImage : countdownBg;
   const showCountdownStrip =
-    !!countdown || (eventState === "live" && !!liveNowLabel) || !!countdownBg;
+    !!countdown ||
+    (eventState === "live" && !!liveImage) ||
+    (eventState === "upcoming" && !!countdownBg);
 
   const form = data.form ?? undefined;
   const hasFormCard =
@@ -353,158 +395,127 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
             column-gap: 4rem !important;
           }
         }
+        @keyframes workshop-live-pulse {
+          0% {
+            box-shadow: 0 0 0 0 rgba(64, 166, 250, 0.28),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+          70% {
+            box-shadow: 0 0 0 10px rgba(64, 166, 250, 0),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(64, 166, 250, 0),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+        }
+        .workshop-live-pulse {
+          animation: workshop-live-pulse 3s ease-out infinite;
+        }
+        @keyframes workshop-live-dot {
+          0% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(255, 82, 82, 0.5), 0 0 0 0 rgba(255, 82, 182, 0.5);
+          }
+          70% {
+            transform: scale(1);
+            box-shadow: 0 0 0 8px rgba(255, 82, 82, 0), 0 0 0 14px rgba(255, 82, 182, 0);
+          }
+          100% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(255, 82, 82, 0), 0 0 0 0 rgba(255, 82, 182, 0);
+          }
+        }
+        .workshop-live-dot {
+          background: rgba(255, 82, 82, 1);
+          animation: workshop-live-dot 1.5s ease-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .workshop-live-pulse,
+          .workshop-live-dot {
+            animation: none;
+          }
+        }
       `}</style>
-      {/* Row 1: title block + countdown — solid blue band (full-bleed) */}
-      <div className="relative">
-        {/* <div
-          aria-hidden
-          className="pointer-events-none absolute left-1/2 top-[calc(-1*var(--section-pt,0px))] bottom-0 z-0 w-screen -translate-x-1/2"
-          style={{ background: TOP_ROW_BG }}
-          data-testid="workshop-top-row-bg"
-        /> */}
-        <div
-          className="relative z-10 grid grid-cols-1 gap-y-8"
-          data-workshop-cols
-        >
-          <div className="space-y-4">
-            {badge && (
-              <span
-                className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
-                data-testid="text-workshop-badge"
-              >
-                {badge}
-              </span>
-            )}
-
-            {titleHtml && (
-              <h1
-                className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
-                data-testid="text-workshop-title"
-              >
-                <div
-                  className="block md:hidden text-[2.25rem] leading-none"
-                  dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
-                />
-                <div
-                  className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
-                  dangerouslySetInnerHTML={{ __html: titleHtml }}
-                />
-              </h1>
-            )}
-
-            {(dateLine || durationLabel) && (
-              <div
-                className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
-                data-testid="text-workshop-datetime"
-              >
-                {dateLine && (
-                  <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
-                    {DateIcon && (
-                      <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
-                    )}
-                    <span>{dateLine}</span>
-                  </div>
-                )}
-                {durationLabel && (
-                  <span
-                    className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
-                    data-testid="text-workshop-duration"
-                  >
-                    {DurationIcon && (
-                      <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
-                    )}
-                    {durationLabel}
-                    {durationSuffix ? ` ${durationSuffix}` : ""}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-
-          {showCountdownStrip ? (
-            <div
-              className={`relative min-h-[7.5rem] max-h-48 lg:self-end overflow-hidden bg-muted ${
-                hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
-              }`}
-              style={{
-                border: "1.5px solid hsl(var(--primary) / 0.22)",
-                borderBottom: hasFormCard ? "none" : undefined,
-                boxShadow: hasFormCard
-                  ? undefined
-                  : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-              }}
-              data-testid="workshop-countdown"
-            >
-              {countdownBg && (
-                <div className="absolute inset-0 z-0">
-                  <UniversalImage
-                    id={countdownBg}
-                    alt=""
-                    className="w-full h-full object-cover"
-                    fieldContext={{ fieldPath: "countdown_background_image" }}
-                  />
-                </div>
-              )}
-              <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
-                {eventState === "live" && liveNowLabel && (
-                  <span className="inline-flex items-center gap-2 rounded-full bg-background/90 px-3 py-1.5 text-sm font-bold text-destructive shadow-sm">
-                    <span className="w-2 h-2 rounded-full bg-destructive" aria-hidden />
-                    {liveNowLabel}
-                  </span>
-                )}
-                {countdown && (
-                  <div
-                    className={`flex gap-2 sm:gap-3 font-inter tabu lar-nums items-center py-6 ${
-                      countdownBg ? "text-white drop-shadow-sm" : "text-foreground"
-                    }`}
-                  >
-                    {countdownSlots.map(([label, value], i) => (
-                      <div key={label} className="flex items-center gap-2 sm:gap-3">
-                        {i > 0 && (
-                          <span
-                            className={`text-2xl font-bold leading-none -mt-4 ${
-                              countdownBg ? "text-white/80" : "text-muted-foreground"
-                            }`}
-                            aria-hidden
-                          >
-                            :
-                          </span>
-                        )}
-                        <div
-                          className="flex flex-col items-center min-w-[2.75rem]"
-                          data-testid={`countdown-${label}`}
-                        >
-                          <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
-                            {value}
-                          </span>
-                          <span
-                            className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
-                              countdownBg ? "text-white/90" : "text-muted-foreground"
-                            }`}
-                          >
-                            {label}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="hidden lg:block" aria-hidden />
-          )}
-        </div>
-      </div>
-
-      {/* Row 2: description/host | form + seats — same column tracks as row 1 */}
       <div
-        className="ps-3 grid grid-cols-1 lg:items-start gap-y-8 lg:pt-0"
+        className="relative z-10 grid grid-cols-1 lg:items-start gap-y-8"
         data-workshop-cols
       >
-        <div className="min-w-0 space-y-4 pt-8 lg:pt-8">
+        <div className="min-w-0 space-y-4">
+          {(badge || (eventState === "live" && liveNowLabel)) && (
+            <div
+              className="flex flex-wrap items-center gap-2"
+              data-testid="workshop-badge-row"
+            >
+              {badge ? (
+                <span
+                  className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
+                  data-testid="text-workshop-badge"
+                >
+                  {badge}
+                </span>
+              ) : null}
+              {eventState === "live" && liveNowLabel ? (
+                <span
+                  className="inline-flex items-center gap-2.5 rounded-[18px] bg-[#FFBEBE] text-[#CD0000] px-2.5 py-1 text-xs font-bold leading-none"
+                  data-testid="text-workshop-live-label"
+                >
+                  <span
+                    className="workshop-live-dot w-2 h-2 rounded-full shrink-0"
+                    aria-hidden
+                  />
+                  {liveNowLabel}
+                </span>
+              ) : null}
+            </div>
+          )}
+
+          {titleHtml && (
+            <h1
+              className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
+              data-testid="text-workshop-title"
+            >
+              <div
+                className="block md:hidden text-[2.25rem] leading-none"
+                dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
+              />
+              <div
+                className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
+                dangerouslySetInnerHTML={{ __html: titleHtml }}
+              />
+            </h1>
+          )}
+
+          {(dateLine || durationLabel) && (
+            <div
+              className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
+              data-testid="text-workshop-datetime"
+            >
+              {dateLine && (
+                <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
+                  {DateIcon && (
+                    <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
+                  )}
+                  <span>{dateLine}</span>
+                </div>
+              )}
+              {durationLabel && (
+                <span
+                  className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
+                  data-testid="text-workshop-duration"
+                >
+                  {DurationIcon && (
+                    <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
+                  )}
+                  {durationLabel}
+                  {durationSuffix ? ` ${durationSuffix}` : ""}
+                </span>
+              )}
+            </div>
+          )}
+
           {paragraphs.length > 0 && (
-            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70" data-testid="text-workshop-description">
+            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70 pt-4" data-testid="text-workshop-description">
               {paragraphs.map((p, i) => (
                 <p key={i} className="whitespace-pre-line">
                   {p}
@@ -523,19 +534,19 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                   {hostHeading}
                 </p>
               )}
-              {(hostName || hostBio || data.host_avatar_url || hostSocials.length > 0) && (
+              {(hostName || hostBio || hostAvatarUrl || hostSocials.length > 0) && (
                 <Card
                   className="w-full rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
                   data-testid="workshop-host"
                 >
                   <div className="flex gap-4 items-center p-5">
-                    {data.host_avatar_url ? (
+                    {hostAvatarUrl ? (
                       <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full overflow-hidden shrink-0 bg-muted">
                         <UniversalImage
-                          id={String(data.host_avatar_url)}
+                          id={hostAvatarUrl}
                           alt={hostName || "Host"}
                           className="w-full h-full object-cover"
-                          fieldContext={{ fieldPath: "host_avatar_url" }}
+                          fieldContext={{ fieldPath: "host.avatar_url" }}
                         />
                       </div>
                     ) : hostName ? (
@@ -602,198 +613,279 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
         </div>
 
         <div className="flex flex-col gap-4 w-full min-w-0 h-fit lg:self-start shrink-0">
-          <div
-            className={`bg-card h-fit shrink-0 ${
-              showCountdownStrip ? "rounded-b-[16px]" : "rounded-[16px]"
-            }`}
-            style={{
-              border: "1.5px solid hsl(var(--primary) / 0.22)",
-              borderTop: showCountdownStrip ? "none" : undefined,
-              boxShadow:
-                "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-            }}
-            data-testid="workshop-form-card"
-          >
-              {hasFormCard && (data.form_card_title || data.form_card_subtitle) && (
-                <div className="pb-1 px-5 pt-5 text-center">
-                  {data.form_card_title && (
-                    <p className="font-inter text-[19px] font-semibold tracking-tight text-foreground">
-                      {data.form_card_title}
-                    </p>
-                  )}
-                  {data.form_card_subtitle && (
-                    <p className="text-[12.5px] text-muted-foreground leading-snug mt-1">
-                      {data.form_card_subtitle}
-                    </p>
-                  )}
-                </div>
-              )}
-              {form && (
-                <div className="px-5 pb-3" data-hero-inline-form>
-                  <Suspense
-                    fallback={
-                      <div className="min-h-24 flex items-center justify-center text-muted-foreground text-sm">
-                        Loading...
-                      </div>
-                    }
+          {(showCountdownStrip || hasFormCard) ? (
+            <div
+              className={`overflow-hidden rounded-[16px] bg-card ${
+                eventState === "live" ? "workshop-live-pulse" : ""
+              }`}
+              style={{
+                border:
+                  eventState === "live"
+                    ? "1.6px solid hsl(var(--primary) / 0.18)"
+                    : "1px solid hsl(var(--border))",
+                boxShadow:
+                  eventState === "live"
+                    ? undefined
+                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
+              }}
+              data-testid="workshop-form-stack"
+            >
+              {showCountdownStrip ? (
+                eventState === "live" ? (
+                  <div
+                    className="relative overflow-hidden bg-muted"
+                    data-testid="workshop-countdown"
                   >
-                    <LeadForm data={form} />
-                  </Suspense>
-                </div>
-              )}
-              {data.form_card_disclaimer && (
-                <p className="text-[11px] text-muted-foreground/60 pb-3 px-5 font-medium text-center">
-                  {data.form_card_disclaimer}
-                </p>
-              )}
+                    {stripBg ? (
+                      <UniversalImage
+                        id={stripBg}
+                        alt=""
+                        loading="eager"
+                        className="block w-full leading-none"
+                        style={{
+                          width: "100%",
+                          height: "auto",
+                          objectFit: "contain",
+                          objectPosition: "center center",
+                        }}
+                        fieldContext={{ fieldPath: "live.images" }}
+                      />
+                    ) : null}
+                  </div>
+                ) : (
+                  <div
+                    className="relative min-h-[7.5rem] max-h-48 overflow-hidden bg-muted"
+                    data-testid="workshop-countdown"
+                  >
+                    {stripBg && (
+                      <div className="absolute inset-0 z-0">
+                        <UniversalImage
+                          id={stripBg}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          fieldContext={{ fieldPath: "countdown.background_image" }}
+                        />
+                      </div>
+                    )}
+                    <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
+                      {countdown && (
+                        <div
+                          className={`flex gap-2 sm:gap-3 font-inter tabular-nums items-center py-6 ${
+                            stripBg ? "text-white drop-shadow-sm" : "text-foreground"
+                          }`}
+                        >
+                          {countdownSlots.map(([label, value], i) => (
+                            <div key={label} className="flex items-center gap-2 sm:gap-3">
+                              {i > 0 && (
+                                <span
+                                  className={`text-2xl font-bold leading-none -mt-4 ${
+                                    stripBg ? "text-white/80" : "text-muted-foreground"
+                                  }`}
+                                  aria-hidden
+                                >
+                                  :
+                                </span>
+                              )}
+                              <div
+                                className="flex flex-col items-center min-w-[2.75rem]"
+                                data-testid={`countdown-${label}`}
+                              >
+                                <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
+                                  {value}
+                                </span>
+                                <span
+                                  className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
+                                    stripBg ? "text-white/90" : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {label}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              ) : null}
 
-              <div
-                className={`px-5 ${hasFormCard ? "pt-3 border-t border-border/60" : "pt-5"} pb-5`}
-                data-testid="workshop-seats"
-                aria-live="polite"
-              >
+              {hasFormCard ? (
+                <div data-testid="workshop-form-card">
+                  {(data.form_card_title || data.form_card_subtitle) && (
+                    <div className="pb-1 px-5 pt-5 text-center">
+                      {data.form_card_title && (
+                        <p className="font-inter text-[19px] font-semibold tracking-tight text-foreground">
+                          {data.form_card_title}
+                        </p>
+                      )}
+                      {data.form_card_subtitle && (
+                        <p className="text-[12.5px] text-muted-foreground leading-snug mt-1">
+                          {data.form_card_subtitle}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {form && (
+                    <div className="px-5 py-3" data-hero-inline-form>
+                      <Suspense
+                        fallback={
+                          <div className="min-h-24 flex items-center justify-center text-muted-foreground text-sm">
+                            Loading...
+                          </div>
+                        }
+                      >
+                        <LeadForm data={form} />
+                      </Suspense>
+                    </div>
+                  )}
+                  {data.form_card_disclaimer && (
+                    <p className="text-[11px] text-muted-foreground/60 pb-3 px-5 font-medium text-center">
+                      {data.form_card_disclaimer}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {hasSeatsInfo ? (
+            <Card
+              className="w-full h-fit shrink-0 rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
+              data-testid="workshop-seats-card"
+            >
+              <div className="p-5" data-testid="workshop-seats" aria-live="polite">
                 <div
                   className="flex flex-col gap-3.5 rounded-2xl bg-muted p-4"
                   style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
                 >
-                  {hasSeatsInfo ? (
-                    <>
-                      {seatsCopy ? (
-                        <p
-                          className="text-xs mb-3 font-medium text-foreground text-center leading-snug"
-                          data-testid="text-workshop-seats-copy"
-                        >
-                          {seatsCopy}
-                        </p>
-                      ) : null}
-                      {registrants.length > 0 ? (
-                        <div
-                          className={
-                            seatsOverflow
-                              ? "flex min-h-0 flex-col"
-                              : undefined
-                          }
-                          style={
-                            seatsOverflow
-                              ? { height: SEATS_LIST_REGION_H }
-                              : undefined
-                          }
-                          data-testid="workshop-seats-viewport"
-                        >
+                  {seatsCopy ? (
+                    <p
+                      className="text-xs mb-3 font-medium text-foreground text-center leading-snug"
+                      data-testid="text-workshop-seats-copy"
+                    >
+                      {seatsCopy}
+                    </p>
+                  ) : null}
+                  {registrants.length > 0 ? (
+                    <div
+                      className={
+                        seatsOverflow ? "flex min-h-0 flex-col" : undefined
+                      }
+                      style={
+                        seatsOverflow
+                          ? { height: SEATS_LIST_REGION_H }
+                          : undefined
+                      }
+                      data-testid="workshop-seats-viewport"
+                    >
+                      <div
+                        className={
+                          seatsOverflow
+                            ? `min-h-0 flex-1 ${
+                                showAllSeats
+                                  ? "overflow-y-auto overscroll-contain pr-0.5"
+                                  : "overflow-hidden"
+                              }`
+                            : undefined
+                        }
+                      >
+                        <TooltipProvider delayDuration={200}>
                           <div
-                            className={
-                              seatsOverflow
-                                ? `min-h-0 flex-1 ${
-                                    showAllSeats
-                                      ? "overflow-y-auto overscroll-contain pr-0.5"
-                                      : "overflow-hidden"
-                                  }`
-                                : undefined
-                            }
+                            className="grid gap-x-2 gap-y-4 justify-items-center"
+                            style={{
+                              gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
+                            }}
+                            data-testid="workshop-seats-grid"
                           >
-                            <TooltipProvider delayDuration={200}>
-                              <div
-                                className="grid gap-x-2 gap-y-4 justify-items-center"
-                                style={{
-                                  gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
-                                }}
-                                data-testid="workshop-seats-grid"
-                              >
-                                {registrants.map((person, i) => {
-                                  const label = person.name || `Participant ${i + 1}`;
-                                  const resolvedAvatar =
-                                    person.avatar_url ||
-                                    (fallbackAvatars.length
-                                      ? fallbackAvatars[i % fallbackAvatars.length]
-                                      : "");
-                                  const avatar = (
-                                    <div
-                                      className="rounded-full overflow-hidden bg-background border border-border/80"
-                                      style={{
-                                        width: AVATAR_SIZE,
-                                        height: AVATAR_SIZE,
+                            {registrants.map((person, i) => {
+                              const label = person.name || `Participant ${i + 1}`;
+                              const resolvedAvatar =
+                                person.avatar_url ||
+                                (fallbackAvatars.length
+                                  ? fallbackAvatars[i % fallbackAvatars.length]
+                                  : "");
+                              const avatar = (
+                                <div
+                                  className="rounded-full overflow-hidden bg-background border border-border/80"
+                                  style={{
+                                    width: AVATAR_SIZE,
+                                    height: AVATAR_SIZE,
+                                  }}
+                                >
+                                  {resolvedAvatar ? (
+                                    <UniversalImage
+                                      id={resolvedAvatar}
+                                      alt={label}
+                                      className="w-full h-full object-cover"
+                                      fieldContext={{
+                                        arrayPath: person.avatar_url
+                                          ? "registrant_avatars"
+                                          : "fallback_avatars",
+                                        index: i,
+                                        srcField: person.avatar_url
+                                          ? "avatar_url"
+                                          : "",
                                       }}
+                                    />
+                                  ) : (
+                                    <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
+                                      {(person.name || "?").charAt(0)}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                              if (!person.name) {
+                                return (
+                                  <div key={`${person.avatar_url}-${i}`}>
+                                    {avatar}
+                                  </div>
+                                );
+                              }
+                              return (
+                                <Tooltip
+                                  key={`${person.avatar_url}-${i}-${person.name}`}
+                                >
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                      aria-label={label}
                                     >
-                                      {resolvedAvatar ? (
-                                        <UniversalImage
-                                          id={resolvedAvatar}
-                                          alt={label}
-                                          className="w-full h-full object-cover"
-                                          fieldContext={{
-                                            arrayPath: person.avatar_url
-                                              ? "registrant_avatars"
-                                              : "fallback_avatars",
-                                            index: i,
-                                            srcField: person.avatar_url
-                                              ? "avatar_url"
-                                              : "",
-                                          }}
-                                        />
-                                      ) : (
-                                        <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
-                                          {(person.name || "?").charAt(0)}
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
-                                  if (!person.name) {
-                                    return (
-                                      <div key={`${person.avatar_url}-${i}`}>
-                                        {avatar}
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <Tooltip key={`${person.avatar_url}-${i}-${person.name}`}>
-                                      <TooltipTrigger asChild>
-                                        <button
-                                          type="button"
-                                          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                          aria-label={label}
-                                        >
-                                          {avatar}
-                                        </button>
-                                      </TooltipTrigger>
-                                      <TooltipContent side="top" className="max-w-[14rem]">
-                                        {person.name}
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  );
-                                })}
-                              </div>
-                            </TooltipProvider>
+                                      {avatar}
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" className="max-w-[14rem]">
+                                    {person.name}
+                                  </TooltipContent>
+                                </Tooltip>
+                              );
+                            })}
                           </div>
-                          {canLoadMoreSeats && (
-                            <button
-                              type="button"
-                              className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
-                              onClick={() => setShowAllSeats(true)}
-                              data-testid="button-workshop-seats-load-more"
-                            >
-                              {loadMoreLabel}
-                            </button>
-                          )}
-                        </div>
-                      ) : (
-                        <div
-                          className="rounded-md bg-background/50"
-                          style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
-                          aria-hidden
-                        />
+                        </TooltipProvider>
+                      </div>
+                      {canLoadMoreSeats && (
+                        <button
+                          type="button"
+                          className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
+                          onClick={() => setShowAllSeats(true)}
+                          data-testid="button-workshop-seats-load-more"
+                        >
+                          {loadMoreLabel}
+                        </button>
                       )}
-
-                    </>
+                    </div>
                   ) : (
                     <div
                       className="rounded-md bg-background/50"
                       style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
                       aria-hidden
-                      data-testid="workshop-seats-placeholder"
                     />
                   )}
                 </div>
               </div>
-          </div>
+            </Card>
+          ) : null}
 
           {showCalendarCard ? (
             <Card
