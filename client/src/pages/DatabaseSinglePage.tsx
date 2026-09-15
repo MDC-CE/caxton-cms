@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { IS_SERVER } from "@/lib/initialData";
 import { useLocation } from "wouter";
@@ -6,6 +8,7 @@ import { SectionRenderer } from "@/components/SectionRenderer";
 import { apiFetch } from "@/lib/queryClient";
 import type { TemplatePage } from "@shared/schema";
 import { getApiPath } from "@shared/api-paths";
+import { localeFromPath } from "@shared/runtime-issues";
 import { useContentTypesRaw } from "@/hooks/useContentTypes";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { useSchemaOrg } from "@/hooks/useSchemaOrg";
@@ -34,7 +37,13 @@ interface DatabaseSinglePageProps {
 
 export default function DatabaseSinglePage({ contentType }: DatabaseSinglePageProps) {
   const [location] = useLocation();
-  const locale = location.startsWith("/es") ? "es" : "en";
+  const { i18n } = useTranslation();
+  const locale = localeFromPath(location);
+  useEffect(() => {
+    if (i18n.language !== locale) {
+      i18n.changeLanguage(locale);
+    }
+  }, [locale, i18n]);
   const { menuConfig: defaultHeaderMenuConfig, isLoading: isDefaultHeaderLoading } = useMenuConfig("main-navbar", locale);
 
   const segments = location.split("?")[0].split("/").filter(Boolean);
