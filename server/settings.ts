@@ -472,6 +472,29 @@ export function parseOpenRushSettings(
   };
 }
 
+/** Site-wide funnel completeness enforcement (diagnostics + funnel write gates). */
+export interface FunnelSettings {
+  /** When true, enforced content types require funnel stage (+ products when site has purchasables). Default false. */
+  enforcement: boolean;
+}
+
+export const DEFAULT_FUNNEL_SETTINGS: FunnelSettings = {
+  enforcement: false,
+};
+
+export function parseFunnelSettings(
+  raw: unknown,
+  defaults: FunnelSettings = DEFAULT_FUNNEL_SETTINGS,
+): FunnelSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ...defaults };
+  }
+  const o = raw as Record<string, unknown>;
+  return {
+    enforcement: typeof o.enforcement === "boolean" ? o.enforcement : defaults.enforcement,
+  };
+}
+
 export function parseSearchConsoleBigQuerySettings(
   raw: unknown,
   defaults: SearchConsoleBigQuerySettings = DEFAULT_SEARCH_CONSOLE_BIGQUERY,
@@ -652,6 +675,7 @@ interface SiteSettings {
   robots: RobotsSettings;
   search_console: SearchConsoleSettings;
   openrush: OpenRushSettings;
+  funnel: FunnelSettings;
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
@@ -745,6 +769,7 @@ function loadSettings(contentRoot?: string): SiteSettings {
     robots: { ...DEFAULT_ROBOTS_SETTINGS },
     search_console: { ...DEFAULT_SEARCH_CONSOLE_SETTINGS },
     openrush: { ...DEFAULT_OPENRUSH_SETTINGS },
+    funnel: { ...DEFAULT_FUNNEL_SETTINGS },
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
     consent: { fallback: null },
@@ -935,6 +960,7 @@ function loadSettings(contentRoot?: string): SiteSettings {
       robots,
       search_console: parseSearchConsoleSettings(parsed.search_console),
       openrush: parseOpenRushSettings(parsed.openrush),
+      funnel: parseFunnelSettings(parsed.funnel),
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
@@ -1220,6 +1246,10 @@ export function getSearchConsoleSettings(contentRoot?: string): SearchConsoleSet
 
 export function getOpenRushSettings(contentRoot?: string): OpenRushSettings {
   return loadSettings(contentRoot).openrush;
+}
+
+export function getFunnelSettings(contentRoot?: string): FunnelSettings {
+  return loadSettings(contentRoot).funnel;
 }
 
 export function getEntryPreviewSettings(contentRoot?: string): EntryPreviewSettings {
@@ -1704,6 +1734,32 @@ export function updateOpenRushSettings(
   log.info(
     `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n}`,
   );
+  return merged;
+}
+
+export function updateFunnelSettings(
+  input: Partial<FunnelSettings>,
+  contentRoot?: string,
+): FunnelSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const current = parseFunnelSettings(existing.funnel);
+  const merged = parseFunnelSettings({ ...current, ...input }, DEFAULT_FUNNEL_SETTINGS);
+  existing.funnel = {
+    enforcement: merged.enforcement,
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(`[Settings] Updated funnel.enforcement=${merged.enforcement}`);
   return merged;
 }
 

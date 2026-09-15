@@ -60,7 +60,8 @@ export function signupFieldMapActionRequired(
       },
       {
         tool: "get_entry_fields",
-        reason: "Re-read section after fix",
+        reason:
+          "Omit fields to list available names, then retry with fields: [...] to re-read after fix",
         priority: "optional",
         args_hint: {
           ...(ctx?.slug ? { slug: ctx.slug } : {}),

@@ -1,12 +1,20 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
+import { Info } from "lucide-react";
 import { SeoTab, GeoTab, DiagnosticsFunnelTab } from "@/pages/SeoGeoPage";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiagnosticsOrganicPanel } from "@/components/diagnostics/DiagnosticsOrganicPanel";
 import { isDiagnosticsSeoOrganic } from "@/lib/diagnostics-tab";
 import { cn } from "@/lib/utils";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+import { useFormatSitePath } from "@/hooks/useFormatSitePath";
 
 interface SeoOverview {
   intentDistribution: Record<string, Record<string, number>>;
@@ -144,14 +152,102 @@ function DiagnosticsSeoOverview() {
 }
 
 export function DiagnosticsFunnelPanel() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const formatSitePath = useFormatSitePath();
   const { data: overview, isLoading } = useQuery<SeoOverview>({
     queryKey: ["/api/seo/overview"],
   });
-  if (isLoading) return <LoadingSection />;
+  const { data: funnelSettings, isLoading: settingsLoading } = useQuery<{
+    settings: { enforcement: boolean };
+  }>({
+    queryKey: ["/api/settings/funnel"],
+  });
+  const enforcement = funnelSettings?.settings?.enforcement === true;
+
+  const saveMutation = useMutation({
+    mutationFn: async (next: boolean) => {
+      const res = await apiRequest("PUT", "/api/settings/funnel", { enforcement: next });
+      return res.json() as Promise<{ settings: { enforcement: boolean } }>;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["/api/settings/funnel"], { settings: data.settings });
+      void queryClient.invalidateQueries({ queryKey: ["/api/settings/funnel"] });
+      toast({
+        title: data.settings.enforcement ? "Funnel enforcement on" : "Funnel enforcement off",
+        description: data.settings.enforcement
+          ? "Page diagnostics and funnel saves require stage and products on included content types."
+          : "Funnel completeness checks and write gates are relaxed. Existing page tags are kept.",
+      });
+    },
+    onError: (err) => {
+      toast({
+        title: "Failed to update funnel enforcement",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    },
+  });
+
+  if (isLoading || settingsLoading) return <LoadingSection />;
   if (!overview) {
     return <p className="text-muted-foreground text-sm text-center py-12">Failed to load funnel data</p>;
   }
-  return <DiagnosticsFunnelTab data={overview} />;
+
+  return (
+    <div className="space-y-6">
+      <Card data-testid="card-funnel-enforcement">
+        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <CardTitle className="text-sm font-medium">Funnel enforcement</CardTitle>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0"
+                  aria-label="Read more (advanced)"
+                  data-testid="button-funnel-enforcement-advanced"
+                >
+                  <Info className="h-4 w-4 text-muted-foreground" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                className="w-80 space-y-2 text-xs text-muted-foreground leading-relaxed"
+              >
+                <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
+                <p>
+                  Stored in {formatSitePath("settings.yml")} as{" "}
+                  <code className="font-mono text-[10px]">funnel.enforcement</code>. Per-type
+                  opt-out: Content Type manage → Funnel monitoring (
+                  <code className="font-mono text-[10px]">funnel.enforcement: false</code>).
+                </p>
+                <p>
+                  Validator: <code className="font-mono text-[10px]">funnel-completeness</code>. Off
+                  also relaxes funnel write gates (persona/audience).
+                </p>
+              </PopoverContent>
+            </Popover>
+          </div>
+          <Switch
+            checked={enforcement}
+            disabled={saveMutation.isPending}
+            onCheckedChange={(checked) => saveMutation.mutate(checked)}
+            data-testid="switch-funnel-enforcement"
+          />
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            When on, every included content type’s pages must have funnel stage and products;
+            diagnostics and funnel saves enforce this. Turning off stops those checks; existing page
+            tags are not deleted. Exclude a type with Funnel monitoring on Content Type manage.
+          </p>
+        </CardContent>
+      </Card>
+      <DiagnosticsFunnelTab data={overview} />
+    </div>
+  );
 }
 
 export function DiagnosticsGeoPanel() {

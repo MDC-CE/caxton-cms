@@ -97,6 +97,15 @@ import { enrichIssueCatalogFields } from "../lib/issue-code-enrichment.js";
 import { clusterResolutionConfirmRequired } from "../lib/cluster-resolution-gate.js";
 import { seoResearchWriteGate } from "../lib/seo-research-gate.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
+import {
+  buildAvailableFieldsCatalog,
+  filterFieldsByRequest,
+  findUnknownFields,
+  needsSelectFieldsGate,
+  selectFieldsGatePayload,
+  selectFieldsRetryAction,
+  fieldNameFromRow,
+} from "../lib/get-entry-fields-catalog.js";
 import type { SeoBlock } from "../../server/seo-fields.js";
 import {
   pathForLayoutTarget,
@@ -439,8 +448,8 @@ async function callEditSectionsApi(
             ],
             next_actions: [
               {
-                tool: "get_entry_fields",
-                reason: "Reload current section indexes before retrying update_fields.",
+                tool: "get_entry_content",
+                reason: "Reload current sections[] indexes before retrying update_fields.",
                 priority: "required",
                 args_hint: {
                   slug: params.slug,
@@ -2149,6 +2158,9 @@ export function registerPageTools(
           contentFolder,
           domain,
           requestedUrl: pageUrl,
+          contentType: payload.contentType,
+          slug: payload.slug,
+          locale: payload.locale,
         });
         seoPayload.search_engines = engines.search_engines;
         seoPayload.warnings = [...kmWarnings, ...engines.warnings];
@@ -3485,10 +3497,11 @@ export function registerPageTools(
             ],
           );
         }
-        const gates = assertFunnelAudienceGates(merged.coerced, {
-          contentType: resolved.contentType,
-          contentSlug: slug,
-        });
+    const gates = assertFunnelAudienceGates(merged.coerced, {
+      contentType: resolved.contentType,
+      contentSlug: slug,
+      contentRoot: contentPath,
+    });
         if (!gates.ok) {
           return actionRequired(
             {
@@ -3616,6 +3629,9 @@ export function registerPageTools(
           );
           const next_actions: NextAction[] = [];
           if (hasContent) {
+            const resetFieldPaths = resetUpdates
+              .filter((u) => !u.field_path.startsWith("meta.") && !isSeoPath(u.field_path))
+              .map((u) => u.field_path);
             next_actions.push({
               tool: "get_entry_fields",
               reason: "Confirm provenance after reset",
@@ -3623,6 +3639,7 @@ export function registerPageTools(
                 slug,
                 contentType: ct,
                 locale,
+                fields: resetFieldPaths,
                 ...(variant ? { variant } : {}),
                 ...(site ? { site } : {}),
               },
@@ -3800,6 +3817,7 @@ export function registerPageTools(
             slug,
             locale,
             contentType: resolved.contentType,
+            fields: ["seo.refresh_tier"],
             ...(variant ? { variant } : {}),
             ...(site ? { site } : {}),
           },
@@ -4648,7 +4666,13 @@ let renameResult: Record<string, unknown> | null = null;
       const getHint = {
         tool: "get_entry_fields",
         reason: "Re-check provenance after write",
-        args_hint: { slug, contentType: ct, locale, ...(variant ? { variant } : {}) },
+        args_hint: {
+          slug,
+          contentType: ct,
+          locale,
+          fields: [field],
+          ...(variant ? { variant } : {}),
+        },
         priority: "recommended" as const,
       };
 
@@ -4817,7 +4841,13 @@ let renameResult: Record<string, unknown> | null = null;
                         tool: "get_entry_fields",
                         priority: "recommended",
                         reason: "Read seo.refresh_tier fill_intent to pick a tier.",
-                        args_hint: { slug, locale, contentType: ct, ...(variant ? { variant } : {}) },
+                        args_hint: {
+                          slug,
+                          locale,
+                          contentType: ct,
+                          fields: ["seo.refresh_tier"],
+                          ...(variant ? { variant } : {}),
+                        },
                       },
                       {
                         tool: "explain_site",
@@ -4889,23 +4919,31 @@ let renameResult: Record<string, unknown> | null = null;
 
   mcp.tool(
     "get_entry_fields",
-    "List mapping fields with effective value and provenance " +
+    "Inspect mapping fields with effective value and provenance " +
     "(original | db_override | ct_override | entry_default). " +
-    "Static types: values come from root keys on the layer file (entry_default); leftover field_overrides bags are still applied until migrated. " +
-    "DB types: ct_override = field_overrides bag; db_override = overrides.json. " +
-    "Includes MCP-only seo.include_in_clustering (boolean; never YAML) when the type has seo fields — writable only if seo_monitoring.enabled. " +
-    "Optional variant reads {variant}.{locale}.yml. Use before update_fields / update_entry_field (value or reset:true). Requires content_view.",
+    "Requires non-empty fields: string[] of field paths (e.g. title, seo.refresh_tier). " +
+    "Omit fields or pass [] → action_required select_fields with available_fields names only (no values). " +
+    "Unknown names reject the whole call (catalog + unknown_fields). " +
+    "seo.include_in_clustering is MCP-only (never YAML); listed in the catalog; returned only when explicitly requested. " +
+    "Large bodies (e.g. content) return full value when selected. " +
+    "Optional variant reads {variant}.{locale}.yml. Use before update_fields / update_entry_field. Requires content_view.",
     {
       slug: z.string(),
       contentType: z.string().optional(),
       locale: z.string().default("en"),
+      fields: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Required for values: non-empty list of field paths. Omit or [] to list available_fields names only.",
+        ),
       variant: z
         .string()
         .optional()
         .describe("Optional variant slug to inspect that layer file instead of live {locale}.yml"),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ slug, contentType, locale, variant, site }) => {
+    async ({ slug, contentType, locale, fields, variant, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { domain } = siteResult;
@@ -4920,6 +4958,65 @@ let renameResult: Record<string, unknown> | null = null;
       }
       const fieldsDenied = await denyUnlessContentView(mcpToken, resolved.contentType, grants);
       if (fieldsDenied) return fieldsDenied;
+
+      const configs = loadContentTypes(siteResult.contentPath);
+      const cfg = configs[resolved.contentType];
+      if (!cfg) {
+        return fail(`Content type '${resolved.contentType}' not found`);
+      }
+      const catalog = buildAvailableFieldsCatalog({
+        contentType: resolved.contentType,
+        config: cfg,
+        contentRoot: siteResult.contentPath,
+      });
+      const exampleField =
+        catalog.find((r) => r.field === "title")?.field ??
+        catalog.find((r) => r.writable !== false)?.field ??
+        catalog[0]?.field ??
+        "title";
+      const gateNext = [
+        selectFieldsRetryAction({
+          slug,
+          contentType: resolved.contentType,
+          locale,
+          variant,
+          site: site ?? domain,
+          exampleField,
+        }),
+      ];
+
+      if (needsSelectFieldsGate(fields)) {
+        return actionRequired(
+          selectFieldsGatePayload({
+            contentType: resolved.contentType,
+            slug,
+            locale,
+            variant,
+            site: site ?? domain,
+            catalog,
+          }),
+          gateNext,
+        );
+      }
+
+      const requested = fields as string[];
+      const unknown = findUnknownFields(requested, catalog);
+      if (unknown.length) {
+        return actionRequired(
+          selectFieldsGatePayload({
+            contentType: resolved.contentType,
+            slug,
+            locale,
+            variant,
+            site: site ?? domain,
+            catalog,
+            unknown_fields: unknown,
+          }),
+          gateNext,
+        );
+      }
+
+      const requestedSet = new Set(requested);
       const q = new URLSearchParams({ locale });
       if (domain) q.set("__site", domain);
       if (variant) q.set("variant", variant);
@@ -4929,56 +5026,55 @@ let renameResult: Record<string, unknown> | null = null;
         const data = await res.json();
         if (!res.ok) return fail((data as { error?: string }).error || `Server error: ${res.status}`);
 
-        // Enrich relation fields with MCP-only system_hints (never staff description).
         const payload = data as {
           fields?: Array<Record<string, unknown>>;
           [key: string]: unknown;
         };
-        let fieldsOut = payload.fields;
+        let fieldsOut = Array.isArray(payload.fields) ? [...payload.fields] : [];
         const typeMonitored = isSeoMonitoringEnabled(resolved.contentType, siteResult.contentPath);
+        const ed = getEditorConfig(cfg);
+
         try {
-          const configs = loadContentTypes(siteResult.contentPath);
-          const cfg = configs[resolved.contentType];
-          const ed = cfg ? getEditorConfig(cfg) : undefined;
-          if (Array.isArray(fieldsOut)) {
-            fieldsOut = fieldsOut.map((f) => {
-              const name = typeof f.field === "string" ? f.field : typeof f.name === "string" ? f.name : null;
-              if (!name) return f;
-              if (typeof name === "string" && name.startsWith("seo.")) {
-                const def = getSeoFieldDef(name);
-                return {
-                  ...f,
-                  ...(def?.fill_intent ? { fill_intent: def.fill_intent } : {}),
-                  system_hints: def?.system_hints ?? [
-                    "Locale YAML seo: for writes (writeSeoFields). Never _common.yml.",
-                  ],
-                };
-              }
-              if (name === PURCHASABLE_FIELD || f.source === "system") {
-                return {
-                  ...f,
-                  writable: false,
-                  system_hints: [
-                    "Computed from _product.yml (slug is in the product index).",
-                    "Do not write via update_fields / update_entry_field. Edit _product.yml via staff Store or get_product / update_product.",
-                    "Lead-form catalogs filter with source.query purchasable=true — not actively_selling.",
-                  ],
-                };
-              }
-              const hint = ed?.[name];
-              const system_hints = buildEditorSystemHints(name, hint as Parameters<typeof buildEditorSystemHints>[1]);
-              const fill_intent =
-                hint && typeof hint === "object" && "fill_intent" in hint
-                  ? (hint as { fill_intent?: unknown }).fill_intent ?? null
-                  : null;
-              if (!system_hints && fill_intent == null) return f;
+          fieldsOut = fieldsOut.map((f) => {
+            const name = fieldNameFromRow(f);
+            if (!name || !requestedSet.has(name)) return f;
+            if (name.startsWith("seo.")) {
+              const def = getSeoFieldDef(name);
               return {
                 ...f,
-                ...(system_hints ? { system_hints } : {}),
-                ...(fill_intent != null ? { fill_intent } : {}),
+                ...(def?.fill_intent ? { fill_intent: def.fill_intent } : {}),
+                system_hints: def?.system_hints ?? [
+                  "Locale YAML seo: for writes (writeSeoFields). Never _common.yml.",
+                ],
               };
-            });
+            }
+            if (name === PURCHASABLE_FIELD || f.source === "system") {
+              return {
+                ...f,
+                writable: false,
+                system_hints: [
+                  "Computed from _product.yml (slug is in the product index).",
+                  "Do not write via update_fields / update_entry_field. Edit _product.yml via staff Store or get_product / update_product.",
+                  "Lead-form catalogs filter with source.query purchasable=true — not actively_selling.",
+                ],
+              };
+            }
+            const hint = ed?.[name];
+            const system_hints = buildEditorSystemHints(name, hint as Parameters<typeof buildEditorSystemHints>[1]);
+            const fill_intent =
+              hint && typeof hint === "object" && "fill_intent" in hint
+                ? (hint as { fill_intent?: unknown }).fill_intent ?? null
+                : null;
+            if (!system_hints && fill_intent == null) return f;
+            return {
+              ...f,
+              ...(system_hints ? { system_hints } : {}),
+              ...(fill_intent != null ? { fill_intent } : {}),
+            };
+          });
 
+          // Virtual clustering row only when explicitly requested.
+          if (requestedSet.has(SEO_INCLUDE_IN_CLUSTERING)) {
             const localeSeo = (() => {
               if (variant) {
                 const v = loadVariantPage(
@@ -4994,32 +5090,30 @@ let renameResult: Record<string, unknown> | null = null;
               return live?.data?.seo;
             })();
             const includeInClustering = deriveIncludeInClustering(localeSeo);
-
-            const hasSeoRow = fieldsOut.some((f) => {
-              const n = typeof f.field === "string" ? f.field : typeof f.name === "string" ? f.name : "";
-              return n.startsWith("seo.");
-            });
-            if (hasSeoRow || typeMonitored) {
-              fieldsOut = [
-                {
-                  field: SEO_INCLUDE_IN_CLUSTERING,
-                  effective: includeInClustering,
-                  writable: typeMonitored,
-                  source: "system",
-                  system_hints: [
-                    "MCP-only virtual boolean (mirrors staff Include in SEO clustering). Never written to YAML.",
-                    typeMonitored
-                      ? "Writable via update_fields. false → pillar_path:null + is_pillar:false. true requires pillar_path or is_pillar after merge."
-                      : "Not writable: content type seo_monitoring.enabled is off. Raw seo.* fields still allowed.",
-                    "Does not change content-types.yml seo_monitoring; does not create a YAML key.",
-                  ],
-                },
-                ...fieldsOut,
-              ];
-            }
+            fieldsOut = [
+              {
+                field: SEO_INCLUDE_IN_CLUSTERING,
+                effective: includeInClustering,
+                writable: typeMonitored,
+                source: "system",
+                system_hints: [
+                  "MCP-only virtual boolean (mirrors staff Include in SEO clustering). Never written to YAML.",
+                  typeMonitored
+                    ? "Writable via update_fields. false → pillar_path:null + is_pillar:false. true requires pillar_path or is_pillar after merge."
+                    : "Not writable: content type seo_monitoring.enabled is off. Raw seo.* fields still allowed.",
+                  "Does not change content-types.yml seo_monitoring; does not create a YAML key.",
+                ],
+              },
+              ...fieldsOut.filter((f) => fieldNameFromRow(f) !== SEO_INCLUDE_IN_CLUSTERING),
+            ];
           }
+
+          const filtered = filterFieldsByRequest(fieldsOut, requested);
           const relation_fields = Object.entries(ed || {})
-            .filter(([, h]) => h && (h as { type?: string }).type === "relation")
+            .filter(
+              ([field, h]) =>
+                requestedSet.has(field) && h && (h as { type?: string }).type === "relation",
+            )
             .map(([field, hint]) => ({
               field,
               system_hints: buildEditorSystemHints(field, hint as Parameters<typeof buildEditorSystemHints>[1]) ?? [],
@@ -5028,7 +5122,7 @@ let renameResult: Record<string, unknown> | null = null;
             {
               message: `Fields for ${resolved.contentType}/${slug} (${locale}${variant ? `, variant=${variant}` : ""})`,
               ...payload,
-              fields: fieldsOut ?? payload.fields,
+              fields: filtered,
               relation_fields,
               ...resolvedUpdatedAtFields(
                 resolved.contentType,
@@ -5040,10 +5134,15 @@ let renameResult: Record<string, unknown> | null = null;
             { warnings: [], next_actions: [] },
           );
         } catch {
+          const filtered = filterFieldsByRequest(
+            Array.isArray(payload.fields) ? payload.fields : [],
+            requested,
+          );
           return ok(
             {
               message: `Fields for ${resolved.contentType}/${slug} (${locale}${variant ? `, variant=${variant}` : ""})`,
-              ...(data as Record<string, unknown>),
+              ...payload,
+              fields: filtered,
               ...resolvedUpdatedAtFields(
                 resolved.contentType,
                 slug,

@@ -1,8 +1,15 @@
 # Funnel (stage, products, money pages)
 
-Call this topic for page funnel stage, product membership, money-page inventory, and how that differs from a product conversion journey.
+Call this topic for page funnel stage, product membership, money-page inventory, funnel enforcement, and how that differs from a product conversion journey.
 
 SEO meta / clusters / GSC → topic `seo`. Purchasable products, audience, section product scope, per-SKU journey tools → topic `product` (alias `ecommerce`).
+
+## Enforcement (site + content type)
+
+- **Site master:** `settings.yml` → `funnel.enforcement` (default `false`). Staff: Diagnostics → Funnel. When **off**: `funnel-completeness` validator skips; funnel write gates (stage/products/persona/audience) are **relaxed** — incomplete or persona-less bindings can save. Does **not** delete existing page `funnel:` YAML. Section/meta micro-saves stay unrestricted either way.
+- **Type Funnel monitoring:** `content-types.yml` → `funnel.enforcement` — omitted/`true` = include when site on; `false` = opt out. Staff: Content Type manage KPI **Funnel monitoring** (default on). **`authors` is seeded off** (entity pages, not funnel members).
+- **When site on + type included:** every inventory slug (YAML + catalog; missing `_common.yml` = incomplete) must have `funnel.stage`. If the site has ≥1 purchasable product (including paused), also require non-empty `funnel.products` (`"all"` or bindings). Persona rules below apply on bindings. Write codes also include `missing_funnel_stage`, `missing_funnel_products`.
+- Diagnostics validator name: `funnel-completeness`.
 
 ## Source of truth
 
@@ -25,8 +32,8 @@ Legacy `products: [ai-fluency]` still reads (coerced to `{ product }`). Writes d
 - **MCP writes:**
   - Single page: `update_fields` with `funnel.stage` / `funnel.products` (or `reset:true`). Requires `content_edit_structure`. Gate fail → nothing else in that call is applied. `locale`/`variant` ignored for funnel (warning).
   - Many pages: `update_entry_attributes` (safe attrs: `meta.*` + `funnel.*` only — not sections). Per-slug rollback if funnel fails. **BREAKING:** `update_meta_fields` removed — reconnect MCP.
-- When a product has minimal audience, landings must include a valid `persona`. Program self-page may omit persona. `"all"` never carries personas.
-- Codes: `missing_product_audience`, `missing_funnel_persona`, `unknown_persona`.
+- When enforcement is on and a product has minimal audience, landings must include a valid `persona`. Program self-page may omit persona. `"all"` never carries personas.
+- Codes: `missing_funnel_stage`, `missing_funnel_products`, `missing_product_audience`, `missing_funnel_persona`, `unknown_persona`.
 
 ## Stages
 

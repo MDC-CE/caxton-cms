@@ -75,11 +75,11 @@ Ecommerce **on** for a content type = that type has **at least one** product in 
 
 1. `explain_site` topic `lead-forms` (this file).
 2. `get_content_type_info` → `ecommerce.enabled` + `system_fields: ["purchasable"]` + `field_mapping` / `relation_fields`.
-3. `get_entry_fields` / `get_entry_content` — this entry’s pointers (`programs: […]`), computed `purchasable`, and current form YAML.
+3. `get_entry_fields` with `fields: [...]` (omit once to list names) / `get_entry_content` — this entry’s pointers (`programs: […]`), computed `purchasable`, and current form YAML.
 4. Confirm the subset with the user: vendible catalog (`query: purchasable=true`) vs slug subset vs `related_field`.
 5. Catalog forms on an ecommerce type **must** set `source.query`. Typical: `purchasable=true`. Exception: form **on a non-purchasable program page** → that program only (`source.related_field` or `query: "slug=<this>"`), not the vendible catalog. Purchasable program pages that already inherit one product: leave related_field/inherit.
 6. Writes missing `query` and/or `value_path`/`label_path` return `actionRequired`. Re-call `update_fields` / `add_section` with the merged source complete. Real tools only — no `validate_content`. Do **not** guess paths.
-7. `get_entry_fields` / `get_entry_content` show computed `purchasable` (`writable: false`). Do **not** write `single.purchasable`. Edit `_ecommerce.yml` or use `get_product_funnel` (journey read). Page funnel stage/products → topic `funnel`.
+7. `get_entry_fields` with `fields: ["purchasable"]` (or related paths) / `get_entry_content` show computed `purchasable` (`writable: false`). Do **not** write `single.purchasable`. Edit `_ecommerce.yml` or use `get_product_funnel` (journey read). Page funnel stage/products → topic `funnel`.
 
 ## Non-effects
 

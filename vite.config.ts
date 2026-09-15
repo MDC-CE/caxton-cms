@@ -139,7 +139,16 @@ function navigationEagerManifestPlugin(isSsr: boolean): Plugin {
   };
 }
 
+// Stress / parallel `npm run dev` children can clobber the shared optimize-deps
+// cache (deps_temp_* left behind, no deps/) → browser gets 504 Outdated Optimize
+// Dep and "Failed to fetch dynamically imported module" for pages that import
+// radix wrappers (DiagnosticsPage → Progress / RadioGroup). Isolate via env.
+const viteCacheDir =
+  process.env.VITE_CACHE_DIR?.trim() ||
+  path.resolve(import.meta.dirname, "node_modules", ".vite");
+
 export default defineConfig(async () => ({
+  cacheDir: viteCacheDir,
   plugins: [
     siteComponentSchemasStubPlugin(),
     componentRegistryGuardPlugin(),

@@ -1790,6 +1790,11 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               {p.kind === "notes" ? "Handoff note" : p.kind === "idea" ? "Idea brief" : "Summary"}
             </h3>
+            {p.kind === "edits" ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                Intent and why — exact field values are in Proposed changes below.
+              </p>
+            ) : null}
             <p className="whitespace-pre-wrap text-sm leading-6">{p.summary}</p>
             {p.related_issue_ids.length > 0 ? (
               <div className="flex flex-wrap items-center gap-1.5 pt-1">

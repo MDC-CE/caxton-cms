@@ -14,7 +14,7 @@ export const PLAYBOOK_VERSION = "5";
  * Explicit conventions seed version. Bump when editing mcp-server/agent-conventions.md
  * so agents re-fetch skill.content (known_skill_version mismatch).
  */
-export const CONVENTIONS_VERSION = "17";
+export const CONVENTIONS_VERSION = "19";
 
 export const CONVENTIONS_PATH = "mcp-server/agent-conventions.md";
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -14,8 +14,10 @@ import {
   buildBingEngineStatus,
   buildGoogleEngineStatus,
   buildSearchEnginesPagePayload,
+  pathsDifferForSearchEngines,
   toAbsolutePublicUrl,
 } from "./search-engines-page";
+import * as sitemapMod from "./sitemap";
 
 function url(partial: Partial<DebugSitemapUrl> & { loc: string }): DebugSitemapUrl {
   return {
@@ -50,6 +52,7 @@ describe("search-engines-page", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     setGscCacheRootForTests(null);
     if (prevCreds === undefined) delete process.env.GSC_CREDENTIALS_JSON;
     else process.env.GSC_CREDENTIALS_JSON = prevCreds;
@@ -61,6 +64,15 @@ describe("search-engines-page", () => {
     expect(toAbsolutePublicUrl("/en/blog/foo", "example.com")).toBe("https://example.com/en/blog/foo");
     expect(toAbsolutePublicUrl("https://example.com/en/x", "example.com")).toBe("https://example.com/en/x");
     expect(toAbsolutePublicUrl("/x", "localhost")).toBeNull();
+  });
+
+  it("pathsDifferForSearchEngines ignores trailing slash", () => {
+    expect(pathsDifferForSearchEngines("https://example.com/en/a", "https://example.com/en/a/")).toBe(
+      false,
+    );
+    expect(pathsDifferForSearchEngines("https://example.com/en/a", "https://example.com/en/b")).toBe(
+      true,
+    );
   });
 
   it("buildBingEngineStatus is always not_configured", () => {
@@ -136,6 +148,50 @@ describe("search-engines-page", () => {
     expect(google.resolved.loc).toBe(loc);
   });
 
+  it("point-resolve prefers sitemap loc for GSC lookup when page URL differs (2b)", () => {
+    const sitemapLoc = "https://example.com/en/blog/canonical";
+    const pageUrl = "https://example.com/en/blog/folder-name";
+    upsertRecord(rootName, sitemapLoc, {
+      inspectedAt: new Date().toISOString(),
+      verdict: "PASS",
+    });
+    const google = buildGoogleEngineStatus({
+      contentRoot,
+      contentRootName: rootName,
+      domain: "example.com",
+      requestedUrl: pageUrl,
+      sitemapEntry: url({
+        loc: sitemapLoc,
+        content_type: "blog",
+        slug: "folder-name",
+        locale: "en",
+        inSitemap: true,
+      }),
+    });
+    expect(google.status).toBe("indexed");
+    expect(google.resolved.requested).toBe(pageUrl);
+    expect(google.resolved.loc).toBe(sitemapLoc);
+    expect(google.resolved.inSitemap).toBe(true);
+  });
+
+  it("soft miss does not claim inSitemap but still hits cache by page URL (1a)", () => {
+    const pageUrl = "https://example.com/en/orphan-soft";
+    upsertRecord(rootName, pageUrl, {
+      inspectedAt: new Date().toISOString(),
+      verdict: "PASS",
+    });
+    const google = buildGoogleEngineStatus({
+      contentRoot,
+      contentRootName: rootName,
+      domain: "example.com",
+      requestedUrl: pageUrl,
+      pointResolveSoftMiss: true,
+    });
+    expect(google.status).toBe("indexed");
+    expect(google.resolved.inSitemap).toBe(false);
+    expect(google.resolved.isDraft).toBe(false);
+  });
+
   it("marks stale when inspectedAt older than STALE_MS", () => {
     const loc = "https://example.com/en/old";
     const now = Date.parse("2026-08-20T12:00:00.000Z");
@@ -195,5 +251,75 @@ describe("search-engines-page", () => {
     expect(payload.search_engines.google).toBeDefined();
     expect(payload.search_engines.bing.status).toBe("not_configured");
     expect(payload.warnings.some((w) => w.code === "bing_not_configured")).toBe(true);
+  });
+
+  it("emits search_engines_loc_mismatch when page URL differs from point-resolve loc", () => {
+    const sitemapLoc = "https://example.com/en/blog/canonical";
+    const pageUrl = "https://example.com/en/blog/folder-name";
+    const folder = "site_demo_mismatch";
+    const siteRoot = path.join(tmp, folder);
+    fs.mkdirSync(siteRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(siteRoot, "settings.yml"),
+      "search_console:\n  site_url: https://example.com/\n",
+      "utf-8",
+    );
+    fs.writeFileSync(path.join(siteRoot, "content-types.yml"), "blog:\n  directory: blog\n", "utf-8");
+    resetSettings(siteRoot);
+
+    vi.spyOn(sitemapMod, "resolveDebugSitemapUrl").mockReturnValue(
+      url({
+        loc: sitemapLoc,
+        content_type: "blog",
+        slug: "folder-name",
+        locale: "en",
+        inSitemap: true,
+      }),
+    );
+    vi.spyOn(sitemapMod, "getDebugSitemapUrls").mockReturnValue([]);
+
+    const payload = buildSearchEnginesPagePayload({
+      contentRoot: siteRoot,
+      contentFolder: folder,
+      domain: "example.com",
+      requestedUrl: pageUrl,
+      contentType: "blog",
+      slug: "folder-name",
+      locale: "en",
+    });
+
+    expect(payload.warnings.some((w) => w.code === "search_engines_loc_mismatch")).toBe(true);
+    expect(payload.search_engines.google.resolved.requested).toBe(pageUrl);
+    expect(payload.search_engines.google.resolved.loc).toBe(sitemapLoc);
+    expect(sitemapMod.getDebugSitemapUrls).not.toHaveBeenCalled();
+  });
+
+  it("soft miss on point-resolve does not call getDebugSitemapUrls", () => {
+    const folder = "site_demo_soft";
+    const siteRoot = path.join(tmp, folder);
+    fs.mkdirSync(siteRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(siteRoot, "settings.yml"),
+      "search_console:\n  site_url: https://example.com/\n",
+      "utf-8",
+    );
+    fs.writeFileSync(path.join(siteRoot, "content-types.yml"), "blog:\n  directory: blog\n", "utf-8");
+    resetSettings(siteRoot);
+
+    vi.spyOn(sitemapMod, "resolveDebugSitemapUrl").mockReturnValue(null);
+    const fullSpy = vi.spyOn(sitemapMod, "getDebugSitemapUrls").mockReturnValue([]);
+
+    const payload = buildSearchEnginesPagePayload({
+      contentRoot: siteRoot,
+      contentFolder: folder,
+      domain: "example.com",
+      requestedUrl: "https://example.com/en/missing",
+      contentType: "blog",
+      slug: "missing",
+      locale: "en",
+    });
+
+    expect(fullSpy).not.toHaveBeenCalled();
+    expect(payload.search_engines.google.resolved.inSitemap).toBe(false);
   });
 });

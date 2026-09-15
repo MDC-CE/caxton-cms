@@ -1,5 +1,6 @@
 /**
- * Funnel write gates for product audience + persona bindings.
+ * Funnel write gates for product audience + persona bindings + completeness.
+ * When site funnel.enforcement is off (or type opted out), gates are skipped.
  */
 
 import {
@@ -7,7 +8,12 @@ import {
   isMinimalProductAudience,
 } from "@shared/productAudience";
 import type { FunnelBlock, FunnelProductBinding } from "@shared/funnel";
+import { normalizeFunnelProducts } from "@shared/funnel";
 import { productManager } from "./product-manager";
+import {
+  isFunnelEnforcedForType,
+  siteHasPurchasableProducts,
+} from "../funnel-enforcement";
 
 export type FunnelAudienceGateResult =
   | { ok: true; warnings: { code: string; message: string }[] }
@@ -20,17 +26,53 @@ function resolveProductContentType(productSlug: string): string {
   return p?.content_type ?? "program";
 }
 
+function hasFunnelStage(funnel: FunnelBlock): boolean {
+  return typeof funnel.stage === "string" && funnel.stage.trim().length > 0;
+}
+
+function hasFunnelProducts(funnel: FunnelBlock): boolean {
+  const products = normalizeFunnelProducts(funnel.products as unknown);
+  return products === "all" || (Array.isArray(products) && products.length > 0);
+}
+
 /**
- * Validate funnel.products bindings against product audience rules.
+ * Validate funnel write under enforcement:
+ * - Site off / type opted out → ok (relaxed gates).
+ * - Else require stage; require products when site has purchasables; then audience/persona rules.
  * - `all` is always allowed (no persona).
  * - Binding a product without minimal audience → missing_product_audience.
  * - Binding a product with audience requires a valid persona, except program self-page may omit persona.
  */
 export function assertFunnelAudienceGates(
   funnel: FunnelBlock,
-  ctx: { contentType: string; contentSlug: string },
+  ctx: { contentType: string; contentSlug: string; contentRoot?: string },
 ): FunnelAudienceGateResult {
   const warnings: { code: string; message: string }[] = [];
+
+  if (!isFunnelEnforcedForType(ctx.contentType, ctx.contentRoot)) {
+    return { ok: true, warnings };
+  }
+
+  if (!hasFunnelStage(funnel)) {
+    return {
+      ok: false,
+      code: "missing_funnel_stage",
+      error:
+        "funnel.stage is required while funnel enforcement is on for this content type. Set awareness, consideration, decision, or post-enrollment.",
+      details: { contentType: ctx.contentType, slug: ctx.contentSlug },
+    };
+  }
+
+  if (siteHasPurchasableProducts() && !hasFunnelProducts(funnel)) {
+    return {
+      ok: false,
+      code: "missing_funnel_products",
+      error:
+        'funnel.products is required while funnel enforcement is on (site has purchasable products). Set "all" or product+persona bindings.',
+      details: { contentType: ctx.contentType, slug: ctx.contentSlug },
+    };
+  }
+
   const products = funnel.products;
   if (!products) return { ok: true, warnings };
   if (products === "all") return { ok: true, warnings };

@@ -233,7 +233,8 @@ function sourceWriteNextActions(ctx: {
     },
     {
       tool: "get_entry_fields",
-      reason: "Inspect this entry’s related_field pointers and computed purchasable",
+      reason:
+        "Omit fields to list available names, then retry with fields: [...] for related_field pointers and/or purchasable",
       args_hint: {
         ...(ctx.contentType ? { contentType: ctx.contentType } : {}),
         ...(ctx.slug ? { slug: ctx.slug } : {}),

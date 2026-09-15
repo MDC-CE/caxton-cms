@@ -146,6 +146,8 @@ import {
   updateSearchConsoleBigQuerySettings,
   getOpenRushSettings,
   updateOpenRushSettings,
+  getFunnelSettings,
+  updateFunnelSettings,
   buildRobotsTxtContent,
   getAuthSettings,
   updateAuthSettings,
@@ -1862,6 +1864,30 @@ export function registerSettingsRoutes(app: Express): void {
         api_key_configured,
         settings,
       });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  app.get("/api/settings/funnel", async (req, res) => {
+    const auth = await requireCapability(req, res, "seo_settings");
+    if (!auth.authorized) return;
+    const settings = getFunnelSettings(getContentRoot(res));
+    res.json({ settings });
+  });
+
+  app.put("/api/settings/funnel", async (req, res) => {
+    const auth = await requireCapability(req, res, "seo_settings");
+    if (!auth.authorized) return;
+    try {
+      const body = req.body?.funnel ?? req.body;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return res.status(400).json({ error: "Request body must be a funnel object" });
+      }
+      const contentRoot = getContentRoot(res);
+      const settings = updateFunnelSettings(body, contentRoot);
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      res.json({ success: true, settings });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
     }

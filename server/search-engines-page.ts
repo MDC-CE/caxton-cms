@@ -21,7 +21,8 @@ import {
   toUrlPath,
   type GscInspectionRecord,
 } from "./gsc-url-inspection";
-import { getDebugSitemapUrls, type ActiveSiteCtx, type DebugSitemapUrl } from "./sitemap";
+import * as sitemap from "./sitemap";
+import type { ActiveSiteCtx, DebugSitemapUrl } from "./sitemap";
 
 export type SearchEngineWarning = {
   code: string;
@@ -74,6 +75,16 @@ export function toAbsolutePublicUrl(requested: string, domain: string | undefine
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   const p = toUrlPath(trimmed);
   return `https://${host}${p.startsWith("/") ? p : `/${p}`}`;
+}
+
+/** Normalize path for mismatch compare (strip trailing slash except root). */
+export function normalizeUrlPathForCompare(url: string): string {
+  const p = toUrlPath(url).replace(/\/+$/, "");
+  return p || "/";
+}
+
+export function pathsDifferForSearchEngines(a: string, b: string): boolean {
+  return normalizeUrlPathForCompare(a) !== normalizeUrlPathForCompare(b);
 }
 
 export function buildSitemapCtx(opts: {
@@ -153,11 +164,119 @@ export function buildGoogleEngineStatus(opts: {
   domain?: string;
   requestedUrl: string | undefined | null;
   debugUrls?: DebugSitemapUrl[];
+  /**
+   * Point-resolve row: membership from this entry; GSC lookup prefers sitemap loc (2b).
+   * Pass null for soft miss (no row).
+   */
+  sitemapEntry?: DebugSitemapUrl | null;
+  /** When true with sitemapEntry === null/undefined for point path: soft miss. */
+  pointResolveSoftMiss?: boolean;
   now?: number;
 }): GoogleEngineStatus {
   const cfg = getGscConfig(opts.contentRoot);
   const requested = (opts.requestedUrl || "").trim();
   const debugUrls = opts.debugUrls ?? [];
+
+  if (!requested && !opts.sitemapEntry) {
+    return {
+      configured: cfg.configured,
+      status: "not_applicable",
+      detail: "No public URL resolved for this locale",
+      stale: false,
+      canonical_mismatch: false,
+      resolved: {
+        requested: "",
+        loc: null,
+        inSitemap: false,
+        isDraft: false,
+      },
+      record: null,
+    };
+  }
+
+  // Point-resolve path: sitemap loc wins for membership + primary cache key (2b)
+  if (opts.sitemapEntry) {
+    const entry = opts.sitemapEntry;
+    const pageRequested = requested || entry.loc;
+    const { record, locUsed } = lookupGoogleRecord(
+      opts.contentRootName,
+      entry.loc,
+      pageRequested,
+      opts.domain,
+    );
+    const resolved: SearchEngineResolvedUrl = {
+      requested: pageRequested,
+      loc: locUsed ?? entry.loc,
+      inSitemap: entry.inSitemap,
+      isDraft: !!entry.isDraft,
+    };
+    const mapped = googleToCrawlerStatus({
+      configured: cfg.configured,
+      record: record ?? null,
+      resolved,
+    });
+    const stale = record ? isStale(record, opts.now) : false;
+    return {
+      configured: cfg.configured,
+      status: mapped.status,
+      detail: mapped.detail,
+      stale,
+      checkedAt: mapped.checkedAt,
+      lastCrawlAt: mapped.lastCrawlAt,
+      canonical_mismatch: canonicalMismatch(record ?? null),
+      resolved,
+      record: record ?? null,
+    };
+  }
+
+  // Soft miss (1a): no sitemap row — do not claim inSitemap; still try cache by page URL
+  if (opts.pointResolveSoftMiss) {
+    if (!requested) {
+      return {
+        configured: cfg.configured,
+        status: "not_applicable",
+        detail: "No public URL resolved for this locale",
+        stale: false,
+        canonical_mismatch: false,
+        resolved: {
+          requested: "",
+          loc: null,
+          inSitemap: false,
+          isDraft: false,
+        },
+        record: null,
+      };
+    }
+    const { record, locUsed } = lookupGoogleRecord(
+      opts.contentRootName,
+      null,
+      requested,
+      opts.domain,
+    );
+    const resolved: SearchEngineResolvedUrl = {
+      requested,
+      loc: locUsed,
+      inSitemap: false,
+      isDraft: false,
+    };
+    const mapped = googleToCrawlerStatus({
+      configured: cfg.configured,
+      record: record ?? null,
+      resolved,
+    });
+    const stale = record ? isStale(record, opts.now) : false;
+    return {
+      configured: cfg.configured,
+      status: mapped.status,
+      detail: mapped.detail,
+      stale,
+      checkedAt: mapped.checkedAt,
+      lastCrawlAt: mapped.lastCrawlAt,
+      canonical_mismatch: canonicalMismatch(record ?? null),
+      resolved,
+      record: record ?? null,
+    };
+  }
 
   if (!requested) {
     return {
@@ -217,6 +336,10 @@ export function buildSearchEnginesPagePayload(opts: {
   contentFolder: string;
   domain?: string;
   requestedUrl: string | undefined | null;
+  /** When set, use point-resolve (no full debug list walk). */
+  contentType?: string;
+  slug?: string;
+  locale?: string;
   now?: number;
 }): SearchEnginesPagePayload {
   const sitemapCtx = buildSitemapCtx({
@@ -224,24 +347,73 @@ export function buildSearchEnginesPagePayload(opts: {
     contentRoot: opts.contentRoot,
     domain: opts.domain,
   });
-  const debugUrls = getDebugSitemapUrls(sitemapCtx);
 
-  const google = buildGoogleEngineStatus({
-    contentRoot: opts.contentRoot,
-    contentRootName: sitemapCtx.contentRootName,
-    domain: opts.domain,
-    requestedUrl: opts.requestedUrl,
-    debugUrls,
-    now: opts.now,
-  });
-
-  const bing = buildBingEngineStatus();
   const warnings: SearchEngineWarning[] = [
     {
       code: "bing_not_configured",
       message: "Bing Webmaster is not configured on this site yet (phase 2).",
     },
   ];
+
+  const usePoint =
+    typeof opts.contentType === "string" &&
+    opts.contentType.trim() &&
+    typeof opts.slug === "string" &&
+    opts.slug.trim() &&
+    typeof opts.locale === "string" &&
+    opts.locale.trim();
+
+  let google: GoogleEngineStatus;
+
+  if (usePoint) {
+    const entry = sitemap.resolveDebugSitemapUrl({
+      ctx: sitemapCtx,
+      contentType: opts.contentType!.trim(),
+      slug: opts.slug!.trim(),
+      locale: opts.locale!.trim(),
+    });
+
+    if (entry) {
+      google = buildGoogleEngineStatus({
+        contentRoot: opts.contentRoot,
+        contentRootName: sitemapCtx.contentRootName,
+        domain: opts.domain,
+        requestedUrl: opts.requestedUrl,
+        sitemapEntry: entry,
+        now: opts.now,
+      });
+      const pageUrl = (opts.requestedUrl || "").trim();
+      if (pageUrl && pathsDifferForSearchEngines(pageUrl, entry.loc)) {
+        warnings.push({
+          code: "search_engines_loc_mismatch",
+          message:
+            `Page URL and sitemap loc differ. Membership and Search Console cache lookup used the sitemap loc. ` +
+            `Page URL: ${pageUrl}. Sitemap loc: ${entry.loc}.`,
+        });
+      }
+    } else {
+      google = buildGoogleEngineStatus({
+        contentRoot: opts.contentRoot,
+        contentRootName: sitemapCtx.contentRootName,
+        domain: opts.domain,
+        requestedUrl: opts.requestedUrl,
+        pointResolveSoftMiss: true,
+        now: opts.now,
+      });
+    }
+  } else {
+    const debugUrls = sitemap.getDebugSitemapUrls(sitemapCtx);
+    google = buildGoogleEngineStatus({
+      contentRoot: opts.contentRoot,
+      contentRootName: sitemapCtx.contentRootName,
+      domain: opts.domain,
+      requestedUrl: opts.requestedUrl,
+      debugUrls,
+      now: opts.now,
+    });
+  }
+
+  const bing = buildBingEngineStatus();
 
   if (google.stale && google.record) {
     warnings.push({

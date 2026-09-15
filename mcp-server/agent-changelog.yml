@@ -6,6 +6,44 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "Site funnel.enforcement + type Funnel monitoring"
+    agent_impact:
+      - "settings.yml funnel.enforcement (default false) gates funnel-completeness diagnostics and funnel write gates (stage/products/persona). Off = skip diagnostics + relax writes; does not wipe page funnel YAML."
+      - "content-types.yml funnel.enforcement false opts a type out (default on). authors seeded off. Codes: missing_funnel_stage, missing_funnel_products (+ existing persona/audience codes)."
+      - "explain_site topic funnel documents enforcement. No new MCP tools — use content-type config / staff Diagnostics Funnel switch."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/funnel.md
+      - server/funnel-enforcement.ts
+      - scripts/validation/validators/funnel-completeness.ts
+  - date: "2026-09-15"
+    summary: "Edits propose_change summary = intent + why"
+    agent_impact:
+      - "Edits summary: intent + why only (min 80) — do not paste proposed field values; ops/updates own those; list triage uses title + field_paths. Go-live empty updates: why the draft should go live."
+      - "Notes/idea summaries stay handoff/brief payloads. Optional rationale = deeper reasoning; situation_note = current live picture, not proposed values. After revise_entries, trust ops over an older summary."
+      - "Reconnect MCP for updated propose_change describes; re-bootstrap_agent for conventions v19."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+  - date: "2026-09-15"
+    summary: "get_entry_fields requires fields[] (catalog gate)"
+    agent_impact:
+      - "get_entry_fields requires non-empty fields: string[]. Omit or [] → action_required select_fields with available_fields names only (no values/hints)."
+      - "Unknown names reject the whole call (catalog + unknown_fields). seo.include_in_clustering only when explicitly requested. Large bodies (e.g. content) return full value when selected."
+      - "Reconnect MCP; re-bootstrap_agent for conventions v18."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/get-entry-fields-catalog.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/relation-fields.md
+      - mcp-server/explain/local_databases.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-09-15"
     summary: "list_entries refresh_tier empty match returns []"
     agent_impact:
       - "list_entries refresh_tier=medium|evergreen|fast|unset with zero seo-index hits now returns an empty list (total 0), not the unfiltered catalog."

@@ -81,6 +81,8 @@ On an agentic swarm role connector (`/mcp/role/…`), write policy is enforced:
 
 When caps forbid a write (any connector), call `propose_change` (prefer **edits**, or **idea** for a brief) instead of pasting JSON in chat.
 
+- **Edits `summary`:** intent + why only (min 80). Do **not** restate `updates[]` values — ops own those; list triage uses title + `field_paths`. Go-live with empty updates: why the draft should become live. Notes/idea summaries stay the handoff or brief payload.
+
 **Worked example:** missing `content_edit_text` on a blog CTA → `propose_change` with that entry’s `updates[]`, then tell the human **Proposal Reviewer** or **Publisher** (or staff UI) must `update_proposal` with `action: "apply"`.
 
 ### 2b. Proposal collaboration (claim vs blocker vs approve)
@@ -128,6 +130,12 @@ For `SEO_KEYWORD_RESEARCH_INCOMPLETE`:
 
 ### 7. Set `seo.refresh_tier` when clustering / topic nature is known
 
-When enabling SEO clustering or classifying a page’s topic, set `seo.refresh_tier` to `fast`, `medium`, or `evergreen` (fact staleness — not traffic decay). Read `get_entry_fields` fill_intent or `explain_site` topic `seo` to pick. Cannot clear — change only by picking another tier. Revisit the tier when the page angle changes (e.g. concept explainer becomes a yearly “best of”). Per locale; translate does not copy.
+When enabling SEO clustering or classifying a page’s topic, set `seo.refresh_tier` to `fast`, `medium`, or `evergreen` (fact staleness — not traffic decay). Read `get_entry_fields` with `fields: ["seo.refresh_tier"]` (fill_intent) or `explain_site` topic `seo` to pick. Cannot clear — change only by picking another tier. Revisit the tier when the page angle changes (e.g. concept explainer becomes a yearly “best of”). Per locale; translate does not copy.
 
 **Worked example:** turning clustering on for a “best AI tools 2026” post → `update_fields` with `seo.refresh_tier: "fast"` (after reading fill_intent if unsure).
+
+### 8. Inspect fields with an explicit list
+
+`get_entry_fields` requires non-empty `fields: string[]`. Omit or pass `[]` once to get `available_fields` names only (`action_required: select_fields`), then retry with the paths you need. Do not expect a full dump of every field value.
+
+**Worked example:** `get_entry_fields` with `fields: ["title", "authors"]` before updating those paths.

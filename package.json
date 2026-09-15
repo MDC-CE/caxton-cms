@@ -51,6 +51,7 @@
     "db:push": "drizzle-kit push",
     "ssr:check": "bash scripts/ssr-check.sh",
     "test": "vitest run --maxWorkers=1",
+    "test:stress": "tsx scripts/stress/run.ts",
     "prepare": "husky"
   },
   "dependencies": {

@@ -49,11 +49,13 @@ import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
 import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
 import { unassignedVariablesValidator } from "./unassigned-variables";
+import { funnelCompletenessValidator } from "./funnel-completeness";
 
 export const validators: Validator[] = [
   redirectValidator,
   metaValidator,
   requiredFieldsValidator,
+  funnelCompletenessValidator,
   schemaValidator,
   sitemapValidator,
   componentsValidator,

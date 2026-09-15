@@ -297,7 +297,7 @@ export function prepareAndWriteFunnelMerge(
   contentRoot: string | undefined,
   assertGates: (
     funnel: FunnelBlock,
-    ctx: { contentType: string; contentSlug: string },
+    ctx: { contentType: string; contentSlug: string; contentRoot?: string },
   ) => { ok: true; warnings: { code: string; message: string }[] } | { ok: false; error: string; code: string; details?: unknown },
 ): (FunnelSaveResult & { relativePath?: string }) {
   const filePath = commonYmlPath(contentType, slug, contentRoot);
@@ -305,7 +305,11 @@ export function prepareAndWriteFunnelMerge(
   const merged = mergeFunnelPatch(current, patch);
   if (!merged.ok) return merged;
 
-  const gates = assertGates(merged.coerced, { contentType, contentSlug: slug });
+  const gates = assertGates(merged.coerced, {
+    contentType,
+    contentSlug: slug,
+    contentRoot,
+  });
   if (!gates.ok) {
     return { ok: false, error: gates.error, code: gates.code, details: gates.details };
   }

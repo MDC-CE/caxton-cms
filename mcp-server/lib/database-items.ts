@@ -663,7 +663,8 @@ export function nonLocalMutateOverrideNextActions(opts: {
   return [
     {
       tool: "get_entry_fields",
-      reason: "Inspect field provenance (original vs db_override vs ct_override) before writing",
+      reason:
+        "Omit fields to list available names, then retry get_entry_fields with fields: [...] before writing overrides",
       args_hint: { slug, contentType, ...(site ? { site } : {}) },
       priority: "recommended",
     },

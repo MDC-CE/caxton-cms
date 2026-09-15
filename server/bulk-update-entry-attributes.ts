@@ -263,6 +263,7 @@ export async function bulkUpdateEntryAttributes(request: BulkEntryAttrRequest): 
     const gates = assertFunnelAudienceGates(merged.coerced, {
       contentType,
       contentSlug: slug,
+      contentRoot,
     });
     if (!gates.ok) {
       results.push({

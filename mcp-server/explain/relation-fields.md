@@ -24,7 +24,7 @@ fields:
 
 1. `explain_site` topic `relation-fields`
 2. `get_content_type_info` → `relation_fields` + `system_hints`
-3. `get_entry_fields` → current value + `system_hints`
+3. `get_entry_fields` with `fields: ["<relation_field>"]` → current value + `system_hints`
 4. `update_fields` path `<field>` = string[] pointers on `_common` (from hint.source catalog)
 5. Form YAML: `source.related_field: <field>` plus `value_path` / `label_path` (not hardcoded default/slugs)
 6. Publish — gate until pointers valid/non-empty when forms bind that field

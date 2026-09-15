@@ -250,6 +250,7 @@ export function formFieldSourceNextActions(
         contentType: ctx.contentType,
         slug: ctx.slug,
         site: ctx.site,
+        fields: [issue.relationField],
       },
       priority: "recommended",
     });

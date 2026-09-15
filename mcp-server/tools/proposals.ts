@@ -156,8 +156,15 @@ export function registerProposalTools(
       "Four-eyes apply/reject/accept compare human+role (not username alone). Apply/reject need proposals_review (Proposal Reviewer or Publisher).",
     {
       title: z.string().describe("Short title"),
-      summary: z.string().describe("Why + what (min 80 chars). For notes, include steps tried."),
-      rationale: z.string().optional(),
+      summary: z
+        .string()
+        .describe(
+          "Min 80 chars. Edits (entries/promote): intent + why only — do not paste proposed field values (ops own those; list triage uses title + field_paths). Go-live with empty updates: why this draft should become live. Notes: steps tried + recommended next. Idea: pitch + desired outcome.",
+        ),
+      rationale: z
+        .string()
+        .optional()
+        .describe("Optional deeper reasoning beyond summary. Do not paste proposed field values here."),
       category: z.enum(["content.field", "content.seo"]).optional(),
       kind: z
         .enum(["notes", "idea"])
@@ -182,7 +189,12 @@ export function registerProposalTools(
         .describe(
           "Required after confirm_recent_activity action_required — set true only after inspecting get_entry_activity.",
         ),
-      situation_note: z.string().optional().describe("Plain-English picture of current live values."),
+      situation_note: z
+        .string()
+        .optional()
+        .describe(
+          "Optional plain-English picture of current live values (baseline context). Not proposed values — those go in updates[].",
+        ),
       agent_session_id: z.string().describe("Required. From agent_session start — attach_variant later in the same session."),
       promote_on_apply: z
         .boolean()

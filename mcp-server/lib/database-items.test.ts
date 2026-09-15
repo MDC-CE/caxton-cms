@@ -388,6 +388,8 @@ describe("resolveContentTypesForDatabase / nonLocalMutateFailDetails", () => {
       "get_entry_fields",
       "update_entry_field",
     ]);
+    expect(details.next_actions[0].args_hint?.fields).toBeUndefined();
+    expect(String(details.next_actions[0].reason)).toMatch(/Omit fields|list available names/i);
     expect(details.next_actions[1].args_hint?.level).toBe("database");
     expect(details.warnings.some((w) => w.code === "use_field_overrides")).toBe(true);
   });

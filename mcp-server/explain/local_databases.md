@@ -62,7 +62,7 @@ PATCH/DELETE use the position in the **full unfiltered** item array (all locales
 
 MCP cannot edit upstream api/remote rows. When a content type has `database.slug` matching the bank:
 
-1. `get_entry_fields` — provenance (original / db_override / ct_override)
+1. `get_entry_fields` with `fields: [...]` (or omit once to list names) — provenance (original / db_override / ct_override)
 2. `update_entry_field` — `level: database` (listings + pages) or `level: content_type` (page only)
 
 Mutate tools on non-local DBs **fail** with `next_actions` pointing at those tools when a linked CT + row `slug` are available. If no linked CT, overrides are not available for that bank. Overrides ≠ bank definition — do not use `create_or_update_database` for field overrides.

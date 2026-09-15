@@ -295,6 +295,7 @@ interface ContentTypeConfig {
   preview?: ContentTypePreviewConfig | null;
   schema_org_requirements?: Array<{ schema_type: string }>;
   seo_monitoring?: { enabled?: boolean; require_cluster?: boolean } | null;
+  funnel?: { enforcement?: boolean } | null;
   strategy?: { purpose: string; constraints?: string[] } | null;
 }
 
@@ -6882,6 +6883,8 @@ export default function ContentTypeManagePage() {
   const [seoMonitoringSaving, setSeoMonitoringSaving] = useState(false);
   const seoMonitoringEnabled = typeConfig?.seo_monitoring?.enabled === true;
   const requireClusterEnabled = typeConfig?.seo_monitoring?.require_cluster === true;
+  const [funnelMonitoringSaving, setFunnelMonitoringSaving] = useState(false);
+  const funnelMonitoringEnabled = typeConfig?.funnel?.enforcement !== false;
   const [explainSharedLayoutOpen, setExplainSharedLayoutOpen] = useState(false);
   const [explainLinkedDatabaseOpen, setExplainLinkedDatabaseOpen] = useState(false);
   const [enableSharedLayoutOpen, setEnableSharedLayoutOpen] = useState(false);
@@ -7040,6 +7043,30 @@ export default function ContentTypeManagePage() {
       });
     } finally {
       setSeoMonitoringSaving(false);
+    }
+  };
+
+  const saveFunnelMonitoring = async (enabled: boolean) => {
+    setFunnelMonitoringSaving(true);
+    try {
+      await apiRequest("PUT", `/api/content-types/${contentType}/config`, {
+        funnel: enabled ? null : { enforcement: false },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/content-types", contentType, "config"] });
+      toast({
+        title: enabled ? "Funnel monitoring on" : "Funnel monitoring off",
+        description: enabled
+          ? "When site funnel enforcement is on, pages of this type must have funnel stage and products."
+          : "This type is excluded from funnel enforcement until re-enabled.",
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to update Funnel monitoring",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setFunnelMonitoringSaving(false);
     }
   };
 
@@ -7833,6 +7860,25 @@ export default function ContentTypeManagePage() {
                   data-testid="switch-require-cluster"
                 />
               </div>
+            </CardContent>
+          </Card>
+          <Card data-testid="card-kpi-funnel-monitoring">
+            <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                Funnel monitoring
+              </CardTitle>
+              <Switch
+                checked={funnelMonitoringEnabled}
+                disabled={funnelMonitoringSaving || typeConfig === undefined}
+                onCheckedChange={(checked) => void saveFunnelMonitoring(checked)}
+                data-testid="switch-funnel-monitoring"
+              />
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                When site funnel enforcement is on, require stage and products on pages of this type.
+                On by default; turn off to exclude. Does not clear page funnel fields.
+              </p>
             </CardContent>
           </Card>
           <Card data-testid="card-kpi-single-template">

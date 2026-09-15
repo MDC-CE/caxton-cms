@@ -20,7 +20,8 @@ export const CONTENT_QUALITY_ISSUE_CODES: Record<string, IssueCodeDefinition> = 
     next_actions: [
       {
         tool: "get_entry_fields",
-        reason: "Inspect current content / title fields on this locale",
+        reason:
+          'Inspect content/title: get_entry_fields with fields: ["content", "title"] (or omit fields once to list names)',
         priority: "recommended",
       },
       {

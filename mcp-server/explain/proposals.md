@@ -48,6 +48,18 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 
 Do **not** use notes for new-spoke / config pitches — use `kind:"idea"`.
 
+### Summary by kind
+
+| Kind | `summary` job (min 80) |
+|---|---|
+| `edits` | **Intent + why** only. Do **not** paste proposed field values — those live in `updates[]` / ops. List triage uses title + `field_paths`. Go-live with empty updates: say **why this draft should become live** (preview owns exact copy). |
+| `notes` | Handoff payload: steps tried + recommended next. |
+| `idea` | Brief: pitch + desired outcome. |
+
+**Field roles:** `summary` = above; optional `rationale` = deeper reasoning (still no value dumps); optional `situation_note` = current live picture, not proposed values.
+
+After **`revise_entries`**, trust Proposed changes / ops over an older summary if scope drifted — revise does not rewrite summary.
+
 ## Ideas
 
 - **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; → `finished` + `accepted`. **No YAML.**

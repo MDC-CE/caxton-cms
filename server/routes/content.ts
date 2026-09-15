@@ -2155,6 +2155,19 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      if (body.funnel !== undefined) {
+        if (body.funnel === null) {
+          update.funnel = null;
+        } else if (typeof body.funnel === "object") {
+          const f = body.funnel as Record<string, unknown>;
+          update.funnel =
+            f.enforcement === false ? { enforcement: false } : null;
+        } else {
+          res.status(400).json({ error: "funnel must be an object or null" });
+          return;
+        }
+      }
+
       // Gate: required fields need a valid CT strategy (merged post-update view).
       {
         const {

@@ -750,8 +750,228 @@ function pushDebugUrl(
 /**
  * Debug-only content URL list: indexed + excluded (and drafts with preview locs).
  * Does not write to the XML sitemap cache.
+ * Memoized per content root (60s TTL); invalidated with sitemap entry invalidation / clearSitemapCache.
  */
-export function getDebugSitemapUrls(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
+const DEBUG_SITEMAP_TTL_MS = 60_000;
+
+type DebugSitemapMemo = {
+  urls: DebugSitemapUrl[];
+  generatedAt: number;
+};
+
+const _debugSitemapCache = new Map<string, DebugSitemapMemo>();
+
+function debugSitemapCacheKey(ctx?: ActiveSiteCtx): string {
+  return ctx?.contentRootName ?? getDefaultContentFolder();
+}
+
+/** Drop memoized debug URL lists (all sites, or one content root). */
+export function invalidateDebugSitemapUrls(contentRootName?: string): void {
+  if (contentRootName) {
+    _debugSitemapCache.delete(contentRootName);
+  } else {
+    _debugSitemapCache.clear();
+  }
+}
+
+/** @internal test helper */
+export function resetDebugSitemapCacheForTests(): void {
+  _debugSitemapCache.clear();
+}
+
+function finalizeDebugUrl(opts: {
+  loc: string;
+  label: string;
+  locale?: string;
+  contentKey?: string;
+  indexable: boolean;
+  excludeReason?: string;
+  isDraft?: boolean;
+  siteBlocked: boolean;
+}): DebugSitemapUrl {
+  const out: DebugSitemapUrl[] = [];
+  const inSitemap = !opts.siteBlocked && opts.indexable && !opts.isDraft;
+  pushDebugUrl(out, {
+    loc: opts.loc,
+    label: opts.label,
+    locale: opts.locale,
+    contentKey: opts.contentKey,
+    inSitemap,
+    excludeReason: opts.siteBlocked
+      ? "site_blocked"
+      : opts.isDraft
+        ? undefined
+        : opts.excludeReason,
+    isDraft: opts.isDraft,
+  });
+  return out[0]!;
+}
+
+/**
+ * Resolve a single page's debug-sitemap row (draft / public / noindex) without walking the site.
+ * Returns null when the URL cannot be built (soft miss for search-engines).
+ */
+export function resolveDebugSitemapUrl(opts: {
+  ctx?: ActiveSiteCtx;
+  contentType: string;
+  slug: string;
+  locale: string;
+}): DebugSitemapUrl | null {
+  const ctx = opts.ctx;
+  _activeSiteCtx = ctx ?? null;
+  try {
+    const contentRoot = resolveSitemapContentRoot(ctx);
+    const siteBlocked = isIndexingBlocked(contentRoot);
+    const ci = ctx?.contentIndex ?? contentIndex;
+    const db = ctx?.database ?? databaseManager;
+    const cf = ctx?.contentRootName ?? getDefaultContentFolder();
+    const base = getBaseUrl(ctx);
+    const typeName = opts.contentType;
+    const dirSlug = opts.slug;
+    const locale = opts.locale;
+    if (!typeName || !dirSlug || !locale) return null;
+
+    const allConfigs = getAllConfigs(cf);
+    const typeConfig = allConfigs[typeName];
+
+    // DB-backed types
+    if (typeConfig?.database?.slug) {
+      const dbName = typeConfig.database.slug;
+      const items = db.getMappedItems(dbName);
+      if (!items?.length) return null;
+      const localeFieldKey = getLocaleKey(typeName);
+      const localeSource = getLocaleSource(typeName);
+      const urlPatterns = typeConfig.url_pattern;
+      const fieldMapping = getFullFieldMapping(typeName);
+      const typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
+      const defaults = getFieldMappingDefaults(typeName, cf);
+
+      for (const item of items) {
+        let itemLocale = "en";
+        if (localeFieldKey) {
+          const resolvedLocaleField =
+            fieldMapping && localeFieldKey in fieldMapping
+              ? fieldMapping[localeFieldKey]
+              : localeFieldKey;
+          const langVal = String(item[resolvedLocaleField] || item[localeFieldKey] || "en");
+          itemLocale = localeSource ? applyTransformIfNeeded(localeSource, langVal) : langVal;
+        }
+        if (itemLocale !== locale) continue;
+        const itemSlug = String(item.slug || item.id || "");
+        const hreflangMap = resolveHreflangsFromRecord(item, typeName, cf);
+        const canonicalSlug = hreflangMap ? getCanonicalHreflangSlug(hreflangMap) : null;
+        const matches =
+          itemSlug === dirSlug ||
+          (canonicalSlug != null && canonicalSlug === dirSlug) ||
+          String(item.id || "") === dirSlug;
+        if (!matches) continue;
+
+        const urlPattern = urlPatterns[locale] || urlPatterns["en"];
+        if (!urlPattern) return null;
+        const { missing } = extractUrlPatternParams(urlPattern, item, fieldMapping, defaults);
+        if (missing.length > 0) return null;
+        const itemUrl = `${base}${resolveUrlPatternWithMapping(urlPattern, item, locale, fieldMapping, defaults)}`;
+        const title = String(item.title || item.slug || item.id || "");
+        const contentKey = canonicalSlug
+          ? `${typeName}:${canonicalSlug}`
+          : itemSlug
+            ? `${typeName}:${itemSlug}`
+            : undefined;
+        const robots = resolveDbItemRobots(item, typeName, cf);
+        const entryNoindex = robots.toLowerCase().includes("noindex");
+        return finalizeDebugUrl({
+          loc: itemUrl,
+          label: `${typeLabel}: ${title} (${formatLocaleLabel(locale)})`,
+          locale,
+          contentKey,
+          indexable: !entryNoindex,
+          excludeReason: entryNoindex ? "noindex" : undefined,
+          siteBlocked,
+        });
+      }
+      return null;
+    }
+
+    // YAML types (program / location / page / other)
+    if (isDraftEntry(typeName, dirSlug, cf)) {
+      return finalizeDebugUrl({
+        loc: `${base}/private/preview/${typeName}/${dirSlug}?locale=${locale}`,
+        label: `${typeName}: ${dirSlug} (${formatLocaleLabel(locale)})`,
+        locale,
+        contentKey: `${typeName}:${dirSlug}`,
+        indexable: false,
+        isDraft: true,
+        siteBlocked,
+      });
+    }
+
+    if (!getSupportedLocales(cf).includes(locale)) return null;
+    if (shouldSkipEmptyDetachedLocale(typeName, dirSlug, locale, ci)) return null;
+
+    const merged = loadMergedContent(typeName, dirSlug, locale, ci);
+    if (!merged) return null;
+
+    const meta = (merged.meta as ContentMeta) || {};
+    const entryNoindex = !!meta.robots?.toLowerCase().includes("noindex");
+    const classic = typeName === "program" || typeName === "location" || typeName === "page";
+
+    if (classic) {
+      const urlSlug = resolveSitemapUrlSlug(merged.slug) ?? dirSlug;
+      const loc = `${base}${ci.buildUrl(typeName, locale, urlSlug)}`;
+      const title =
+        meta.page_title ||
+        (merged.title as string) ||
+        (merged.name as string) ||
+        dirSlug;
+      const typeLabel =
+        typeName === "program"
+          ? title
+          : typeName === "location"
+            ? `Location: ${title}`
+            : `Page: ${title}`;
+      return finalizeDebugUrl({
+        loc,
+        label: `${typeLabel} (${formatLocaleLabel(locale)})`,
+        locale,
+        contentKey: `${typeName}:${dirSlug}`,
+        indexable: !entryNoindex,
+        excludeReason: entryNoindex ? "noindex" : undefined,
+        siteBlocked,
+      });
+    }
+
+    // Other YAML content types
+    if (!typeConfig || typeConfig.database) return null;
+    const urlPattern =
+      typeConfig.url_pattern?.[locale] || typeConfig.url_pattern?.["default"];
+    let params: Record<string, string> | undefined;
+    if (urlPattern) {
+      const fieldMapping = getFullFieldMapping(typeName, cf);
+      const defaults = getFieldMappingDefaults(typeName, cf);
+      const extracted = extractUrlPatternParams(urlPattern, merged, fieldMapping, defaults);
+      if (extracted.missing.length > 0) return null;
+      params = extracted.params;
+    }
+    const urlSlug = resolveSitemapUrlSlug(merged.slug);
+    if (!urlSlug) return null;
+    const loc = `${base}${ci.buildUrl(typeName, locale, urlSlug, params)}`;
+    const title = meta.page_title || (merged.title as string) || dirSlug;
+    const typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
+    return finalizeDebugUrl({
+      loc,
+      label: `${typeLabel}: ${title} (${formatLocaleLabel(locale)})`,
+      locale,
+      contentKey: `${typeName}:${dirSlug}`,
+      indexable: !entryNoindex,
+      excludeReason: entryNoindex ? "noindex" : undefined,
+      siteBlocked,
+    });
+  } finally {
+    _activeSiteCtx = null;
+  }
+}
+
+function buildDebugSitemapUrlsUncached(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
   _activeSiteCtx = ctx ?? null;
   try {
     const contentRoot = resolveSitemapContentRoot(ctx);
@@ -1008,7 +1228,6 @@ export function getDebugSitemapUrls(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
           for (const locale of locales) {
             if (!getSupportedLocales(cf).includes(locale)) continue;
             if (shouldSkipEmptyDetachedLocale(typeName, slug, locale, ci)) {
-              // empty detached — no reliable public URL; skip per plan (only emit when loc resolvable)
               continue;
             }
 
@@ -1058,15 +1277,28 @@ export function getDebugSitemapUrls(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
   }
 }
 
+export function getDebugSitemapUrls(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
+  const key = debugSitemapCacheKey(ctx);
+  const now = Date.now();
+  const hit = _debugSitemapCache.get(key);
+  if (hit && now - hit.generatedAt < DEBUG_SITEMAP_TTL_MS) {
+    return hit.urls.map((u) => ({ ...u }));
+  }
+  const urls = buildDebugSitemapUrlsUncached(ctx);
+  _debugSitemapCache.set(key, { urls, generatedAt: now });
+  return urls.map((u) => ({ ...u }));
+}
+
 export function clearSitemapCache(): { success: boolean; message: string } {
   const hadSiteCount = _perSiteSitemapCache.size;
+  invalidateDebugSitemapUrls();
 
   if (sitemapCache) {
     const age = Date.now() - sitemapCache.generatedAt;
     const ageMinutes = Math.round(age / 1000 / 60);
     sitemapCache = null;
     _perSiteSitemapCache.clear();
-    log.info("[Sitemap] Cache cleared (global + per-site)");
+    log.info("[Sitemap] Cache cleared (global + per-site + debug URLs)");
     return {
       success: true,
       message: `Cache cleared. Previous global cache was ${ageMinutes} minutes old; ${hadSiteCount} per-site cache(s) cleared.`,
@@ -1075,7 +1307,7 @@ export function clearSitemapCache(): { success: boolean; message: string } {
 
   if (hadSiteCount > 0) {
     _perSiteSitemapCache.clear();
-    log.info("[Sitemap] Per-site cache cleared");
+    log.info("[Sitemap] Per-site cache cleared (+ debug URLs)");
     return { success: true, message: `${hadSiteCount} per-site cache(s) cleared.` };
   }
 
@@ -1125,6 +1357,7 @@ export function getSitemapCacheStatus(): {
  * No-op when cache is cold.
  */
 export function invalidateSitemapEntry(mapKey: string): void {
+  invalidateDebugSitemapUrls();
   if (!sitemapCache) return;
   sitemapCache.entries.delete(mapKey);
   log.info(`[Sitemap] Invalidated entry: ${mapKey}`);
@@ -1137,6 +1370,7 @@ export function invalidateSitemapEntry(mapKey: string): void {
  * No-op when cache is cold.
  */
 export function invalidateSitemapEntriesByContentKey(contentKey: string): void {
+  invalidateDebugSitemapUrls();
   if (!sitemapCache) return;
   let removed = 0;
   for (const [key, entry] of sitemapCache.entries) {

@@ -470,6 +470,8 @@ blog:
     enabled: true
     require_cluster: true
 authors:
+  funnel:
+    enforcement: false
   insights_intent: content_seo
   strategy:
     purpose: "Person entity pages for authorship and E-E-A-T signals."

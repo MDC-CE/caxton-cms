@@ -29,6 +29,11 @@ export interface SeoMonitoringConfig {
   require_cluster?: boolean;
 }
 
+/** Page funnel completeness for this type — omitted/true = on when site enforcement is on; false = opt out. */
+export interface ContentTypeFunnelConfig {
+  enforcement?: boolean;
+}
+
 export interface LayoutMenuConfig {
   top: string | null;
   bottom: string | null;
@@ -144,6 +149,11 @@ export interface ContentTypeEntry {
    * Omitted = disabled. require_cluster warns when a monitored entry has no cluster assignment.
    */
   seo_monitoring?: SeoMonitoringConfig;
+  /**
+   * Funnel monitoring for this type. Omitted or enforcement true = participate when site
+   * funnel.enforcement is on. Set enforcement false to exclude this type.
+   */
+  funnel?: ContentTypeFunnelConfig;
   /**
    * Type-level strategy brief for staff/agents (main why of this content type).
    * Required before any editor.required true|attached. Context only for field fill_intent.
@@ -293,6 +303,10 @@ const CONFIG_HEADER = `# Content Types Configuration
 #   Per-entry opt-out: set seo.pillar_path: null on locale YAML (intentional standalone).
 #   DB-backed types: optional field_mapping keys seo_main_keyword, seo_pillar_path, seo_is_pillar
 #   map DB columns; locale YAML seo: overlay wins per key.
+#
+# funnel (optional):
+#   Funnel monitoring for this type when site settings.yml funnel.enforcement is on.
+#   Omitted or enforcement: true = include. enforcement: false = exclude this type.
 #
 # schema_org_requirements (optional):
 #   List of companion schema_org sections required on every entry, e.g.
@@ -1142,7 +1156,7 @@ export function hasFieldMapping(type: string, contentRoot?: string): boolean {
   return !!getFieldMapping(type, contentRoot);
 }
 
-export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "strategy">> & {
+export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "funnel" | "strategy">> & {
   /** Pass `null` to unlink a database-backed type (removes the `database` key). */
   database?: DatabaseConfig | null;
   /** Pass `null` to remove preview screenshot config. */
@@ -1151,6 +1165,11 @@ export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" 
   editor?: ContentTypeEntry["editor"] | null;
   /** Pass `null` to remove seo_monitoring (same as omitted = disabled). */
   seo_monitoring?: SeoMonitoringConfig | null;
+  /**
+   * Pass `null` to remove funnel key (same as omitted = monitoring on when site enforces).
+   * Set `{ enforcement: false }` to opt this type out.
+   */
+  funnel?: ContentTypeFunnelConfig | null;
   /** Pass `null` to remove strategy (rejected if required fields remain). */
   strategy?: ContentTypeEntry["strategy"] | null;
 };
@@ -1168,6 +1187,7 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
     preview: previewUpdate,
     editor: editorUpdate,
     seo_monitoring: seoMonitoringUpdate,
+    funnel: funnelUpdate,
     strategy: strategyUpdate,
     ...rest
   } = update;
@@ -1196,6 +1216,16 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
     delete merged.seo_monitoring;
   } else if (seoMonitoringUpdate) {
     merged.seo_monitoring = seoMonitoringUpdate;
+  }
+
+  if (funnelUpdate === null) {
+    delete merged.funnel;
+  } else if (funnelUpdate) {
+    if (funnelUpdate.enforcement === false) {
+      merged.funnel = { enforcement: false };
+    } else {
+      delete merged.funnel;
+    }
   }
 
   if (strategyUpdate === null) {
