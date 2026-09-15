@@ -3,10 +3,12 @@ import { Button } from "@/components/ui/button";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { Check } from "lucide-react";
 import { getIcon as resolveIcon } from "@/lib/icons";
-import type { ComponentType, CSSProperties } from "react";
+import type { CSSProperties } from "react";
 import UniversalImage from "@/components/UniversalImage";
 import type { HumanAndAIDuoSection } from "@shared/schema";
 import { UniversalVideo } from "@/components/UniversalVideo";
+import { RichTextContent } from "@/components/ui/rich-text-content";
+import { inlineMarkdownToHtml } from "@/lib/inline-markdown";
 
 // Image type for styling
 interface StyledImageProps {
@@ -189,9 +191,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
             <h2 className="text-3xl font-bold text-foreground mb-3" data-testid="text-human-ai-heading">
               {data.heading}
             </h2>
-            <p className="text-base text-muted-foreground leading-relaxed">
-              {data.description}
-            </p>
+            <RichTextContent
+              html={inlineMarkdownToHtml(data.description)}
+              className="text-base text-muted-foreground leading-relaxed"
+              data-testid="text-human-ai-description-mobile"
+            />
             {renderCta("button-human-ai-cta-mobile")}
           </div>
           {renderMedia(
@@ -213,7 +217,12 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
                     )}
                     <h4 className="font-semibold text-foreground uppercase tracking-wide text-xs">{group.title}</h4>
                   </div>
-                  {group.description && <p className="text-muted-foreground text-sm mb-3">{group.description}</p>}
+                  {group.description && (
+                    <RichTextContent
+                      html={inlineMarkdownToHtml(group.description)}
+                      className="text-muted-foreground text-sm mb-3"
+                    />
+                  )}
                   {group.bullets && group.bullets.length > 0 && (
                     <ul className="space-y-2">
                       {group.bullets.map((bullet, bulletIndex) => (
@@ -230,7 +239,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
           </Card>
           )}
           {data.footer_description && (
-            <p className="text-sm text-muted-foreground leading-relaxed italic text-center">{data.footer_description}</p>
+            <RichTextContent
+              html={inlineMarkdownToHtml(data.footer_description)}
+              className="text-sm text-muted-foreground leading-relaxed italic text-center"
+              data-testid="text-human-ai-footer-mobile"
+            />
           )}
         </div>
 
@@ -241,7 +254,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
               <h2 className="text-3xl font-bold text-foreground mb-3" data-testid="text-human-ai-heading-tablet">
                 {data.heading}
               </h2>
-              <p className="text-base text-muted-foreground leading-relaxed">{data.description}</p>
+              <RichTextContent
+                html={inlineMarkdownToHtml(data.description)}
+                className="text-base text-muted-foreground leading-relaxed"
+                data-testid="text-human-ai-description-tablet"
+              />
               {renderCta("button-human-ai-cta-tablet")}
             </div>
             <div className="col-span-5">
@@ -266,7 +283,12 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
                     )}
                     <h4 className="font-semibold text-foreground uppercase tracking-wide text-xs">{group.title}</h4>
                   </div>
-                  {group.description && <p className="text-muted-foreground text-sm mb-3">{group.description}</p>}
+                  {group.description && (
+                    <RichTextContent
+                      html={inlineMarkdownToHtml(group.description)}
+                      className="text-muted-foreground text-sm mb-3"
+                    />
+                  )}
                   {group.bullets && group.bullets.length > 0 && (
                     <ul className="space-y-2">
                       {group.bullets.map((bullet, bulletIndex) => (
@@ -283,7 +305,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
           </Card>
           )}
           {data.footer_description && (
-            <p className="text-sm text-muted-foreground leading-relaxed italic text-left">{data.footer_description}</p>
+            <RichTextContent
+              html={inlineMarkdownToHtml(data.footer_description)}
+              className="text-sm text-muted-foreground leading-relaxed italic text-left"
+              data-testid="text-human-ai-footer-tablet"
+            />
           )}
         </div>
 
@@ -294,7 +320,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
               <h2 className="text-4xl font-bold text-foreground mb-4 w-full" data-testid="text-human-ai-heading">
                 {data.heading}
               </h2>
-              <p className="text-lg text-muted-foreground leading-relaxed">{data.description}</p>
+              <RichTextContent
+                html={inlineMarkdownToHtml(data.description)}
+                className="text-lg text-muted-foreground leading-relaxed"
+                data-testid="text-human-ai-description"
+              />
               {renderCta("button-human-ai-cta-desktop")}
             </div>
             <div className={`${hasVideo ? "col-span-5" : "col-span-5 flex items-start gap-4 bg-primary/5 p-4 rounded-card h-44"}`}>
@@ -319,7 +349,12 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
                     )}
                     <h4 className="font-semibold text-foreground uppercase tracking-wide text-xs">{group.title}</h4>
                   </div>
-                  {group.description && <p className="text-muted-foreground text-base mb-4">{group.description}</p>}
+                  {group.description && (
+                    <RichTextContent
+                      html={inlineMarkdownToHtml(group.description)}
+                      className="text-muted-foreground text-base mb-4"
+                    />
+                  )}
                   {group.bullets && group.bullets.length > 0 && (
                     <ul className="space-y-3">
                       {group.bullets.map((bullet, bulletIndex) => (
@@ -336,7 +371,11 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
           </Card>
           )}
           {data.footer_description && (
-            <p className="text-base text-muted-foreground leading-relaxed italic">{data.footer_description}</p>
+            <RichTextContent
+              html={inlineMarkdownToHtml(data.footer_description)}
+              className="text-base text-muted-foreground leading-relaxed italic"
+              data-testid="text-human-ai-footer"
+            />
           )}
         </div>
       </div>

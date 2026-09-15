@@ -5,6 +5,16 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-15"
+    summary: "list_entries refresh_tier empty match returns []"
+    agent_impact:
+      - "list_entries refresh_tier=medium|evergreen|fast|unset with zero seo-index hits now returns an empty list (total 0), not the unfiltered catalog."
+      - "Previously an empty matched-slug set was ignored and looked like medium/evergreen were broken. Reconnect MCP for updated describes."
+    tools_changed: true
+    paths:
+      - mcp-server/lib/list-entries-resolve.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/seo.md
   - date: "2026-09-14"
     summary: "list_proposals filters by proposer username, actor, session"
     agent_impact:

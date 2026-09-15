@@ -112,6 +112,7 @@ import {
 } from "@/lib/proposalCardMeta";
 import { McpCopyButton } from "@/components/mcp/McpSetupUi";
 import {
+  PROPOSAL_ACTOR_TYPE_OPTIONS,
   PROPOSAL_KIND_OPTIONS,
   PROPOSAL_SORT_PRESETS,
   PROPOSAL_STATUS_OPTIONS,
@@ -740,8 +741,29 @@ export function ProposalListPanel() {
         PROPOSAL_KIND_OPTIONS.find((o) => o.value === view.filters.kind)?.label ?? view.filters.kind,
       );
     }
+    const user = view.filters.proposerUsername.trim();
+    if (user) parts.push(`Proposer ${user}`);
+    if (view.filters.proposerActorType !== "all") {
+      parts.push(
+        PROPOSAL_ACTOR_TYPE_OPTIONS.find((o) => o.value === view.filters.proposerActorType)?.label ??
+          view.filters.proposerActorType,
+      );
+    }
+    const role = view.filters.proposerActorRole.trim();
+    if (role) parts.push(role);
+    const session = view.filters.agentSessionId.trim();
+    if (session) {
+      parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
+    }
     return parts.join(" · ");
-  }, [view.filters.status, view.filters.kind]);
+  }, [
+    view.filters.status,
+    view.filters.kind,
+    view.filters.proposerUsername,
+    view.filters.proposerActorType,
+    view.filters.proposerActorRole,
+    view.filters.agentSessionId,
+  ]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["/api/admin/proposals", apiQuery],
@@ -903,7 +925,15 @@ export function ProposalListPanel() {
         stats={data?.stats}
         onApply={(dims) =>
           writeView({
-            filters: { ...view.filters, status: dims.status, kind: dims.kind },
+            filters: {
+              ...view.filters,
+              status: dims.status,
+              kind: dims.kind,
+              proposerUsername: dims.proposerUsername,
+              proposerActorType: dims.proposerActorType,
+              proposerActorRole: dims.proposerActorRole,
+              agentSessionId: dims.agentSessionId,
+            },
             q: view.q,
           })
         }
@@ -974,7 +1004,7 @@ export function ProposalListPanel() {
                   <div className="space-y-1">
                     <p className="text-sm font-medium">No proposals match these filters</p>
                     <p className="text-xs text-muted-foreground">
-                      Try a broader status or clear the search to see everything.
+                      Try broader filters or clear the search to see everything.
                     </p>
                   </div>
                   <div className="flex flex-wrap justify-center gap-2">

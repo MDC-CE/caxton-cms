@@ -101,6 +101,21 @@ describe("filterSlugRows", () => {
     });
     expect(filtered.map((r) => r.slug)).toEqual(["b"]);
   });
+
+  it("treats empty slugs as match-nothing (not unfiltered)", () => {
+    const filtered = filterSlugRows(base, {
+      slugs: [],
+      contentFolder: "site_test",
+    });
+    expect(filtered).toEqual([]);
+  });
+
+  it("omits slug filter when slugs is undefined", () => {
+    const filtered = filterSlugRows(base, {
+      contentFolder: "site_test",
+    });
+    expect(filtered.map((r) => r.slug).sort()).toEqual(["a", "b", "c"]);
+  });
 });
 
 describe("filterSlugRows funnel overlay", () => {
@@ -254,5 +269,28 @@ describe("collectTypeStats / resolveEntryList", () => {
     expect(got.entries).toHaveLength(2);
     expect(got.entries[0]?.content).toBeUndefined();
     expect(got.entries.find((e) => e.slug === "one")?.tags).toEqual(["t"]);
+  });
+
+  it("empty slugs array returns zero rows (refresh_tier zero-match)", async () => {
+    const fetchItems: FetchItemsFn = async () => ({
+      ok: true,
+      total: 2,
+      results: [
+        { slug: "one", locale: "en", title: "One" },
+        { slug: "two", locale: "en", title: "Two" },
+      ],
+    });
+    const got = await resolveEntryList({
+      contentType: "blog",
+      domain: null,
+      contentPath: process.cwd(),
+      contentFolder: "site_4geeks-com",
+      slugs: [],
+      fetchItems,
+    });
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.total).toBe(0);
+    expect(got.entries).toEqual([]);
   });
 });

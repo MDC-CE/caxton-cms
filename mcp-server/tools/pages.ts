@@ -1425,7 +1425,7 @@ export function registerPageTools(
     "Optional detail:true adds safe non-body scalars (never full content/readme). " +
     "Optional filters (AND, entry mode): locale (strict — slug must have that locale), slugs, search, " +
     "funnel_stage / funnel_product / is_money_page (overlay _common.yml funnel; missing file = untagged). " +
-    "refresh_tier (fast|medium|evergreen|unset) filters via seo-index inventory only — pages with a YAML tier but no keyword/cluster signal are omitted. " +
+    "refresh_tier (fast|medium|evergreen|unset) filters via seo-index inventory only — pages with a YAML tier but no keyword/cluster signal are omitted; zero matches returns an empty list (not the unfiltered catalog). " +
     "is_money_page + conflicting funnel_stage fails. Funnel-filtered rows include funnel + is_money_page + stage_missing. " +
     "Create/delete of catalog-sourced identities still blocked — see get_content_type_info create_via. " +
     MULTI_SITE_TOOL_BLURB + " Requires content_view.",
@@ -1456,7 +1456,7 @@ export function registerPageTools(
         .enum(["fast", "medium", "evergreen", "unset"])
         .optional()
         .describe(
-          "Filter by seo-index refresh_tier (fact-staleness). unset = inventory row with missing/null tier. Not GSC traffic decay.",
+          "Filter by seo-index refresh_tier (fact-staleness). unset = inventory row with missing/null tier. Zero matches → empty list (does not fall back to unfiltered). Not GSC traffic decay.",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },

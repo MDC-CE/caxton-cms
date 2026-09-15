@@ -13,6 +13,8 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
+import { RichTextContent } from "@/components/ui/rich-text-content";
+import { inlineMarkdownToHtml } from "@/lib/inline-markdown";
 
 const AVAILABLE_FEATURES = [
   "online-platform",
@@ -326,8 +328,11 @@ export function FaqEditor({ data }: FaqEditorProps) {
                       <AccordionTrigger className="text-left font-medium hover:no-underline py-4">
                         {faq.question}
                       </AccordionTrigger>
-                      <AccordionContent className="text-muted-foreground pb-4 whitespace-pre-line">
-                        {faq.answer}
+                      <AccordionContent className="text-muted-foreground pb-4">
+                        <RichTextContent
+                          html={inlineMarkdownToHtml(faq.answer)}
+                          className="text-muted-foreground"
+                        />
                       </AccordionContent>
                     </AccordionItem>
                   ))}
