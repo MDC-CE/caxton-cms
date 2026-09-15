@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_IGNORE_RULE_INPUTS } from "@shared/runtime-issues-ignore";
-import { fingerprintNotFound } from "@shared/runtime-issues";
+import { fingerprintNotFound, utcHourKey } from "@shared/runtime-issues";
 import { gcs } from "./gcs";
 import {
   _resetRuntimeIssuesForTests,
@@ -43,7 +43,8 @@ describe("runtime-issues-store", () => {
 
   it("records Googlebot page 404s with byHour and search_crawler", () => {
     const contentRoot = root();
-    const ts = Date.UTC(2026, 7, 14, 15, 0, 0);
+    // Keep lastSeen inside ISSUE_TTL_MS (30d) relative to wall clock.
+    const ts = Date.now() - 60_000;
     expect(
       recordPublicNotFound({
         site: "site_test",
@@ -58,8 +59,9 @@ describe("runtime-issues-store", () => {
     expect(listed.issues[0].sources).toContain("search_crawler");
     expect(listed.issues[0].uaBucket).toBe("search_crawler");
     expect(listed.issues[0].likelyBot).toBeFalsy();
-    expect(listed.issues[0].byHour?.["2026-08-14T15"]?.total).toBe(1);
-    expect(listed.issues[0].byHour?.["2026-08-14T15"]?.search_crawler).toBe(1);
+    const hour = utcHourKey(ts);
+    expect(listed.issues[0].byHour?.[hour]?.total).toBe(1);
+    expect(listed.issues[0].byHour?.[hour]?.search_crawler).toBe(1);
   });
 
   it("merges query attribution on the same path", () => {
@@ -219,9 +221,10 @@ describe("runtime-issues-store", () => {
     expect(listRuntimeIssues("site_test", { contentRoot }).issues.map((i) => i.path)).toEqual(["/local-only"]);
 
     const prodFp = "prod-fp";
+    const seen = Date.now() - 2 * 24 * 60 * 60 * 1000;
     const prodState = {
       version: 1 as const,
-      updatedAt: Date.UTC(2026, 7, 1),
+      updatedAt: seen,
       issues: {
         [prodFp]: {
           fingerprint: prodFp,
@@ -229,8 +232,8 @@ describe("runtime-issues-store", () => {
           path: "/prod-only",
           locale: "en",
           count: 4,
-          firstSeen: Date.UTC(2026, 7, 1),
-          lastSeen: Date.UTC(2026, 7, 14),
+          firstSeen: seen,
+          lastSeen: seen,
         },
       },
       recent: [],
@@ -499,7 +502,7 @@ describe("runtime-issues-store", () => {
     const contentRoot = root();
     const wpFp = fingerprintNotFound("site_test", "en", "/wp-json/Batch/v1");
     const realFp = fingerprintNotFound("site_test", "en", "/us/real");
-    const ts = Date.UTC(2026, 7, 14);
+    const ts = Date.now() - 60_000;
     writeFileSync(
       getRuntimeIssuesLocalPath("site_test", contentRoot),
       JSON.stringify({
@@ -576,14 +579,16 @@ describe("runtime-issues-store", () => {
 
   it("prod+GCS: skips ingest and upload until hydrate, then keeps GCS history", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-15T12:00:00.000Z"));
     const contentRoot = root();
     _setRuntimeIssuesProductionForTests(true);
     vi.spyOn(gcs, "available", "get").mockReturnValue(true);
 
     const prodFp = "prod-fp";
+    const seen = Date.UTC(2026, 8, 10); // within 30d of frozen system time
     const prodState = {
       version: 1 as const,
-      updatedAt: Date.UTC(2026, 7, 1),
+      updatedAt: seen,
       issues: {
         [prodFp]: {
           fingerprint: prodFp,
@@ -591,8 +596,8 @@ describe("runtime-issues-store", () => {
           path: "/prod-history",
           locale: "en",
           count: 9,
-          firstSeen: Date.UTC(2026, 7, 1),
-          lastSeen: Date.UTC(2026, 7, 14),
+          firstSeen: seen,
+          lastSeen: seen,
         },
       },
       recent: [],

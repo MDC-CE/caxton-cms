@@ -3,8 +3,9 @@ import { useState, useEffect, useMemo } from "react";
 import { Check, Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
 import { Turnstile } from "@marsidev/react-turnstile";
+import { normalizeLocale } from "@/lib/locale";
+import { localeFromPath } from "@shared/runtime-issues";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -19,6 +20,7 @@ import {
 } from "@/components/ui/form";
 import { useSession, useLocation as useSessionLocation, useUTM } from "@/contexts/SessionContext";
 import { useSectionContext } from "@/contexts/SectionContext";
+import { useLocation } from "wouter";
 import { apiRequest, apiFetch, queryClient } from "@/lib/queryClient";
 import { getApiPath } from "@shared/api-paths";
 import type { Country } from "react-phone-number-input";
@@ -58,6 +60,7 @@ import {
   resolveLeadFormPhase,
   resolveLeadFormCopy,
   leadFormSubtitleClassName,
+  type LeadFormLocale,
   type LeadFormSubtitleStyle,
 } from "@/lib/resolveLeadFormCopy";
 import {
@@ -717,11 +720,13 @@ function buildEffectiveSubmitConfig(
 
 export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const landingLocations = undefined as string[] | undefined;
-  const { slug, contentType, singleEntry } = useSectionContext();
+  const { slug, contentType, singleEntry, locale: sectionLocale } = useSectionContext();
   const programContext = contentType === "program" ? slug : undefined;
   const pageFunnel = usePageFunnel();
-  const { t, i18n } = useTranslation();
-  const locale = i18n.language === "es" ? "es" : "en";
+  const [locationPath] = useLocation();
+  /** Page locale (SectionContext → path). Used for copy, options, and reload_entry queryKeys. */
+  const locale: LeadFormLocale =
+    normalizeLocale(sectionLocale || localeFromPath(locationPath)) === "es" ? "es" : "en";
   const { session, setConversionPage } = useSession();
   const sessionLocation = useSessionLocation();
   const utm = useUTM();
@@ -1766,13 +1771,11 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       if (effective.success?.reload_entry && contentType && slug) {
+        const dbKey = ["/api/database-single", contentType, slug, locale] as const;
+        const staticKey = [getApiPath(contentType), slug, locale] as const;
         // Non-blocking: refresh entry page data so overrides re-resolve (e.g. registered).
-        void queryClient.invalidateQueries({
-          queryKey: ["/api/database-single", contentType, slug, locale],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: [getApiPath(contentType), slug, locale],
-        });
+        void queryClient.invalidateQueries({ queryKey: [...dbKey] });
+        void queryClient.invalidateQueries({ queryKey: [...staticKey] });
       }
 
       if (effective.success?.url) {
