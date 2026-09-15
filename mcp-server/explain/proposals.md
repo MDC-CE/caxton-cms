@@ -11,7 +11,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 | Tool | Caps | Job |
 |---|---|---|
 | `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
-| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `proposal_id` / `query` / `issue_id` / `status` / `kind` (`edits`\|`notes`\|`idea`). Single-id open\|partial returns live `review_context` + `discovery_path`. |
+| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` (`type`\|`role`) / `agent_session_id` → **summary** rows (`entry_count`, `field_paths`, slim stubs; no ops/values). `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
@@ -34,8 +34,8 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 
 | Caps | Allowed | Denied |
 |---|---|---|
-| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry |
-| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry | apply, reject, accept, close, blockers |
+| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries |
+| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries | apply, reject, accept, close, blockers |
 | both | full set | — |
 
 ## Kinds
@@ -80,9 +80,13 @@ Do **not** use notes for new-spoke / config pitches — use `kind:"idea"`.
 ## Collaboration
 
 - **One open proposal per variant** → `proposal_exists`.
-- **Claim** = working it (human+role; staff UI may take over). **add_blocker** = feedback.
+- **Claim** = working it (human+role; staff UI may take over). **add_blocker** = feedback for polish.
+- **Reject** = rare terminal: bad / not implementable / illegal-or-policy / harmful / duplicate weaker / target missing. Requires `confirm_reject`, `reject_kind`, and `close_note` (min 80). Do **not** reject for polish.
+- **revise_entries** (authors): rewrite pending/failed soft ops; idle or self-claim only; foreign claim blocks; open blockers stay open until `resolve_blocker`.
 - **Open blockers block apply and idea accept** — reject/withdraw/close still work.
 - Cleared blockers ≠ approved — re-preview then four-eyes apply/accept.
+- Optional `supersedes_proposal_id` on `propose_change` links a replacement to a rejected/withdrawn predecessor (`replaced_by` on the old). Never required.
+- **Withdraw:** `close_note` min 20 (no reject-kind gate).
 
 ## Rules
 
@@ -95,6 +99,7 @@ Do **not** use notes for new-spoke / config pitches — use `kind:"idea"`.
 - **Allowed shape:** live missing but named draft exists → `new_public_content` (promote later).
 - **Apply block:** `target_missing` when the page was deleted after filing — reject/withdraw/close still work.
 - Live `review_context` on `list_proposals(proposal_id)` for open|partial; snapshot on list rows is a filed hint only.
+- Multi-row list is **summary only** (`proposals_view: "summary"`, warning `proposals_summary_only`): use `entry_count` + `field_paths` to triage; pass `proposal_id` for ops/baselines before apply.
 - Before apply, prefer `list_proposals(proposal_id)` + `explain` → `reading-proposals`.
 
 Full checklist IDs and axes: `explain` → `reading-proposals`.

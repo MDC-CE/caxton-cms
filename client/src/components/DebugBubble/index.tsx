@@ -18,6 +18,7 @@ import { useEditModeOptional } from "@/contexts/EditModeContext";
 import {
   restoreEditModeScrollPosition,
 } from "@/lib/editModeScroll";
+import { isPrivatePreviewPath } from "@/lib/visual-edit-path";
 import { useEnterVisualEditMode } from "@/hooks/useEnterVisualEditMode";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useSyncOptional } from "@/contexts/SyncContext";
@@ -2196,7 +2197,12 @@ export function DebugBubble() {
     pageErrorCount,
     pageWarningCount,
     pageDiagnosticsLoading,
-    pageDiagnosticsUrl: pageDiagnostics?.url ?? resolvedPublicPageUrl ?? null,
+    pageDiagnosticsUrl: (() => {
+      if (resolvedPublicPageUrl) return resolvedPublicPageUrl;
+      const u = pageDiagnostics?.url;
+      if (u && !isPrivatePreviewPath(u)) return u;
+      return null;
+    })(),
     pageDiagnosticsEntryKey: pageDiagnostics?.entryKey ?? null,
     onOpenPageErrors: openPageErrorsModal,
     currentLang,
@@ -2561,6 +2567,7 @@ export function DebugBubble() {
         onOpenChange={setPageErrorsModalOpen}
         pageDiagnostics={pageDiagnostics}
         pageUrl={pageDiagnostics?.url}
+        publicPageUrl={resolvedPublicPageUrl}
         loading={pageDiagnosticsLoading}
         error={pageDiagnosticsError}
         onRefreshDiagnostics={refreshPageDiagnostics}

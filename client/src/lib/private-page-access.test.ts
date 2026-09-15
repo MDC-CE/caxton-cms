@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   isPrivateEmbedPath,
+  isPrivateHtmlAuthBypass,
   resolvePrivatePageAccess,
-} from "./private-page-access";
+} from "@shared/private-page-access";
 
 describe("isPrivateEmbedPath", () => {
   it("allows capture and component preview frames", () => {
@@ -31,25 +32,34 @@ describe("isPrivateEmbedPath", () => {
   });
 });
 
+describe("isPrivateHtmlAuthBypass", () => {
+  it("allows OAuth return with staff_session_code", () => {
+    expect(
+      isPrivateHtmlAuthBypass("/private/settings", "?staff_session_code=abc"),
+    ).toBe(true);
+  });
+
+  it("does not bypass for empty staff_session_code", () => {
+    expect(isPrivateHtmlAuthBypass("/private/settings", "?staff_session_code=")).toBe(
+      false,
+    );
+  });
+});
+
 describe("resolvePrivatePageAccess", () => {
   const base = {
     pathname: "/private/redirects",
-    isDebugMode: false,
     isLoading: false,
     isValidated: false as boolean | null,
     hasToken: false,
     hasCachedStaffSession: false,
   };
 
-  it("404s anonymous visitors without debug mode", () => {
+  it("denies anonymous visitors", () => {
     expect(resolvePrivatePageAccess(base)).toBe("deny");
   });
 
-  it("allows debug mode without a staff session", () => {
-    expect(resolvePrivatePageAccess({ ...base, isDebugMode: true })).toBe("allow");
-  });
-
-  it("allows a validated staff session without debug mode", () => {
+  it("allows a validated staff session", () => {
     expect(
       resolvePrivatePageAccess({
         ...base,
@@ -71,7 +81,7 @@ describe("resolvePrivatePageAccess", () => {
     ).toBe("pending");
   });
 
-  it("404s immediately when auth is loading but there is no staff token", () => {
+  it("denies immediately when auth is loading but there is no staff token", () => {
     expect(
       resolvePrivatePageAccess({
         ...base,
@@ -81,7 +91,7 @@ describe("resolvePrivatePageAccess", () => {
     ).toBe("deny");
   });
 
-  it("allows embed frames without debug or login", () => {
+  it("allows embed frames without login", () => {
     expect(
       resolvePrivatePageAccess({
         ...base,

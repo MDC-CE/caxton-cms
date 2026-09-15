@@ -16,6 +16,14 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ query: "cta" })).toBe(true);
   });
 
+  it("treats proposer filters as scoped", () => {
+    expect(isProposalsScoped({ proposer_username: "alice@4geeks.com" })).toBe(true);
+    expect(isProposalsScoped({ proposer_actor: { type: "ui" } })).toBe(true);
+    expect(isProposalsScoped({ proposer_actor: { role: "copy_editor" } })).toBe(true);
+    expect(isProposalsScoped({ proposer_actor: {} })).toBe(false);
+    expect(isProposalsScoped({ agent_session_id: "sess-1" })).toBe(true);
+  });
+
   it("clamps limit and computes next_offset", () => {
     expect(clampProposalLimit(undefined)).toBe(20);
     expect(clampProposalLimit(500)).toBe(200);

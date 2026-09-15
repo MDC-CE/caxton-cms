@@ -172,9 +172,10 @@ import {
   staffSessionJson,
 } from "../staff-session-resolve";
 import { revokeAllStaffSessions } from "../staff-session";
-
-
 import {
+  clearStaffSessionCookie,
+  mintStaffSessionCookie,
+} from "../staff-session-cookie";import {
 
   BREATHECODE_HOST,
   extractToken,
@@ -440,6 +441,7 @@ export function registerAuthRoutes(app: Express): void {
 
       const resolved = await resolveOwnedStaffSession(token);
       if (!resolved) {
+        clearStaffSessionCookie(res);
         res.json({
           valid: false,
           capabilities: [],
@@ -452,6 +454,7 @@ export function registerAuthRoutes(app: Express): void {
         return;
       }
 
+      mintStaffSessionCookie(res, resolved.token, { expiresAt: resolved.expiresAt });
       res.json(staffSessionJson(resolved));
     } catch (error) {
       log.error({ err: error }, "Token validation error:");
@@ -771,10 +774,12 @@ export function registerAuthRoutes(app: Express): void {
 
       const resolved = await resolveOwnedStaffSession(token);
       if (!resolved) {
+        clearStaffSessionCookie(res);
         res.json({ valid: false, expired: true });
         return;
       }
 
+      mintStaffSessionCookie(res, resolved.token, { expiresAt: resolved.expiresAt });
       res.json({
         valid: true,
         expired: false,

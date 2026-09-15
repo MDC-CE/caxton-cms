@@ -1,7 +1,7 @@
 import { Switch, Route, useLocation, useParams } from "wouter";
 import { lazy, Suspense, type ReactNode } from "react";
 import NotFound from "@/pages/not-found";
-import { getDebugToken, isDebugModeActive, useDebugAuth } from "@/hooks/useDebugAuth";
+import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { resolvePrivatePageAccess } from "@/lib/private-page-access";
 
 const ComponentShowcase = lazy(() => import("@/pages/ComponentShowcase"));
@@ -103,7 +103,6 @@ function PrivateStaffGate({ children }: { children: ReactNode }) {
   const { isLoading, isValidated, hasToken } = useDebugAuth();
   const access = resolvePrivatePageAccess({
     pathname,
-    isDebugMode: isDebugModeActive(),
     isLoading,
     isValidated,
     hasToken,

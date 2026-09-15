@@ -5,6 +5,7 @@ import { setupVite, serveStatic, log } from "./vite";
 import { registerDevViteForHubRender } from "./render-hub-html";
 import type { ViteDevServer } from "vite";
 import { fallbackRedirectMiddleware } from "./redirects";
+import { privateHtmlAuthMiddleware } from "./private-html-auth";
 import { initialDataMiddleware } from "./initial-data-middleware";
 import compression from "compression";
 import cookieParser from "cookie-parser";
@@ -389,6 +390,9 @@ app.use((req, res, next) => {
   // Fallback redirects: only fire for URLs that would otherwise 404
   // Registered before Vite's catch-all so they can intercept unknown routes
   app.use(fallbackRedirectMiddleware);
+
+  // /private document GETs require a staff session cookie (or OAuth return / embeds)
+  app.use(privateHtmlAuthMiddleware);
 
   // Serve cached anonymous HTML before initial-data resolution / SSR work.
   // Only active in production — development always re-renders for HMR accuracy.

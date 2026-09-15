@@ -2,10 +2,11 @@ import type { Express, Request, Response } from "express";
 import { api } from "../rate-limit/api";
 import * as userStore from "../user-store";
 import { requireAnyCapability } from "./_helpers";
-import { proposalServiceForSite, exportAllProposals } from "../content-proposals";
+import { proposalServiceForSite, exportAllProposals, toProposalSummary } from "../content-proposals";
 import type { SiteContext } from "../site-manager";
 import {
   parseProposalSort,
+  parseProposerActorType,
   type CreateProposalInput,
   type ProposalUpdateAction,
 } from "../content-proposals/service";
@@ -59,6 +60,7 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "reopen_blocker",
   "attach_variant",
   "set_no_auto_retry",
+  "revise_entries",
 ]);
 
 const ALL_ACTIONS = new Set<ProposalUpdateAction>([
@@ -75,6 +77,7 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "resolve_blocker",
   "reopen_blocker",
   "set_no_auto_retry",
+  "revise_entries",
 ]);
 
 export function registerProposalRoutes(app: Express): void {
@@ -163,6 +166,12 @@ export function registerProposalRoutes(app: Express): void {
     const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
     const query = typeof req.query.q === "string" ? req.query.q : undefined;
     const proposalId = typeof req.query.proposal_id === "string" ? req.query.proposal_id : undefined;
+    const proposerUsername =
+      typeof req.query.proposer_username === "string" ? req.query.proposer_username : undefined;
+    const proposerActorRole =
+      typeof req.query.proposer_actor_role === "string" ? req.query.proposer_actor_role : undefined;
+    const agentSessionId =
+      typeof req.query.agent_session_id === "string" ? req.query.agent_session_id : undefined;
     const limitRaw = req.query.limit ? Number(req.query.limit) : undefined;
     const offsetRaw = req.query.offset ? Number(req.query.offset) : undefined;
     const sortRaw = typeof req.query.sort === "string" ? req.query.sort : undefined;
@@ -177,6 +186,13 @@ export function registerProposalRoutes(app: Express): void {
       res.status(400).json({ error: parsedSort.error });
       return;
     }
+    const actorTypeRaw =
+      typeof req.query.proposer_actor_type === "string" ? req.query.proposer_actor_type : undefined;
+    const parsedActorType = parseProposerActorType(actorTypeRaw);
+    if (!parsedActorType.ok) {
+      res.status(400).json({ error: parsedActorType.error });
+      return;
+    }
     const stats = svc.stats();
     let { proposals, total } = svc.list({
       issue_id: issueId,
@@ -184,6 +200,10 @@ export function registerProposalRoutes(app: Express): void {
       kind: kind as never,
       query,
       proposal_id: proposalId,
+      proposer_username: proposerUsername,
+      proposer_actor_type: parsedActorType.type,
+      proposer_actor_role: proposerActorRole,
+      agent_session_id: agentSessionId,
       limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
       offset: Number.isFinite(offsetRaw) ? offsetRaw : undefined,
       sort: parsedSort.sort,
@@ -197,15 +217,25 @@ export function registerProposalRoutes(app: Express): void {
       // Refresh list row snapshot fields after lazy fill
       const refreshed = svc.get(p.id);
       if (refreshed) proposals = [refreshed];
+      res.json({
+        proposals,
+        total,
+        stats,
+        sort: parsedSort.sort,
+        sort_dir: parsedSort.sortDir,
+        proposals_view: "full",
+        ...(review_context ? { review_context } : {}),
+      });
+      return;
     }
 
     res.json({
-      proposals,
+      proposals: proposals.map(toProposalSummary),
       total,
       stats,
       sort: parsedSort.sort,
       sort_dir: parsedSort.sortDir,
-      ...(review_context ? { review_context } : {}),
+      proposals_view: "summary",
     });
   });
 
@@ -253,7 +283,9 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "confirm_recent_activity" ||
         result.code === "activity_unavailable" ||
         result.code === "competing_entry_edits" ||
-        result.code === "mixed_risk_bundle"
+        result.code === "mixed_risk_bundle" ||
+        result.code === "supersedes_already_replaced" ||
+        result.code === "supersedes_not_closed"
           ? 409
           : 400;
       res.status(status).json(result);
@@ -354,18 +386,23 @@ export function registerProposalRoutes(app: Express): void {
       next_step: typeof req.body?.next_step === "string" ? req.body.next_step : undefined,
       no_auto_retry:
         typeof req.body?.no_auto_retry === "boolean" ? req.body.no_auto_retry : undefined,
+      confirm_reject: req.body?.confirm_reject === true,
+      reject_kind: typeof req.body?.reject_kind === "string" ? req.body.reject_kind : undefined,
+      entries: Array.isArray(req.body?.entries) ? req.body.entries : undefined,
     });
     if (!result.ok) {
       const status =
         result.code === "not_found"
           ? 404
-          : result.code === "four_eyes" || result.code === "not_claimant"
+          : result.code === "four_eyes" || result.code === "not_claimant" || result.code === "not_proposer"
             ? 403
             : result.code === "proposal_exists" ||
                 result.code === "confirm_end_experiment" ||
                 result.code === "confirm_recent_activity" ||
+                result.code === "confirm_reject" ||
                 result.code === "activity_unavailable" ||
-                result.code === "notes_no_auto_retry"
+                result.code === "notes_no_auto_retry" ||
+                result.code === "claimed"
               ? 409
               : 400;
       res.status(status).json(result);

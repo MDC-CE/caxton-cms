@@ -4,8 +4,10 @@
 
 import {
   parseProposalSort,
+  parseProposerActorType,
   type ProposalSortDir,
   type ProposalSortField,
+  type ProposerActorType,
 } from "../../server/content-proposals/service.js";
 
 export type ListProposalsArgs = {
@@ -14,6 +16,12 @@ export type ListProposalsArgs = {
   status?: string;
   kind?: string;
   issue_id?: string;
+  proposer_username?: string;
+  proposer_actor?: {
+    type?: ProposerActorType;
+    role?: string;
+  };
+  agent_session_id?: string;
   limit?: number;
   offset?: number;
   sort?: string;
@@ -26,7 +34,11 @@ export function isProposalsScoped(args: ListProposalsArgs): boolean {
       args.query?.trim() ||
       args.issue_id?.trim() ||
       args.status ||
-      args.kind,
+      args.kind ||
+      args.proposer_username?.trim() ||
+      args.proposer_actor?.type ||
+      args.proposer_actor?.role?.trim() ||
+      args.agent_session_id?.trim(),
   );
 }
 
@@ -52,6 +64,8 @@ export function proposalNextOffset(
 
 export {
   parseProposalSort,
+  parseProposerActorType,
   type ProposalSortField,
   type ProposalSortDir,
+  type ProposerActorType,
 };

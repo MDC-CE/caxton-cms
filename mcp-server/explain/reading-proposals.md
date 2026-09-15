@@ -45,7 +45,12 @@ Notes + edits on the same issue stay allowed. Shared issue alone does **not** re
 
 ## Apply block
 
-If live classify reports `target_missing` (page deleted after filing), `update_proposal` **apply** fails with `target_missing`. Reject / withdraw / close still work. Restore the page and file fresh if the work is still wanted.
+If live classify reports `target_missing` (page deleted after filing), `update_proposal` **apply** fails with `target_missing`. Reject with `reject_kind: target_missing` (+ confirm + note) / withdraw / close still work. Restore the page and file fresh (optional `supersedes_proposal_id`) if the work is still wanted.
+
+## Reject vs blocker
+
+- **add_blocker** — good idea, needs polish; author `revise_entries` then resolve.
+- **reject** — idea must not ship; stores `close_reason`/`close_note` for learning.
 
 ## Warnings on live context
 

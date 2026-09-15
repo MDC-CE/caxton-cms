@@ -9,6 +9,7 @@ import { useContentTypes } from "@/hooks/useContentTypes";
 import { entryKeyToPageUrl } from "@/lib/entryKeyToPageUrl";
 import { fetchPageDiagnostics } from "@/lib/fetchPageDiagnostics";
 import { parseEntryKey } from "@/lib/parseEntryKey";
+import { isPrivatePreviewPath } from "@/lib/visual-edit-path";
 import { cn } from "@/lib/utils";
 
 type EntryValidationModalTriggerProps = {
@@ -77,6 +78,10 @@ export function EntryValidationModalTrigger({
     await loadDiagnostics();
   };
 
+  const resolvedForModal = pageDiagnostics?.url ?? lastUrlRef.current ?? undefined;
+  const publicForModal =
+    resolvedForModal && !isPrivatePreviewPath(resolvedForModal) ? resolvedForModal : null;
+
   return (
     <>
       <button
@@ -94,7 +99,8 @@ export function EntryValidationModalTrigger({
         open={open}
         onOpenChange={setOpen}
         pageDiagnostics={pageDiagnostics}
-        pageUrl={pageDiagnostics?.url ?? lastUrlRef.current ?? undefined}
+        pageUrl={resolvedForModal}
+        publicPageUrl={publicForModal}
         loading={loading}
         error={error}
         onRefreshDiagnostics={handleRefresh}

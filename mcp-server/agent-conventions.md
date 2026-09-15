@@ -88,12 +88,14 @@ When caps forbid a write (any connector), call `propose_change` (prefer **edits*
 Proposals are a shared work item, not a chat. Prefer one open proposal per draft variant (`proposal_exists` → join it).
 
 - **Claim** only when you will edit the draft / soft updates (same human+role; staff UI may take over). **add_blocker** to leave review feedback (what’s wrong, what fixed looks like, why — min 80 chars; no tool shopping lists). Do not claim only to approve.
+- **Reject** only when the idea must not ship (bad / not implementable / illegal-or-policy / harmful / duplicate weaker / target missing). Pass `confirm_reject`, `reject_kind`, and `close_note` (min 80). Prefer **add_blocker** for polish; author **`revise_entries`** (idle or self-claim; foreign claim blocks) then `resolve_blocker` — revise does not clear blockers.
 - Only the **active claimant** (human+role) may `resolve_blocker`. Do not resolve to overturn a disagreement — escalate or leave open; reviewers `reopen_blocker`.
 - Open blockers block **apply** and idea **accept** (reject/withdraw/close still OK). Cleared blockers ≠ ship — re-preview, then four-eyes `apply` / `accept`. For `promote_on_apply`, confirm ending experiments when asked (`confirm_end_experiment`).
+- Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note.
 - Four-eyes = different **username+role** (or staff UI), not merely a different model under the same role.
 - **`list_proposals(proposal_id)`** on an open/partial proposal may include **`discovery_path`**: optional research menu (`think` + `tool` items). Use it to deepen judgment before apply/reject/add_blocker. It is **not** `next_actions` and skip does **not** block decide actions. Items with `available: false` need a human to enable access, then refresh MCP.
 
-**Worked example:** Blake adds a blocker on CTA product; Alex claims, fixes the draft, resolves with a note; Casey (different role or UI) previews again then applies.
+**Worked example:** Blake adds a blocker on CTA product; Alex revises soft entries (or fixes the draft), resolves with a note; Casey (different role or UI) previews again then applies.
 
 ### 3. Cluster SEO only on live (or draft-before-live)
 

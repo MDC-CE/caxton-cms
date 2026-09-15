@@ -6,6 +6,41 @@ window_days: 6
 
 entries:
   - date: "2026-09-14"
+    summary: "list_proposals filters by proposer username, actor, session"
+    agent_impact:
+      - "Scoped list_proposals accepts proposer_username (exact case-insensitive), proposer_actor { type?, role? } (AND; role alone OK; staff-only = type ui), and agent_session_id (matches created_agent_session_id; UI nulls never match)."
+      - "These count as scope filters (with status/kind/query/issue_id). Copy values from proposal rows or agent_session — do not invent role ids. Reconnect MCP for updated describes."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+  - date: "2026-09-14"
+    summary: "Reject gate + revise_entries + successor links"
+    agent_impact:
+      - "Reject requires confirm_reject + reject_kind (bad_idea|not_implementable|illegal_or_policy|harmful|duplicate_weaker|target_missing) + close_note min 80. Prefer add_blocker for polish."
+      - "Authors can revise_entries (pending/failed only; idle or self-claim). Open blockers stay until resolve_blocker. Optional supersedes_proposal_id on propose_change."
+      - "Withdraw needs close_note min 20. Reconnect MCP; conventions v17."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+      - server/content-proposals/service.ts
+  - date: "2026-09-14"
+    summary: "list_proposals multi-row returns summary rows (no ops/baselines)"
+    agent_impact:
+      - "Scoped multi-row list_proposals (status/kind/query/issue_id) returns summary rows: entry_count, field_paths, slim entry stubs — not full ops/values/baselines. Warning proposals_summary_only."
+      - "Pass proposal_id for full detail + live review_context before apply/reject. Reconnect MCP for the updated tool description."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+  - date: "2026-09-14"
     summary: "agent_session for write roles + Proposal Reviewer (create vs review caps)"
     agent_impact:
       - "agent_session is listed for any non-view-only role (Layout/Media/Reviewer). Reconnect those connectors."

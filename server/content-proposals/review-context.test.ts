@@ -44,6 +44,9 @@ function baseProposal(
     related_entries: [],
     entries: [],
     blockers: [],
+    review_context_snapshot: null,
+    supersedes_proposal_id: null,
+    replaced_by_proposal_id: null,
     ...overrides,
   };
 }

@@ -22,11 +22,18 @@ describe("allowedProposalUpdateActions", () => {
     const a = allowedProposalUpdateActions(true, false);
     expect(a.has("withdraw")).toBe(true);
     expect(a.has("attach_variant")).toBe(true);
+    expect(a.has("revise_entries")).toBe(true);
     expect(a.has("apply")).toBe(false);
     expect(a.has("reject")).toBe(false);
     expect(a.has("accept")).toBe(false);
     expect(a.has("close")).toBe(false);
     expect(a.size).toBe(PROPOSAL_AUTHOR_ACTIONS.length);
+  });
+
+  it("review-only cannot revise_entries", () => {
+    const a = allowedProposalUpdateActions(false, true);
+    expect(a.has("revise_entries")).toBe(false);
+    expect(a.has("reject")).toBe(true);
   });
 
   it("both caps get full toolkit", () => {
