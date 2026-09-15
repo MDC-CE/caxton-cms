@@ -29,7 +29,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { getDebugUserName } from "@/hooks/useDebugAuth";
+import { getDebugUserName, useDebugAuth } from "@/hooks/useDebugAuth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -177,6 +177,10 @@ type Proposal = {
   promote_on_apply?: boolean;
   open_blocker_count?: number;
   no_auto_retry?: boolean;
+  escalated?: boolean;
+  escalated_at?: number | null;
+  escalated_by?: string | null;
+  escalated_note?: string | null;
   close_reason?: string | null;
   close_note?: string | null;
   closed_by?: string | null;
@@ -755,6 +759,7 @@ export function ProposalListPanel() {
     if (session) {
       parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
     }
+    if (view.filters.escalatedOnly) parts.push("Escalated");
     return parts.join(" · ");
   }, [
     view.filters.status,
@@ -763,6 +768,7 @@ export function ProposalListPanel() {
     view.filters.proposerActorType,
     view.filters.proposerActorRole,
     view.filters.agentSessionId,
+    view.filters.escalatedOnly,
   ]);
 
   const { data, isLoading } = useQuery({
@@ -1059,6 +1065,8 @@ export function ProposalListPanel() {
 export function ProposalDetailPanel({ id }: { id: string }) {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const { roles } = useDebugAuth();
+  const isSteward = roles.includes("platform_steward");
   const searchString = useSearch();
   const backHref = proposalsListHref(searchString);
   const [blockerBody, setBlockerBody] = useState("");
@@ -1079,6 +1087,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [rejectNote, setRejectNote] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [withdrawNote, setWithdrawNote] = useState("");
+  const [escalateOpen, setEscalateOpen] = useState(false);
+  const [escalateNote, setEscalateNote] = useState("");
+  const [deescalateOpen, setDeescalateOpen] = useState(false);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const addBlockerFormRef = useRef<HTMLDivElement>(null);
   const addBlockerInputRef = useRef<HTMLTextAreaElement>(null);
@@ -1286,6 +1297,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const withdrawNoteOk = withdrawNote.trim().length >= CLOSE_NOTE_MIN;
   const withdrawNoteHint =
     withdrawNote.trim().length > 0 ? minLengthHint(withdrawNote, CLOSE_NOTE_MIN) : null;
+  const escalateNoteOk = escalateNote.trim().length >= CLOSE_NOTE_MIN;
+  const escalateNoteHint =
+    escalateNote.trim().length > 0 ? minLengthHint(escalateNote, CLOSE_NOTE_MIN) : null;
   const closeReasonLabel =
     p?.close_reason === "accepted"
       ? "Accepted"
@@ -1380,8 +1394,65 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       {p.open_blocker_count} needs changes
                     </Badge>
                   ) : null}
+                  {p.escalated ? (
+                    <Badge
+                      variant="outline"
+                      className="gap-1 font-normal border-status-busy/40 text-status-busy"
+                      data-testid="badge-proposal-escalated"
+                    >
+                      Escalated
+                    </Badge>
+                  ) : null}
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
+                {p.escalated ? (
+                  <div
+                    className="rounded-md border border-status-busy/30 bg-status-busy/5 px-3 py-2 text-sm text-foreground"
+                    data-testid="banner-proposal-escalated"
+                  >
+                    <p className="font-medium text-status-busy">Agent work is paused</p>
+                    <p className="mt-1 text-muted-foreground">
+                      A steward must release this hold before agents can claim, add blockers, or
+                      decide again. Staff can still Approve, Reject, or clear needs-change notes.
+                      Open blockers still block Approve until someone resolves them.
+                    </p>
+                    {p.escalated_note ? (
+                      <p className="mt-2 text-sm" data-testid="text-escalated-note">
+                        <span className="font-medium">Why: </span>
+                        {p.escalated_note}
+                        {p.escalated_by ? (
+                          <span className="text-muted-foreground"> — {p.escalated_by}</span>
+                        ) : null}
+                      </p>
+                    ) : null}
+                    <Collapsible className="mt-2">
+                      <CollapsibleTrigger className="text-xs text-muted-foreground underline-offset-2 hover:underline">
+                        Read more (advanced)
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="mt-1 text-xs text-muted-foreground space-y-1">
+                        <p>
+                          Escalated is a flag on top of Open/Partial — the proposal status does not
+                          change.
+                        </p>
+                        <p>
+                          MCP agents fail every update while the flag is on; staff UI actions still
+                          work.
+                        </p>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </div>
+                ) : p.escalated_note && !isTerminal ? (
+                  <div
+                    className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+                    data-testid="banner-proposal-escalated-history"
+                  >
+                    <p className="font-medium text-foreground">Previous steward hold</p>
+                    <p className="mt-1" data-testid="text-escalated-note-history">
+                      {p.escalated_note}
+                      {p.escalated_by ? ` — ${p.escalated_by}` : ""}
+                    </p>
+                  </div>
+                ) : null}
                 {!isTerminal ? (
                   <ProposalSituationCallout
                     reviewContext={reviewContext}
@@ -1586,6 +1657,30 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   >
                     <IconMessage className="h-4 w-4" aria-hidden />
                     Ask for changes
+                  </Button>
+                ) : null}
+                {isSteward && !isTerminal && !p.escalated ? (
+                  <Button
+                    variant="outline"
+                    className="border-status-busy/40 text-status-busy"
+                    onClick={() => {
+                      setEscalateNote("");
+                      setEscalateOpen(true);
+                    }}
+                    disabled={mut.isPending || rejectPending}
+                    data-testid="button-escalate-proposal"
+                  >
+                    Escalate
+                  </Button>
+                ) : null}
+                {isSteward && p.escalated ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => setDeescalateOpen(true)}
+                    disabled={mut.isPending || rejectPending}
+                    data-testid="button-deescalate-proposal"
+                  >
+                    Release hold
                   </Button>
                 ) : null}
                 {showReject ? (
@@ -2418,6 +2513,97 @@ export function ProposalDetailPanel({ id }: { id: string }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          <Dialog
+            open={escalateOpen}
+            onOpenChange={(open) => {
+              setEscalateOpen(open);
+              if (!open) setEscalateNote("");
+            }}
+          >
+            <DialogContent data-testid="dialog-escalate-proposal">
+              <DialogHeader>
+                <DialogTitle>Escalate — pause agents</DialogTitle>
+                <DialogDescription>
+                  Agents stop claiming, blocking, and deciding on this proposal until a steward
+                  releases the hold. Staff can still Approve or Reject. Open blockers still block
+                  Approve until someone resolves them.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1">
+                <Label htmlFor="proposal-escalate-note">Why (min {CLOSE_NOTE_MIN})</Label>
+                <Textarea
+                  id="proposal-escalate-note"
+                  value={escalateNote}
+                  onChange={(e) => setEscalateNote(e.target.value)}
+                  rows={4}
+                  placeholder="What went wrong with an agent interaction, and what must change before agents continue."
+                  data-testid="input-escalate-note"
+                />
+                {escalateNoteHint ? (
+                  <p className={escalateNoteHint.className} data-testid="text-escalate-note-length-hint">
+                    {escalateNoteHint.text}
+                  </p>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setEscalateOpen(false)}
+                  data-testid="button-cancel-escalate-proposal"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={mut.isPending || !escalateNoteOk}
+                  onClick={() => {
+                    mut.mutate(
+                      {
+                        action: "escalate",
+                        body: { escalated_note: escalateNote.trim() },
+                      },
+                      { onSuccess: () => setEscalateOpen(false) },
+                    );
+                  }}
+                  data-testid="button-confirm-escalate-proposal"
+                >
+                  Pause agents
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <AlertDialog open={deescalateOpen} onOpenChange={setDeescalateOpen}>
+            <AlertDialogContent data-testid="dialog-deescalate-proposal">
+              <AlertDialogHeader>
+                <AlertDialogTitle>Release agent hold?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Agents may claim, add blockers, and decide again. Your last note stays on the card
+                  for context until this proposal is finished, rejected, or withdrawn.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel data-testid="button-cancel-deescalate-proposal">
+                  Cancel
+                </AlertDialogCancel>
+                <Button
+                  type="button"
+                  disabled={mut.isPending}
+                  onClick={() => {
+                    mut.mutate(
+                      { action: "deescalate" },
+                      { onSuccess: () => setDeescalateOpen(false) },
+                    );
+                  }}
+                  data-testid="button-confirm-deescalate-proposal"
+                >
+                  Release hold
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
           <Dialog
             open={closeOpen}

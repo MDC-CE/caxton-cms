@@ -9,6 +9,7 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   proposerActorType: "proposer_actor_type",
   proposerActorRole: "proposer_actor_role",
   agentSessionId: "agent_session_id",
+  escalatedOnly: "escalated",
 } as const;
 
 export type ProposalListStatus =
@@ -39,6 +40,8 @@ export type ProposalListFilters = {
   proposerActorRole: string;
   /** Exact created_agent_session_id; empty = no filter. */
   agentSessionId: string;
+  /** When true, only proposals with the escalated flag. */
+  escalatedOnly: boolean;
 };
 
 export type ProposalListViewState = {
@@ -55,6 +58,7 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   proposerActorType: "all",
   proposerActorRole: "",
   agentSessionId: "",
+  escalatedOnly: false,
 };
 
 export const DEFAULT_PROPOSAL_LIST_VIEW: ProposalListViewState = {
@@ -106,6 +110,12 @@ function parseActorType(raw: string | null): ProposalListActorType {
     : DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorType;
 }
 
+function parseEscalatedOnly(raw: string | null): boolean {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
 export function parseProposalListSearch(search: string): ProposalListViewState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return {
@@ -118,6 +128,7 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       proposerActorType: parseActorType(params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerActorType)),
       proposerActorRole: params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerActorRole) ?? "",
       agentSessionId: params.get(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId) ?? "",
+      escalatedOnly: parseEscalatedOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly)),
     },
     q: params.get(PROPOSAL_LIST_SEARCH_KEYS.q) ?? "",
   };
@@ -186,6 +197,12 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId, trimmedSession);
   }
 
+  if (!filters.escalatedOnly) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly, "1");
+  }
+
   const trimmedQ = q.trim();
   if (!trimmedQ) {
     params.delete(PROPOSAL_LIST_SEARCH_KEYS.q);
@@ -206,6 +223,7 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   if (filters.proposerActorType !== d.proposerActorType) n += 1;
   if (filters.proposerActorRole.trim()) n += 1;
   if (filters.agentSessionId.trim()) n += 1;
+  if (filters.escalatedOnly) n += 1;
   return n;
 }
 
@@ -219,6 +237,7 @@ export function clearProposalListFilters(filters: ProposalListFilters): Proposal
     proposerActorType: DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorType,
     proposerActorRole: DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorRole,
     agentSessionId: DEFAULT_PROPOSAL_LIST_FILTERS.agentSessionId,
+    escalatedOnly: DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly,
   };
 }
 
@@ -232,6 +251,7 @@ export type ProposalListApiQuery = {
   proposer_actor_type?: string;
   proposer_actor_role?: string;
   agent_session_id?: string;
+  escalated?: string;
 };
 
 /** Map UI filters to API query params. status/kind/actor type `all` → omit. */
@@ -254,6 +274,7 @@ export function toProposalListApiQuery(
   if (role) out.proposer_actor_role = role;
   const session = filters.agentSessionId.trim();
   if (session) out.agent_session_id = session;
+  if (filters.escalatedOnly) out.escalated = "1";
   return out;
 }
 
@@ -268,6 +289,7 @@ export function proposalListApiSearchParams(query: ProposalListApiQuery): string
   if (query.proposer_actor_type) params.set("proposer_actor_type", query.proposer_actor_type);
   if (query.proposer_actor_role) params.set("proposer_actor_role", query.proposer_actor_role);
   if (query.agent_session_id) params.set("agent_session_id", query.agent_session_id);
+  if (query.escalated) params.set("escalated", query.escalated);
   return params.toString();
 }
 
@@ -275,6 +297,7 @@ export type ProposalListStats = {
   total: number;
   by_status: Record<string, number>;
   by_kind: Record<string, number>;
+  escalated_count?: number;
 };
 
 export const PROPOSAL_STATUS_OPTIONS: Array<{ value: ProposalListStatus; label: string }> = [

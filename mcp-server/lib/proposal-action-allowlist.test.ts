@@ -46,4 +46,11 @@ describe("allowedProposalUpdateActions", () => {
   it("neither cap gets empty set", () => {
     expect(allowedProposalUpdateActions(false, false).size).toBe(0);
   });
+
+  it("never includes escalate or deescalate", () => {
+    const both = allowedProposalUpdateActions(true, true);
+    expect(both.has("escalate" as never)).toBe(false);
+    expect(both.has("deescalate" as never)).toBe(false);
+    expect(PROPOSAL_ALL_UPDATE_ACTIONS.includes("escalate" as never)).toBe(false);
+  });
 });

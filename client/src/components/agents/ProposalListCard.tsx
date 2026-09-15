@@ -33,6 +33,8 @@ export type ProposalCardData = {
   review_mode?: string;
   promote_on_apply?: boolean;
   open_blocker_count?: number;
+  escalated?: boolean;
+  escalated_note?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
   related_issue_ids: string[];
@@ -247,6 +249,15 @@ export function ProposalListCard({
                 >
                   <IconAlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
                   {blockers} blocker{blockers === 1 ? "" : "s"}
+                </Badge>
+              ) : null}
+              {p.escalated ? (
+                <Badge
+                  variant="outline"
+                  className="gap-1 font-normal border-status-busy/40 text-status-busy"
+                  data-testid={`badge-proposal-escalated-${p.id}`}
+                >
+                  Escalated
                 </Badge>
               ) : null}
               <IconChevronRight

@@ -91,7 +91,7 @@ export type ClassifyProposalReviewOpts = {
   snapshot?: { damage_class?: string } | null;
 };
 
-const MAX_THINK = 5;
+const MAX_THINK = 6;
 
 export function damageClassForTarget(opts: {
   contentType: string;
@@ -234,6 +234,14 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     if (damage_class === "selling_page") checklists.add("selling_page_figures");
     if (damage_class === "new_public_content") checklists.add("new_content_brand");
     checklists.add("verify_copy");
+    if (
+      !block_apply &&
+      (damage_class === "existing_metadata" ||
+        damage_class === "existing_content" ||
+        damage_class === "selling_page")
+    ) {
+      checklists.add("adjacent_findings");
+    }
     checklists.add("disposition");
   } else if (proposal.kind === "idea") {
     const related = proposal.related_entries ?? [];

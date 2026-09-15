@@ -34,6 +34,7 @@ describe("parseProposalListSearch", () => {
         proposerActorType: "all",
         proposerActorRole: "",
         agentSessionId: "",
+        escalatedOnly: false,
       },
       q: "hero",
     });
@@ -47,6 +48,12 @@ describe("parseProposalListSearch", () => {
     expect(view.filters.proposerActorType).toBe("mcp");
     expect(view.filters.proposerActorRole).toBe("copy_editor");
     expect(view.filters.agentSessionId).toBe("sess-1");
+  });
+
+  it("parses escalated=1 as escalatedOnly", () => {
+    expect(parseProposalListSearch("escalated=1").filters.escalatedOnly).toBe(true);
+    expect(parseProposalListSearch("escalated=true").filters.escalatedOnly).toBe(true);
+    expect(parseProposalListSearch("").filters.escalatedOnly).toBe(false);
   });
 
   it("coerces invalid values per field without wiping siblings", () => {
@@ -93,6 +100,7 @@ describe("serializeProposalListSearch", () => {
         proposerActorType: "ui" as const,
         proposerActorRole: "copy_editor",
         agentSessionId: "sess-9",
+        escalatedOnly: true,
       },
       q: "pricing",
     };
@@ -132,8 +140,9 @@ describe("countActiveProposalFilters", () => {
         proposerActorType: "mcp",
         proposerActorRole: "seo_specialist",
         agentSessionId: "s1",
+        escalatedOnly: true,
       }),
-    ).toBe(6);
+    ).toBe(7);
   });
 });
 
@@ -149,6 +158,7 @@ describe("clearProposalListFilters", () => {
         proposerActorType: "ui",
         proposerActorRole: "copy_editor",
         agentSessionId: "sess",
+        escalatedOnly: true,
       }),
     ).toEqual({
       status: "open",
@@ -159,6 +169,7 @@ describe("clearProposalListFilters", () => {
       proposerActorType: "all",
       proposerActorRole: "",
       agentSessionId: "",
+      escalatedOnly: false,
     });
   });
 });
@@ -205,6 +216,17 @@ describe("toProposalListApiQuery", () => {
     });
   });
 
+  it("maps escalatedOnly to escalated=1", () => {
+    expect(
+      toProposalListApiQuery({ ...DEFAULT_PROPOSAL_LIST_FILTERS, escalatedOnly: true }, ""),
+    ).toEqual({
+      status: "open",
+      sort: "updated_at",
+      sort_dir: "desc",
+      escalated: "1",
+    });
+  });
+
   it("builds search params string", () => {
     const qs = proposalListApiSearchParams(
       toProposalListApiQuery(
@@ -217,6 +239,7 @@ describe("toProposalListApiQuery", () => {
           proposerActorType: "ui",
           proposerActorRole: "",
           agentSessionId: "",
+          escalatedOnly: true,
         },
         "x",
       ),
@@ -230,5 +253,6 @@ describe("toProposalListApiQuery", () => {
     expect(params.get("proposer_username")).toBe("u");
     expect(params.get("proposer_actor_type")).toBe("ui");
     expect(params.get("proposer_actor_role")).toBeNull();
+    expect(params.get("escalated")).toBe("1");
   });
 });

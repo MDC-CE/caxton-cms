@@ -1295,4 +1295,93 @@ describe("content proposals", () => {
       expect(withdrawn.proposal.close_reason).toBe("withdrawn");
     }
   });
+
+  it("escalates with note, clears claim, freezes MCP, keeps note after deescalate", async () => {
+    const svc = makeService();
+    const summary =
+      "Update the landing CTA copy so the product name matches the live funnel offer. ".repeat(2);
+    const created = await svc.create(
+      {
+        title: "CTA product name",
+        summary,
+        entries: [sampleEntry()],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await svc.update(created.proposal.id, "claim", {
+      username: "blake",
+      actor: { type: "mcp", role: "proposal_reviewer" },
+      report: "Reviewing the CTA product naming suggestion before apply. ".repeat(2),
+    });
+    expect(svc.get(created.proposal.id)?.claim?.by).toBe("blake");
+
+    const short = await svc.update(created.proposal.id, "escalate", {
+      username: "steward",
+      actor: { type: "ui" },
+      escalated_note: "too short",
+    });
+    expect(short.ok).toBe(false);
+    if (!short.ok) expect(short.code).toBe("escalated_note_required");
+
+    const note =
+      "Grok added a blocker that invents a product claim we do not make — pause agents until review rules are fixed.";
+    const escalated = await svc.update(created.proposal.id, "escalate", {
+      username: "steward",
+      actor: { type: "ui" },
+      escalated_note: note,
+    });
+    expect(escalated.ok).toBe(true);
+    if (!escalated.ok) return;
+    expect(escalated.proposal.status).toBe("open");
+    expect(escalated.proposal.escalated).toBe(true);
+    expect(escalated.proposal.escalated_note).toBe(note);
+    expect(escalated.proposal.escalated_by).toBe("steward");
+    expect(escalated.proposal.claim).toBeNull();
+    expect(svc.stats().escalated_count).toBe(1);
+
+    const mcpBlocked = await svc.update(created.proposal.id, "add_blocker", {
+      username: "grok",
+      actor: { type: "mcp", role: "proposal_reviewer" },
+      body:
+        "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.",
+    });
+    expect(mcpBlocked.ok).toBe(false);
+    if (!mcpBlocked.ok) expect(mcpBlocked.code).toBe("escalated");
+
+    const mcpEscalate = await svc.update(created.proposal.id, "deescalate", {
+      username: "grok",
+      actor: { type: "mcp", role: "proposal_reviewer" },
+    });
+    expect(mcpEscalate.ok).toBe(false);
+    if (!mcpEscalate.ok) expect(mcpEscalate.code).toBe("steward_ui_only");
+
+    const staffStill = await svc.update(created.proposal.id, "add_blocker", {
+      username: "casey",
+      actor: { type: "ui" },
+      body:
+        "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.",
+    });
+    expect(staffStill.ok).toBe(true);
+    if (staffStill.ok) expect(staffStill.proposal.open_blocker_count).toBe(1);
+
+    const released = await svc.update(created.proposal.id, "deescalate", {
+      username: "steward",
+      actor: { type: "ui" },
+    });
+    expect(released.ok).toBe(true);
+    if (!released.ok) return;
+    expect(released.proposal.escalated).toBe(false);
+    expect(released.proposal.escalated_note).toBe(note);
+    expect(released.proposal.status).toBe("open");
+
+    const listed = svc.list({ escalated: true });
+    expect(listed.total).toBe(0);
+    const withHistory = svc.list({ status: "open" });
+    expect(withHistory.proposals.some((p) => p.id === created.proposal.id && p.escalated_note === note)).toBe(
+      true,
+    );
+  });
 });

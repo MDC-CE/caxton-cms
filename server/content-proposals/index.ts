@@ -4,6 +4,7 @@ export {
   createProposalService,
   parseProposalSort,
   parseProposerActorType,
+  parseEscalatedQuery,
   listOpenProposalsForVariant,
   deriveReviewMode,
   exportAllProposals,

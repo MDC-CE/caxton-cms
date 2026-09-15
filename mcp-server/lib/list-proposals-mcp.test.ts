@@ -16,6 +16,11 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ query: "cta" })).toBe(true);
   });
 
+  it("treats escalated boolean as scoped", () => {
+    expect(isProposalsScoped({ escalated: true })).toBe(true);
+    expect(isProposalsScoped({ escalated: false })).toBe(true);
+  });
+
   it("treats proposer filters as scoped", () => {
     expect(isProposalsScoped({ proposer_username: "alice@4geeks.com" })).toBe(true);
     expect(isProposalsScoped({ proposer_actor: { type: "ui" } })).toBe(true);

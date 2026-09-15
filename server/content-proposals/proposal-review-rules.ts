@@ -25,6 +25,7 @@ export type ChecklistId =
   | "notes_close"
   | "review_mode_inert"
   | "verify_copy"
+  | "adjacent_findings"
   | "disposition"
   | "existence_unknown"
   | "target_missing";
@@ -89,7 +90,7 @@ export type ThinkTemplate = {
   title: string;
   why: string;
   look_for: string[];
-  /** Sort priority (lower = earlier). Cap at 5 think items. */
+  /** Sort priority (lower = earlier). Cap at MAX_THINK in review-context. */
   priority: number;
 };
 
@@ -179,17 +180,40 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
   verify_copy: {
     id: "verify_copy",
     title: "Check the proposed change against live",
-    why: "Confirm the edit matches the summary and does not invent claims.",
-    look_for: ["proposed vs live values", "no invented stats", "CTA and structure intact"],
+    why: "Confirm the proposed values match the summary and do not invent claims.",
+    look_for: [
+      "proposed value vs live for fields this proposal writes",
+      "summary claims match the ops (meta-only is not a content refresh)",
+      "no invented stats in the proposed text",
+    ],
     priority: 30,
+  },
+  adjacent_findings: {
+    id: "adjacent_findings",
+    title: "Park out-of-scope live-page defects",
+    why: "Real live defects this proposal does not write must not become default apply-blockers or chat-only.",
+    look_for: [
+      "invented or stale figures on the live page even if ops do not change them",
+      "dead links, duplicate blocks, locale-mismatched related links",
+      "title/H1/body disagreement that this proposal does not fix",
+      "would I still ship this meta if the article stays as-is?",
+      "makes proposed copy false or summary overclaims → add_blocker",
+      "same entry, ops do not touch → notes naming this page; link issue only if one exists; do not block apply",
+      "other entry → notes naming that page; never blocker on this proposal",
+      "existing open notes covering it → join/append; nothing to park → no empty notes",
+      "do not leave findings only in chat",
+      "lack proposals_create → do not turn park items into blockers; hand off to a create-capable role",
+    ],
+    priority: 50,
   },
   disposition: {
     id: "disposition",
     title: "Choose a disposition",
-    why: "After optional research, decide apply, reject, or add_blocker.",
+    why: "After optional research, decide apply, reject, add_blocker, or park adjacent notes.",
     look_for: [
       "apply only when you would ship this yourself",
-      "add_blocker for fixable polish (then author revise_entries)",
+      "add_blocker when the proposed change is wrong or invents claims (then author revise_entries)",
+      "out-of-scope live defects → adjacent_findings notes park (same or other page); do not default every finding to add_blocker",
       "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",
     ],
     priority: 90,

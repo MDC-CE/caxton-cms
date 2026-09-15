@@ -416,7 +416,7 @@ export function registerProposalTools(
           }
           return fail(String(data.error ?? "propose_change failed"), { code: data.code });
         }
-        const proposal = (data as { proposal?: { id?: string; review_mode?: string; promote_on_apply?: boolean } })
+        const proposal = (data as { proposal?: { id?: string; review_mode?: string; promote_on_apply?: boolean; escalated_siblings?: Array<{ id: string; title: string }> } })
           .proposal;
         const warnings: Array<{ code: string; message: string }> = [
           {
@@ -430,6 +430,15 @@ export function registerProposalTools(
               "A different human+role with proposals_review (Proposal Reviewer or Publisher) must apply or reject edits. Notes close with a reason (not four-eyes) — close does not fix content.",
           },
         ];
+        if (proposal?.escalated_siblings?.length) {
+          warnings.push({
+            code: "escalated_sibling",
+            message:
+              `An overlapping open proposal is under steward hold: ${proposal.escalated_siblings
+                .map((s) => `${s.id} (${s.title})`)
+                .join("; ")}. Create succeeded; prefer joining that card or waiting for release before parallel agent work.`,
+          });
+        }
         if (proposal?.review_mode === "draft_backed" || proposal?.promote_on_apply) {
           warnings.push({
             code: "review_variant_before_apply",
@@ -464,10 +473,11 @@ export function registerProposalTools(
   mcp.tool(
     "list_proposals",
     "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only. " +
-      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, or agent_session_id for paginated summary rows " +
+      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, or escalated for paginated summary rows " +
       "(detail:\"summary\": identity, entry_count, field_paths, slim entry stubs — no ops/values/baselines). " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
+      "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
@@ -509,6 +519,10 @@ export function registerProposalTools(
           "Exact match on created_agent_session_id. Copy from agent_session start or a proposal row. " +
             "Staff-UI proposals are usually null and never match.",
         ),
+      escalated: z
+        .boolean()
+        .optional()
+        .describe("When true, only proposals with a steward escalate hold. When false, only non-escalated."),
       limit: z.number().optional().describe("Page size when scoped (default 20, max 200)"),
       offset: z.number().optional().describe("Offset when scoped"),
       sort: z
@@ -538,7 +552,7 @@ export function registerProposalTools(
           code: "proposals_need_filter",
           message:
             "Unscoped list_proposals returns proposal_stats only. Pass status, kind, query, issue_id, proposal_id, " +
-            "proposer_username, proposer_actor, or agent_session_id to load proposals[].",
+            "proposer_username, proposer_actor, agent_session_id, or escalated to load proposals[].",
         });
         if (args.limit != null || args.offset != null) {
           warnings.push({
@@ -576,6 +590,8 @@ export function registerProposalTools(
           qs.set("proposer_actor_role", args.proposer_actor.role.trim());
         }
         if (args.agent_session_id?.trim()) qs.set("agent_session_id", args.agent_session_id.trim());
+        if (args.escalated === true) qs.set("escalated", "1");
+        if (args.escalated === false) qs.set("escalated", "0");
         qs.set("limit", String(limit));
         qs.set("offset", String(offset));
         qs.set("sort", sort);
@@ -630,13 +646,48 @@ export function registerProposalTools(
               "Multi-row list returns summary rows (entry_count, field_paths, slim stubs — no ops/values/baselines). Pass proposal_id for full detail before apply/reject.",
           });
         }
-        for (const p of proposals as Array<{ review_mode?: string; open_blocker_count?: number }>) {
+        for (const p of proposals as Array<{
+          review_mode?: string;
+          open_blocker_count?: number;
+          escalated?: boolean;
+          escalated_note?: string | null;
+          escalated_siblings?: Array<{ id: string; title: string }>;
+        }>) {
           if (p.review_mode === "draft_backed" || p.review_mode === "soft_variant") {
             warnings.push({
               code: "review_variant_before_apply",
               message: "At least one listed proposal involves a draft — preview before judging.",
             });
             break;
+          }
+        }
+        for (const p of proposals as Array<{
+          escalated?: boolean;
+          escalated_note?: string | null;
+          escalated_siblings?: Array<{ id: string; title: string }>;
+          id?: string;
+        }>) {
+          if (p.escalated) {
+            warnings.push({
+              code: "proposal_escalated",
+              message:
+                `Proposal ${p.id ?? ""} has a steward hold — MCP update_proposal is blocked until release.` +
+                (p.escalated_note ? ` Note: ${String(p.escalated_note).slice(0, 200)}` : ""),
+            });
+          } else if (p.escalated_note) {
+            warnings.push({
+              code: "proposal_escalated_history",
+              message: `Proposal ${p.id ?? ""} was previously escalated. Prior note: ${String(p.escalated_note).slice(0, 200)}`,
+            });
+          }
+          if (p.escalated_siblings?.length) {
+            warnings.push({
+              code: "escalated_sibling",
+              message:
+                `Overlapping escalated sibling(s): ${p.escalated_siblings
+                  .map((s) => `${s.id} (${s.title})`)
+                  .join("; ")}. Create still succeeds; prefer joining or waiting on the hold.`,
+            });
           }
         }
 
@@ -650,6 +701,8 @@ export function registerProposalTools(
             kind?: string;
             title?: string;
             summary?: string;
+            escalated?: boolean;
+            escalated_note?: string | null;
             entries?: Array<{
               contentType: string;
               slug: string;
@@ -682,6 +735,8 @@ export function registerProposalTools(
                 kind: match.kind ?? "edits",
                 title: match.title,
                 summary: match.summary,
+                escalated: match.escalated,
+                escalated_note: match.escalated_note,
                 entries: match.entries,
                 open_blocker_count: match.open_blocker_count,
                 blockers: match.blockers,
@@ -1074,6 +1129,19 @@ export function registerProposalTools(
                 },
               ],
             );
+          }
+          if (data.code === "escalated" || data.code === "steward_ui_only") {
+            return fail(String(data.error ?? "proposal escalated"), {
+              code: data.code,
+              next_actions: [],
+              warnings: [
+                {
+                  code: "proposal_escalated",
+                  message:
+                    "Steward hold — agents cannot mutate this proposal until a Platform Steward releases it in the staff UI. Reading is fine.",
+                },
+              ],
+            });
           }
           return fail(String(data.error ?? "update_proposal failed"), { code: data.code });
         }

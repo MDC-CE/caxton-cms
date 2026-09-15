@@ -21,7 +21,10 @@ const EDITS_TOOLS: Array<{
     id: "preview_content",
     tool: "get_entry_content",
     why: "See the page body the proposal would change.",
-    look_for: ["proposed fields vs live copy", "broken CTAs or missing sections"],
+    look_for: [
+      "proposed fields vs live copy",
+      "broken CTAs or missing sections ops do not touch → adjacent_findings / notes, not default add_blocker",
+    ],
   },
   {
     id: "recent_writes",
@@ -45,7 +48,10 @@ const EDITS_TOOLS: Array<{
     id: "diagnostics",
     tool: "run_entry_diagnostics",
     why: "Surface open validation issues on the entry.",
-    look_for: ["blocking SEO/content issues", "issues the proposal claims to fix"],
+    look_for: [
+      "issues the proposal claims to fix",
+      "open issues ops do not touch → adjacent_findings / notes (same or other page), not default add_blocker",
+    ],
   },
 ];
 
@@ -58,6 +64,8 @@ export type ProposalDiscoveryInput = {
   kind: string;
   title?: string;
   summary?: string;
+  escalated?: boolean;
+  escalated_note?: string | null;
   entries?: Array<{
     contentType: string;
     slug: string;
@@ -127,7 +135,7 @@ function buildToolItems(allowed: Set<string> | null): {
 }
 
 function thinkFromPreview(items: AgentPreviewThink[]): DiscoveryPathItem[] {
-  return items.slice(0, 5).map((t) => ({
+  return items.slice(0, 6).map((t) => ({
     kind: "think" as const,
     id: t.id,
     title: t.title,
@@ -194,8 +202,49 @@ export function buildProposalDiscoveryPath(
     return { discovery_path: null, warnings: [] };
   }
 
-  const allowed = allowedSet(opts.allowedTools);
   const warnings: McpWarning[] = [];
+
+  if (proposal.escalated) {
+    warnings.push({
+      code: "proposal_escalated",
+      message:
+        "A steward paused agent work on this proposal. Do not call update_proposal until they release the hold. " +
+        (proposal.escalated_note
+          ? `Note: ${proposal.escalated_note.slice(0, 240)}${proposal.escalated_note.length > 240 ? "…" : ""}`
+          : "Read escalated_note on the proposal for why."),
+    });
+    return {
+      discovery_path: {
+        goal: "Steward hold — agents must not mutate this proposal. Skip discovery tools until released.",
+        items: [
+          {
+            kind: "think",
+            id: "steward_hold",
+            title: "Respect the steward hold",
+            why: "Escalate freezes all MCP update_proposal actions until a Platform Steward releases it in the staff UI.",
+            look_for: [
+              proposal.escalated_note
+                ? `steward note: ${proposal.escalated_note.slice(0, 200)}${proposal.escalated_note.length > 200 ? "…" : ""}`
+                : "escalated_note on the proposal",
+              "do not claim, add_blocker, apply, reject, or revise",
+            ],
+          },
+        ],
+      },
+      warnings,
+    };
+  }
+
+  if (!proposal.escalated && proposal.escalated_note) {
+    warnings.push({
+      code: "proposal_escalated_history",
+      message:
+        "A steward previously paused agents on this proposal. Mutations are allowed again. " +
+        `Prior note: ${proposal.escalated_note.slice(0, 240)}${proposal.escalated_note.length > 240 ? "…" : ""}`,
+    });
+  }
+
+  const allowed = allowedSet(opts.allowedTools);
 
   if (reviewContext?.agent_preview?.warnings?.length) {
     warnings.push(...reviewContext.agent_preview.warnings);
@@ -230,17 +279,18 @@ export function buildProposalDiscoveryPath(
         kind: "think",
         id: "disposition",
         title: "Choose a disposition",
-        why: "After optional research, decide apply, reject, or add_blocker — discovery is not a gate.",
+        why: "After optional research, decide apply, reject, add_blocker, or park adjacent notes — discovery is not a gate.",
         look_for: [
           "apply only when you would ship this yourself",
-          "add_blocker for fixable polish (then revise_entries)",
+          "add_blocker when the proposed change is wrong or invents claims (then revise_entries)",
+          "out-of-scope live defects → adjacent_findings notes park; do not default every finding to add_blocker",
           "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",
         ],
       },
     ];
   }
 
-  if (think.length > 5) think = think.slice(0, 5);
+  if (think.length > 6) think = think.slice(0, 6);
 
   let tools: DiscoveryPathToolItem[] = [];
   if (kind === "edits" && !reviewContext?.block_apply) {

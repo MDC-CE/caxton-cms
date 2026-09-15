@@ -7,6 +7,7 @@ import type { SiteContext } from "../site-manager";
 import {
   parseProposalSort,
   parseProposerActorType,
+  parseEscalatedQuery,
   type CreateProposalInput,
   type ProposalUpdateAction,
 } from "../content-proposals/service";
@@ -61,6 +62,8 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "attach_variant",
   "set_no_auto_retry",
   "revise_entries",
+  "escalate",
+  "deescalate",
 ]);
 
 const ALL_ACTIONS = new Set<ProposalUpdateAction>([
@@ -78,6 +81,8 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "reopen_blocker",
   "set_no_auto_retry",
   "revise_entries",
+  "escalate",
+  "deescalate",
 ]);
 
 export function registerProposalRoutes(app: Express): void {
@@ -172,6 +177,12 @@ export function registerProposalRoutes(app: Express): void {
       typeof req.query.proposer_actor_role === "string" ? req.query.proposer_actor_role : undefined;
     const agentSessionId =
       typeof req.query.agent_session_id === "string" ? req.query.agent_session_id : undefined;
+    const escalatedRaw = typeof req.query.escalated === "string" ? req.query.escalated : undefined;
+    const parsedEscalated = parseEscalatedQuery(escalatedRaw);
+    if (!parsedEscalated.ok) {
+      res.status(400).json({ error: parsedEscalated.error });
+      return;
+    }
     const limitRaw = req.query.limit ? Number(req.query.limit) : undefined;
     const offsetRaw = req.query.offset ? Number(req.query.offset) : undefined;
     const sortRaw = typeof req.query.sort === "string" ? req.query.sort : undefined;
@@ -204,6 +215,7 @@ export function registerProposalRoutes(app: Express): void {
       proposer_actor_type: parsedActorType.type,
       proposer_actor_role: proposerActorRole,
       agent_session_id: agentSessionId,
+      escalated: parsedEscalated.escalated,
       limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
       offset: Number.isFinite(offsetRaw) ? offsetRaw : undefined,
       sort: parsedSort.sort,
@@ -307,9 +319,33 @@ export function registerProposalRoutes(app: Express): void {
       : await requireProposalRead(req, res);
     if (!auth) return;
 
+    const actor = resolveEventActor(req, { model: req.body?.model });
+
+    if (action === "escalate" || action === "deescalate") {
+      if (actor?.type === "mcp") {
+        res.status(403).json({
+          ok: false,
+          code: "steward_ui_only",
+          error: "Escalate and release are staff steward actions in the UI — agents cannot set them.",
+        });
+        return;
+      }
+      if (!auth.username || !userStore.userHasRole(auth.username, "platform_steward")) {
+        res.status(403).json({
+          ok: false,
+          code: "steward_required",
+          error: "Only a Platform Steward can escalate or release a proposal hold.",
+        });
+        return;
+      }
+    }
+
     let asStaff = needsWrite && action !== "attach_variant" && action !== "add_blocker";
     if (action === "set_no_auto_retry") {
       // Staff UI may flip without claim; MCP must claim (enforced in service via actor.type).
+      asStaff = true;
+    }
+    if (action === "escalate" || action === "deescalate") {
       asStaff = true;
     }
     if (action === "withdraw") {
@@ -362,7 +398,7 @@ export function registerProposalRoutes(app: Express): void {
       username: auth.actor,
       report: typeof req.body?.report === "string" ? req.body.report : undefined,
       asStaff,
-      actor: resolveEventActor(req, { model: req.body?.model }),
+      actor,
       agent_session_id:
         typeof req.body?.agent_session_id === "string"
           ? req.body.agent_session_id
@@ -389,12 +425,18 @@ export function registerProposalRoutes(app: Express): void {
       confirm_reject: req.body?.confirm_reject === true,
       reject_kind: typeof req.body?.reject_kind === "string" ? req.body.reject_kind : undefined,
       entries: Array.isArray(req.body?.entries) ? req.body.entries : undefined,
+      escalated_note:
+        typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
     });
     if (!result.ok) {
       const status =
         result.code === "not_found"
           ? 404
-          : result.code === "four_eyes" || result.code === "not_claimant" || result.code === "not_proposer"
+          : result.code === "four_eyes" ||
+              result.code === "not_claimant" ||
+              result.code === "not_proposer" ||
+              result.code === "steward_ui_only" ||
+              result.code === "escalated"
             ? 403
             : result.code === "proposal_exists" ||
                 result.code === "confirm_end_experiment" ||

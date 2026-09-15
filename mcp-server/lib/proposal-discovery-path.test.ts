@@ -22,6 +22,20 @@ const baseEdits = {
 };
 
 describe("buildProposalDiscoveryPath", () => {
+  it("returns think-only path and warning when escalated", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        escalated: true,
+        escalated_note: "Agent invented a blocker that invents product claims we do not make.",
+      },
+      allowedTools: catalog,
+    });
+    expect(discovery_path?.items).toHaveLength(1);
+    expect(discovery_path?.items[0]).toMatchObject({ kind: "think", id: "steward_hold" });
+    expect(warnings.some((w) => w.code === "proposal_escalated")).toBe(true);
+  });
+
   it("returns null for finished/rejected/withdrawn", () => {
     for (const status of ["finished", "rejected", "withdrawn"] as const) {
       const { discovery_path } = buildProposalDiscoveryPath({
@@ -32,7 +46,7 @@ describe("buildProposalDiscoveryPath", () => {
     }
   });
 
-  it("builds edits path with think-before-tools and ≤5 thinks", () => {
+  it("builds edits path with think-before-tools and ≤6 thinks", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: baseEdits,
       allowedTools: catalog,
@@ -46,6 +60,12 @@ describe("buildProposalDiscoveryPath", () => {
               title: "Verify figures",
               why: "Selling page",
               look_for: ["hire rate"],
+            },
+            {
+              id: "adjacent_findings",
+              title: "Park out-of-scope live-page defects",
+              why: "Park debt",
+              look_for: ["same entry, ops do not touch → notes"],
             },
             {
               id: "disposition",
@@ -62,7 +82,7 @@ describe("buildProposalDiscoveryPath", () => {
     const thinks = items.filter((i) => i.kind === "think");
     const tools = items.filter((i) => i.kind === "tool");
     expect(thinks.length).toBeGreaterThan(0);
-    expect(thinks.length).toBeLessThanOrEqual(5);
+    expect(thinks.length).toBeLessThanOrEqual(6);
     expect(tools.length).toBe(proposalDiscoveryToolNames().length);
     const firstToolIdx = items.findIndex((i) => i.kind === "tool");
     const lastThinkIdx = items.map((i) => i.kind).lastIndexOf("think");
@@ -72,9 +92,18 @@ describe("buildProposalDiscoveryPath", () => {
 
     const figures = thinks.find((t) => t.id === "selling_page_figures");
     expect(figures?.kind).toBe("think");
+    const adjacent = thinks.find((t) => t.id === "adjacent_findings");
+    expect(adjacent?.kind).toBe("think");
 
     const toolNames = tools.map((t) => (t.kind === "tool" ? t.tool : "")).filter(Boolean);
     expect(assertCatalogToolNames(toolNames, catalog)).toEqual({ ok: true });
+
+    const previewContent = tools.find((t) => t.kind === "tool" && t.id === "preview_content");
+    expect(previewContent?.kind).toBe("tool");
+    if (previewContent?.kind === "tool") {
+      expect(previewContent.look_for.some((l) => /adjacent_findings|notes/i.test(l))).toBe(true);
+      expect(previewContent.look_for.some((l) => /not default add_blocker/i.test(l))).toBe(true);
+    }
   });
 
   it("marks tools unavailable and warns when grants are thin", () => {
@@ -90,6 +119,35 @@ describe("buildProposalDiscoveryPath", () => {
     expect(warnings.some((w) => w.code === "discovery_tool_capped")).toBe(true);
     // think items still present
     expect(discovery_path!.items.some((i) => i.kind === "think")).toBe(true);
+  });
+
+  it("passes adjacent_findings think items from agent_preview", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: baseEdits,
+      allowedTools: catalog,
+      reviewContext: {
+        agent_preview: {
+          think_items: [
+            {
+              id: "adjacent_findings",
+              title: "Park out-of-scope live-page defects",
+              why: "Park",
+              look_for: ["other entry → notes"],
+            },
+            {
+              id: "verify_copy",
+              title: "Check copy",
+              why: "Verify",
+              look_for: ["proposed value vs live"],
+            },
+          ],
+        },
+      },
+    });
+    const adjacent = discovery_path!.items.find(
+      (i) => i.kind === "think" && i.id === "adjacent_findings",
+    );
+    expect(adjacent?.kind).toBe("think");
   });
 
   it("uses agent_preview think items when provided", () => {

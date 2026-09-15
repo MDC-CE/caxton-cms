@@ -6,6 +6,33 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "Proposal escalated flag (steward hold)"
+    agent_impact:
+      - "Staff Platform Steward can escalate a proposal in the UI (required note). Status stays open|partial; escalated=true freezes ALL MCP update_proposal actions until release."
+      - "list_proposals surfaces escalated / escalated_note / escalated_siblings; discovery_path becomes think-only under hold. Sibling create still allowed with escalated_sibling warning."
+      - "Escalate/deescalate are not MCP actions. Re-bootstrap_agent for conventions v21."
+    tools_changed: true
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/proposal-discovery-path.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+  - date: "2026-09-15"
+    summary: "adjacent_findings review lane (park out-of-scope page debt)"
+    agent_impact:
+      - "list_proposals discovery_path / review_context may include think item adjacent_findings on live-page edits. Same-entry ops-not-touched → notes naming the page (issue link only if present); cross-entry → notes; blocker only if proposed text is false / summary overclaims. Do not chat-only; do not default every finding to add_blocker."
+      - "Proposal Reviewer lacks proposals_create — hand park lists to a create-capable role; do not convert park items into blockers. Notes = backlog (no YAML, no auto-fix). Re-bootstrap_agent for conventions v20; reconnect MCP for discovery look_for text."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-context.ts
+      - mcp-server/lib/proposal-discovery-path.ts
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+  - date: "2026-09-15"
     summary: "Site funnel.enforcement + type Funnel monitoring"
     agent_impact:
       - "settings.yml funnel.enforcement (default false) gates funnel-completeness diagnostics and funnel write gates (stage/products/persona). Off = skip diagnostics + relax writes; does not wipe page funnel YAML."
@@ -43,6 +70,7 @@ entries:
       - mcp-server/explain/relation-fields.md
       - mcp-server/explain/local_databases.md
       - mcp-server/explain/lead-forms.md
+  - date: "2026-09-15"
     summary: "LeadForm webhook headers + fail_silently (strict default)"
     agent_impact:
       - "Webhook default is strict (await upstream; 502 → form error). Opt out with webhook.fail_silently: true (fire-and-forget)."

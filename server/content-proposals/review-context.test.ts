@@ -246,6 +246,122 @@ describe("classifyProposalReview", () => {
     expect(ctx.damage_class).toBe("existing_metadata");
   });
 
+  it("adds adjacent_findings for existing_metadata edits and keeps ≤6 think items", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        category: "content.seo",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "hello",
+          locale: "en",
+          existence: "exists",
+        },
+      ],
+    });
+    expect(ctx.damage_class).toBe("existing_metadata");
+    expect(ctx.active_checklists).toContain("adjacent_findings");
+    expect(ctx.active_checklists).toContain("verify_copy");
+    expect(ctx.active_checklists).toContain("disposition");
+    expect(ctx.agent_preview.think_items.length).toBeLessThanOrEqual(6);
+    expect(ctx.agent_preview.think_items.some((t) => t.id === "adjacent_findings")).toBe(true);
+  });
+
+  it("adds adjacent_findings for selling_page edits", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "landing/ai",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "landing",
+            slug: "ai",
+          },
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "landing",
+          slug: "ai",
+          locale: "en",
+          existence: "exists",
+        },
+      ],
+    });
+    expect(ctx.damage_class).toBe("selling_page");
+    expect(ctx.active_checklists).toContain("adjacent_findings");
+    expect(ctx.active_checklists).toContain("selling_page_figures");
+    expect(ctx.agent_preview.think_items.length).toBeLessThanOrEqual(6);
+  });
+
+  it("skips adjacent_findings when target_missing blocks apply", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "hello",
+          locale: "en",
+          existence: "missing",
+          draftExists: false,
+        },
+      ],
+    });
+    expect(ctx.block_apply).toBe(true);
+    expect(ctx.active_checklists).not.toContain("adjacent_findings");
+  });
+
   it("idea with no related_entries → none", () => {
     const ctx = classifyProposalReview({
       proposal: baseProposal({ kind: "idea" }),

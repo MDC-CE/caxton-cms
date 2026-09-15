@@ -22,6 +22,8 @@ export type ListProposalsArgs = {
     role?: string;
   };
   agent_session_id?: string;
+  /** When true, only escalated proposals. */
+  escalated?: boolean;
   limit?: number;
   offset?: number;
   sort?: string;
@@ -38,7 +40,9 @@ export function isProposalsScoped(args: ListProposalsArgs): boolean {
       args.proposer_username?.trim() ||
       args.proposer_actor?.type ||
       args.proposer_actor?.role?.trim() ||
-      args.agent_session_id?.trim(),
+      args.agent_session_id?.trim() ||
+      args.escalated === true ||
+      args.escalated === false,
   );
 }
 

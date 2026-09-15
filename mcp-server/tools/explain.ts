@@ -65,7 +65,7 @@ const TOPIC_DESC: Record<string, string> = {
   proposals:
     "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first",
   "reading-proposals":
-    "review_context damage/undo axes, checklist IDs, create refuses, target_missing apply block, discovery_path",
+    "review_context damage/undo axes, checklist IDs incl. adjacent_findings, three disposition lanes, create refuses, target_missing apply block, discovery_path",
 };
 
 type TagResolver = (contentPath: string) => string;
@@ -391,7 +391,7 @@ export function registerExplainTools(
       "'lead-forms' (catalog source.content_type/database/related_field, required value_path/label_path, required query on ecommerce catalogs, purchasable vs actively_selling), " +
       "'redirects' (CMS 301/302, two stores, test_redirect / read_redirects, update_redirect / edit_redirects, first-match), " +
       "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity), " +
-      "'reading-proposals' (review_context axes, checklist IDs, create refuses, target_missing apply block). " +
+      "'reading-proposals' (review_context axes, checklist IDs incl. adjacent_findings, three disposition lanes, create refuses, target_missing apply block). " +
       "Requires content_view. " +
       "Calling an unknown topic returns a clear error listing the valid options. " +
       "Multi-site: always pass site. If unsure, call list_sites first.",

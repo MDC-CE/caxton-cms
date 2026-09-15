@@ -11,7 +11,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 | Tool | Caps | Job |
 |---|---|---|
 | `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
-| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` (`type`\|`role`) / `agent_session_id` → **summary** rows (`entry_count`, `field_paths`, slim stubs; no ops/values). `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
+| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` (`type`\|`role`) / `agent_session_id` / `escalated` → **summary** rows (`entry_count`, `field_paths`, slim stubs; no ops/values). `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
@@ -96,6 +96,7 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **Reject** = rare terminal: bad / not implementable / illegal-or-policy / harmful / duplicate weaker / target missing. Requires `confirm_reject`, `reject_kind`, and `close_note` (min 80). Do **not** reject for polish.
 - **revise_entries** (authors): rewrite pending/failed soft ops; idle or self-claim only; foreign claim blocks; open blockers stay open until `resolve_blocker`.
 - **Open blockers block apply and idea accept** — reject/withdraw/close still work.
+- **Escalated:** steward UI hold (`escalated: true` + note). Status stays open|partial. MCP `update_proposal` fails (`code: escalated`) until release. Not an MCP action. Sibling create may warn `escalated_sibling`.
 - Cleared blockers ≠ approved — re-preview then four-eyes apply/accept.
 - Optional `supersedes_proposal_id` on `propose_change` links a replacement to a rejected/withdrawn predecessor (`replaced_by` on the old). Never required.
 - **Withdraw:** `close_note` min 20 (no reject-kind gate).

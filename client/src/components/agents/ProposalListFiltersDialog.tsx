@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -40,6 +41,7 @@ export type ProposalListFilterDims = Pick<
   | "proposerActorType"
   | "proposerActorRole"
   | "agentSessionId"
+  | "escalatedOnly"
 >;
 
 const ROLE_ANY = "__any__";
@@ -52,6 +54,7 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     proposerActorType: filters.proposerActorType,
     proposerActorRole: filters.proposerActorRole,
     agentSessionId: filters.agentSessionId,
+    escalatedOnly: filters.escalatedOnly,
   };
 }
 
@@ -84,6 +87,7 @@ export function ProposalListFiltersDialog({
     filters.proposerActorType,
     filters.proposerActorRole,
     filters.agentSessionId,
+    filters.escalatedOnly,
   ]);
 
   const patchDraft = (patch: Partial<ProposalListFilterDims>) => {
@@ -297,6 +301,23 @@ export function ProposalListFiltersDialog({
             <p className="text-[11px] text-muted-foreground">
               Staff-filed proposals usually have no session and will not match.
             </p>
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+            <div className="space-y-0.5">
+              <Label htmlFor="proposal-escalated-only-filter" className="text-xs text-foreground">
+                Escalated only
+              </Label>
+              <p className="text-[11px] text-muted-foreground">
+                Steward hold — agents paused
+                {stats?.escalated_count != null ? ` (${stats.escalated_count})` : ""}.
+              </p>
+            </div>
+            <Switch
+              id="proposal-escalated-only-filter"
+              checked={draft.escalatedOnly}
+              onCheckedChange={(checked) => patchDraft({ escalatedOnly: checked })}
+              data-testid="switch-proposal-escalated-only-filter"
+            />
           </div>
         </div>
         <DialogFooter className="gap-2 sm:gap-0">

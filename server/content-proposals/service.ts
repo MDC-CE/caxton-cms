@@ -180,6 +180,10 @@ export type ProposalRecord = {
   review_mode: ReviewMode;
   open_blocker_count: number;
   no_auto_retry: boolean;
+  escalated: boolean;
+  escalated_at: number | null;
+  escalated_by: string | null;
+  escalated_note: string | null;
   close_reason: ProposalStoredCloseReason | null;
   close_note: string | null;
   closed_by: string | null;
@@ -194,6 +198,8 @@ export type ProposalRecord = {
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
+  /** Other open/partial proposals on overlapping targets that are currently escalated. */
+  escalated_siblings?: Array<{ id: string; title: string }>;
 };
 
 /** Slim entry stub for multi-row list responses (no ops / baselines). */
@@ -231,6 +237,10 @@ export type ProposalSummary = {
   review_mode: ReviewMode;
   open_blocker_count: number;
   no_auto_retry: boolean;
+  escalated: boolean;
+  escalated_at: number | null;
+  escalated_by: string | null;
+  escalated_note: string | null;
   close_reason: ProposalStoredCloseReason | null;
   close_note: string | null;
   closed_by: string | null;
@@ -243,6 +253,7 @@ export type ProposalSummary = {
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
   entries: ProposalEntrySummary[];
+  escalated_siblings?: Array<{ id: string; title: string }>;
 };
 
 export function toProposalSummary(record: ProposalRecord): ProposalSummary {
@@ -276,6 +287,10 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     review_mode: record.review_mode,
     open_blocker_count: record.open_blocker_count,
     no_auto_retry: record.no_auto_retry,
+    escalated: record.escalated,
+    escalated_at: record.escalated_at,
+    escalated_by: record.escalated_by,
+    escalated_note: record.escalated_note,
     close_reason: record.close_reason,
     close_note: record.close_note,
     closed_by: record.closed_by,
@@ -294,6 +309,9 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
       status: e.status,
       ...(e.last_error ? { last_error: e.last_error } : {}),
     })),
+    ...(record.escalated_siblings?.length
+      ? { escalated_siblings: record.escalated_siblings }
+      : {}),
   };
 }
 
@@ -319,6 +337,10 @@ type ProposalRow = {
   created_agent_session_id: string | null;
   promote_on_apply: number;
   no_auto_retry: number;
+  escalated?: number;
+  escalated_at?: number | null;
+  escalated_by?: string | null;
+  escalated_note?: string | null;
   close_reason: string | null;
   close_note: string | null;
   closed_by: string | null;
@@ -396,7 +418,9 @@ export type ProposalUpdateAction =
   | "reopen_blocker"
   | "set_no_auto_retry"
   | "accept"
-  | "revise_entries";
+  | "revise_entries"
+  | "escalate"
+  | "deescalate";
 
 export type ProposalUpdateCaller = {
   username: string;
@@ -426,6 +450,8 @@ export type ProposalUpdateCaller = {
   reject_kind?: string;
   /** revise_entries: replacement pending entry set. */
   entries?: ProposalEntryInput[];
+  /** escalate: required steward note (min MIN_CLOSE_NOTE). */
+  escalated_note?: string;
 };
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -544,6 +570,10 @@ function mapProposal(
     review_mode: deriveReviewMode({ promote_on_apply, entries }),
     open_blocker_count: blockers.filter((b) => b.status === "open").length,
     no_auto_retry: Boolean(row.no_auto_retry),
+    escalated: Boolean(row.escalated),
+    escalated_at: row.escalated_at ?? null,
+    escalated_by: row.escalated_by ?? null,
+    escalated_note: row.escalated_note ?? null,
     close_reason: (row.close_reason as ProposalStoredCloseReason | null) ?? null,
     close_note: row.close_note ?? null,
     closed_by: row.closed_by ?? null,
@@ -674,7 +704,9 @@ function emitProposalEvent(
     | "proposal_closed"
     | "proposal_rejected"
     | "proposal_withdrawn"
-    | "proposal_revised",
+    | "proposal_revised"
+    | "proposal_escalated"
+    | "proposal_deescalated",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -743,6 +775,7 @@ export type ProposalStats = {
   total: number;
   by_status: Record<ProposalStatus, number>;
   by_kind: Record<ProposalKind, number>;
+  escalated_count: number;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -830,6 +863,22 @@ export function parseProposerActorType(
   };
 }
 
+/** Empty/missing → undefined (no filter). `1`/`true`/`0`/`false` (case-insensitive). */
+export function parseEscalatedQuery(
+  raw?: string | null,
+): { ok: true; escalated: boolean | undefined } | { ok: false; error: string } {
+  if (raw == null || String(raw).trim() === "") {
+    return { ok: true, escalated: undefined };
+  }
+  const trimmed = String(raw).trim().toLowerCase();
+  if (trimmed === "1" || trimmed === "true") return { ok: true, escalated: true };
+  if (trimmed === "0" || trimmed === "false") return { ok: true, escalated: false };
+  return {
+    ok: false,
+    error: `Invalid escalated '${raw}'. Allowed: 1, 0, true, false`,
+  };
+}
+
 function compareProposalsBySort(
   a: ProposalRecord,
   b: ProposalRecord,
@@ -914,6 +963,49 @@ export function listOpenProposalsForVariant(
     status: ProposalStatus;
   }>;
   return rows;
+}
+
+function proposalTargetKeys(proposal: {
+  entries?: Array<{ contentType: string; slug: string; locale: string }>;
+  related_entries?: RelatedEntryRef[];
+}): Set<string> {
+  const keys = new Set<string>();
+  for (const e of proposal.entries ?? []) {
+    keys.add(`${e.contentType}\0${e.slug}\0${e.locale}`);
+  }
+  for (const r of proposal.related_entries ?? []) {
+    keys.add(`${r.contentType}\0${r.slug}\0${r.locale ?? ""}`);
+  }
+  return keys;
+}
+
+function findEscalatedSiblings(
+  db: Database.Database,
+  site: string,
+  proposal: ProposalRecord,
+): Array<{ id: string; title: string }> {
+  const mine = proposalTargetKeys(proposal);
+  if (mine.size === 0) return [];
+  const rows = db
+    .prepare(
+      `SELECT * FROM content_proposals
+       WHERE site = ? AND status IN ('open','partial') AND escalated = 1 AND id != ?`,
+    )
+    .all(site, proposal.id) as ProposalRow[];
+  const out: Array<{ id: string; title: string }> = [];
+  for (const row of rows) {
+    const other = mapProposal(row, loadEntries(db, row.id), []);
+    const theirs = proposalTargetKeys(other);
+    let overlap = false;
+    for (const k of mine) {
+      if (theirs.has(k)) {
+        overlap = true;
+        break;
+      }
+    }
+    if (overlap) out.push({ id: row.id, title: row.title });
+  }
+  return out;
 }
 
 export function createProposalService(deps: ProposalServiceDeps) {
@@ -1059,9 +1151,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ...proposal, recent_activity: resolved.activity };
   }
 
+  function withSiblings(proposal: ProposalRecord): ProposalRecord {
+    const siblings = findEscalatedSiblings(dbFor(site), site, proposal);
+    return siblings.length ? { ...proposal, escalated_siblings: siblings } : proposal;
+  }
+
   function get(id: string): ProposalRecord | null {
     const raw = loadProposal(dbFor(site), id);
-    return raw ? enrichRecentActivity(raw) : null;
+    return raw ? withSiblings(enrichRecentActivity(raw)) : null;
   }
 
   /** Unenriched load for internal mutate paths (avoid nested activity reads mid-apply). */
@@ -1088,10 +1185,16 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const totalRow = db
       .prepare(`SELECT COUNT(*) AS n FROM content_proposals WHERE site = ?`)
       .get(site) as { n: number };
+    const escalatedRow = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM content_proposals WHERE site = ? AND escalated = 1`,
+      )
+      .get(site) as { n: number };
     return {
       total: Number(totalRow?.n) || 0,
       by_status,
       by_kind,
+      escalated_count: Number(escalatedRow?.n) || 0,
     };
   }
 
@@ -1109,6 +1212,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     proposer_actor_type?: ProposerActorType;
     proposer_actor_role?: string;
     agent_session_id?: string;
+    escalated?: boolean;
     limit?: number;
     offset?: number;
     sort?: ProposalSortField;
@@ -1162,6 +1266,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
       where += ` AND created_agent_session_id = ?`;
       params.push(agentSessionId);
     }
+    if (opts.escalated === true) {
+      where += ` AND escalated = 1`;
+    } else if (opts.escalated === false) {
+      where += ` AND escalated = 0`;
+    }
 
     if (opts.issue_id) {
       const rows = db
@@ -1173,7 +1282,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       records = [...records].sort((a, b) => compareProposalsBySort(a, b, sort, sortDir));
       const total = records.length;
       return {
-        proposals: records.slice(offset, offset + limit).map(enrichRecentActivity),
+        proposals: records.slice(offset, offset + limit).map((p) => withSiblings(enrichRecentActivity(p))),
         total,
       };
     }
@@ -1188,7 +1297,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       )
       .all(...params, limit, offset) as ProposalRow[];
     const proposals = rows.map((r) =>
-      enrichRecentActivity(mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id))),
+      withSiblings(enrichRecentActivity(mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)))),
     );
     return { proposals, total };
   }
@@ -1683,6 +1792,62 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     const report = caller.report?.trim() ?? "";
     const now = Date.now();
+
+    if (action === "escalate" || action === "deescalate") {
+      if (caller.actor?.type === "mcp") {
+        return {
+          ok: false,
+          code: "steward_ui_only",
+          error: "Escalate and release are staff steward actions in the UI — agents cannot set them.",
+          proposal,
+        };
+      }
+    } else if (proposal.escalated && caller.actor?.type === "mcp") {
+      return {
+        ok: false,
+        code: "escalated",
+        error:
+          "A steward paused agent work on this proposal. Do not claim, add blockers, apply, or reject until they release it.",
+        proposal,
+      };
+    }
+
+    if (action === "escalate") {
+      if (proposal.status !== "open" && proposal.status !== "partial") {
+        return { ok: false, code: "closed", error: "Cannot escalate a closed proposal" };
+      }
+      if (proposal.escalated) {
+        return { ok: false, code: "already_escalated", error: "Proposal is already escalated", proposal };
+      }
+      const note = (caller.escalated_note || caller.close_note || caller.body || "").trim();
+      if (note.length < MIN_CLOSE_NOTE) {
+        return {
+          ok: false,
+          code: "escalated_note_required",
+          error: `escalated_note required (min ${MIN_CLOSE_NOTE} characters): why agents must pause`,
+        };
+      }
+      db.prepare(
+        `UPDATE content_proposals
+         SET escalated = 1, escalated_at = ?, escalated_by = ?, escalated_note = ?,
+             claim_json = NULL, updated_at = ?
+         WHERE id = ?`,
+      ).run(now, caller.username, note, now, id);
+      emitProposalEvent(site, "proposal_escalated", id, caller.username, { note }, caller.actor);
+      return { ok: true, proposal: get(id)! };
+    }
+
+    if (action === "deescalate") {
+      if (!proposal.escalated) {
+        return { ok: false, code: "not_escalated", error: "Proposal is not escalated", proposal };
+      }
+      db.prepare(`UPDATE content_proposals SET escalated = 0, updated_at = ? WHERE id = ?`).run(
+        now,
+        id,
+      );
+      emitProposalEvent(site, "proposal_deescalated", id, caller.username, {}, caller.actor);
+      return { ok: true, proposal: get(id)! };
+    }
 
     if (action === "claim") {
       const claim = proposal.claim;
@@ -2740,8 +2905,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       created_at, updated_at, claim_json, tags_json, search_text,
       created_agent_session_id, promote_on_apply, no_auto_retry,
       close_reason, close_note, closed_by, closed_at, related_entries_json,
-      review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
+      escalated, escalated_at, escalated_by, escalated_note
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -2798,6 +2964,10 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.review_context_snapshot ? JSON.stringify(p.review_context_snapshot) : null,
         p.supersedes_proposal_id ?? null,
         p.replaced_by_proposal_id ?? null,
+        p.escalated ? 1 : 0,
+        p.escalated_at ?? null,
+        p.escalated_by ?? null,
+        p.escalated_note ?? null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
