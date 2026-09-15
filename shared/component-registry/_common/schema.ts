@@ -190,6 +190,11 @@ export const leadFormOverrideSchema = z
       .object({
         url: z.string().optional(),
         message: z.string().optional(),
+        /**
+         * Non-blocking: invalidate the current entry page query after submit success
+         * so computed entry fields refresh while success.url / message still run.
+         */
+        reload_entry: z.boolean().optional(),
       })
       .optional(),
     tags: z.string().optional(),
@@ -239,6 +244,11 @@ export const leadFormDataSchema = z.object({
   success: z.object({
     url: z.string().optional(),
     message: z.string().optional(),
+    /**
+     * Non-blocking: invalidate the current entry page query after submit success
+     * so computed entry fields refresh while success.url / message still run.
+     */
+    reload_entry: z.boolean().optional(),
   }).optional(),
   /**
    * Continuous form_overrides: first match overlays form props for UI + submit.

@@ -10,7 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { UniversalImage } from "@/components/UniversalImage";
 import { getIcon } from "@/lib/icons";
-import { coerceToText } from "@/lib/variable-manager";
+import { coerceToText, resolveTemplateFallback } from "@/lib/variable-manager";
 import {
   Tooltip,
   TooltipContent,
@@ -24,9 +24,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChevronDown } from "lucide-react";
-
-/** Solid soft blue behind the title + countdown row (full-bleed). */
-const TOP_ROW_BG = "hsl(var(--primary) / 0.09)";
 
 /** Learn-like seats: fixed (grid + load-more) height; after expand, button gone and grid fills that space. */
 const SEATS_VISIBLE_THRESHOLD = 16; // beyond this → clamp the grid+button region
@@ -278,8 +275,14 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
   const loadMoreLabel = coerceToText(data.seats?.load_more_label);
   const countdownBg = coerceToText(data.countdown?.background_image);
 
-  const startingAtIso = coerceToText(data.date?.starting_at_iso);
-  const endingAtIso = coerceToText(data.date?.ending_at_iso);
+  // Edit mode preserveTemplate wraps entry fields as "{{ entry.x | value }}";
+  // strip to the fallback ISO so Date.parse / live strip work like read mode.
+  const startingAtIso = resolveTemplateFallback(
+    coerceToText(data.date?.starting_at_iso),
+  );
+  const endingAtIso = resolveTemplateFallback(
+    coerceToText(data.date?.ending_at_iso),
+  );
   const startMs = parseIso(startingAtIso || undefined);
   const endMs = parseIso(endingAtIso || undefined);
   const dateLine =
@@ -392,203 +395,127 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
             column-gap: 4rem !important;
           }
         }
+        @keyframes workshop-live-pulse {
+          0% {
+            box-shadow: 0 0 0 0 rgba(64, 166, 250, 0.28),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+          70% {
+            box-shadow: 0 0 0 10px rgba(64, 166, 250, 0),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(64, 166, 250, 0),
+              0 3px 10px hsl(var(--primary) / 0.05), 0 8px 22px hsl(var(--primary) / 0.03);
+          }
+        }
+        .workshop-live-pulse {
+          animation: workshop-live-pulse 3s ease-out infinite;
+        }
+        @keyframes workshop-live-dot {
+          0% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(255, 82, 82, 0.5), 0 0 0 0 rgba(255, 82, 182, 0.5);
+          }
+          70% {
+            transform: scale(1);
+            box-shadow: 0 0 0 8px rgba(255, 82, 82, 0), 0 0 0 14px rgba(255, 82, 182, 0);
+          }
+          100% {
+            transform: scale(0.95);
+            box-shadow: 0 0 0 0 rgba(255, 82, 82, 0), 0 0 0 0 rgba(255, 82, 182, 0);
+          }
+        }
+        .workshop-live-dot {
+          background: rgba(255, 82, 82, 1);
+          animation: workshop-live-dot 1.5s ease-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .workshop-live-pulse,
+          .workshop-live-dot {
+            animation: none;
+          }
+        }
       `}</style>
-      {/* Row 1: title block + countdown — solid blue band (full-bleed) */}
-      <div className="relative">
-        {/* <div
-          aria-hidden
-          className="pointer-events-none absolute left-1/2 top-[calc(-1*var(--section-pt,0px))] bottom-0 z-0 w-screen -translate-x-1/2"
-          style={{ background: TOP_ROW_BG }}
-          data-testid="workshop-top-row-bg"
-        /> */}
-        <div
-          className="relative z-10 grid grid-cols-1 gap-y-8"
-          data-workshop-cols
-        >
-          <div className="space-y-4">
-            {(badge || (eventState === "live" && liveNowLabel)) && (
-              <div
-                className="flex flex-wrap items-center gap-2"
-                data-testid="workshop-badge-row"
-              >
-                {badge ? (
-                  <span
-                    className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
-                    data-testid="text-workshop-badge"
-                  >
-                    {badge}
-                  </span>
-                ) : null}
-                {eventState === "live" && liveNowLabel ? (
-                  <span
-                    className="inline-flex items-center gap-2 rounded-full bg-destructive/10 text-destructive px-3 py-1 text-xs font-bold tracking-wide"
-                    data-testid="text-workshop-live-label"
-                  >
-                    <span
-                      className="w-2 h-2 rounded-full bg-destructive"
-                      aria-hidden
-                    />
-                    {liveNowLabel}
-                  </span>
-                ) : null}
-              </div>
-            )}
-
-            {titleHtml && (
-              <h1
-                className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
-                data-testid="text-workshop-title"
-              >
-                <div
-                  className="block md:hidden text-[2.25rem] leading-none"
-                  dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
-                />
-                <div
-                  className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
-                  dangerouslySetInnerHTML={{ __html: titleHtml }}
-                />
-              </h1>
-            )}
-
-            {(dateLine || durationLabel) && (
-              <div
-                className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
-                data-testid="text-workshop-datetime"
-              >
-                {dateLine && (
-                  <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
-                    {DateIcon && (
-                      <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
-                    )}
-                    <span>{dateLine}</span>
-                  </div>
-                )}
-                {durationLabel && (
-                  <span
-                    className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
-                    data-testid="text-workshop-duration"
-                  >
-                    {DurationIcon && (
-                      <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
-                    )}
-                    {durationLabel}
-                    {durationSuffix ? ` ${durationSuffix}` : ""}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-
-          {showCountdownStrip ? (
-            eventState === "live" ? (
-              <div
-                className={`relative lg:self-end overflow-hidden bg-muted ${
-                  hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
-                }`}
-                style={{
-                  border: "1.5px solid hsl(var(--primary) / 0.22)",
-                  borderBottom: hasFormCard ? "none" : undefined,
-                  boxShadow: hasFormCard
-                    ? undefined
-                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-                }}
-                data-testid="workshop-countdown"
-              >
-                {stripBg ? (
-                  <UniversalImage
-                    id={stripBg}
-                    alt=""
-                    loading="eager"
-                    className="block w-full leading-none"
-                    style={{
-                      width: "100%",
-                      height: "auto",
-                      objectFit: "contain",
-                      objectPosition: "center center",
-                    }}
-                    fieldContext={{ fieldPath: "live.images" }}
-                  />
-                ) : null}
-              </div>
-            ) : (
-              <div
-                className={`relative min-h-[7.5rem] max-h-48 lg:self-end overflow-hidden bg-muted ${
-                  hasFormCard ? "rounded-t-[16px]" : "rounded-[16px]"
-                }`}
-                style={{
-                  border: "1.5px solid hsl(var(--primary) / 0.22)",
-                  borderBottom: hasFormCard ? "none" : undefined,
-                  boxShadow: hasFormCard
-                    ? undefined
-                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-                }}
-                data-testid="workshop-countdown"
-              >
-                {stripBg && (
-                  <div className="absolute inset-0 z-0">
-                    <UniversalImage
-                      id={stripBg}
-                      alt=""
-                      className="w-full h-full object-cover"
-                      fieldContext={{ fieldPath: "countdown.background_image" }}
-                    />
-                  </div>
-                )}
-                <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
-                  {countdown && (
-                    <div
-                      className={`flex gap-2 sm:gap-3 font-inter tabular-nums items-center py-6 ${
-                        stripBg ? "text-white drop-shadow-sm" : "text-foreground"
-                      }`}
-                    >
-                      {countdownSlots.map(([label, value], i) => (
-                        <div key={label} className="flex items-center gap-2 sm:gap-3">
-                          {i > 0 && (
-                            <span
-                              className={`text-2xl font-bold leading-none -mt-4 ${
-                                stripBg ? "text-white/80" : "text-muted-foreground"
-                              }`}
-                              aria-hidden
-                            >
-                              :
-                            </span>
-                          )}
-                          <div
-                            className="flex flex-col items-center min-w-[2.75rem]"
-                            data-testid={`countdown-${label}`}
-                          >
-                            <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
-                              {value}
-                            </span>
-                            <span
-                              className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
-                                stripBg ? "text-white/90" : "text-muted-foreground"
-                              }`}
-                            >
-                              {label}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          ) : (
-            <div className="hidden lg:block" aria-hidden />
-          )}
-        </div>
-      </div>
-
-      {/* Row 2: description/host | form + seats — same column tracks as row 1 */}
       <div
-        className="ps-3 grid grid-cols-1 lg:items-start gap-y-8 lg:pt-0"
+        className="relative z-10 grid grid-cols-1 lg:items-start gap-y-8"
         data-workshop-cols
       >
-        <div className="min-w-0 space-y-4 pt-8 lg:pt-8">
+        <div className="min-w-0 space-y-4">
+          {(badge || (eventState === "live" && liveNowLabel)) && (
+            <div
+              className="flex flex-wrap items-center gap-2"
+              data-testid="workshop-badge-row"
+            >
+              {badge ? (
+                <span
+                  className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
+                  data-testid="text-workshop-badge"
+                >
+                  {badge}
+                </span>
+              ) : null}
+              {eventState === "live" && liveNowLabel ? (
+                <span
+                  className="inline-flex items-center gap-2.5 rounded-[18px] bg-[#FFBEBE] text-[#CD0000] px-2.5 py-1 text-xs font-bold leading-none"
+                  data-testid="text-workshop-live-label"
+                >
+                  <span
+                    className="workshop-live-dot w-2 h-2 rounded-full shrink-0"
+                    aria-hidden
+                  />
+                  {liveNowLabel}
+                </span>
+              ) : null}
+            </div>
+          )}
+
+          {titleHtml && (
+            <h1
+              className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
+              data-testid="text-workshop-title"
+            >
+              <div
+                className="block md:hidden text-[2.25rem] leading-none"
+                dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
+              />
+              <div
+                className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
+                dangerouslySetInnerHTML={{ __html: titleHtml }}
+              />
+            </h1>
+          )}
+
+          {(dateLine || durationLabel) && (
+            <div
+              className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
+              data-testid="text-workshop-datetime"
+            >
+              {dateLine && (
+                <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
+                  {DateIcon && (
+                    <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
+                  )}
+                  <span>{dateLine}</span>
+                </div>
+              )}
+              {durationLabel && (
+                <span
+                  className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
+                  data-testid="text-workshop-duration"
+                >
+                  {DurationIcon && (
+                    <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
+                  )}
+                  {durationLabel}
+                  {durationSuffix ? ` ${durationSuffix}` : ""}
+                </span>
+              )}
+            </div>
+          )}
+
           {paragraphs.length > 0 && (
-            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70" data-testid="text-workshop-description">
+            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70 pt-4" data-testid="text-workshop-description">
               {paragraphs.map((p, i) => (
                 <p key={i} className="whitespace-pre-line">
                   {p}
@@ -686,198 +613,279 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
         </div>
 
         <div className="flex flex-col gap-4 w-full min-w-0 h-fit lg:self-start shrink-0">
-          <div
-            className={`bg-card h-fit shrink-0 ${
-              showCountdownStrip ? "rounded-b-[16px]" : "rounded-[16px]"
-            }`}
-            style={{
-              border: "1.5px solid hsl(var(--primary) / 0.22)",
-              borderTop: showCountdownStrip ? "none" : undefined,
-              boxShadow:
-                "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
-            }}
-            data-testid="workshop-form-card"
-          >
-              {hasFormCard && (data.form_card_title || data.form_card_subtitle) && (
-                <div className="pb-1 px-5 pt-5 text-center">
-                  {data.form_card_title && (
-                    <p className="font-inter text-[19px] font-semibold tracking-tight text-foreground">
-                      {data.form_card_title}
-                    </p>
-                  )}
-                  {data.form_card_subtitle && (
-                    <p className="text-[12.5px] text-muted-foreground leading-snug mt-1">
-                      {data.form_card_subtitle}
-                    </p>
-                  )}
-                </div>
-              )}
-              {form && (
-                <div className="px-5 py-3" data-hero-inline-form>
-                  <Suspense
-                    fallback={
-                      <div className="min-h-24 flex items-center justify-center text-muted-foreground text-sm">
-                        Loading...
-                      </div>
-                    }
+          {(showCountdownStrip || hasFormCard) ? (
+            <div
+              className={`overflow-hidden rounded-[16px] bg-card ${
+                eventState === "live" ? "workshop-live-pulse" : ""
+              }`}
+              style={{
+                border:
+                  eventState === "live"
+                    ? "1.6px solid hsl(var(--primary) / 0.18)"
+                    : "1px solid hsl(var(--border))",
+                boxShadow:
+                  eventState === "live"
+                    ? undefined
+                    : "0 3px 10px hsl(var(--primary) / 0.06), 0 8px 22px hsl(var(--primary) / 0.04)",
+              }}
+              data-testid="workshop-form-stack"
+            >
+              {showCountdownStrip ? (
+                eventState === "live" ? (
+                  <div
+                    className="relative overflow-hidden bg-muted"
+                    data-testid="workshop-countdown"
                   >
-                    <LeadForm data={form} />
-                  </Suspense>
-                </div>
-              )}
-              {data.form_card_disclaimer && (
-                <p className="text-[11px] text-muted-foreground/60 pb-3 px-5 font-medium text-center">
-                  {data.form_card_disclaimer}
-                </p>
-              )}
+                    {stripBg ? (
+                      <UniversalImage
+                        id={stripBg}
+                        alt=""
+                        loading="eager"
+                        className="block w-full leading-none"
+                        style={{
+                          width: "100%",
+                          height: "auto",
+                          objectFit: "contain",
+                          objectPosition: "center center",
+                        }}
+                        fieldContext={{ fieldPath: "live.images" }}
+                      />
+                    ) : null}
+                  </div>
+                ) : (
+                  <div
+                    className="relative min-h-[7.5rem] max-h-48 overflow-hidden bg-muted"
+                    data-testid="workshop-countdown"
+                  >
+                    {stripBg && (
+                      <div className="absolute inset-0 z-0">
+                        <UniversalImage
+                          id={stripBg}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          fieldContext={{ fieldPath: "countdown.background_image" }}
+                        />
+                      </div>
+                    )}
+                    <div className="relative z-10 h-full min-h-[7.5rem] max-h-48 flex items-center justify-center px-6 py-8">
+                      {countdown && (
+                        <div
+                          className={`flex gap-2 sm:gap-3 font-inter tabular-nums items-center py-6 ${
+                            stripBg ? "text-white drop-shadow-sm" : "text-foreground"
+                          }`}
+                        >
+                          {countdownSlots.map(([label, value], i) => (
+                            <div key={label} className="flex items-center gap-2 sm:gap-3">
+                              {i > 0 && (
+                                <span
+                                  className={`text-2xl font-bold leading-none -mt-4 ${
+                                    stripBg ? "text-white/80" : "text-muted-foreground"
+                                  }`}
+                                  aria-hidden
+                                >
+                                  :
+                                </span>
+                              )}
+                              <div
+                                className="flex flex-col items-center min-w-[2.75rem]"
+                                data-testid={`countdown-${label}`}
+                              >
+                                <span className="text-[2rem] sm:text-[2.5rem] font-extrabold leading-none">
+                                  {value}
+                                </span>
+                                <span
+                                  className={`text-[10px] uppercase tracking-wider mt-1 font-bold ${
+                                    stripBg ? "text-white/90" : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {label}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              ) : null}
 
-              <div
-                className={`px-5 ${hasFormCard ? "pt-3 border-t border-border/60" : "pt-5"} pb-5`}
-                data-testid="workshop-seats"
-                aria-live="polite"
-              >
+              {hasFormCard ? (
+                <div data-testid="workshop-form-card">
+                  {(data.form_card_title || data.form_card_subtitle) && (
+                    <div className="pb-1 px-5 pt-5 text-center">
+                      {data.form_card_title && (
+                        <p className="font-inter text-[19px] font-semibold tracking-tight text-foreground">
+                          {data.form_card_title}
+                        </p>
+                      )}
+                      {data.form_card_subtitle && (
+                        <p className="text-[12.5px] text-muted-foreground leading-snug mt-1">
+                          {data.form_card_subtitle}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {form && (
+                    <div className="px-5 py-3" data-hero-inline-form>
+                      <Suspense
+                        fallback={
+                          <div className="min-h-24 flex items-center justify-center text-muted-foreground text-sm">
+                            Loading...
+                          </div>
+                        }
+                      >
+                        <LeadForm data={form} />
+                      </Suspense>
+                    </div>
+                  )}
+                  {data.form_card_disclaimer && (
+                    <p className="text-[11px] text-muted-foreground/60 pb-3 px-5 font-medium text-center">
+                      {data.form_card_disclaimer}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {hasSeatsInfo ? (
+            <Card
+              className="w-full h-fit shrink-0 rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
+              data-testid="workshop-seats-card"
+            >
+              <div className="p-5" data-testid="workshop-seats" aria-live="polite">
                 <div
                   className="flex flex-col gap-3.5 rounded-2xl bg-muted p-4"
                   style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
                 >
-                  {hasSeatsInfo ? (
-                    <>
-                      {seatsCopy ? (
-                        <p
-                          className="text-xs mb-3 font-medium text-foreground text-center leading-snug"
-                          data-testid="text-workshop-seats-copy"
-                        >
-                          {seatsCopy}
-                        </p>
-                      ) : null}
-                      {registrants.length > 0 ? (
-                        <div
-                          className={
-                            seatsOverflow
-                              ? "flex min-h-0 flex-col"
-                              : undefined
-                          }
-                          style={
-                            seatsOverflow
-                              ? { height: SEATS_LIST_REGION_H }
-                              : undefined
-                          }
-                          data-testid="workshop-seats-viewport"
-                        >
+                  {seatsCopy ? (
+                    <p
+                      className="text-xs mb-3 font-medium text-foreground text-center leading-snug"
+                      data-testid="text-workshop-seats-copy"
+                    >
+                      {seatsCopy}
+                    </p>
+                  ) : null}
+                  {registrants.length > 0 ? (
+                    <div
+                      className={
+                        seatsOverflow ? "flex min-h-0 flex-col" : undefined
+                      }
+                      style={
+                        seatsOverflow
+                          ? { height: SEATS_LIST_REGION_H }
+                          : undefined
+                      }
+                      data-testid="workshop-seats-viewport"
+                    >
+                      <div
+                        className={
+                          seatsOverflow
+                            ? `min-h-0 flex-1 ${
+                                showAllSeats
+                                  ? "overflow-y-auto overscroll-contain pr-0.5"
+                                  : "overflow-hidden"
+                              }`
+                            : undefined
+                        }
+                      >
+                        <TooltipProvider delayDuration={200}>
                           <div
-                            className={
-                              seatsOverflow
-                                ? `min-h-0 flex-1 ${
-                                    showAllSeats
-                                      ? "overflow-y-auto overscroll-contain pr-0.5"
-                                      : "overflow-hidden"
-                                  }`
-                                : undefined
-                            }
+                            className="grid gap-x-2 gap-y-4 justify-items-center"
+                            style={{
+                              gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
+                            }}
+                            data-testid="workshop-seats-grid"
                           >
-                            <TooltipProvider delayDuration={200}>
-                              <div
-                                className="grid gap-x-2 gap-y-4 justify-items-center"
-                                style={{
-                                  gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
-                                }}
-                                data-testid="workshop-seats-grid"
-                              >
-                                {registrants.map((person, i) => {
-                                  const label = person.name || `Participant ${i + 1}`;
-                                  const resolvedAvatar =
-                                    person.avatar_url ||
-                                    (fallbackAvatars.length
-                                      ? fallbackAvatars[i % fallbackAvatars.length]
-                                      : "");
-                                  const avatar = (
-                                    <div
-                                      className="rounded-full overflow-hidden bg-background border border-border/80"
-                                      style={{
-                                        width: AVATAR_SIZE,
-                                        height: AVATAR_SIZE,
+                            {registrants.map((person, i) => {
+                              const label = person.name || `Participant ${i + 1}`;
+                              const resolvedAvatar =
+                                person.avatar_url ||
+                                (fallbackAvatars.length
+                                  ? fallbackAvatars[i % fallbackAvatars.length]
+                                  : "");
+                              const avatar = (
+                                <div
+                                  className="rounded-full overflow-hidden bg-background border border-border/80"
+                                  style={{
+                                    width: AVATAR_SIZE,
+                                    height: AVATAR_SIZE,
+                                  }}
+                                >
+                                  {resolvedAvatar ? (
+                                    <UniversalImage
+                                      id={resolvedAvatar}
+                                      alt={label}
+                                      className="w-full h-full object-cover"
+                                      fieldContext={{
+                                        arrayPath: person.avatar_url
+                                          ? "registrant_avatars"
+                                          : "fallback_avatars",
+                                        index: i,
+                                        srcField: person.avatar_url
+                                          ? "avatar_url"
+                                          : "",
                                       }}
+                                    />
+                                  ) : (
+                                    <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
+                                      {(person.name || "?").charAt(0)}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                              if (!person.name) {
+                                return (
+                                  <div key={`${person.avatar_url}-${i}`}>
+                                    {avatar}
+                                  </div>
+                                );
+                              }
+                              return (
+                                <Tooltip
+                                  key={`${person.avatar_url}-${i}-${person.name}`}
+                                >
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                      aria-label={label}
                                     >
-                                      {resolvedAvatar ? (
-                                        <UniversalImage
-                                          id={resolvedAvatar}
-                                          alt={label}
-                                          className="w-full h-full object-cover"
-                                          fieldContext={{
-                                            arrayPath: person.avatar_url
-                                              ? "registrant_avatars"
-                                              : "fallback_avatars",
-                                            index: i,
-                                            srcField: person.avatar_url
-                                              ? "avatar_url"
-                                              : "",
-                                          }}
-                                        />
-                                      ) : (
-                                        <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
-                                          {(person.name || "?").charAt(0)}
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
-                                  if (!person.name) {
-                                    return (
-                                      <div key={`${person.avatar_url}-${i}`}>
-                                        {avatar}
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <Tooltip key={`${person.avatar_url}-${i}-${person.name}`}>
-                                      <TooltipTrigger asChild>
-                                        <button
-                                          type="button"
-                                          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                          aria-label={label}
-                                        >
-                                          {avatar}
-                                        </button>
-                                      </TooltipTrigger>
-                                      <TooltipContent side="top" className="max-w-[14rem]">
-                                        {person.name}
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  );
-                                })}
-                              </div>
-                            </TooltipProvider>
+                                      {avatar}
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" className="max-w-[14rem]">
+                                    {person.name}
+                                  </TooltipContent>
+                                </Tooltip>
+                              );
+                            })}
                           </div>
-                          {canLoadMoreSeats && (
-                            <button
-                              type="button"
-                              className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
-                              onClick={() => setShowAllSeats(true)}
-                              data-testid="button-workshop-seats-load-more"
-                            >
-                              {loadMoreLabel}
-                            </button>
-                          )}
-                        </div>
-                      ) : (
-                        <div
-                          className="rounded-md bg-background/50"
-                          style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
-                          aria-hidden
-                        />
+                        </TooltipProvider>
+                      </div>
+                      {canLoadMoreSeats && (
+                        <button
+                          type="button"
+                          className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
+                          onClick={() => setShowAllSeats(true)}
+                          data-testid="button-workshop-seats-load-more"
+                        >
+                          {loadMoreLabel}
+                        </button>
                       )}
-
-                    </>
+                    </div>
                   ) : (
                     <div
                       className="rounded-md bg-background/50"
                       style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
                       aria-hidden
-                      data-testid="workshop-seats-placeholder"
                     />
                   )}
                 </div>
               </div>
-          </div>
+            </Card>
+          ) : null}
 
           {showCalendarCard ? (
             <Card

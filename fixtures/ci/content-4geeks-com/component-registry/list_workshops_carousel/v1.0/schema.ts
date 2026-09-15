@@ -62,6 +62,8 @@ export const listWorkshopsCarouselSectionSchema = z.object({
     .object({
       database: z.string().optional(),
       content_type: z.string().optional(),
+      /** When false, mixed-locale listing; _resolved_url uses each entry's lang */
+      filter_by_locale: z.boolean().optional(),
       limit: z.number().optional(),
       sort: z.string().optional(),
       item_template: z.record(z.string(), z.unknown()).optional(),

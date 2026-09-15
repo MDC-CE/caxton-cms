@@ -12,7 +12,8 @@
     mobile: 2xl
     desktop: 2xl
   dynamic_entries:
-    database: workshops
+    content_type: workshop
+    filter_by_locale: false
     limit: 10
     sort: starting_at
     item_template:
@@ -25,6 +26,5 @@
       host_name: "{{ entry.host_name }}"
       host_avatar_url: "{{ entry.host_avatar_url }}"
       lang: "{{ entry.lang }}"
-      slug: "{{ entry.slug }}"
-      cta_url: "{{ entry.cta_url }}"
+      cta_url: "{{ entry._resolved_url }}"
       technology_image_ids: "{{ entry.technology_image_ids }}"

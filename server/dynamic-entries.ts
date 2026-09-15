@@ -3,7 +3,7 @@ import { contentIndex, type ContentIndex } from "./content-index";
 import { getContentTypeConfig, resolveContentTypeUrl } from "./content-types";
 import { isSemanticSearchEnabled, resolveListingDatabase } from "./listing-search";
 import { normalizeListingSearchConfig } from "@shared/listing-search-config";
-import { queryEntries, type QueryFilter, applyFilters, applyMatchCountSort } from "./query-entries";
+import { queryEntries, type QueryFilter, applyFilters, applyMatchCountSort, localeForUrlFromItem } from "./query-entries";
 import { child } from "./logger";
 import { resolveSingleTemplateValue } from "@shared/json-field";
 import { applyIgnoredEntries, faqItemKey } from "@shared/faq-listing";
@@ -52,6 +52,12 @@ interface DynamicEntriesConfig {
   limit?: number;
   sort?: string;
   search?: string;
+  /**
+   * When false, content_type listings include every locale (mixed).
+   * Default / omitted = filter to the page locale. Only then do URLs use each
+   * entry's own lang for `_resolved_url`.
+   */
+  filter_by_locale?: boolean;
   permanent_filters?: PermanentFilter[];
   user_filters?: UserFilter[];
   ignored_entries?: string[];
@@ -350,10 +356,13 @@ export async function resolveDynamicEntries(
           ? ({ contentType } as const)
           : ({ database: resolvedDatabase! } as const);
 
+        const filterByLocale = dynamicEntries.filter_by_locale !== false;
+
         const result = await queryEntries(
           {
             from,
             locale,
+            filterByLocale,
             filters,
             sort: dynamicEntries.sort,
             limit: queryLimit,
@@ -383,12 +392,18 @@ export async function resolveDynamicEntries(
         },
       );
 
+      const filterByLocale = dynamicEntries.filter_by_locale !== false;
+      const useItemLocaleForUrl = contentType && !filterByLocale;
+
       let resolvedItems: unknown[];
       if (itemTemplate) {
         resolvedItems = items.map((item) => {
           const enriched = { ...item };
           if (contentType && !enriched._resolved_url) {
-            const url = resolveContentTypeUrl(contentType, item, locale, contentRoot);
+            const urlLocale = useItemLocaleForUrl
+              ? localeForUrlFromItem(item, contentType, locale, contentRoot)
+              : locale;
+            const url = resolveContentTypeUrl(contentType, item, urlLocale, contentRoot);
             if (url) enriched._resolved_url = url;
           }
           return applyItemTemplatePreservingUserFilters(
@@ -400,7 +415,15 @@ export async function resolveDynamicEntries(
       } else {
         resolvedItems = items.map((item) => {
           if (contentType && !(item as { _resolved_url?: string })._resolved_url) {
-            const url = resolveContentTypeUrl(contentType, item, locale, contentRoot);
+            const urlLocale = useItemLocaleForUrl
+              ? localeForUrlFromItem(item as Record<string, unknown>, contentType, locale, contentRoot)
+              : locale;
+            const url = resolveContentTypeUrl(
+              contentType,
+              item as Record<string, unknown>,
+              urlLocale,
+              contentRoot,
+            );
             if (url) (item as Record<string, unknown>)._resolved_url = url;
           }
           return item;

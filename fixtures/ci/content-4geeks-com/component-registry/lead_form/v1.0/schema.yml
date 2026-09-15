@@ -27,6 +27,9 @@ props:
   conversion_name:
     type: string
     required: false
+  ecommerce_product_field:
+    type: string
+    required: false
   title:
     type: string
     required: false
@@ -58,26 +61,27 @@ props:
         type: string
         required: false
         description: >-
-          Destination URL to POST/GET the conversion payload. May include {{ entry.* }} /
-          {{ visitor.* }} templates. Optional when only use_visitor_token is set.
+          Destination URL to POST/GET the conversion payload. May include {{ entry.* }} / {{ visitor.* }} templates.
+          Optional when only use_visitor_token is set.
         example: https://hooks.zapier.com/hooks/catch/xxxxx/yyyyy/
       method:
         type: string
         required: false
+        options:
+          - POST
+          - GET
         description: HTTP method (default POST)
         example: POST
       use_visitor_token:
         type: boolean
         required: false
-        description: >-
-          When true, send Authorization Token on delivery (if url) and append ?token= to
-          success.url when redirecting.
+        description: When true, send Authorization Token on delivery (if url) and append ?token= to success.url when redirecting.
       fail_on_error:
         type: boolean
         required: false
         description: >-
-          When true, wait for the upstream webhook and fail the form submit (no success UI /
-          redirect) if delivery errors or returns non-2xx. Default omit/false is fire-and-forget.
+          When true, wait for the upstream webhook and fail the form submit (no success UI / redirect) if delivery
+          errors or returns non-2xx. Default omit/false is fire-and-forget.
     description: >-
       Form-level webhook — highest priority in the three-level chain (form > per-event > global). When set, this webhook
       is always used for this form regardless of tracking settings. Requires url and/or use_visitor_token.
@@ -703,6 +707,81 @@ props:
                 type: string
                 required: true
         description: Coupon code field (can be pre-filled from URL)
+      referral_key:
+        type: object
+        required: false
+        properties:
+          visible:
+            type: boolean
+            required: false
+          required:
+            type: boolean
+            required: false
+          default:
+            type: string
+            required: false
+          default_country:
+            type: string
+            required: false
+          helper_text:
+            type: string
+            required: false
+          placeholder:
+            type: string
+            required: false
+          show_label:
+            type: boolean
+            required: false
+          label:
+            type: string
+            required: false
+          slugs:
+            type: array
+            required: false
+            items:
+              type:
+                type: string
+                required: true
+          source:
+            type: object
+            required: false
+            properties:
+              content_type:
+                type: string
+                required: false
+              database:
+                type: string
+                required: false
+              related_field:
+                type: string
+                required: false
+              query:
+                type: string
+                required: false
+              value_path:
+                type: string
+                required: true
+              label_path:
+                type: string
+                required: true
+          component_renderer:
+            type: string
+            required: false
+            options:
+              - text
+              - phone
+              - textarea
+              - select
+              - cards
+              - simple-list
+              - grouped-list
+          options:
+            type: array
+            required: false
+            items:
+              value:
+                type: string
+                required: true
       client_comments:
         type: object
         required: false
@@ -796,77 +875,101 @@ props:
         required: false
         description: Success message to display (if no url)
         example: Thanks! We'll contact you within 24 hours.
+      reload_entry:
+        type: boolean
+        required: false
+        description: >-
+          After submit success, invalidate the current entry page query in the background (non-blocking) so computed
+          fields refresh while success.url still runs.
     description: What happens after successful submission
   form_overrides:
     type: array
     required: false
-    description: >-
-      Continuous form_overrides: the first entry whose conditions all match (AND) overlays this
-      form for both UI copy and submit (messages, webhook, success, tags, conversion_name).
-      Partial message/success/webhook objects are deep-merged onto the form root. No match
-      → root form props. Conditions use form_field_slug or entry_field_slug (bare entry path).
-      Condition values may use {{ visitor.* }} templates (visitor = logged-in profile).
-      match_method equals (default) or contains (substring on strings; membership on arrays).
     items:
-      type: object
-      required: false
-      properties:
-        conditions:
-          type: array
-          required: true
-          items:
-            type: object
+      conditions:
+        type: array
+        required: true
+        items:
+          form_field_slug:
+            type: string
             required: false
-            properties:
-              form_field_slug:
-                type: string
-                required: false
-                description: Form field key to compare (submitted value)
-              entry_field_slug:
-                type: string
-                required: false
-                description: >-
-                  Bare entry field path looked up on singleEntry at match time
-                  (e.g. event_started, registered_attendee_ids). Do not use {{ entry.* }}
-                  here — section resolveDeep would replace templates before LeadForm runs.
-              match_method:
-                type: string
-                required: false
-                options:
-                  - equals
-                  - contains
-                description: >-
-                  equals (default) string equality; contains = substring on strings or
-                  membership in arrays of scalars (e.g. registered_attendee_ids + {{ visitor.id }})
-              value:
-                type: string
-                required: true
-                description: Expected value; may be a template e.g. "{{ visitor.id }}"
-        conversion_name:
-          type: string
-          required: false
-        tags:
-          type: string
-          required: false
-        automations:
-          type: string
-          required: false
-        webhook:
-          type: object
-          required: false
-        success:
-          type: object
-          required: false
-        messages:
-          type: object
-          required: false
-          description: Partial phase copy (guest/login/incomplete/ready); deep-merged onto form messages
+          entry_field_slug:
+            type: string
+            required: false
+          match_method:
+            type: string
+            required: false
+            options:
+              - equals
+              - contains
+          value:
+            type: string
+            required: true
+      conversion_name:
+        type: string
+        required: false
+      ecommerce_product_field:
+        type: string
+        required: false
+      success:
+        type: object
+        required: false
+        properties:
+          url:
+            type: string
+            required: false
+          message:
+            type: string
+            required: false
+          reload_entry:
+            type: boolean
+            required: false
+      tags:
+        type: string
+        required: false
+      automations:
+        type: string
+        required: false
+      webhook:
+        type: object
+        required: false
+        properties:
+          url:
+            type: string
+            required: false
+          method:
+            type: string
+            required: false
+            options:
+              - POST
+              - GET
+          use_visitor_token:
+            type: boolean
+            required: false
+          fail_on_error:
+            type: boolean
+            required: false
+      messages:
+        type: object
+        required: false
+    description: >-
+      Continuous form_overrides: the first entry whose conditions all match (AND) overlays this form for both UI copy
+      and submit (messages, webhook, success, tags, conversion_name). Partial message/success/webhook objects are
+      deep-merged onto the form root. No match → root form props. Conditions use form_field_slug or entry_field_slug
+      (bare entry path). Condition values may use {{ visitor.* }} templates (visitor = logged-in profile). match_method
+      equals (default) or contains (substring on strings; membership on arrays).
   messages:
     type: object
     required: false
     description: >-
-      Phase copy for signup forms (guest, login, incomplete, ready). Routes may override
-      individual phases/fields via deep merge.
+      Phase copy for signup forms (guest, login, incomplete, ready). Routes may override individual phases/fields via
+      deep merge.
+  is_signup:
+    type: boolean
+    required: false
+  allow_signup:
+    type: boolean
+    required: false
   terms_url:
     type: string
     required: false

@@ -32,6 +32,11 @@ export interface LeadFormOverrideCondition {
 export interface LeadFormOverrideSuccess {
   url?: string;
   message?: string;
+  /**
+   * When true, after a successful submit invalidate the current entry page query
+   * (non-blocking) so computed fields like registered_attendee_ids refresh.
+   */
+  reload_entry?: boolean;
 }
 
 export interface LeadFormOverrideWebhook {

@@ -58,6 +58,12 @@ export type QueryFrom =
 export interface QueryEntriesInput {
   from: QueryFrom;
   locale?: string;
+  /**
+   * When false, content-type listings keep rows from every locale (mixed lists).
+   * Default true — same as before (filter to `locale` when set).
+   * With false, `_resolved_url` uses each item's own locale/lang.
+   */
+  filterByLocale?: boolean;
   filters?: QueryFilter[];
   sort?: string;
   limit?: number;
@@ -438,6 +444,27 @@ async function loadFromDatabase(
   return items;
 }
 
+/**
+ * Locale used for url_pattern when building `_resolved_url` for a mixed-locale listing.
+ * Maps Breathecode-style `us` → `en`. Falls back to page locale.
+ */
+export function localeForUrlFromItem(
+  item: Record<string, unknown>,
+  contentType: string,
+  pageLocale: string | undefined,
+  contentRoot?: string,
+): string {
+  const localeKey = getLocaleKey(contentType, contentRoot) || "lang";
+  const raw = String(
+    item[localeKey] ?? item.lang ?? item.locale ?? item.language ?? pageLocale ?? "",
+  )
+    .trim()
+    .toLowerCase();
+  if (!raw) return pageLocale || "en";
+  if (raw === "us") return "en";
+  return raw;
+}
+
 async function loadFromContentType(
   contentType: string,
   locale: string | undefined,
@@ -445,14 +472,16 @@ async function loadFromContentType(
     db: DatabaseManager;
     ci: ContentIndex;
     contentRoot: string;
+    filterByLocale?: boolean;
   },
 ): Promise<{ items: Record<string, unknown>[]; source: "database" | "content_type" }> {
   const { db, ci, contentRoot } = options;
+  const filterByLocale = options.filterByLocale !== false;
   const ctConfig = getContentTypeConfig(contentType, contentRoot);
 
   if (ctConfig?.database?.slug) {
     let items = await db.fetchMappedItems(contentType);
-    if (locale) {
+    if (locale && filterByLocale) {
       items = filterByContentTypeLocale(items, contentType, locale, contentRoot);
     }
     const fullMapping = getFullFieldMapping(contentType, contentRoot);
@@ -480,7 +509,7 @@ async function loadFromContentType(
   }
 
   let items = loadStaticContentTypeItems(contentType, contentRoot, ci);
-  if (locale) {
+  if (locale && filterByLocale) {
     items = filterByContentTypeLocale(items, contentType, locale, contentRoot);
   }
   return { items, source: "content_type" };
@@ -491,10 +520,15 @@ function attachResolvedUrls(
   contentType: string,
   locale: string | undefined,
   contentRoot?: string,
+  opts?: { useItemLocale?: boolean },
 ): Record<string, unknown>[] {
-  if (!locale) return items;
+  const useItemLocale = opts?.useItemLocale === true;
+  if (!useItemLocale && !locale) return items;
   return items.map((item) => {
-    const url = resolveContentTypeUrl(contentType, item, locale, contentRoot);
+    const urlLocale = useItemLocale
+      ? localeForUrlFromItem(item, contentType, locale, contentRoot)
+      : locale!;
+    const url = resolveContentTypeUrl(contentType, item, urlLocale, contentRoot);
     if (!url) return item;
     return { ...item, _resolved_url: url };
   });
@@ -523,11 +557,14 @@ export async function queryEntries(
   let source: "database" | "content_type" = "database";
   let key = "";
 
+  const filterByLocale = query.filterByLocale !== false;
+
   if (contentType) {
     const loaded = await loadFromContentType(contentType, query.locale, {
       db,
       ci,
       contentRoot,
+      filterByLocale,
     });
     items = loaded.items;
     source = loaded.source;
@@ -556,7 +593,9 @@ export async function queryEntries(
   items = applyMatchCountSort(items, query.filters, query.sort);
 
   if (contentType) {
-    items = attachResolvedUrls(items, contentType, query.locale, contentRoot);
+    items = attachResolvedUrls(items, contentType, query.locale, contentRoot, {
+      useItemLocale: !filterByLocale,
+    });
   }
 
   const total = items.length;

@@ -1,0 +1,42 @@
+name: "Workshop RSVP success (two column)"
+description: "two_column-style overlay — image left (md+), rich text + generic buttons (link or dropdown items). Opens via #workshop-rsvp-success."
+yaml: |
+  - type: modal
+    version: "1.0"
+    variant: twoColumn
+    section_id: workshop-rsvp-success
+    show_close: true
+    size: xl
+    proportions: [6, 6]
+    left:
+      image: https://learn.4geeks.com/static/images/happy-meeting-2.webp
+      image_alt: Students celebrating after registering for a workshop
+      image_object_fit: contain
+      image_object_position: center center
+      image_max_width: 100%
+      justify: center
+    right:
+      heading: Thank you for signing up for our workshop, now is time to get ready
+      description: Get the most out of this workshop
+      bullet_icon: Check
+      bullet_icon_color: text-primary
+      bullets:
+        - text: The host is already answering questions on our WhatsApp community
+        - text: Chat with other attendees
+        - text: Get updates about this and future workshops
+        - text: Practice interactively thanks to Learnpack and our AI mentor
+      buttons:
+        - text: Join the conversation
+          url: https://chat.whatsapp.com/CBppI0ulMt8Dx4Fsw9AreG
+          variant: outline
+          icon: MessageCircle
+        - text: Add to my calendar
+          variant: primary
+          icon: Calendar
+          items:
+            - name: Google
+              url: "{{ entry.calendar_google_url }}"
+            - name: Outlook.com
+              url: "{{ entry.calendar_outlook_url }}"
+            - name: Yahoo
+              url: "{{ entry.calendar_yahoo_url }}"
