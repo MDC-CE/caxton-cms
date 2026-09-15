@@ -43,6 +43,7 @@ export const MIN_SUMMARY = 80;
 export const MIN_BLOCKER_BODY = 80;
 export const MIN_CLOSE_NOTE = 20;
 export const MIN_ACCEPT_NEXT_STEP = 20;
+export const MIN_REJECT_NOTE = 80;
 
 export type ProposalStatus = "open" | "partial" | "finished" | "rejected" | "withdrawn";
 export type ProposalKind = "edits" | "notes" | "idea";
@@ -57,12 +58,32 @@ export type ProposalCloseReason =
   | "other"
   | "accepted";
 
+export type ProposalRejectKind =
+  | "bad_idea"
+  | "not_implementable"
+  | "illegal_or_policy"
+  | "harmful"
+  | "duplicate_weaker"
+  | "target_missing";
+
+/** Values stored in close_reason (notes/ideas close, reject kinds, withdraw). */
+export type ProposalStoredCloseReason = ProposalCloseReason | ProposalRejectKind | "withdrawn";
+
 export const PROPOSAL_CLOSE_REASONS: ProposalCloseReason[] = [
   "wont_fix",
   "fixed_elsewhere",
   "tracked_elsewhere",
   "other",
   "accepted",
+];
+
+export const PROPOSAL_REJECT_KINDS: ProposalRejectKind[] = [
+  "bad_idea",
+  "not_implementable",
+  "illegal_or_policy",
+  "harmful",
+  "duplicate_weaker",
+  "target_missing",
 ];
 
 /** Close/park reasons for ideas (Accept uses accepted separately). */
@@ -80,6 +101,10 @@ export type RelatedEntryRef = {
 
 export function isProposalCloseReason(raw: string): raw is ProposalCloseReason {
   return (PROPOSAL_CLOSE_REASONS as string[]).includes(raw);
+}
+
+export function isProposalRejectKind(raw: string): raw is ProposalRejectKind {
+  return (PROPOSAL_REJECT_KINDS as string[]).includes(raw);
 }
 
 export type FieldUpdate = { field_path: string; value?: unknown; reset?: boolean };
@@ -155,7 +180,7 @@ export type ProposalRecord = {
   review_mode: ReviewMode;
   open_blocker_count: number;
   no_auto_retry: boolean;
-  close_reason: ProposalCloseReason | null;
+  close_reason: ProposalStoredCloseReason | null;
   close_note: string | null;
   closed_by: string | null;
   closed_at: number | null;
@@ -164,10 +189,113 @@ export type ProposalRecord = {
   blockers: ProposalBlocker[];
   /** Snapshot JSON for list badges — persisted. */
   review_context_snapshot: Record<string, unknown> | null;
+  supersedes_proposal_id: string | null;
+  replaced_by_proposal_id: string | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
 };
+
+/** Slim entry stub for multi-row list responses (no ops / baselines). */
+export type ProposalEntrySummary = {
+  contentType: string;
+  slug: string;
+  locale: string;
+  variant: string | null;
+  status: EntryRowStatus;
+  last_error?: string | null;
+};
+
+/**
+ * Thin proposal row for multi-row list / MCP triage.
+ * Full ops + baselines stay on GET /:id and list with proposal_id.
+ */
+export type ProposalSummary = {
+  detail: "summary";
+  id: string;
+  site: string;
+  status: ProposalStatus;
+  kind: ProposalKind;
+  category: ProposalCategory;
+  title: string;
+  summary: string;
+  related_issue_ids: string[];
+  proposer_username: string;
+  proposer_actor: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+  claim: ProposalClaim | null;
+  tags: string[];
+  created_agent_session_id: string | null;
+  promote_on_apply: boolean;
+  review_mode: ReviewMode;
+  open_blocker_count: number;
+  no_auto_retry: boolean;
+  close_reason: ProposalStoredCloseReason | null;
+  close_note: string | null;
+  closed_by: string | null;
+  closed_at: number | null;
+  related_entries: RelatedEntryRef[];
+  review_context_snapshot: Record<string, unknown> | null;
+  supersedes_proposal_id: string | null;
+  replaced_by_proposal_id: string | null;
+  entry_count: number;
+  /** Unique field paths across all entry ops (sorted). */
+  field_paths: string[];
+  entries: ProposalEntrySummary[];
+};
+
+export function toProposalSummary(record: ProposalRecord): ProposalSummary {
+  const pathSet = new Set<string>();
+  for (const e of record.entries) {
+    for (const op of e.ops ?? []) {
+      if (typeof op.field_path === "string" && op.field_path.trim()) {
+        pathSet.add(op.field_path);
+      }
+    }
+  }
+  const field_paths = [...pathSet].sort();
+  return {
+    detail: "summary",
+    id: record.id,
+    site: record.site,
+    status: record.status,
+    kind: record.kind,
+    category: record.category,
+    title: record.title,
+    summary: record.summary,
+    related_issue_ids: record.related_issue_ids,
+    proposer_username: record.proposer_username,
+    proposer_actor: record.proposer_actor,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    claim: record.claim,
+    tags: record.tags,
+    created_agent_session_id: record.created_agent_session_id,
+    promote_on_apply: record.promote_on_apply,
+    review_mode: record.review_mode,
+    open_blocker_count: record.open_blocker_count,
+    no_auto_retry: record.no_auto_retry,
+    close_reason: record.close_reason,
+    close_note: record.close_note,
+    closed_by: record.closed_by,
+    closed_at: record.closed_at,
+    related_entries: record.related_entries,
+    review_context_snapshot: record.review_context_snapshot,
+    supersedes_proposal_id: record.supersedes_proposal_id,
+    replaced_by_proposal_id: record.replaced_by_proposal_id,
+    entry_count: record.entries.length,
+    field_paths,
+    entries: record.entries.map((e) => ({
+      contentType: e.contentType,
+      slug: e.slug,
+      locale: e.locale,
+      variant: e.variant,
+      status: e.status,
+      ...(e.last_error ? { last_error: e.last_error } : {}),
+    })),
+  };
+}
 
 type ProposalRow = {
   id: string;
@@ -197,6 +325,8 @@ type ProposalRow = {
   closed_at: number | null;
   related_entries_json: string | null;
   review_context_snapshot_json: string | null;
+  supersedes_proposal_id: string | null;
+  replaced_by_proposal_id: string | null;
 };
 
 type EntryDbRow = {
@@ -246,6 +376,8 @@ export type CreateProposalInput = {
   /** Explicit notes|idea when no entries; default notes. Ignored when entries/promote. */
   kind?: "notes" | "idea";
   related_entries?: RelatedEntryRef[];
+  /** Optional: link a replacement to a rejected/withdrawn predecessor. */
+  supersedes_proposal_id?: string;
 };
 
 export type SimilarProposal = { id: string; title: string; score: number };
@@ -263,7 +395,8 @@ export type ProposalUpdateAction =
   | "resolve_blocker"
   | "reopen_blocker"
   | "set_no_auto_retry"
-  | "accept";
+  | "accept"
+  | "revise_entries";
 
 export type ProposalUpdateCaller = {
   username: string;
@@ -288,6 +421,11 @@ export type ProposalUpdateCaller = {
   no_auto_retry?: boolean;
   /** Accept idea: free-text next step (min MIN_ACCEPT_NEXT_STEP). */
   next_step?: string;
+  /** Reject: must be true for MCP; staff UI sends true after dialog. */
+  confirm_reject?: boolean;
+  reject_kind?: string;
+  /** revise_entries: replacement pending entry set. */
+  entries?: ProposalEntryInput[];
 };
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -406,7 +544,7 @@ function mapProposal(
     review_mode: deriveReviewMode({ promote_on_apply, entries }),
     open_blocker_count: blockers.filter((b) => b.status === "open").length,
     no_auto_retry: Boolean(row.no_auto_retry),
-    close_reason: (row.close_reason as ProposalCloseReason | null) ?? null,
+    close_reason: (row.close_reason as ProposalStoredCloseReason | null) ?? null,
     close_note: row.close_note ?? null,
     closed_by: row.closed_by ?? null,
     closed_at: row.closed_at ?? null,
@@ -415,6 +553,8 @@ function mapProposal(
       string,
       unknown
     > | null),
+    supersedes_proposal_id: row.supersedes_proposal_id ?? null,
+    replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
     entries,
     blockers,
   };
@@ -533,7 +673,8 @@ function emitProposalEvent(
     | "proposal_acknowledged"
     | "proposal_closed"
     | "proposal_rejected"
-    | "proposal_withdrawn",
+    | "proposal_withdrawn"
+    | "proposal_revised",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -643,6 +784,9 @@ export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at"] as const;
 export type ProposalSortField = (typeof PROPOSAL_SORT_FIELDS)[number];
 export type ProposalSortDir = "asc" | "desc";
 
+export const PROPOSER_ACTOR_TYPES = ["ui", "mcp", "system"] as const;
+export type ProposerActorType = (typeof PROPOSER_ACTOR_TYPES)[number];
+
 export function parseProposalSort(
   sort?: string | null,
   sortDir?: string | null,
@@ -665,6 +809,25 @@ export function parseProposalSort(
     };
   }
   return { ok: true, sort: fieldRaw, sortDir: dirRaw };
+}
+
+/** Empty/missing → undefined (no filter). Invalid non-empty → error. */
+export function parseProposerActorType(
+  raw?: string | null,
+):
+  | { ok: true; type: ProposerActorType | undefined }
+  | { ok: false; error: string } {
+  if (raw == null || String(raw).trim() === "") {
+    return { ok: true, type: undefined };
+  }
+  const trimmed = String(raw).trim();
+  if (trimmed === "ui" || trimmed === "mcp" || trimmed === "system") {
+    return { ok: true, type: trimmed };
+  }
+  return {
+    ok: false,
+    error: `Invalid proposer_actor_type '${trimmed}'. Allowed: ui, mcp, system`,
+  };
 }
 
 function compareProposalsBySort(
@@ -942,6 +1105,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
     issue_id?: string;
     query?: string;
     proposal_id?: string;
+    proposer_username?: string;
+    proposer_actor_type?: ProposerActorType;
+    proposer_actor_role?: string;
+    agent_session_id?: string;
     limit?: number;
     offset?: number;
     sort?: ProposalSortField;
@@ -975,6 +1142,25 @@ export function createProposalService(deps: ProposalServiceDeps) {
     if (opts.query?.trim()) {
       where += ` AND search_text LIKE ?`;
       params.push(`%${opts.query.trim().toLowerCase()}%`);
+    }
+    const proposerUsername = opts.proposer_username?.trim();
+    if (proposerUsername) {
+      where += ` AND LOWER(proposer_username) = LOWER(?)`;
+      params.push(proposerUsername);
+    }
+    if (opts.proposer_actor_type) {
+      where += ` AND json_extract(proposer_actor_json, '$.type') = ?`;
+      params.push(opts.proposer_actor_type);
+    }
+    const proposerActorRole = opts.proposer_actor_role?.trim();
+    if (proposerActorRole) {
+      where += ` AND json_extract(proposer_actor_json, '$.role') = ?`;
+      params.push(proposerActorRole);
+    }
+    const agentSessionId = opts.agent_session_id?.trim();
+    if (agentSessionId) {
+      where += ` AND created_agent_session_id = ?`;
+      params.push(agentSessionId);
     }
 
     if (opts.issue_id) {
@@ -1361,6 +1547,35 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return { ok: false, code: "promote_entry_required", error: "promote_on_apply requires an entry" };
     }
 
+    let supersedesId: string | null = null;
+    const supersedesRaw = input.supersedes_proposal_id?.trim();
+    if (supersedesRaw) {
+      const pred = loadProposal(db, supersedesRaw);
+      if (!pred || pred.site !== site) {
+        return {
+          ok: false,
+          code: "supersedes_not_found",
+          error: `Predecessor proposal ${supersedesRaw} was not found on this site.`,
+        };
+      }
+      if (pred.status !== "rejected" && pred.status !== "withdrawn") {
+        return {
+          ok: false,
+          code: "supersedes_not_closed",
+          error: `Predecessor must be rejected or withdrawn (currently ${pred.status}).`,
+        };
+      }
+      if (pred.replaced_by_proposal_id) {
+        return {
+          ok: false,
+          code: "supersedes_already_replaced",
+          error: `Predecessor already has a replacement (${pred.replaced_by_proposal_id}).`,
+          existing_proposal: pred,
+        };
+      }
+      supersedesId = pred.id;
+    }
+
     const now = Date.now();
     const id = randomUUID();
     const sessionId = input.agent_session_id?.trim() || null;
@@ -1371,8 +1586,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
-        review_context_snapshot_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -1397,7 +1612,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
       noAutoRetry,
       JSON.stringify(relatedEntries),
       null,
+      supersedesId,
+      null,
     );
+
+    if (supersedesId) {
+      db.prepare(
+        `UPDATE content_proposals SET replaced_by_proposal_id = ?, updated_at = ? WHERE id = ?`,
+      ).run(id, now, supersedesId);
+    }
 
     for (const cap of captured) {
       db.prepare(
@@ -1419,7 +1642,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const proposal = get(id)!;
     const reviewCtx = classifyLive(proposal, { refreshSnapshot: true });
     const withSnap = get(id)!;
-    emitProposalEvent(site, "proposal_created", id, proposer.username);
+    emitProposalEvent(site, "proposal_created", id, proposer.username, {
+      ...(supersedesId ? { supersedes_proposal_id: supersedesId } : {}),
+    });
     if (deps.indexSearch) {
       deps.indexSearch(withSnap).catch((err) => log.warn({ err }, "proposal index failed"));
     }
@@ -1505,10 +1730,23 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (proposal.status === "finished") {
         return { ok: false, code: "already_finished", error: "Finished proposals cannot be withdrawn" };
       }
-      db.prepare(`UPDATE content_proposals SET status = 'withdrawn', claim_json = NULL, updated_at = ? WHERE id = ?`).run(
-        now,
-        id,
-      );
+      if (proposal.status === "rejected" || proposal.status === "withdrawn") {
+        return { ok: false, code: "closed", error: "Proposal is already closed" };
+      }
+      const withdrawNote = (caller.close_note || caller.report || "").trim();
+      if (withdrawNote.length < MIN_CLOSE_NOTE) {
+        return {
+          ok: false,
+          code: "withdraw_note_required",
+          error: `withdraw note required (min ${MIN_CLOSE_NOTE} characters)`,
+        };
+      }
+      db.prepare(
+        `UPDATE content_proposals
+         SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
+             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
+         WHERE id = ?`,
+      ).run(now, "withdrawn", withdrawNote, caller.username, now, id);
       emitProposalEvent(site, "proposal_withdrawn", id, caller.username);
       return { ok: true, proposal: get(id)! };
     }
@@ -1528,11 +1766,47 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: "Four-eyes: a different agent role (or staff UI) must reject",
         };
       }
-      db.prepare(`UPDATE content_proposals SET status = 'rejected', claim_json = NULL, updated_at = ? WHERE id = ?`).run(
-        now,
-        id,
-      );
-      emitProposalEvent(site, "proposal_rejected", id, caller.username);
+      if (
+        proposal.status === "finished" ||
+        proposal.status === "rejected" ||
+        proposal.status === "withdrawn"
+      ) {
+        return { ok: false, code: "closed", error: "Proposal is already closed" };
+      }
+      if (!caller.confirm_reject) {
+        return {
+          ok: false,
+          code: "confirm_reject",
+          error:
+            "Reject is for bad/impossible/illegal/harmful ideas only — not polish. Pass confirm_reject: true with reject_kind and close_note. Prefer add_blocker when the idea is fine but needs changes.",
+          proposal,
+        };
+      }
+      const kindRaw = (caller.reject_kind || "").trim();
+      if (!isProposalRejectKind(kindRaw)) {
+        return {
+          ok: false,
+          code: "reject_kind_required",
+          error: `reject_kind required: ${PROPOSAL_REJECT_KINDS.join(" | ")}`,
+        };
+      }
+      const rejectNote = (caller.close_note || caller.body || "").trim();
+      if (rejectNote.length < MIN_REJECT_NOTE) {
+        return {
+          ok: false,
+          code: "reject_note_too_short",
+          error: `reject note required (min ${MIN_REJECT_NOTE} characters): why this must not ship`,
+        };
+      }
+      db.prepare(
+        `UPDATE content_proposals
+         SET status = 'rejected', claim_json = NULL, updated_at = ?,
+             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
+         WHERE id = ?`,
+      ).run(now, kindRaw, rejectNote, caller.username, now, id);
+      emitProposalEvent(site, "proposal_rejected", id, caller.username, {
+        reject_kind: kindRaw,
+      });
       return { ok: true, proposal: get(id)! };
     }
 
@@ -1701,6 +1975,331 @@ export function createProposalService(deps: ProposalServiceDeps) {
         id,
       );
       return { ok: true, proposal: get(id)! };
+    }
+
+    if (action === "revise_entries") {
+      if (proposal.kind !== "edits") {
+        return {
+          ok: false,
+          code: "wrong_kind",
+          error: "revise_entries is for edits proposals only",
+        };
+      }
+      if (proposal.status !== "open" && proposal.status !== "partial") {
+        return { ok: false, code: "closed", error: "Cannot revise a closed proposal" };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may revise entries",
+        };
+      }
+      const { active } = activeClaim(proposal, now);
+      if (
+        active &&
+        !sameAgentIdentity(
+          active.by,
+          asAgentActor(active.actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !isStaffUiActor(asAgentActor(caller.actor))
+      ) {
+        const holder = formatAgentActorLine(active.by, asAgentActor(active.actor));
+        return {
+          ok: false,
+          code: "claimed",
+          error: `Claimed by ${holder} until ${active.expiresAt}. Wait or coordinate before revising.`,
+          proposal,
+        };
+      }
+
+      const doneEntries = proposal.entries.filter((e) => e.status === "done");
+      const entriesIn = (caller.entries ?? []).map((e) => ({
+        ...e,
+        updates: e.updates ?? [],
+      }));
+      if (entriesIn.length === 0 && !proposal.promote_on_apply) {
+        return {
+          ok: false,
+          code: "entries_required",
+          error: "revise_entries requires entries[] for the pending set",
+        };
+      }
+      if (proposal.promote_on_apply) {
+        if (entriesIn.length !== 1) {
+          return {
+            ok: false,
+            code: "promote_entry_required",
+            error: "promote_on_apply proposals require exactly one entry when revising",
+          };
+        }
+        const e = entriesIn[0]!;
+        if (!e.contentType || !e.slug || !e.locale || !e.variant?.trim()) {
+          return {
+            ok: false,
+            code: "promote_variant_required",
+            error: "promote_on_apply requires contentType, slug, locale, and variant",
+          };
+        }
+      }
+
+      for (const e of entriesIn) {
+        if (!e.contentType || !e.slug || !e.locale) {
+          return { ok: false, code: "entry_required", error: "Each entry needs contentType, slug, and locale" };
+        }
+        if (!proposal.promote_on_apply && !e.updates?.length) {
+          return {
+            ok: false,
+            code: "updates_required",
+            error: `Entry ${e.contentType}/${e.slug} has no field updates`,
+          };
+        }
+      }
+
+      const classTargets: Array<{
+        contentType: string;
+        category?: ProposalCategory;
+        existence: ExistenceState;
+        draftExists?: boolean;
+      }> = [];
+      for (const e of entriesIn) {
+        const hasVariant = Boolean(e.variant?.trim());
+        const ex = resolveExistence({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+        });
+        const liveOk = ex.live === "exists";
+        const draftOk = hasVariant && ex.draftExists;
+        if (!hasVariant && !liveOk) {
+          return {
+            ok: false,
+            code: "entry_not_found",
+            error: `Page ${e.contentType}/${e.slug} (${e.locale}) does not exist yet.`,
+          };
+        }
+        if (hasVariant && !ex.draftExists) {
+          return {
+            ok: false,
+            code: "entry_not_found",
+            error: `Draft variant '${e.variant}' for ${e.contentType}/${e.slug} (${e.locale}) was not found.`,
+          };
+        }
+        classTargets.push({
+          contentType: e.contentType,
+          category: (e.updates ?? []).some(
+            (u) => u.field_path.startsWith("meta.") || u.field_path.startsWith("seo."),
+          )
+            ? "content.seo"
+            : "content.field",
+          existence: ex.live,
+          draftExists: draftOk,
+        });
+      }
+      const classes = collectDamageClassesForMixedCheck(classTargets);
+      if (isMixedRiskBundle(classes)) {
+        return {
+          ok: false,
+          code: "mixed_risk_bundle",
+          error:
+            "This revise mixes different risk levels. Keep one risk class per proposal.",
+        };
+      }
+
+      for (const e of entriesIn) {
+        if (e.variant?.trim()) {
+          const existingVariant = findOpenProposalForVariant(
+            db,
+            site,
+            e.contentType,
+            e.slug,
+            e.locale,
+            e.variant.trim(),
+          );
+          if (existingVariant && existingVariant.id !== id) {
+            return {
+              ok: false,
+              code: "proposal_exists",
+              error: `An open proposal already references variant '${e.variant}'`,
+              existing_proposal: existingVariant,
+            };
+          }
+        }
+        const competing = findOpenEditsForEntry(db, site, e.contentType, e.slug, e.locale, id);
+        if (competing) {
+          return {
+            ok: false,
+            code: "competing_entry_edits",
+            error: `Another open edits proposal already targets ${e.contentType}/${e.slug} (${e.locale}).`,
+            existing_proposal: competing,
+          };
+        }
+      }
+
+      if (entriesIn.length > 0) {
+        const activityResult = runResolveActivity({
+          entries: entriesIn.map((e) => ({
+            contentType: e.contentType,
+            slug: e.slug,
+            locale: e.locale,
+            variant: e.variant,
+          })),
+          excludeAgentSessionId: caller.agent_session_id,
+          excludeProposalApplies: doneEntries.map((e) => ({
+            contentType: e.contentType,
+            slug: e.slug,
+            locale: e.locale,
+            variant: e.variant,
+            applied_at: e.applied_at,
+            applied_by: e.applied_by,
+          })),
+        });
+        if (!activityResult.ok) {
+          return {
+            ok: false,
+            code: "activity_unavailable",
+            error:
+              activityResult.error ||
+              "Could not load recent entry activity. Retry when activity history is available.",
+            proposal,
+          };
+        }
+        if (activityResult.gateWriteCount > 0 && !caller.confirm_recent_activity) {
+          return {
+            ok: false,
+            code: "confirm_recent_activity",
+            error:
+              "Linked entries have recent writes. Inspect recent activity, then pass confirm_recent_activity: true to revise.",
+            activity: activityResult.activity,
+            proposal: enrichRecentActivity({
+              ...proposal,
+              recent_activity: activityResult.activity,
+            }),
+          };
+        }
+      }
+
+      const captured: Array<{
+        input: ProposalEntryInput & { updates: FieldUpdate[] };
+        baseline: { values: Record<string, unknown>; note?: string };
+        variant_fingerprint: string | null;
+      }> = [];
+      for (const e of entriesIn) {
+        const updates = e.updates ?? [];
+        let baseline: { values: Record<string, unknown>; note?: string } = { values: {} };
+        if (updates.length) {
+          const capturedBaseline = deps.captureBaseline({ ...e, updates });
+          if (capturedBaseline.error) {
+            return { ok: false, code: "baseline_failed", error: capturedBaseline.error };
+          }
+          baseline = { values: capturedBaseline.values };
+        }
+        let variant_fingerprint: string | null = null;
+        if (e.variant?.trim() && deps.readVariantFingerprint) {
+          const fp = deps.readVariantFingerprint({
+            contentType: e.contentType,
+            slug: e.slug,
+            locale: e.locale,
+            variant: e.variant.trim(),
+          });
+          if (fp.error) return { ok: false, code: "baseline_failed", error: fp.error };
+          variant_fingerprint = fp.fingerprint;
+        }
+        captured.push({ input: { ...e, updates }, baseline, variant_fingerprint });
+      }
+
+      const fingerprint = fingerprintEdits({
+        site,
+        category: proposal.category,
+        entries: entriesIn.map((e) => ({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+          updates: e.updates ?? [],
+        })),
+      });
+      const dup = db
+        .prepare(
+          `SELECT id FROM content_proposals WHERE site = ? AND fingerprint = ? AND status IN ('open','partial') AND id != ? LIMIT 1`,
+        )
+        .get(site, fingerprint, id) as { id: string } | undefined;
+      if (dup) {
+        return {
+          ok: false,
+          code: "duplicate_fingerprint",
+          error: `Another open proposal already has this exact change set (${dup.id}).`,
+          existing_proposal: loadProposal(db, dup.id) ?? undefined,
+        };
+      }
+
+      const searchBlob = [
+        proposal.title,
+        proposal.summary,
+        proposal.rationale ?? "",
+        ...(proposal.tags ?? []),
+        ...proposal.related_issue_ids,
+        ...entriesIn.map(
+          (e) =>
+            `${e.contentType}/${e.slug} ${e.variant ?? ""} ${(e.updates ?? []).map((u) => u.field_path).join(" ")}`,
+        ),
+        proposal.promote_on_apply ? "promote_on_apply" : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      db.prepare(
+        `DELETE FROM content_proposal_entries WHERE proposal_id = ? AND status IN ('pending','failed')`,
+      ).run(id);
+      for (const cap of captured) {
+        db.prepare(
+          `INSERT INTO content_proposal_entries (
+            proposal_id, entry_key, locale, variant, status, ops_json, baseline_context_json, variant_fingerprint
+          ) VALUES (?,?,?,?,?,?,?,?)`,
+        ).run(
+          id,
+          makeEntryKey(cap.input.contentType, cap.input.slug),
+          cap.input.locale,
+          cap.input.variant || null,
+          "pending",
+          JSON.stringify(cap.input.updates),
+          JSON.stringify(cap.baseline),
+          cap.variant_fingerprint,
+        );
+      }
+      db.prepare(
+        `UPDATE content_proposals SET fingerprint = ?, search_text = ?, updated_at = ? WHERE id = ?`,
+      ).run(fingerprint, searchBlob, now, id);
+
+      const after = getRaw(id)!;
+      persistRollup(db, after);
+      classifyLive(after, { refreshSnapshot: true });
+      emitProposalEvent(site, "proposal_revised", id, caller.username, {
+        entry_count: captured.length,
+        open_blocker_count: after.open_blocker_count,
+      });
+      return {
+        ok: true,
+        proposal: get(id)!,
+        warnings: [
+          {
+            code: "blockers_remain_after_revise",
+            message:
+              "Open needs-changes still block apply. Resolve each blocker after fixing, then re-preview before apply.",
+          },
+        ],
+      };
     }
 
     if (action === "add_blocker") {
@@ -2141,8 +2740,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       created_at, updated_at, claim_json, tags_json, search_text,
       created_agent_session_id, promote_on_apply, no_auto_retry,
       close_reason, close_note, closed_by, closed_at, related_entries_json,
-      review_context_snapshot_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -2197,6 +2796,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.closed_at ?? null,
         JSON.stringify(p.related_entries ?? []),
         p.review_context_snapshot ? JSON.stringify(p.review_context_snapshot) : null,
+        p.supersedes_proposal_id ?? null,
+        p.replaced_by_proposal_id ?? null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

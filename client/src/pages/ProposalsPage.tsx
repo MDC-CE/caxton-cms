@@ -71,6 +71,12 @@ import {
   closeNoteRequired,
   type ProposalCloseReasonValue,
 } from "@/lib/proposalCloseReason";
+import {
+  PROPOSAL_REJECT_KIND_OPTIONS,
+  REJECT_NOTE_MIN,
+  rejectKindLabel,
+  type ProposalRejectKindValue,
+} from "@/lib/proposalRejectKind";
 import { minLengthHint } from "@/lib/minLengthHint";
 import { ProposalListFiltersDialog } from "@/components/agents/ProposalListFiltersDialog";
 import {
@@ -174,6 +180,8 @@ type Proposal = {
   close_note?: string | null;
   closed_by?: string | null;
   closed_at?: number | null;
+  supersedes_proposal_id?: string | null;
+  replaced_by_proposal_id?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
   related_issue_ids: string[];
@@ -364,8 +372,11 @@ function proposalStatusExplain(
   if (status === "rejected") {
     return {
       title: "Rejected",
-      body: "A reviewer rejected this proposal. It is no longer waiting for Approve. Reject does not undo entries that were already applied earlier.",
-      advanced: ["Reject is four-eyes on edits and idea proposals."],
+      body: "A reviewer rejected this proposal. It is no longer waiting for Approve. Reject does not undo entries that were already applied earlier. The reason and note stay on this card for the next agent.",
+      advanced: [
+        "Reject is for bad/impossible/illegal/harmful ideas — not polish (use Needs changes).",
+        "A later proposal may link here as a replacement.",
+      ],
     };
   }
   if (status === "withdrawn") {
@@ -783,7 +794,8 @@ export function ProposalListPanel() {
         <p className="text-sm leading-6 text-muted-foreground">
           Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
           open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
-          does not change the live site). Needs changes (blockers) mean not ready to approve.
+          does not change the live site). Needs changes mean not ready to approve — use that for polish;
+          Reject only when the idea must not ship.
         </p>
         <Collapsible open={advanced} onOpenChange={setAdvanced}>
           <CollapsibleTrigger asChild>
@@ -1033,6 +1045,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [acceptNextStep, setAcceptNextStep] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectPending, setRejectPending] = useState(false);
+  const [rejectKind, setRejectKind] = useState<ProposalRejectKindValue>("bad_idea");
+  const [rejectNote, setRejectNote] = useState("");
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [withdrawNote, setWithdrawNote] = useState("");
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const addBlockerFormRef = useRef<HTMLDivElement>(null);
   const addBlockerInputRef = useRef<HTMLTextAreaElement>(null);
@@ -1125,6 +1141,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   };
 
   const scheduleReject = () => {
+    const note = rejectNote.trim();
+    if (note.length < REJECT_NOTE_MIN) return;
+    const kind = rejectKind;
     clearPendingReject();
     setRejectOpen(false);
     setRejectPending(true);
@@ -1147,7 +1166,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       rejectTimerRef.current = null;
       rejectToastDismissRef.current = null;
       setRejectPending(false);
-      mutRef.current.mutate({ action: "reject" });
+      mutRef.current.mutate({
+        action: "reject",
+        body: {
+          confirm_reject: true,
+          reject_kind: kind,
+          close_note: note,
+        },
+      });
+      setRejectNote("");
     }, REJECT_UNDO_MS);
   };
 
@@ -1223,11 +1250,17 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     acceptNextStep.trim().length > 0 ? minLengthHint(acceptNextStep, ACCEPT_NEXT_STEP_MIN) : null;
   const blockerHint =
     blockerBody.trim().length > 0 ? minLengthHint(blockerBody, 80) : null;
+  const rejectNoteOk = rejectNote.trim().length >= REJECT_NOTE_MIN;
+  const rejectNoteHint =
+    rejectNote.trim().length > 0 ? minLengthHint(rejectNote, REJECT_NOTE_MIN) : null;
+  const withdrawNoteOk = withdrawNote.trim().length >= CLOSE_NOTE_MIN;
+  const withdrawNoteHint =
+    withdrawNote.trim().length > 0 ? minLengthHint(withdrawNote, CLOSE_NOTE_MIN) : null;
   const closeReasonLabel =
     p?.close_reason === "accepted"
       ? "Accepted"
       : PROPOSAL_CLOSE_REASON_OPTIONS.find((o) => o.value === p?.close_reason)?.label ??
-        p?.close_reason;
+        (p?.status === "rejected" ? rejectKindLabel(p.close_reason) : p?.close_reason);
 
   const detailMeta: Array<{ key: string; node: ReactNode }> = [];
   if (p && attribution) {
@@ -1539,7 +1572,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 {showWithdraw ? (
                   <Button
                     variant="outline"
-                    onClick={() => mut.mutate({ action: "withdraw" })}
+                    onClick={() => setWithdrawOpen(true)}
                     disabled={mut.isPending || rejectPending}
                     data-testid="button-withdraw-proposal"
                   >
@@ -1635,6 +1668,46 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 {p.close_reason === "accepted" ? "Accepted" : `Closed as ${closeReasonLabel}`}
                 {p.closed_by ? ` by ${p.closed_by}` : ""}
                 {p.close_note ? `: ${p.close_note}` : ""}
+              </p>
+            </div>
+          ) : null}
+
+          {p.status === "rejected" && (p.close_reason || p.close_note) ? (
+            <div
+              className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm"
+              data-testid="text-proposal-reject-reason"
+            >
+              <IconCircleX className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden />
+              <div className="space-y-1">
+                <p>
+                  Rejected
+                  {p.close_reason ? ` — ${rejectKindLabel(p.close_reason)}` : ""}
+                  {p.closed_by ? ` by ${p.closed_by}` : ""}
+                  {p.close_note ? `: ${p.close_note}` : ""}
+                </p>
+                {p.replaced_by_proposal_id ? (
+                  <p>
+                    <Link
+                      href={`${AGENTS_PROPOSALS_BASE}/${p.replaced_by_proposal_id}`}
+                      className="text-primary underline-offset-2 hover:underline"
+                      data-testid="link-replaced-by-proposal"
+                    >
+                      Open replacement proposal
+                    </Link>
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {p.status === "withdrawn" && p.close_note ? (
+            <div
+              className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="text-proposal-withdraw-note"
+            >
+              <IconBan className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              <p>
+                Withdrawn{p.closed_by ? ` by ${p.closed_by}` : ""}: {p.close_note}
               </p>
             </div>
           ) : null}
@@ -2176,27 +2249,64 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             onOpenChange={(open) => {
               if (rejectPending) return;
               setRejectOpen(open);
+              if (!open) {
+                setRejectNote("");
+                setRejectKind("bad_idea");
+              }
             }}
           >
             <AlertDialogContent data-testid="dialog-reject-proposal">
               <AlertDialogHeader>
-                <AlertDialogTitle>Reject this proposal completely?</AlertDialogTitle>
+                <AlertDialogTitle>Reject this proposal?</AlertDialogTitle>
                 <AlertDialogDescription asChild>
                   <div className="space-y-2 text-sm text-muted-foreground">
                     <p>
-                      Rejecting closes this proposal. It leaves the open list and will no longer wait
-                      for Approve.
+                      Reject only when this work must not ship (bad idea, illegal/policy, harmful,
+                      impossible, duplicate, or page gone). If the idea is fine but needs polishing,
+                      cancel and use Needs changes instead.
                     </p>
                     <p>
-                      The live site does not change from this action. Entries already applied earlier
-                      stay as they are — reject does not roll those back.
-                    </p>
-                    <p>
-                      After you confirm, you have 10 seconds to undo before the rejection is final.
+                      The live site does not change. After you confirm, you have 10 seconds to undo.
                     </p>
                   </div>
                 </AlertDialogDescription>
               </AlertDialogHeader>
+              <div className="space-y-3 py-1">
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-reject-kind">Why reject</Label>
+                  <Select
+                    value={rejectKind}
+                    onValueChange={(v) => setRejectKind(v as ProposalRejectKindValue)}
+                  >
+                    <SelectTrigger id="proposal-reject-kind" data-testid="select-reject-kind">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROPOSAL_REJECT_KIND_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-reject-note">Note (min {REJECT_NOTE_MIN})</Label>
+                  <Textarea
+                    id="proposal-reject-note"
+                    value={rejectNote}
+                    onChange={(e) => setRejectNote(e.target.value)}
+                    placeholder="Why this must not ship — not polish instructions"
+                    rows={4}
+                    data-testid="input-reject-note"
+                  />
+                  {rejectNoteHint ? (
+                    <p className={rejectNoteHint.className} data-testid="text-reject-note-length-hint">
+                      {rejectNoteHint.text}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
               <AlertDialogFooter>
                 <AlertDialogCancel data-testid="button-cancel-reject-proposal">
                   Cancel
@@ -2204,16 +2314,75 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 <Button
                   type="button"
                   variant="destructive"
-                  disabled={mut.isPending || rejectPending}
+                  disabled={mut.isPending || rejectPending || !rejectNoteOk}
                   onClick={scheduleReject}
                   data-testid="button-confirm-reject-proposal"
                 >
                   <IconCircleX className="h-4 w-4" aria-hidden />
-                  Reject completely
+                  Reject
                 </Button>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+
+          <Dialog
+            open={withdrawOpen}
+            onOpenChange={(open) => {
+              setWithdrawOpen(open);
+              if (!open) setWithdrawNote("");
+            }}
+          >
+            <DialogContent data-testid="dialog-withdraw-proposal">
+              <DialogHeader>
+                <DialogTitle>Withdraw this proposal?</DialogTitle>
+                <DialogDescription>
+                  Pulls it off the open list. Live content does not change. Leave a short note so others
+                  know why.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1">
+                <Label htmlFor="proposal-withdraw-note">Note (min {CLOSE_NOTE_MIN})</Label>
+                <Textarea
+                  id="proposal-withdraw-note"
+                  value={withdrawNote}
+                  onChange={(e) => setWithdrawNote(e.target.value)}
+                  rows={3}
+                  data-testid="input-withdraw-note"
+                />
+                {withdrawNoteHint ? (
+                  <p className={withdrawNoteHint.className} data-testid="text-withdraw-note-length-hint">
+                    {withdrawNoteHint.text}
+                  </p>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setWithdrawOpen(false)}
+                  data-testid="button-cancel-withdraw-proposal"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={mut.isPending || !withdrawNoteOk}
+                  onClick={() => {
+                    mut.mutate(
+                      {
+                        action: "withdraw",
+                        body: { close_note: withdrawNote.trim() },
+                      },
+                      { onSuccess: () => setWithdrawOpen(false) },
+                    );
+                  }}
+                  data-testid="button-confirm-withdraw-proposal"
+                >
+                  Withdraw
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           <Dialog
             open={closeOpen}

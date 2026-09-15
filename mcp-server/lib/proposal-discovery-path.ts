@@ -233,8 +233,8 @@ export function buildProposalDiscoveryPath(
         why: "After optional research, decide apply, reject, or add_blocker — discovery is not a gate.",
         look_for: [
           "apply only when you would ship this yourself",
-          "reject with a clear reason",
-          "add_blocker for fixable feedback",
+          "add_blocker for fixable polish (then revise_entries)",
+          "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",
         ],
       },
     ];

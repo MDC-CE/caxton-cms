@@ -7,7 +7,9 @@ import { fingerprintEdits, fingerprintNotes } from "./fingerprint";
 import {
   createProposalService,
   listOpenProposalsForVariant,
+  parseProposerActorType,
   PROPOSAL_CLAIM_TTL_MS,
+  toProposalSummary,
   type ProposalEntryInput,
 } from "./service";
 
@@ -454,6 +456,90 @@ describe("content proposals", () => {
     expect(desc.proposals[0]!.updated_at).toBeGreaterThanOrEqual(desc.proposals[1]!.updated_at);
   });
 
+  it("parseProposerActorType accepts enums and rejects invalid", () => {
+    expect(parseProposerActorType(undefined)).toEqual({ ok: true, type: undefined });
+    expect(parseProposerActorType("")).toEqual({ ok: true, type: undefined });
+    expect(parseProposerActorType("ui")).toEqual({ ok: true, type: "ui" });
+    expect(parseProposerActorType("mcp")).toEqual({ ok: true, type: "mcp" });
+    expect(parseProposerActorType("staff").ok).toBe(false);
+  });
+
+  it("list filters by proposer_username, actor type/role, and agent_session_id", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+
+    const staff = await svc.create(
+      {
+        title: "Staff CTA",
+        summary,
+        entries: [sampleEntry({ slug: "staff-post" })],
+      },
+      { username: "Alice@4geeks.com", actor: { type: "ui" } },
+    );
+    expect(staff.ok).toBe(true);
+
+    const copyEditor = await svc.create(
+      {
+        title: "Copy editor CTA",
+        summary,
+        entries: [sampleEntry({ slug: "copy-post" })],
+        agent_session_id: "sess-copy-1",
+      },
+      {
+        username: "bob@4geeks.com",
+        actor: { type: "mcp", role: "copy_editor", model: "claude/sonnet-4.5", client: "Cursor" },
+      },
+    );
+    expect(copyEditor.ok).toBe(true);
+
+    const seo = await svc.create(
+      {
+        title: "SEO CTA",
+        summary,
+        entries: [sampleEntry({ slug: "seo-post" })],
+        agent_session_id: "sess-seo-1",
+      },
+      {
+        username: "carol@4geeks.com",
+        actor: { type: "mcp", role: "seo_specialist", model: "claude/sonnet-4.5", client: "Cursor" },
+      },
+    );
+    expect(seo.ok).toBe(true);
+
+    const byUser = svc.list({ proposer_username: "alice@4geeks.com" });
+    expect(byUser.total).toBe(1);
+    expect(byUser.proposals[0]!.proposer_username).toBe("Alice@4geeks.com");
+    expect(svc.list({ proposer_username: "alice" }).total).toBe(0);
+
+    const staffOnly = svc.list({ proposer_actor_type: "ui" });
+    expect(staffOnly.total).toBe(1);
+    expect(staffOnly.proposals[0]!.id).toBe(staff.ok ? staff.proposal.id : "");
+
+    const byRole = svc.list({ proposer_actor_role: "copy_editor" });
+    expect(byRole.total).toBe(1);
+    expect(byRole.proposals[0]!.id).toBe(copyEditor.ok ? copyEditor.proposal.id : "");
+
+    const roleAndType = svc.list({
+      proposer_actor_type: "mcp",
+      proposer_actor_role: "seo_specialist",
+    });
+    expect(roleAndType.total).toBe(1);
+    expect(roleAndType.proposals[0]!.id).toBe(seo.ok ? seo.proposal.id : "");
+
+    const bySession = svc.list({ agent_session_id: "sess-copy-1" });
+    expect(bySession.total).toBe(1);
+    expect(bySession.proposals[0]!.created_agent_session_id).toBe("sess-copy-1");
+    expect(svc.list({ agent_session_id: "sess-missing" }).total).toBe(0);
+
+    const combined = svc.list({
+      status: "open",
+      proposer_username: "bob@4geeks.com",
+    });
+    expect(combined.total).toBe(1);
+    expect(combined.proposals[0]!.id).toBe(copyEditor.ok ? copyEditor.proposal.id : "");
+  });
+
   it("enforces one open proposal per variant", async () => {
     const svc = makeService({
       liveValues: { "call_to_action.title": "Old" },
@@ -557,8 +643,19 @@ describe("content proposals", () => {
     expect(applyBlocked.ok).toBe(false);
     if (!applyBlocked.ok) expect(applyBlocked.code).toBe("proposal_blocked");
 
-    const rejected = await svc.update(created.proposal.id, "reject", { username: "casey" });
+    const rejected = await svc.update(created.proposal.id, "reject", {
+      username: "casey",
+      confirm_reject: true,
+      reject_kind: "bad_idea",
+      close_note:
+        "This approach is fundamentally wrong for brand and SEO and must not ship even if polished.",
+    });
     expect(rejected.ok).toBe(true);
+    if (rejected.ok) {
+      expect(rejected.proposal.status).toBe("rejected");
+      expect(rejected.proposal.close_reason).toBe("bad_idea");
+      expect(rejected.proposal.close_note).toContain("fundamentally wrong");
+    }
   });
 
   it("claimant-only resolve; expired claim hints claim first; soft apply into variant", async () => {
@@ -685,7 +782,10 @@ describe("content proposals", () => {
         expect(expired.claim_expired).toBe(true);
       }
 
-      const withdrawn = await svc.update(created.proposal.id, "withdraw", { username: "alice" });
+      const withdrawn = await svc.update(created.proposal.id, "withdraw", {
+        username: "alice",
+        close_note: "Pulling back while open blockers remain; will refile later.",
+      });
       expect(withdrawn.ok).toBe(true);
       if (withdrawn.ok) expect(withdrawn.proposal.status).toBe("withdrawn");
     } finally {
@@ -957,5 +1057,242 @@ describe("content proposals", () => {
     });
     expect(withBlocker.ok).toBe(false);
     if (!withBlocker.ok) expect(withBlocker.code).toBe("proposal_blocked");
+  });
+
+  it("toProposalSummary strips ops/baselines and aggregates unique field_paths", async () => {
+    const svc = makeService({
+      liveValues: {
+        "seo.main_keyword": "old",
+        "meta.page_title": "Old title",
+      },
+    });
+    const summary =
+      "Bulk SEO keyword updates across location landing pages for a regional campaign review. ".repeat(
+        2,
+      );
+    const created = await svc.create(
+      {
+        title: "Location SEO keywords",
+        summary,
+        entries: [
+          {
+            contentType: "landing",
+            slug: "miami",
+            locale: "en",
+            updates: [
+              { field_path: "seo.main_keyword", value: "miami bootcamp" },
+              { field_path: "meta.page_title", value: "Miami" },
+            ],
+          },
+          {
+            contentType: "landing",
+            slug: "chicago",
+            locale: "en",
+            updates: [{ field_path: "seo.main_keyword", value: "chicago bootcamp" }],
+          },
+        ],
+      },
+      { username: "alice", actor: { type: "ui" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const slim = toProposalSummary(created.proposal);
+    expect(slim.detail).toBe("summary");
+    expect(slim.entry_count).toBe(2);
+    expect(slim.field_paths).toEqual(["meta.page_title", "seo.main_keyword"]);
+    expect(slim.entries).toHaveLength(2);
+    for (const e of slim.entries) {
+      expect(e).toMatchObject({
+        contentType: "landing",
+        locale: "en",
+        status: "pending",
+      });
+      expect(e).not.toHaveProperty("ops");
+      expect(e).not.toHaveProperty("baseline_context");
+    }
+    expect(slim).not.toHaveProperty("blockers");
+    expect(slim).not.toHaveProperty("documentation");
+    expect(slim).not.toHaveProperty("search_text");
+    expect(slim).not.toHaveProperty("fingerprint");
+    expect(created.proposal.entries[0]!.ops.length).toBeGreaterThan(0);
+    expect(created.proposal.entries[0]!.baseline_context.values).toBeTruthy();
+  });
+
+  it("rejects without confirm_reject / kind / note; withdraw requires note; revise and supersedes", async () => {
+    const live: Record<string, unknown> = { "meta.title": "Old" };
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: (entry) => {
+        const values: Record<string, unknown> = {};
+        for (const u of entry.updates ?? []) values[u.field_path] = live[u.field_path];
+        return { values };
+      },
+      applyUpdates: async (entry) => {
+        for (const u of entry.ops) live[u.field_path] = u.value;
+        return { ok: true };
+      },
+      resolveRecentActivity: () => ({
+        ok: true,
+        activity: [],
+        gateWriteCount: 0,
+      }),
+    });
+    const summary = "Soft title tweak for blog hello after review of live meta. ".repeat(2);
+    const created = await svc.create(
+      {
+        title: "Title tweak",
+        summary,
+        entries: [
+          sampleEntry({
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "New" }],
+          }),
+        ],
+      },
+      { username: "alice", actor: { type: "mcp", role: "content" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const noConfirm = await svc.update(created.proposal.id, "reject", { username: "casey" });
+    expect(noConfirm.ok).toBe(false);
+    if (!noConfirm.ok) expect(noConfirm.code).toBe("confirm_reject");
+
+    const noKind = await svc.update(created.proposal.id, "reject", {
+      username: "casey",
+      confirm_reject: true,
+      close_note: "x".repeat(80),
+    });
+    expect(noKind.ok).toBe(false);
+    if (!noKind.ok) expect(noKind.code).toBe("reject_kind_required");
+
+    const shortNote = await svc.update(created.proposal.id, "reject", {
+      username: "casey",
+      confirm_reject: true,
+      reject_kind: "bad_idea",
+      close_note: "too short",
+    });
+    expect(shortNote.ok).toBe(false);
+    if (!shortNote.ok) expect(shortNote.code).toBe("reject_note_too_short");
+
+    const body =
+      "On soft meta.title, proposed New is fine but value should be Newer for brand. Must match H1.";
+    await svc.update(created.proposal.id, "add_blocker", { username: "blake", body });
+
+    const foreignClaim = await svc.update(created.proposal.id, "claim", {
+      username: "blake",
+      actor: { type: "mcp", role: "reviewer" },
+    });
+    expect(foreignClaim.ok).toBe(true);
+
+    const reviseBlocked = await svc.update(created.proposal.id, "revise_entries", {
+      username: "alice",
+      actor: { type: "mcp", role: "content" },
+      entries: [
+        sampleEntry({
+          locale: "en",
+          updates: [{ field_path: "meta.title", value: "Newer" }],
+        }),
+      ],
+    });
+    expect(reviseBlocked.ok).toBe(false);
+    if (!reviseBlocked.ok) expect(reviseBlocked.code).toBe("claimed");
+
+    await svc.update(created.proposal.id, "release", { username: "blake" });
+
+    const revised = await svc.update(created.proposal.id, "revise_entries", {
+      username: "alice",
+      actor: { type: "mcp", role: "content" },
+      entries: [
+        sampleEntry({
+          locale: "en",
+          updates: [{ field_path: "meta.title", value: "Newer" }],
+        }),
+      ],
+    });
+    expect(revised.ok).toBe(true);
+    if (!revised.ok) return;
+    expect(revised.proposal.entries[0]?.ops[0]?.value).toBe("Newer");
+    expect(revised.proposal.open_blocker_count).toBe(1);
+
+    const rejected = await svc.update(created.proposal.id, "reject", {
+      username: "casey",
+      confirm_reject: true,
+      reject_kind: "harmful",
+      close_note:
+        "Shipping this keyword change would mislead local pack users and must not go live.",
+    });
+    expect(rejected.ok).toBe(true);
+    if (!rejected.ok) return;
+    expect(rejected.proposal.close_reason).toBe("harmful");
+
+    const replacement = await svc.create(
+      {
+        title: "Better title",
+        summary: "Replacement after harmful reject with city-only chip and skip remote. ".repeat(2),
+        supersedes_proposal_id: created.proposal.id,
+        entries: [
+          sampleEntry({
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "Best" }],
+          }),
+        ],
+      },
+      { username: "dana" },
+    );
+    expect(replacement.ok).toBe(true);
+    if (!replacement.ok) return;
+    expect(replacement.proposal.supersedes_proposal_id).toBe(created.proposal.id);
+    const old = svc.get(created.proposal.id)!;
+    expect(old.replaced_by_proposal_id).toBe(replacement.proposal.id);
+
+    const secondLink = await svc.create(
+      {
+        title: "Another",
+        summary: "Second replacement attempt should fail because predecessor already linked. ".repeat(2),
+        supersedes_proposal_id: created.proposal.id,
+        entries: [
+          sampleEntry({
+            slug: "other",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "X" }],
+          }),
+        ],
+      },
+      { username: "erin" },
+    );
+    expect(secondLink.ok).toBe(false);
+    if (!secondLink.ok) expect(secondLink.code).toBe("supersedes_already_replaced");
+
+    const forWithdraw = await svc.create(
+      {
+        title: "Withdraw me",
+        summary: "Will withdraw with a note after filing for the withdraw-note gate. ".repeat(2),
+        entries: [
+          sampleEntry({
+            slug: "withdraw-me",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "W" }],
+          }),
+        ],
+      },
+      { username: "alice" },
+    );
+    expect(forWithdraw.ok).toBe(true);
+    if (!forWithdraw.ok) return;
+    const noNote = await svc.update(forWithdraw.proposal.id, "withdraw", { username: "alice" });
+    expect(noNote.ok).toBe(false);
+    if (!noNote.ok) expect(noNote.code).toBe("withdraw_note_required");
+    const withdrawn = await svc.update(forWithdraw.proposal.id, "withdraw", {
+      username: "alice",
+      close_note: "Filing again with a corrected scope after review feedback.",
+    });
+    expect(withdrawn.ok).toBe(true);
+    if (withdrawn.ok) {
+      expect(withdrawn.proposal.status).toBe("withdrawn");
+      expect(withdrawn.proposal.close_reason).toBe("withdrawn");
+    }
   });
 });

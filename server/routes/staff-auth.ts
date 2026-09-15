@@ -12,6 +12,10 @@ import {
   resolveOwnedStaffSession,
   staffSessionJson,
 } from "../staff-session-resolve";
+import {
+  clearStaffSessionCookie,
+  mintStaffSessionCookie,
+} from "../staff-session-cookie";
 import { getStaffGitHubLoginStatus } from "../staff-github-login";
 import { getAllUsers } from "../user-store";
 
@@ -179,6 +183,7 @@ export function registerStaffAuthRoutes(app: Express): void {
       });
       return;
     }
+    mintStaffSessionCookie(res, resolved.token, { expiresAt: resolved.expiresAt });
     res.json({ ...staffSessionJson(resolved), token: resolved.token });
   });
 
@@ -190,6 +195,7 @@ export function registerStaffAuthRoutes(app: Express): void {
     }
     const resolved = await resolveOwnedStaffSession(token);
     if (!resolved) {
+      clearStaffSessionCookie(res);
       const github = getStaffGitHubLoginStatus();
       const error = github.connectionTokenStaffAllowed
         ? "That is not a valid staff session or Weblify connection token. Use the token from your Weblify terminal, or log in with GitHub when it is available."
@@ -204,6 +210,7 @@ export function registerStaffAuthRoutes(app: Express): void {
       });
       return;
     }
+    mintStaffSessionCookie(res, resolved.token, { expiresAt: resolved.expiresAt });
     res.json(staffSessionJson(resolved));
   });
 
@@ -211,6 +218,7 @@ export function registerStaffAuthRoutes(app: Express): void {
     const token = extractToken(req);
     const resolved = await resolveOwnedStaffSession(token);
     if (!resolved) {
+      clearStaffSessionCookie(res);
       res.status(401).json({
         valid: false,
         code: "session_invalid",
@@ -218,12 +226,14 @@ export function registerStaffAuthRoutes(app: Express): void {
       });
       return;
     }
+    mintStaffSessionCookie(res, resolved.token, { expiresAt: resolved.expiresAt });
     res.json(staffSessionJson(resolved));
   });
 
   app.post("/api/staff/session/logout", async (req, res) => {
     const token = extractToken(req) || (typeof req.body?.token === "string" ? req.body.token : "");
     if (token) await revokeStaffSession(token);
+    clearStaffSessionCookie(res);
     res.json({ ok: true });
   });
 
@@ -235,6 +245,7 @@ export function registerStaffAuthRoutes(app: Express): void {
       return;
     }
     await revokeAllStaffSessions(auth.username);
+    clearStaffSessionCookie(res);
     res.json({ ok: true });
   });
 }

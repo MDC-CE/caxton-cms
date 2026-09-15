@@ -311,6 +311,17 @@ function applyValidSessionLocally(data: {
   return { grants: capabilityGrantsFromResponse(data.capabilities), roles: nextRoles };
 }
 
+/** Ensures the HttpOnly /private cookie exists for document navigations. */
+function ensureStaffHtmlCookie(token: string): void {
+  if (!token) return;
+  void fetch("/api/debug/check-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ token }),
+  }).catch(() => {});
+}
+
 export function DebugAuthProvider({ children }: { children: ReactNode }) {
   const [isValidated, setIsValidated] = useState<boolean | null>(null);
   const [hasToken, setHasToken] = useState<boolean>(false);
@@ -352,6 +363,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
         const response = await fetch("/api/staff/session/exchange", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({ code: staffSessionCode }),
         });
         const data = await response.json();
@@ -416,6 +428,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
               setRoles(cachedRoles);
               setIsLoading(false);
               refreshDebugMode();
+              ensureStaffHtmlCookie(cachedToken);
               return;
             }
           } else {
@@ -452,6 +465,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
         headers: {
           "Content-Type": "application/json",
         },
+        credentials: "same-origin",
         body: JSON.stringify({ token }),
       });
 
@@ -516,6 +530,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
         headers: {
           "Content-Type": "application/json",
         },
+        credentials: "same-origin",
         body: JSON.stringify({ token: manualToken.trim() }),
       });
 
@@ -585,6 +600,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
         headers: {
           "Content-Type": "application/json",
         },
+        credentials: "same-origin",
         body: JSON.stringify({ token: cachedToken }),
       });
 
@@ -633,6 +649,13 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
     setCapabilities(DEFAULT_CAPABILITIES);
     setRoles([]);
     refreshDebugMode();
+    // Drop the HttpOnly /private cookie even when we already cleared localStorage.
+    void fetch("/api/staff/session/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({}),
+    }).catch(() => {});
   };
 
   const clearToken = () => {

@@ -10,6 +10,7 @@ import {
   googleToCrawlerStatus,
   type CrawlerBadgeState,
 } from "@/lib/crawlerStatus";
+import { isPrivatePreviewPath } from "@/lib/visual-edit-path";
 
 import type { PageErrorsTab } from "./PageErrorsModal";
 
@@ -17,6 +18,7 @@ interface PageHealthIndicatorsProps {
   errorCount: number;
   warningCount: number;
   loading?: boolean;
+  /** Public page URL for GSC; omit or null when draft-only (no live URL). */
   pageUrl?: string | null;
   /** When set, skips the internal GSC fetch and uses this badge state. */
   crawlerState?: CrawlerBadgeState;
@@ -32,7 +34,9 @@ export function PageHealthIndicators({
   crawlerState: crawlerStateProp,
   onOpenTab,
 }: PageHealthIndicatorsProps) {
-  const inspectLookupUrl = pageUrl ?? "";
+  const rawLookup = (pageUrl ?? "").trim();
+  const isDraftNoPublic = !rawLookup || isPrivatePreviewPath(rawLookup);
+  const inspectLookupUrl = isDraftNoPublic ? "" : rawLookup;
   const useExternalCrawler = crawlerStateProp != null;
 
   const gscQuery = useQuery<GscInspectionGetResponse>({
@@ -58,11 +62,13 @@ export function PageHealthIndicators({
     crawlerStateProp ??
     crawlerBadgeState([
       googleToCrawlerStatus({
-        configured: gscQuery.data?.configured,
-        record: gscQuery.data?.record,
-        resolved: gscQuery.data?.resolved,
-        loadError: gscQuery.isError,
-        loading: gscQuery.isLoading,
+        configured: isDraftNoPublic ? true : gscQuery.data?.configured,
+        record: isDraftNoPublic ? null : gscQuery.data?.record,
+        resolved: isDraftNoPublic
+          ? { requested: "", loc: null, inSitemap: false, isDraft: true }
+          : gscQuery.data?.resolved,
+        loadError: isDraftNoPublic ? false : gscQuery.isError,
+        loading: isDraftNoPublic ? false : gscQuery.isLoading,
       }),
     ]);
 

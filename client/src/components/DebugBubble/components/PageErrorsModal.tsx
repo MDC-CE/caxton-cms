@@ -26,6 +26,7 @@ import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { minLengthHint } from "@/lib/minLengthHint";
 import { formatIssueActorLine } from "@/lib/formatIssueActor";
+import { isPrivatePreviewPath } from "@/lib/visual-edit-path";
 import {
   type GscInspectionGetResponse,
 } from "@/lib/gscInspection";
@@ -74,7 +75,13 @@ interface PageErrorsModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   pageDiagnostics: PageDiagnostics | null;
+  /** Diagnostics fetch URL (may be /private/preview/…). Not shown to staff when publicPageUrl is set. */
   pageUrl?: string;
+  /**
+   * Live public path visitors/search engines see. Prefer for subtitle, open, and GSC.
+   * When absent and diagnostics are on preview → “No public URL (draft)”.
+   */
+  publicPageUrl?: string | null;
   loading?: boolean;
   error?: string | null;
   onRefreshDiagnostics?: () => Promise<void>;
@@ -88,6 +95,54 @@ interface PageErrorsModalProps {
   }) => void;
   /** When opening the modal, start on this tab (e.g. from Page Details health strip). */
   preferredTab?: PageErrorsTab;
+}
+
+/** Staff-facing URL for subtitle / open / GSC — never a /private/preview path. */
+export function resolveDiagnosticsStaffUrl(opts: {
+  publicPageUrl?: string | null;
+  pageUrl?: string | null;
+  diagnosticsUrl?: string | null;
+}): {
+  displayUrl: string | null;
+  openUrl: string | null;
+  inspectLookupUrl: string;
+  isDraftNoPublic: boolean;
+} {
+  const publicUrl = (opts.publicPageUrl || "").trim();
+  if (publicUrl && !isPrivatePreviewPath(publicUrl)) {
+    return {
+      displayUrl: publicUrl,
+      openUrl: publicUrl,
+      inspectLookupUrl: publicUrl,
+      isDraftNoPublic: false,
+    };
+  }
+
+  const fallback = (opts.pageUrl || opts.diagnosticsUrl || "").trim();
+  if (!fallback) {
+    return {
+      displayUrl: null,
+      openUrl: null,
+      inspectLookupUrl: "",
+      isDraftNoPublic: false,
+    };
+  }
+
+  if (isPrivatePreviewPath(fallback)) {
+    return {
+      displayUrl: null,
+      openUrl: null,
+      inspectLookupUrl: "",
+      isDraftNoPublic: true,
+    };
+  }
+
+  return {
+    displayUrl: fallback,
+    openUrl: fallback,
+    inspectLookupUrl: fallback,
+    isDraftNoPublic: false,
+  };
 }
 
 export type PageErrorsTab = "errors" | "warnings" | "crawlers" | "completed";
@@ -782,6 +837,7 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
     onOpenChange,
     pageDiagnostics,
     pageUrl,
+    publicPageUrl,
     loading = false,
     error = null,
     onRefreshDiagnostics,
@@ -836,8 +892,14 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
   );
   const canSolveWithAi = Boolean(pageDiagnostics && (errors.length > 0 || warnings.length > 0));
   const solvePrompt = pageDiagnostics ? buildSolveWithAiPrompt(pageDiagnostics) : "";
-  const openPageUrl = pageUrl ?? pageDiagnostics?.url;
-  const inspectLookupUrl = openPageUrl || "";
+  const staffUrl = resolveDiagnosticsStaffUrl({
+    publicPageUrl,
+    pageUrl,
+    diagnosticsUrl: pageDiagnostics?.url,
+  });
+  const openPageUrl = staffUrl.openUrl;
+  const inspectLookupUrl = staffUrl.inspectLookupUrl;
+  const isDraftNoPublic = staffUrl.isDraftNoPublic;
 
   const handleUpdateIssue = async (
     issue: PageIssue,
@@ -906,7 +968,7 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
 
   const gscQuery = useQuery<GscInspectionGetResponse>({
     queryKey: ["/api/debug/gsc-inspection", inspectLookupUrl],
-    enabled: open && Boolean(inspectLookupUrl),
+    enabled: open && Boolean(inspectLookupUrl) && !isDraftNoPublic,
     queryFn: async () => {
       const token = getDebugToken();
       const res = await fetch(
@@ -925,11 +987,13 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
 
   const crawlerStatuses: CrawlerPageStatus[] = [
     googleToCrawlerStatus({
-      configured: gscQuery.data?.configured,
-      record: gscQuery.data?.record,
-      resolved: gscQuery.data?.resolved,
-      loadError: gscQuery.isError,
-      loading: gscQuery.isLoading,
+      configured: isDraftNoPublic ? true : gscQuery.data?.configured,
+      record: isDraftNoPublic ? null : gscQuery.data?.record,
+      resolved: isDraftNoPublic
+        ? { requested: "", loc: null, inSitemap: false, isDraft: true }
+        : gscQuery.data?.resolved,
+      loadError: isDraftNoPublic ? false : gscQuery.isError,
+      loading: isDraftNoPublic ? false : gscQuery.isLoading,
     }),
   ];
   const crawlerBadge = crawlerBadgeState(crawlerStatuses);
@@ -1044,7 +1108,13 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
           <DialogDescription data-testid="text-modal-description" className="flex items-center gap-1.5">
             {pageDiagnostics ? (
               <>
-                <span>{pageDiagnostics.url}</span>
+                {isDraftNoPublic ? (
+                  <span data-testid="text-modal-no-public-url">No public URL (draft)</span>
+                ) : (
+                  <span data-testid="text-modal-public-url">
+                    {staffUrl.displayUrl ?? pageDiagnostics.url}
+                  </span>
+                )}
                 <LocaleFlag locale={pageDiagnostics.locale} />
                 {openPageUrl && (
                   <div ref={openPageMenuRef} className="relative">
@@ -1164,15 +1234,19 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
                       disabled={
                         inspectMutation.isPending ||
                         !canInspect ||
+                        isDraftNoPublic ||
+                        !inspectLookupUrl ||
                         !gscQuery.data?.configured ||
                         !!gscQuery.data?.resolved?.isDraft
                       }
                       title={
-                        !gscQuery.data?.configured
-                          ? "Search Console is not configured"
-                          : gscQuery.data?.resolved?.isDraft
-                            ? "Draft pages are not sent to Google"
-                            : "Check Google"
+                        isDraftNoPublic || !inspectLookupUrl
+                          ? "Draft pages are not sent to Google"
+                          : !gscQuery.data?.configured
+                            ? "Search Console is not configured"
+                            : gscQuery.data?.resolved?.isDraft
+                              ? "Draft pages are not sent to Google"
+                              : "Check Google"
                       }
                       data-testid="button-check-google"
                     >

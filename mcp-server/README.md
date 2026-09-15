@@ -47,7 +47,7 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `create_entry` | Create YAML entry (draft-first or live shared-layout); not for DB-backed types |
 | `update_fields` | Single-entry field writes (meta + body + one section); `updates[]` length ≥ 1 |
 | `propose_change` | Store an entry-change proposal or issue handoff notes (does not write YAML). Caps: `content_view` or `seo_edit` |
-| `list_proposals` | List / get / search proposals; `issue_id` filters to linked only. Optional `sort`/`sort_dir` when scoped. Same caps as `propose_change` |
+| `list_proposals` | List / get / search proposals (stats-first; multi-row = summary without ops; `proposal_id` = full). Filters: `issue_id`, `proposer_username`, `proposer_actor` (type/role), `agent_session_id`, status/kind/query. Optional `sort`/`sort_dir` when scoped. Caps: `content_view`, `proposals_create`, or `proposals_review` |
 | `update_proposal` | Lifecycle `action`: claim, release, withdraw, apply, close (acknowledge alias), reject, set_no_auto_retry, blockers…. Caps: `content_edit_text` or `seo_edit`; four-eyes on apply/reject (not close) |
 | `update_entry_attributes` | Multi-entry safe attrs bulk: `meta.*` + `funnel.*` (same `updates[]` across `slugs[]`, max 50; not sections) |
 | `add_section` / `remove_section` / `reorder_sections` / `replace_entry_sections` | Section topology |
