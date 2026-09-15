@@ -199,9 +199,8 @@ export interface VisitorContext {
 export interface WebhookConfig {
   url?: string;
   method?: "POST" | "GET";
-  auth_header?: string;
-  use_visitor_token?: boolean;
-  fail_on_error?: boolean;
+  headers?: Record<string, string>;
+  fail_silently?: boolean;
 }
 
 export interface ConsentDefaults {
@@ -240,7 +239,8 @@ export interface ConversionEventEntry {
 export interface TrackingWebhook {
   url: string;
   method?: string;
-  auth_header?: string;
+  headers?: Record<string, string>;
+  fail_silently?: boolean;
 }
 
 export interface TrackingSettingsResponse {

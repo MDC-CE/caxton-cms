@@ -48,7 +48,6 @@ import { resolveConsentCopy, extraConsentYamlFieldsFromObject, consentKeyFromYam
 import { RichTextContent } from "@/components/ui/rich-text-content";
 import {
   applyLeadFormOverrideOutcome,
-  appendVisitorTokenToUrl,
   normalizeLeadFormTags,
   resolveLeadFormOverride,
   type LeadFormOverride,
@@ -146,20 +145,6 @@ function mergeLeadFormOptions(
   return merged;
 }
 
-/**
- * When use_visitor_token is set on the effective webhook, append the visitor
- * token as a query param (Learn-compatible join URLs). Otherwise leave URL as-is.
- */
-function resolveSuccessRedirectUrl(
-  url: string,
-  useVisitorToken: boolean,
-): string {
-  if (!useVisitorToken) return url;
-  const token = getConsumerToken();
-  if (!token) return url;
-  return appendVisitorTokenToUrl(url, token);
-}
-
 interface FieldConfig {
   visible?: boolean;
   required?: boolean;
@@ -211,8 +196,8 @@ export interface LeadFormData {
   webhook?: {
     url?: string;
     method?: "POST" | "GET";
-    use_visitor_token?: boolean;
-    fail_on_error?: boolean;
+    headers?: Record<string, string>;
+    fail_silently?: boolean;
   };
   fields?: {
     email?: FieldConfig;
@@ -233,7 +218,7 @@ export interface LeadFormData {
     url?: string;
     message?: string;
     /** Invalidate entry page query in background after success (non-blocking). */
-    reload_entry?: boolean;
+    reload_entry_fields?: boolean;
   };
   /**
    * Continuous form_overrides: first matching conditions (AND) overlays form props for UI + submit
@@ -630,8 +615,8 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, c
 type EffectiveWebhook = {
   url?: string;
   method?: "POST" | "GET";
-  use_visitor_token?: boolean;
-  fail_on_error?: boolean;
+  headers?: Record<string, string>;
+  fail_silently?: boolean;
 };
 
 /** Resolve conversion/success/tags/webhook for one submit (override > form root > event). */
@@ -643,13 +628,12 @@ function buildEffectiveSubmitConfig(
   entry?: Record<string, unknown> | null,
 ): {
   conversion_name?: string;
-  success?: { url?: string; message?: string; reload_entry?: boolean };
+  success?: { url?: string; message?: string; reload_entry_fields?: boolean };
   tags: string;
   automations: string;
-  /** Delivery override when url is set; may also carry use_visitor_token alone. */
+  /** Delivery override when url is set. */
   formWebhook: EffectiveWebhook | null;
   eventWebhook: EffectiveWebhook | null;
-  use_visitor_token: boolean;
 } {
   const override = resolveLeadFormOverride(values, formData.form_overrides, {
     resolveValue,
@@ -679,7 +663,8 @@ function buildEffectiveSubmitConfig(
           ? {
               url: eventWebhookUrl,
               method: eventEntry.webhook?.method,
-              auth_header: eventEntry.webhook?.auth_header,
+              headers: eventEntry.webhook?.headers,
+              fail_silently: eventEntry.webhook?.fail_silently,
             }
           : undefined,
         success: eventEntry.success,
@@ -691,12 +676,14 @@ function buildEffectiveSubmitConfig(
 
   const wh = resolved.webhook;
   const formWebhook: EffectiveWebhook | null =
-    wh && (wh.url || wh.use_visitor_token)
+    wh && wh.url
       ? {
-          ...(wh.url ? { url: wh.url } : {}),
+          url: wh.url,
           method: (wh.method === "GET" ? "GET" : "POST") as "POST" | "GET",
-          ...(wh.use_visitor_token ? { use_visitor_token: true } : {}),
-          ...(wh.fail_on_error ? { fail_on_error: true } : {}),
+          ...(wh.headers && Object.keys(wh.headers).length > 0
+            ? { headers: wh.headers }
+            : {}),
+          ...(wh.fail_silently === true ? { fail_silently: true } : {}),
         }
       : null;
   const eventWebhook: EffectiveWebhook | null =
@@ -704,6 +691,10 @@ function buildEffectiveSubmitConfig(
       ? {
           url: eventEntry.webhook.url,
           method: (eventEntry.webhook.method === "GET" ? "GET" : "POST") as "POST" | "GET",
+          ...(eventEntry.webhook.headers && Object.keys(eventEntry.webhook.headers).length > 0
+            ? { headers: eventEntry.webhook.headers }
+            : {}),
+          ...(eventEntry.webhook.fail_silently === true ? { fail_silently: true } : {}),
         }
       : null;
 
@@ -714,7 +705,6 @@ function buildEffectiveSubmitConfig(
     automations: resolved.automations || "strong",
     formWebhook,
     eventWebhook,
-    use_visitor_token: formWebhook?.use_visitor_token === true,
   };
 }
 
@@ -724,7 +714,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const programContext = contentType === "program" ? slug : undefined;
   const pageFunnel = usePageFunnel();
   const [locationPath] = useLocation();
-  /** Page locale (SectionContext → path). Used for copy, options, and reload_entry queryKeys. */
+  /** Page locale (SectionContext → path). Used for copy, options, and reload_entry_fields queryKeys. */
   const locale: LeadFormLocale =
     normalizeLocale(sectionLocale || localeFromPath(locationPath)) === "es" ? "es" : "en";
   const { session, setConversionPage } = useSession();
@@ -803,6 +793,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     profile: authProfile,
     isLoggedIn,
     isLoading: authProfileLoading,
+    token: consumerAuthToken,
     setToken: setConsumerToken,
     clearToken: clearConsumerAuth,
   } = useAuthUser({
@@ -915,7 +906,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           ? {
               url: eventWebhookUrl,
               method: eventEntry.webhook?.method,
-              auth_header: eventEntry.webhook?.auth_header,
+              headers: eventEntry.webhook?.headers,
+              fail_silently: eventEntry.webhook?.fail_silently,
             }
           : undefined,
         success: eventEntry.success,
@@ -1594,7 +1586,6 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       // Webhook priority: per-form (YAML) → per-event → global.
-      // use_visitor_token without url skips delivery (token only applies to success redirect).
       const formWebhook = effective.formWebhook;
       const eventWebhook = effective.eventWebhook;
       const globalWebhook = trackingSettings?.webhook?.url ? trackingSettings.webhook : null;
@@ -1608,48 +1599,43 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       let response: Response;
       if (deliveryOverride?.url) {
         const resolvedUrl = resolveTemplatedUrl(deliveryOverride.url) || deliveryOverride.url;
+        const resolvedHeaders: Record<string, string> = {};
+        if (deliveryOverride.headers) {
+          for (const [hk, hv] of Object.entries(deliveryOverride.headers)) {
+            if (typeof hv !== "string") continue;
+            resolvedHeaders[hk] = resolveTemplatedUrl(hv) || hv;
+          }
+        }
         const body: Record<string, unknown> = {
           payload,
           webhook: {
             url: resolvedUrl,
             method: deliveryOverride.method || "POST",
-            ...(effective.use_visitor_token ? { use_visitor_token: true } : {}),
-            ...(deliveryOverride.fail_on_error ? { fail_on_error: true } : {}),
+            ...(Object.keys(resolvedHeaders).length > 0 ? { headers: resolvedHeaders } : {}),
+            ...(deliveryOverride.fail_silently === true ? { fail_silently: true } : {}),
           },
         };
-        if (effective.use_visitor_token) {
-          const visitorToken = getConsumerToken();
-          if (!visitorToken) {
-            throw new Error(
-              "400: " +
-                JSON.stringify({
-                  error: "Login or signup required before this form can submit.",
-                }),
-            );
-          }
-          body.visitor_token = visitorToken;
-        }
         response = await fetch("/api/leads/webhook-delivery", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          credentials: "same-origin",
         });
         if (!response.ok) {
           const errText = await response.text().catch(() => "");
           throw new Error(`${response.status}: ${errText || response.statusText}`);
         }
-      } else if (formWebhook?.use_visitor_token && !formWebhook.url) {
-        // Flag-only: no outbound webhook; success redirect will append token.
-        response = new Response(JSON.stringify({ success: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
       } else if (globalWebhook) {
         response = await fetch("/api/leads/webhook-delivery", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ payload }),
+          credentials: "same-origin",
         });
+        if (!response.ok) {
+          const errText = await response.text().catch(() => "");
+          throw new Error(`${response.status}: ${errText || response.statusText}`);
+        }
       } else {
         response = await apiRequest("POST", "/api/leads", payload);
       }
@@ -1770,7 +1756,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         }
       }
 
-      if (effective.success?.reload_entry && contentType && slug) {
+      if (effective.success?.reload_entry_fields && contentType && slug) {
         const dbKey = ["/api/database-single", contentType, slug, locale] as const;
         const staticKey = [getApiPath(contentType), slug, locale] as const;
         // Non-blocking: refresh entry page data so overrides re-resolve (e.g. registered).
@@ -1779,12 +1765,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       if (effective.success?.url) {
-        const templated =
+        const successUrl =
           resolveTemplatedUrl(effective.success.url) || effective.success.url;
-        const successUrl = resolveSuccessRedirectUrl(
-          templated,
-          effective.use_visitor_token,
-        );
         nav.navigate(successUrl);
       } else {
         setIsSuccess(true);
@@ -1957,10 +1939,19 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
   const watchedValues = form.watch();
 
   const visitorBag = useMemo((): Record<string, unknown> | undefined => {
-    if (!isLoggedIn || !authProfile) return undefined;
-    const { valid: _valid, ...rest } = authProfile;
-    return rest as Record<string, unknown>;
-  }, [isLoggedIn, authProfile]);
+    const token =
+      consumerAuthToken ??
+      (typeof window !== "undefined" ? getConsumerToken() : null);
+    if (isLoggedIn && authProfile) {
+      const { valid: _valid, ...rest } = authProfile;
+      return {
+        ...(rest as Record<string, unknown>),
+        ...(token ? { token } : {}),
+      };
+    }
+    if (token) return { token };
+    return undefined;
+  }, [isLoggedIn, authProfile, consumerAuthToken]);
 
   const resolveTemplateValue = useMemo(() => {
     const defs = variableDefinitions ?? {};

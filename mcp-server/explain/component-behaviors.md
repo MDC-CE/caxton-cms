@@ -76,8 +76,10 @@ Form / blog `call_to_action.tags` is an optional CRM tag string (comma-separated
 ## Post-submit success
 
 - `success.message` — inline thank-you (stay on page)
-- `success.url` — **optional**; when set, navigates via internal nav after a successful submit (`#section_id` opens modals)
-- `webhook.fail_on_error: true` — wait for webhook upstream; on failure the form shows an error and does **not** run success (default omit = fire-and-forget)
+- `success.url` — **optional**; when set, navigates via internal nav after a successful submit (`#section_id` opens modals). May include `?token={{ visitor.token }}`.
+- `success.reload_entry_fields: true` — invalidate the entry page query after success (non-blocking) so entry fields refresh for overrides.
+- Default webhook delivery is **strict** (await upstream; failure → form error). `webhook.fail_silently: true` is fire-and-forget.
+- `webhook.headers` — outbound headers (e.g. `Authorization: "Token {{ visitor.token }}"`). Replaces `use_visitor_token` / `auth_header`.
 
 ## Blog `call_to_action`
 

@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -34,18 +35,18 @@ import {
 
 export type WebhookSource = "section" | "event" | "global" | "none";
 
+export type WebhookCardChangeField = "url" | "method" | "headers" | "failSilently";
+
 export interface WebhookCardProps {
   url: string;
   method: "POST" | "GET";
-  authHeader: string;
-  /** When true, delivery uses the visitor login token and success redirects append ?token= */
-  useVisitorToken?: boolean;
+  /** Outbound headers (e.g. Authorization). Form templates like {{ visitor.token }} OK. */
+  headers?: Record<string, string>;
+  /** When true, form shows success even if upstream fails (fire-and-forget). */
+  failSilently?: boolean;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
-  onChange: (
-    field: "url" | "method" | "authHeader" | "useVisitorToken",
-    value: string | boolean,
-  ) => void;
+  onChange: (field: WebhookCardChangeField, value: string | boolean | Record<string, string>) => void;
   hint?: string;
   testIdPrefix?: string;
   source?: WebhookSource;
@@ -61,12 +62,32 @@ const SOURCE_LABELS: Record<WebhookSource, string> = {
   none: "Not configured",
 };
 
+export function headersRecordToText(headers: Record<string, string> | undefined): string {
+  if (!headers || Object.keys(headers).length === 0) return "";
+  return Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\n");
+}
+
+export function parseHeadersText(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colon = trimmed.indexOf(":");
+    if (colon <= 0) continue;
+    const name = trimmed.slice(0, colon).trim();
+    const value = trimmed.slice(colon + 1).trim();
+    if (name && value) out[name] = value;
+  }
+  return out;
+}
+
 function JsonHighlight({ value }: { value: unknown }) {
   const lines = JSON.stringify(value, null, 2).split("\n");
   return (
     <pre className="text-xs font-mono leading-relaxed whitespace-pre">
       {lines.map((line, i) => {
-        // Key line:  "key": value
         const keyValueMatch = line.match(
           /^(\s*)("(?:[^"\\]|\\.)*")(\s*:\s*)(.*)$/
         );
@@ -81,7 +102,6 @@ function JsonHighlight({ value }: { value: unknown }) {
             </div>
           );
         }
-        // Plain value line (array items, brackets, etc.)
         return (
           <div key={i}>
             <JsonValue raw={line} />
@@ -95,7 +115,6 @@ function JsonHighlight({ value }: { value: unknown }) {
 function JsonValue({ raw }: { raw: string }) {
   const trimmed = raw.trimEnd();
   const trailing = raw.slice(trimmed.length);
-  // string
   if (/^"/.test(trimmed.replace(/,$/, "").trim())) {
     return (
       <span>
@@ -104,7 +123,6 @@ function JsonValue({ raw }: { raw: string }) {
       </span>
     );
   }
-  // number
   if (/^-?\d/.test(trimmed.replace(/,$/, "").trim())) {
     return (
       <span>
@@ -113,7 +131,6 @@ function JsonValue({ raw }: { raw: string }) {
       </span>
     );
   }
-  // boolean / null
   if (/^(true|false|null)/.test(trimmed.replace(/,$/, "").trim())) {
     return (
       <span>
@@ -128,12 +145,12 @@ function JsonValue({ raw }: { raw: string }) {
 export function WebhookCard({
   url,
   method,
-  authHeader,
-  useVisitorToken = false,
+  headers = {},
+  failSilently = false,
   editing,
   onEditingChange,
   onChange,
-  hint = "Overrides the global webhook for this event only. Leave URL blank to use the global webhook.",
+  hint = "After submit we wait for the webhook. If it fails, the form shows an error. Turn on fail silently only when a soft thank-you is OK even if delivery fails.",
   testIdPrefix = "event-webhook",
   source,
   inheritedUrl,
@@ -144,8 +161,10 @@ export function WebhookCard({
   const [testState, setTestState] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [testError, setTestError] = useState<string>("");
   const [payloadOpen, setPayloadOpen] = useState(false);
+  const [headersDraft, setHeadersDraft] = useState(() => headersRecordToText(headers));
 
   const effectiveUrl = url || inheritedUrl || "";
+  const headerCount = Object.keys(headers).length;
 
   function copyUrl(value: string) {
     navigator.clipboard.writeText(value).then(() => {
@@ -240,7 +259,10 @@ export function WebhookCard({
               size="icon"
               variant="ghost"
               className="h-6 w-6"
-              onClick={() => onEditingChange(!editing)}
+              onClick={() => {
+                if (!editing) setHeadersDraft(headersRecordToText(headers));
+                onEditingChange(!editing);
+              }}
               data-testid={`button-edit-${testIdPrefix}`}
             >
               {editing ? (
@@ -261,8 +283,7 @@ export function WebhookCard({
             <p className="text-xs text-muted-foreground">{hint}</p>
             <div className="space-y-1.5">
               <Label htmlFor={`${testIdPrefix}-url`} className="text-xs text-muted-foreground">
-                URL{" "}
-                <span className="font-normal">(optional if using visitor token only)</span>
+                URL
               </Label>
               <Input
                 id={`${testIdPrefix}-url`}
@@ -295,54 +316,59 @@ export function WebhookCard({
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`${testIdPrefix}-headers`} className="text-xs text-muted-foreground">
+                Headers{" "}
+                <span className="font-normal">(one per line: Name: value)</span>
+              </Label>
+              <Textarea
+                id={`${testIdPrefix}-headers`}
+                placeholder={'Authorization: Token {{ visitor.token }}'}
+                value={headersDraft}
+                onChange={(e) => {
+                  setHeadersDraft(e.target.value);
+                  onChange("headers", parseHeadersText(e.target.value));
+                }}
+                data-testid={`input-${testIdPrefix}-headers`}
+                className="text-xs font-mono min-h-[72px]"
+              />
+              <p className="text-[11px] text-muted-foreground leading-snug">
+                Form webhooks may use {"{{ visitor.token }}"} / {"{{ entry.* }}"}. Global
+                settings headers are stored server-side only.
+              </p>
+            </div>
             <div className="flex items-start gap-2 rounded-md border bg-background/60 p-2.5">
               <input
-                id={`${testIdPrefix}-visitor-token`}
+                id={`${testIdPrefix}-fail-silently`}
                 type="checkbox"
                 className="mt-0.5 h-3.5 w-3.5 accent-primary"
-                checked={useVisitorToken}
-                onChange={(e) => onChange("useVisitorToken", e.target.checked)}
-                data-testid={`checkbox-${testIdPrefix}-visitor-token`}
+                checked={failSilently}
+                onChange={(e) => onChange("failSilently", e.target.checked)}
+                data-testid={`checkbox-${testIdPrefix}-fail-silently`}
               />
               <div className="min-w-0 space-y-0.5">
                 <Label
-                  htmlFor={`${testIdPrefix}-visitor-token`}
+                  htmlFor={`${testIdPrefix}-fail-silently`}
                   className="text-xs font-medium cursor-pointer"
                 >
-                  Use visitor login token
+                  Fail silently
                 </Label>
                 <p className="text-[11px] text-muted-foreground leading-snug">
-                  After signup or login, call this URL as that user (Authorization header).
-                  If the form redirects on success, also add their token to the success URL query.
+                  Do not wait for the upstream webhook. The form can show success even if
+                  delivery fails.
                 </p>
               </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor={`${testIdPrefix}-auth`} className="text-xs text-muted-foreground">
-                Authorization header{" "}
-                <span className="font-normal">(optional; ignored when visitor token is on)</span>
-              </Label>
-              <Input
-                id={`${testIdPrefix}-auth`}
-                type="password"
-                placeholder="Bearer sk-..."
-                value={authHeader}
-                onChange={(e) => onChange("authHeader", e.target.value)}
-                data-testid={`input-${testIdPrefix}-auth`}
-                autoComplete="off"
-                className="text-xs"
-              />
             </div>
           </div>
         ) : (
           <div className="space-y-1.5">
-            {useVisitorToken && (
+            {failSilently && (
               <Badge
                 variant="secondary"
                 className="text-[11px] px-1.5 py-0 leading-4 font-normal"
-                data-testid={`badge-${testIdPrefix}-visitor-token`}
+                data-testid={`badge-${testIdPrefix}-fail-silently`}
               >
-                Visitor token
+                Fail silently
               </Badge>
             )}
             <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
@@ -425,13 +451,13 @@ export function WebhookCard({
                 )
               )}
             </div>
-            {authHeader && (
+            {headerCount > 0 && (
               <div className="flex items-start gap-2">
                 <span className="text-xs text-muted-foreground w-20 flex-shrink-0 pt-0.5">
-                  Auth
+                  Headers
                 </span>
                 <span className="text-xs text-muted-foreground italic">
-                  configured
+                  {headerCount} configured
                 </span>
               </div>
             )}

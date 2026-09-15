@@ -5,13 +5,20 @@
 import { z } from "zod";
 
 // CTA Button - used in many components
-export const ctaTrackingSchema = z.enum(["none", "add_to_cart", "begin_checkout"]);
+export const ctaTrackingSchema = z.enum(["none", "add_to_cart", "click_begin_checkout"]);
 
 export const ctaButtonSchema = z.object({
   text: z.string(),
-  url: z.string(),
+  url: z
+    .string()
+    .describe(
+      "Link target: path (/en/…), https://…, #section_id (modal if type:modal else scroll), #top/#bottom, or inline#section_id. Agents: explain_site topic sections.",
+    ),
   variant: z.enum(["primary", "secondary", "outline"]),
-  /** Ecommerce CTA intent — required on field-editor `cta-tracking` paths at save time. */
+  /**
+   * Ecommerce CTA intent. Required on field-editor `cta-tracking` paths (save-time).
+   * Optional in Zod so legacy YAML still parses until migration; use `none` when unbound intent.
+   */
   tracking: ctaTrackingSchema.optional(),
   button_variant: z.string().optional(),
   text_color: z.string().optional(),
@@ -136,28 +143,78 @@ export const leadFormFieldConfigSchema = z.object({
   options: z.array(leadFormFieldOptionSchema).optional(),
 });
 
-// Webhook configuration — used at form-level, per-event, and global tracking level
-export const webhookConfigSchema = z
-  .object({
-    url: z.string().optional(),
-    method: z.enum(["POST", "GET"]).optional(),
-    use_visitor_token: z.boolean().optional(),
-    /** When true, wait for upstream and fail the submit on non-2xx / network error. */
-    fail_on_error: z.boolean().optional(),
-  })
-  .refine(
-    (w) =>
-      (typeof w.url === "string" && w.url.trim().length > 0) ||
-      w.use_visitor_token === true,
-    { message: "webhook requires url and/or use_visitor_token: true" },
-  );
+// Webhook configuration — used at form-level, per-event, and global tracking level.
+// `url` is required (may include {{ entry.* }} / {{ visitor.* }} templates on forms).
+// Default delivery is strict (await upstream); set fail_silently for fire-and-forget.
+export const webhookConfigSchema = z.object({
+  url: z.string().min(1),
+  method: z.enum(["POST", "GET"]).optional(),
+  /** Outbound request headers (form templates OK; global settings = literal secrets). */
+  headers: z.record(z.string()).optional(),
+  /**
+   * When true, `/api/leads/webhook-delivery` responds 200 before upstream finishes
+   * (marketing fire-and-forget). Omit / false = await upstream; non-2xx → 502.
+   */
+  fail_silently: z.boolean().optional(),
+});
 
 export type WebhookConfig = z.infer<typeof webhookConfigSchema>;
+
+/** Override condition: form_field_slug XOR entry_field_slug. See shared/resolveLeadFormOverride.ts */
+export const leadFormOverrideConditionSchema = z
+  .object({
+    form_field_slug: z.string().optional(),
+    /** Bare entry field path (e.g. event_started); looked up on singleEntry at match time. */
+    entry_field_slug: z.string().optional(),
+    /** Default equals. contains = substring on strings; membership on arrays of scalars. */
+    match_method: z.enum(["equals", "contains"]).optional(),
+    /** Compared value; {{ visitor.* }} / templates via resolveDeep may keep numbers. */
+    value: z.unknown(),
+  })
+  .passthrough();
+
+/** First matching form_override overlays form root for UI + submit (deep-merge messages/success/webhook). */
+export const leadFormOverrideSchema = z
+  .object({
+    conditions: z.array(leadFormOverrideConditionSchema).min(1),
+    conversion_name: z.string().optional(),
+    ecommerce_product_field: z.string().optional(),
+    success: z
+      .object({
+        url: z.string().optional(),
+        message: z.string().optional(),
+        /**
+         * Non-blocking: invalidate the current entry page query after submit success
+         * so entry fields refresh while success.url / message still run.
+         */
+        reload_entry_fields: z.boolean().optional(),
+      })
+      .optional(),
+    tags: z.string().optional(),
+    automations: z.string().optional(),
+    webhook: webhookConfigSchema.optional(),
+    messages: z.record(z.unknown()).optional(),
+  })
+  .passthrough();
+
+export type LeadFormOverrideSchema = z.infer<typeof leadFormOverrideSchema>;
+
+/** @deprecated Use leadFormOverrideConditionSchema */
+export const leadFormRouteConditionSchema = leadFormOverrideConditionSchema;
+/** @deprecated Use leadFormOverrideSchema */
+export const leadFormRouteSchema = leadFormOverrideSchema;
+/** @deprecated Use LeadFormOverrideSchema */
+export type LeadFormRouteSchema = LeadFormOverrideSchema;
 
 // Lead Form data schema
 export const leadFormDataSchema = z.object({
   variant: z.enum(["stacked", "inline"]).optional(),
   conversion_name: z.string().optional(), // Tracking event name for conversions
+  /**
+   * Submit field name used to resolve ecommerce product identity for analytics (item_id).
+   * Default "program". Funnel.products scopes allowed values when set on the page.
+   */
+  ecommerce_product_field: z.string().optional(),
   title: z.string().optional(),
   subtitle: z.string().optional(),
   submit_label: z.string().optional(),
@@ -174,12 +231,27 @@ export const leadFormDataSchema = z.object({
     region: leadFormFieldConfigSchema.optional(),
     location: leadFormFieldConfigSchema.optional(),
     coupon: leadFormFieldConfigSchema.optional(),
+    referral_key: leadFormFieldConfigSchema.optional(),
     client_comments: leadFormFieldConfigSchema.optional(),
   }).optional(),
   success: z.object({
     url: z.string().optional(),
     message: z.string().optional(),
+    /**
+     * Non-blocking: invalidate the current entry page query after submit success
+     * so entry fields refresh while success.url / message still run.
+     */
+    reload_entry_fields: z.boolean().optional(),
   }).optional(),
+  /**
+   * Continuous form_overrides: first match overlays form props for UI + submit.
+   * Conditions use form_field_slug or entry_field_slug; values may use {{ visitor.* }}.
+   */
+  form_overrides: z.array(leadFormOverrideSchema).optional(),
+  /** Phase copy for signup forms (guest/login/incomplete/ready). Override messages deep-merge here. */
+  messages: z.record(z.unknown()).optional(),
+  is_signup: z.boolean().optional(),
+  allow_signup: z.boolean().optional(),
   terms_url: z.string().optional(),
   privacy_url: z.string().optional(),
   consent: z.object({
@@ -225,3 +297,61 @@ export const logoItemSchema = z.object({
 });
 
 export type LogoItem = z.infer<typeof logoItemSchema>;
+
+/**
+ * Testimonial bank row — shared by the three testimonials listings.
+ *
+ * Same shape whether the row came from the `testimonials` database or from a
+ * section's `hardcoded_entries`. Passthrough so layout-only extras (slide
+ * country/status/achievement, carousel outcome) validate without adding DB
+ * columns for them.
+ */
+export const testimonialBankRowSchema = z
+  .object({
+    student_name: z.string(),
+    student_thumb: z.string().optional(),
+    student_video: z.string().optional(),
+    excerpt: z.string().optional(),
+    full_text: z.string().optional(),
+    content: z.string().optional(),
+    related_features: z.array(z.string()).optional(),
+    priority: z.number().optional(),
+    rating: z.number().optional(),
+    linkedin_url: z.string().optional(),
+    role: z.string().optional(),
+    company: z.string().optional(),
+    featured: z.boolean().optional(),
+  })
+  .passthrough();
+
+export type TestimonialBankRow = z.infer<typeof testimonialBankRowSchema>;
+
+/** Keep in sync with shared/schema permanentFilterSchema / userFilterSchema. */
+const listingPermanentFilterSchema = z.object({
+  item_property_slug: z.string(),
+  value: z.unknown(),
+});
+
+const listingUserFilterSchema = z.object({
+  item_property_slug: z.string(),
+  component_renderer: z.enum(["text-input", "dropdown", "tags"]),
+  default_value: z.unknown().optional(),
+  all_label: z.string().optional(),
+  split_comma_values: z.boolean().optional(),
+});
+
+/** Listing query for testimonials sections — resolved server-side into `items`. */
+export const testimonialsDynamicEntriesSchema = z.object({
+  content_type: z.string().optional(),
+  database: z.string().optional(),
+  limit: z.number().optional(),
+  sort: z.string().optional(),
+  search: z.string().optional(),
+  item_template: z.record(z.string(), z.unknown()).optional(),
+  hardcoded_entries: z.array(testimonialBankRowSchema).optional(),
+  permanent_filters: z.array(listingPermanentFilterSchema).optional(),
+  user_filters: z.array(listingUserFilterSchema).optional(),
+  ignored_entries: z.array(z.string()).optional(),
+});
+
+export type TestimonialsDynamicEntries = z.infer<typeof testimonialsDynamicEntriesSchema>;

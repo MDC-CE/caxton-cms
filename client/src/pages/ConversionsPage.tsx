@@ -54,7 +54,7 @@ import JsonViewer from "@/components/editing/JsonViewer";
 import { AutomationsTagsCard } from "@/components/editing/AutomationsTagsCard";
 import { ConsentCard } from "@/components/editing/ConsentCard";
 import type { ConsentValues } from "@/components/editing/ConsentCard";
-import { WebhookCard } from "@/components/editing/WebhookCard";
+import { WebhookCard, headersRecordToText, parseHeadersText } from "@/components/editing/WebhookCard";
 import { SuccessCard } from "@/components/editing/SuccessCard";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
@@ -95,7 +95,8 @@ interface EditingEventState {
   successEditing: boolean;
   webhookUrl: string;
   webhookMethod: "POST" | "GET";
-  webhookAuthHeader: string;
+  webhookHeaders: Record<string, string>;
+  webhookFailSilently: boolean;
   webhookEditing: boolean;
 }
 
@@ -114,7 +115,8 @@ function makeEditingState(entry: ConversionEventEntry): EditingEventState {
     successEditing: false,
     webhookUrl: entry.webhook?.url ?? "",
     webhookMethod: entry.webhook?.method ?? "POST",
-    webhookAuthHeader: entry.webhook?.auth_header ?? "",
+    webhookHeaders: entry.webhook?.headers ?? {},
+    webhookFailSilently: entry.webhook?.fail_silently === true,
     webhookEditing: false,
   };
 }
@@ -293,7 +295,9 @@ function ConversionsPageInner() {
 
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookMethod, setWebhookMethod] = useState("POST");
-  const [webhookAuthHeader, setWebhookAuthHeader] = useState("");
+  const [webhookHeaders, setWebhookHeaders] = useState<Record<string, string>>({});
+  const [webhookHeadersDraft, setWebhookHeadersDraft] = useState("");
+  const [webhookFailSilently, setWebhookFailSilently] = useState(false);
   const [webhookEditing, setWebhookEditing] = useState(false);
   const [removeWebhookConfirmOpen, setRemoveWebhookConfirmOpen] = useState(false);
   const [samplePayloadOpen, setSamplePayloadOpen] = useState(false);
@@ -309,7 +313,10 @@ function ConversionsPageInner() {
     if (trackingSettings?.webhook) {
       setWebhookUrl(trackingSettings.webhook.url);
       setWebhookMethod(trackingSettings.webhook.method ?? "POST");
-      setWebhookAuthHeader(trackingSettings.webhook.auth_header ?? "");
+      const h = trackingSettings.webhook.headers ?? {};
+      setWebhookHeaders(h);
+      setWebhookHeadersDraft(headersRecordToText(h));
+      setWebhookFailSilently(trackingSettings.webhook.fail_silently === true);
     }
   }, [trackingSettings?.webhook]);
 
@@ -521,9 +528,24 @@ function ConversionsPageInner() {
   });
 
   const saveWebhookMutation = useMutation({
-    mutationFn: async ({ url, method, auth_header }: { url: string; method: string; auth_header: string }) => {
+    mutationFn: async ({
+      url,
+      method,
+      headers,
+      fail_silently,
+    }: {
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      fail_silently: boolean;
+    }) => {
       const res = await apiRequest("PUT", "/api/settings/tracking", {
-        webhook: { url: url.trim(), method, ...(auth_header.trim() ? { auth_header: auth_header.trim() } : {}) },
+        webhook: {
+          url: url.trim(),
+          method,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+          ...(fail_silently ? { fail_silently: true } : {}),
+        },
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -657,7 +679,10 @@ function ConversionsPageInner() {
                     webhook: {
                       url: event.webhookUrl.trim(),
                       method: event.webhookMethod,
-                      ...(event.webhookAuthHeader.trim() ? { auth_header: event.webhookAuthHeader.trim() } : {}),
+                      ...(Object.keys(event.webhookHeaders).length > 0
+                        ? { headers: event.webhookHeaders }
+                        : {}),
+                      ...(event.webhookFailSilently ? { fail_silently: true } : {}),
                     },
                   }
                 : {}),
@@ -840,17 +865,22 @@ function ConversionsPageInner() {
                     {trackingSettings?.webhook?.method ?? "POST"}
                   </code>
                 </div>
-                {trackingSettings?.webhook?.auth_header && (
+                {trackingSettings?.webhook?.headers &&
+                  Object.keys(trackingSettings.webhook.headers).length > 0 && (
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground uppercase tracking-wide w-20 shrink-0">Auth</span>
+                    <span className="text-xs text-muted-foreground uppercase tracking-wide w-20 shrink-0">Headers</span>
                     <code
                       className="font-mono text-xs bg-muted px-2 py-1 rounded"
-                      data-testid="text-webhook-auth"
+                      data-testid="text-webhook-headers"
                     >
-                      {trackingSettings.webhook.auth_header.length > 16
-                        ? trackingSettings.webhook.auth_header.slice(0, 16) + "•••"
-                        : "•".repeat(trackingSettings.webhook.auth_header.length)}
+                      {Object.keys(trackingSettings.webhook.headers).length} configured
                     </code>
+                  </div>
+                )}
+                {trackingSettings?.webhook?.fail_silently === true && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground uppercase tracking-wide w-20 shrink-0">Mode</span>
+                    <code className="font-mono text-xs bg-muted px-2 py-1 rounded">fail silently</code>
                   </div>
                 )}
               </div>
@@ -880,27 +910,50 @@ function ConversionsPageInner() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="webhook-auth-header">
-                    Authorization header{" "}
-                    <span className="text-muted-foreground font-normal">(optional)</span>
+                  <Label htmlFor="webhook-headers">
+                    Headers{" "}
+                    <span className="text-muted-foreground font-normal">(optional, one per line)</span>
                   </Label>
-                  <Input
-                    id="webhook-auth-header"
-                    type="password"
-                    placeholder="Bearer sk-..."
-                    value={webhookAuthHeader}
-                    onChange={(e) => setWebhookAuthHeader(e.target.value)}
-                    data-testid="input-webhook-auth-header"
-                    autoComplete="off"
+                  <Textarea
+                    id="webhook-headers"
+                    placeholder="Authorization: Bearer …"
+                    value={webhookHeadersDraft}
+                    onChange={(e) => {
+                      setWebhookHeadersDraft(e.target.value);
+                      setWebhookHeaders(parseHeadersText(e.target.value));
+                    }}
+                    data-testid="input-webhook-headers"
+                    className="font-mono text-xs min-h-[72px]"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Sent as the <code className="font-mono">Authorization</code> header on every webhook request.
+                    Stored server-side and never sent to the public page. Default delivery waits for
+                    upstream; enable fail silently only for soft thank-you UX.
                   </p>
+                </div>
+                <div className="flex items-start gap-2">
+                  <input
+                    id="webhook-fail-silently"
+                    type="checkbox"
+                    className="mt-1 h-3.5 w-3.5 accent-primary"
+                    checked={webhookFailSilently}
+                    onChange={(e) => setWebhookFailSilently(e.target.checked)}
+                    data-testid="checkbox-webhook-fail-silently"
+                  />
+                  <Label htmlFor="webhook-fail-silently" className="text-sm font-normal cursor-pointer">
+                    Fail silently (fire-and-forget)
+                  </Label>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <Button
                     size="sm"
-                    onClick={() => saveWebhookMutation.mutate({ url: webhookUrl, method: webhookMethod, auth_header: webhookAuthHeader })}
+                    onClick={() =>
+                      saveWebhookMutation.mutate({
+                        url: webhookUrl,
+                        method: webhookMethod,
+                        headers: webhookHeaders,
+                        fail_silently: webhookFailSilently,
+                      })
+                    }
                     disabled={!webhookUrl.trim() || saveWebhookMutation.isPending}
                     data-testid="button-save-webhook"
                   >
@@ -914,7 +967,10 @@ function ConversionsPageInner() {
                       setWebhookEditing(false);
                       setWebhookUrl(trackingSettings?.webhook?.url ?? "");
                       setWebhookMethod(trackingSettings?.webhook?.method ?? "POST");
-                      setWebhookAuthHeader(trackingSettings?.webhook?.auth_header ?? "");
+                      const h = trackingSettings?.webhook?.headers ?? {};
+                      setWebhookHeaders(h);
+                      setWebhookHeadersDraft(headersRecordToText(h));
+                      setWebhookFailSilently(trackingSettings?.webhook?.fail_silently === true);
                     }}
                     data-testid="button-cancel-webhook"
                   >
@@ -1168,10 +1224,13 @@ function ConversionsPageInner() {
                                           <span className="text-[10px] text-muted-foreground uppercase tracking-wide w-12 shrink-0">Method</span>
                                           <code className="text-[10px] font-mono">{entry?.webhook?.method ?? "POST"}</code>
                                         </div>
-                                        {entry?.webhook?.auth_header && (
+                                        {entry?.webhook?.headers &&
+                                          Object.keys(entry.webhook.headers).length > 0 && (
                                           <div className="flex items-center gap-2">
-                                            <span className="text-[10px] text-muted-foreground uppercase tracking-wide w-12 shrink-0">Auth</span>
-                                            <code className="text-[10px] font-mono">{"•".repeat(Math.min(entry.webhook.auth_header.length, 12))}</code>
+                                            <span className="text-[10px] text-muted-foreground uppercase tracking-wide w-12 shrink-0">Headers</span>
+                                            <code className="text-[10px] font-mono">
+                                              {Object.keys(entry.webhook.headers).length} configured
+                                            </code>
                                           </div>
                                         )}
                                       </div>
@@ -1859,15 +1918,17 @@ function ConversionsPageInner() {
                 <WebhookCard
                   url={editingEvent.webhookUrl}
                   method={editingEvent.webhookMethod}
-                  authHeader={editingEvent.webhookAuthHeader}
+                  headers={editingEvent.webhookHeaders}
+                  failSilently={editingEvent.webhookFailSilently}
                   editing={editingEvent.webhookEditing}
                   onEditingChange={(val) =>
                     setEditingEvent({ ...editingEvent, webhookEditing: val })
                   }
                   onChange={(field, value) => {
-                    if (field === "url") setEditingEvent({ ...editingEvent, webhookUrl: value });
+                    if (field === "url") setEditingEvent({ ...editingEvent, webhookUrl: value as string });
                     else if (field === "method") setEditingEvent({ ...editingEvent, webhookMethod: value as "POST" | "GET" });
-                    else if (field === "authHeader") setEditingEvent({ ...editingEvent, webhookAuthHeader: value });
+                    else if (field === "headers") setEditingEvent({ ...editingEvent, webhookHeaders: value as Record<string, string> });
+                    else if (field === "failSilently") setEditingEvent({ ...editingEvent, webhookFailSilently: value === true });
                   }}
                   samplePayload={sessionEnrichedPayload}
                   onTest={async () => {

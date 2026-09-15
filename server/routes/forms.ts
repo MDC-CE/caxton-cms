@@ -207,6 +207,7 @@ import {
 import { getTrackingSettings } from "../settings";
 import { buildLeadPayload } from "../utils/buildLeadPayload";
 import { isPrivateDestination } from "../../shared/ssrf";
+import { sanitizeWebhookHeaders } from "../../shared/webhookHeaders";
 import { DatabaseManager } from "../database";
 import {
   fetchQueryOptions,
@@ -502,7 +503,9 @@ export function registerFormsRoutes(app: Express): void {
       const webhookMethod: string = globalWebhook?.url
         ? (globalWebhook.method || "POST")
         : (process.env.DEFAULT_WEBHOOK_METHOD || "POST");
-      const webhookAuthHeader: string | undefined = globalWebhook?.url ? globalWebhook.auth_header : undefined;
+      const webhookHeaders = globalWebhook?.url
+        ? sanitizeWebhookHeaders(globalWebhook.headers)
+        : {};
 
       if (!webhookUrl) {
         res.json({ success: true, skipped: "no_webhook" });
@@ -519,7 +522,7 @@ export function registerFormsRoutes(app: Express): void {
         method: webhookMethod,
         headers: {
           "Content-Type": "application/json",
-          ...(webhookAuthHeader ? { Authorization: webhookAuthHeader } : {}),
+          ...webhookHeaders,
         },
         body: JSON.stringify(cleanPayload),
       };

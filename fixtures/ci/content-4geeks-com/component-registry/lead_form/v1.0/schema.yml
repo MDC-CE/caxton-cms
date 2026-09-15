@@ -59,10 +59,9 @@ props:
     properties:
       url:
         type: string
-        required: false
+        required: true
         description: >-
           Destination URL to POST/GET the conversion payload. May include {{ entry.* }} / {{ visitor.* }} templates.
-          Optional when only use_visitor_token is set.
         example: https://hooks.zapier.com/hooks/catch/xxxxx/yyyyy/
       method:
         type: string
@@ -72,19 +71,20 @@ props:
           - GET
         description: HTTP method (default POST)
         example: POST
-      use_visitor_token:
-        type: boolean
+      headers:
+        type: object
         required: false
-        description: When true, send Authorization Token on delivery (if url) and append ?token= to success.url when redirecting.
-      fail_on_error:
+        description: >-
+          Outbound request headers (e.g. Authorization). May include {{ visitor.token }} / {{ entry.* }} on forms.
+      fail_silently:
         type: boolean
         required: false
         description: >-
-          When true, wait for the upstream webhook and fail the form submit (no success UI / redirect) if delivery
-          errors or returns non-2xx. Default omit/false is fire-and-forget.
+          When true, respond success before upstream finishes (fire-and-forget). Omit/false = await upstream;
+          non-2xx shows a form error.
     description: >-
       Form-level webhook — highest priority in the three-level chain (form > per-event > global). When set, this webhook
-      is always used for this form regardless of tracking settings. Requires url and/or use_visitor_token.
+      is always used for this form regardless of tracking settings. Requires a non-empty url.
   fields:
     type: object
     required: false
@@ -875,12 +875,9 @@ props:
         required: false
         description: Success message to display (if no url)
         example: Thanks! We'll contact you within 24 hours.
-      reload_entry:
+      reload_entry_fields:
         type: boolean
         required: false
-        description: >-
-          After submit success, invalidate the current entry page query in the background (non-blocking) so computed
-          fields refresh while success.url still runs.
     description: What happens after successful submission
   form_overrides:
     type: array
@@ -921,7 +918,7 @@ props:
           message:
             type: string
             required: false
-          reload_entry:
+          reload_entry_fields:
             type: boolean
             required: false
       tags:
@@ -936,17 +933,17 @@ props:
         properties:
           url:
             type: string
-            required: false
+            required: true
           method:
             type: string
             required: false
             options:
               - POST
               - GET
-          use_visitor_token:
-            type: boolean
+          headers:
+            type: object
             required: false
-          fail_on_error:
+          fail_silently:
             type: boolean
             required: false
       messages:

@@ -90,7 +90,8 @@ export interface OptimizationSettings {
 export interface WebhookConfig {
   url: string;
   method: "POST" | "GET";
-  auth_header?: string;
+  headers?: Record<string, string>;
+  fail_silently?: boolean;
 }
 
 export interface ConsentDefaults {
@@ -129,7 +130,8 @@ export interface ConversionEventEntry {
 export interface TrackingWebhook {
   url: string;
   method?: string;
-  auth_header?: string;
+  headers?: Record<string, string>;
+  fail_silently?: boolean;
 }
 
 /** GA4 BigQuery export connection (non-secret). Credentials via GCS_CREDENTIALS_JSON / GCS_KEY_FILENAME (same as media) or ADC. */
@@ -801,15 +803,38 @@ function loadSettings(contentRoot?: string): SiteSettings {
     const trackingRaw = parsed.tracking as Record<string, unknown> | undefined;
     const conversionEventsRaw = trackingRaw?.conversion_events;
 
+    const parseWebhookHeaders = (
+      w: Record<string, unknown>,
+    ): Record<string, string> | undefined => {
+      const out: Record<string, string> = {};
+      if (w.headers && typeof w.headers === "object" && !Array.isArray(w.headers)) {
+        for (const [k, v] of Object.entries(w.headers as Record<string, unknown>)) {
+          if (typeof k === "string" && k.trim() && typeof v === "string" && v) {
+            out[k.trim()] = v;
+          }
+        }
+      }
+      // Legacy auth_header → Authorization (read-only migration)
+      if (
+        typeof w.auth_header === "string" &&
+        w.auth_header.trim() &&
+        !Object.keys(out).some((k) => k.toLowerCase() === "authorization")
+      ) {
+        out.Authorization = w.auth_header.trim();
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    };
     const parseWebhookConfig = (raw: unknown): WebhookConfig | undefined => {
       if (!raw || typeof raw !== "object") return undefined;
       const w = raw as Record<string, unknown>;
       if (typeof w.url !== "string" || !w.url.trim()) return undefined;
       const method = w.method === "GET" ? "GET" : "POST";
+      const headers = parseWebhookHeaders(w);
       return {
         url: w.url.trim(),
         method,
-        ...(typeof w.auth_header === "string" && w.auth_header ? { auth_header: w.auth_header } : {}),
+        ...(headers ? { headers } : {}),
+        ...(w.fail_silently === true ? { fail_silently: true } : {}),
       };
     };
     const parseWebhook = (raw: unknown): TrackingWebhook | undefined => {
@@ -817,10 +842,12 @@ function loadSettings(contentRoot?: string): SiteSettings {
       const w = raw as Record<string, unknown>;
       if (typeof w.url !== "string" || !w.url.trim()) return undefined;
       const method = typeof w.method === "string" ? w.method : "POST";
+      const headers = parseWebhookHeaders(w);
       return {
         url: w.url.trim(),
         method,
-        ...(typeof w.auth_header === "string" && w.auth_header ? { auth_header: w.auth_header } : {}),
+        ...(headers ? { headers } : {}),
+        ...(w.fail_silently === true ? { fail_silently: true } : {}),
       };
     };
     const parseConsent = (raw: Record<string, unknown>): ConsentDefaults => {
@@ -1709,7 +1736,12 @@ export function updateOpenRushSettings(
 
 export function updateTrackingSettings(input: {
   conversion_events?: ConversionEventEntry[];
-  webhook?: { url: string; method?: string; auth_header?: string } | null;
+  webhook?: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    fail_silently?: boolean;
+  } | null;
   leads_expected_conversion_names?: string[];
   leads_expected_tags?: string[];
   bigquery?: Partial<TrackingBigQuerySettings>;
@@ -1767,10 +1799,19 @@ export function updateTrackingSettings(input: {
       if (e.tags && e.tags.length > 0) serialized.tags = e.tags;
       if (e.consent && Object.keys(e.consent).length > 0) serialized.consent = e.consent;
       if (e.webhook?.url?.trim()) {
+        const headers =
+          e.webhook.headers && Object.keys(e.webhook.headers).length > 0
+            ? Object.fromEntries(
+                Object.entries(e.webhook.headers).filter(
+                  ([k, v]) => typeof k === "string" && k.trim() && typeof v === "string" && v.trim(),
+                ),
+              )
+            : undefined;
         serialized.webhook = {
           url: e.webhook.url.trim(),
           method: e.webhook.method ?? "POST",
-          ...(e.webhook.auth_header?.trim() ? { auth_header: e.webhook.auth_header.trim() } : {}),
+          ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+          ...(e.webhook.fail_silently === true ? { fail_silently: true } : {}),
         };
       }
       if (e.success?.message?.trim() || e.success?.url?.trim()) {
@@ -1790,7 +1831,16 @@ export function updateTrackingSettings(input: {
       nextTracking.webhook = {
         url: input.webhook.url.trim(),
         method: input.webhook.method ?? "POST",
-        ...(input.webhook.auth_header ? { auth_header: input.webhook.auth_header.trim() } : {}),
+        ...(input.webhook.headers && Object.keys(input.webhook.headers).length > 0
+          ? {
+              headers: Object.fromEntries(
+                Object.entries(input.webhook.headers).filter(
+                  ([k, v]) => typeof k === "string" && k.trim() && typeof v === "string" && v.trim(),
+                ),
+              ),
+            }
+          : {}),
+        ...(input.webhook.fail_silently === true ? { fail_silently: true } : {}),
       };
     }
   }
