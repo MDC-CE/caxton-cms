@@ -28,7 +28,8 @@ export interface ConversionEventDefaults {
   webhook?: {
     url: string;
     method?: "POST" | "GET";
-    auth_header?: string;
+    headers?: Record<string, string>;
+    fail_silently?: boolean;
   };
   success?: {
     message?: string;

@@ -140,18 +140,29 @@ form_overrides:
         subtitle: You have already signed up…
         submit_label: Join
         submit_disabled: true   # optional — disables submit in this phase
-    webhook:
-      use_visitor_token: true
     success:
-      url: https://…/join
+      url: "https://…/join?token={{ visitor.token }}"
+  - conditions:
+      - entry_field_slug: event_started
+        value: "false"
+    webhook:
+      url: "https://…/checkin"
+      method: POST
+      headers:
+        Authorization: "Token {{ visitor.token }}"
+    success:
+      url: "#workshop-rsvp-success"
+      reload_entry_fields: true
 ```
 
 - **`form_field_slug`:** compare against a submitted form field (e.g. `program`).
 - **`entry_field_slug`:** bare entry field path looked up on `singleEntry` at match time (e.g. `event_started`). Do **not** use `{{ entry.* }}` here — section `resolveDeep` would replace the template before LeadForm runs. Listing `item_property_slug` is unrelated.
 - **`match_method: contains`:** substring on strings; membership on arrays of scalars/ids. Not deep object search.
-- **Condition `value`:** `resolveDeep` — literals or `{{ visitor.* }}` (logged-in auth profile). Logged out → unresolved → contains fails → normal form.
+- **Condition `value`:** `resolveDeep` — literals or `{{ visitor.* }}` (logged-in auth profile + `visitor.token`). Logged out → unresolved → contains fails → normal form.
 - **Order matters:** put already-registered overrides before generic live/upcoming.
-- **`webhook.fail_on_error`:** when true, delivery waits for upstream and the form does **not** show success on 502/network/non-2xx (default remains fire-and-forget).
+- **Webhook default is strict** (await upstream; 502 → no success UI). `webhook.fail_silently: true` = fire-and-forget.
+- **`webhook.headers`:** outbound headers; use `Authorization: "Token {{ visitor.token }}"` instead of removed `use_visitor_token`.
+- **`success.reload_entry_fields`:** invalidate entry page query after success so overrides re-resolve.
 - **Resolver:** `shared/resolveLeadFormOverride.ts`. Example: `stacked_with_routes.yml`. Detail: `explain_site` sections → Lead form form_overrides.
 
 ## Paths

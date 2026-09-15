@@ -8689,10 +8689,20 @@ export function SectionEditorPanel({
                 const rawSectionWebhookUrl = String(
                   getValueAtFieldPath(parsedSection, formProp("webhook.url")) ?? ""
                 );
-                const sectionUseVisitorToken =
+                const sectionHeadersRaw = getValueAtFieldPath(
+                  parsedSection,
+                  formProp("webhook.headers"),
+                );
+                const sectionHeaders =
+                  sectionHeadersRaw &&
+                  typeof sectionHeadersRaw === "object" &&
+                  !Array.isArray(sectionHeadersRaw)
+                    ? (sectionHeadersRaw as Record<string, string>)
+                    : {};
+                const sectionFailSilently =
                   getValueAtFieldPath(
                     parsedSection,
-                    formProp("webhook.use_visitor_token"),
+                    formProp("webhook.fail_silently"),
                   ) === true;
                 const storedConversionName = String(
                   getValueAtFieldPath(parsedSection, formProp("conversion_name")) ?? ""
@@ -8705,7 +8715,7 @@ export function SectionEditorPanel({
                     : "";
                 const globalWebhookUrl = trackingSettings?.webhook?.url ?? "";
                 const webhookSource: WebhookSource =
-                  rawSectionWebhookUrl || sectionUseVisitorToken
+                  rawSectionWebhookUrl
                   ? "section"
                   : eventWebhookUrl
                   ? "event"
@@ -8714,12 +8724,12 @@ export function SectionEditorPanel({
                   : "none";
                 const webhookHint =
                   webhookSource === "section"
-                    ? "This section overrides the event default and global webhook. Clear the URL to fall back to the next level. Use visitor login token for event check-in and to add ?token= on success redirects."
+                    ? "After submit we wait for this webhook. If it fails, the form shows an error. Clear the URL to fall back to the next level. Headers may use {{ visitor.token }} / {{ entry.* }}."
                     : webhookSource === "event"
                     ? "No section URL set — currently falling back to the event default. Enter a URL here to override it for this section only."
                     : webhookSource === "global"
                     ? "No section URL set — currently falling back to the global webhook. Enter a URL here to override it for this section only."
-                    : "No webhook configured at any level. Enter a URL and/or enable visitor login token.";
+                    : "No webhook configured at any level. Enter a URL to deliver leads from this form.";
                 const sectionSource = resolvedParsedSection ?? parsedSection ?? {};
                 const webhookSamplePayload = buildWebhookSamplePayload(
                   sectionSource,
@@ -8736,36 +8746,32 @@ export function SectionEditorPanel({
                         formProp("webhook.method")
                       ) as "POST" | "GET") ?? "POST"
                     }
-                    authHeader={String(
-                      getValueAtFieldPath(
-                        parsedSection,
-                        formProp("webhook.auth_header")
-                      ) ?? ""
-                    )}
-                    useVisitorToken={sectionUseVisitorToken}
+                    headers={sectionHeaders}
+                    failSilently={sectionFailSilently}
                     editing={webhookEditing}
                     onEditingChange={setWebhookEditing}
                     onChange={(field, value) => {
                       if (field === "url") {
-                        if (!value && !sectionUseVisitorToken) {
+                        if (!value) {
                           updatePropertyWithValue(formProp("webhook"), undefined);
-                        } else if (!value) {
-                          updatePropertyWithValue(formProp("webhook.url"), undefined);
                         } else {
                           updateProperty(formProp("webhook.url"), value as string);
                         }
                       } else if (field === "method") {
                         updateProperty(formProp("webhook.method"), value as string);
-                      } else if (field === "authHeader") {
-                        updateProperty(formProp("webhook.auth_header"), value as string);
-                      } else if (field === "useVisitorToken") {
+                      } else if (field === "headers") {
+                        const next = value as Record<string, string>;
+                        if (!next || Object.keys(next).length === 0) {
+                          updatePropertyWithValue(formProp("webhook.headers"), undefined);
+                        } else {
+                          updatePropertyWithValue(formProp("webhook.headers"), next);
+                        }
+                      } else if (field === "failSilently") {
                         if (value === true) {
-                          updateProperty(formProp("webhook.use_visitor_token"), true);
-                        } else if (!rawSectionWebhookUrl) {
-                          updatePropertyWithValue(formProp("webhook"), undefined);
+                          updateProperty(formProp("webhook.fail_silently"), true);
                         } else {
                           updatePropertyWithValue(
-                            formProp("webhook.use_visitor_token"),
+                            formProp("webhook.fail_silently"),
                             undefined,
                           );
                         }

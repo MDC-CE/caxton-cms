@@ -43,6 +43,20 @@ entries:
       - mcp-server/explain/relation-fields.md
       - mcp-server/explain/local_databases.md
       - mcp-server/explain/lead-forms.md
+    summary: "LeadForm webhook headers + fail_silently (strict default)"
+    agent_impact:
+      - "Webhook default is strict (await upstream; 502 → form error). Opt out with webhook.fail_silently: true (fire-and-forget)."
+      - "Auth via webhook.headers (e.g. Authorization: Token {{ visitor.token }}). Removed use_visitor_token, fail_on_error, auth_header. success.reload_entry → reload_entry_fields. Put ?token={{ visitor.token }} on success.url when needed."
+      - "visitor.token is in the LeadForm visitor bag (same as visitor.id). Re-bootstrap_agent for explain; reconnect not required for catalog."
+    paths:
+      - shared/component-registry/_common/schema.ts
+      - shared/webhookHeaders.ts
+      - shared/resolveLeadFormOverride.ts
+      - server/routes/webhooks.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/component-behaviors.md
+    tools_changed: false
   - date: "2026-09-15"
     summary: "list_entries refresh_tier empty match returns []"
     agent_impact:
