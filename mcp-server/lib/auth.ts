@@ -111,7 +111,7 @@ export async function fetchMcpAccess(username: string): Promise<McpAccessFlags> 
       mcp_write_enabled?: boolean;
     };
     const mcpReadEnabled = data.mcp_read_enabled !== false;
-    const mcpWriteEnabled = mcpReadEnabled && data.mcp_write_enabled !== false;
+    const mcpWriteEnabled = mcpReadEnabled && data.mcp_write_enabled === true;
     return { mcpReadEnabled, mcpWriteEnabled };
   } catch {
     return { mcpReadEnabled: false, mcpWriteEnabled: false };

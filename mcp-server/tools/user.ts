@@ -32,8 +32,10 @@ export function registerUserTools(
       "Returns: username, firstName, lastName, email, roles, capabilities, allowed_tools, " +
       "mcp_read_enabled, mcp_write_enabled (MCP-only overlay; CMS roles unchanged), " +
       "active_role (null on /mcp; role id on /mcp/role/:id), role_description. " +
-      "When mcp_write_enabled is false, capabilities are view-only and mutate tools are absent from allowed_tools. " +
+      "When mcp_write_enabled is false, capabilities are propose-only (view caps + proposals_create); " +
+      "direct mutate tools and proposals_review are absent from allowed_tools — use propose_change and author update_proposal. " +
       "When mcp_read_enabled is false, the connection is rejected before tools run. " +
+      "Missing write defaults to false (freestyle is an explicit allowlist); missing read defaults to true. " +
       "Note: metrics_view is read-only (diagnostics/insights/error log/conversions/tracking); it does not authorize content edits or job runs. " +
       "content_view authorizes YAML/component/explain reads only. Cursor's tool list updates on MCP reconnect/refresh after a role or MCP-access change.",
     {},
@@ -76,7 +78,7 @@ export function registerUserTools(
             ? profile.capabilities
             : [];
         const mcpReadEnabled = profile.mcp_read_enabled !== false;
-        const mcpWriteEnabled = mcpReadEnabled && profile.mcp_write_enabled !== false;
+        const mcpWriteEnabled = mcpReadEnabled && profile.mcp_write_enabled === true;
         const payload = {
           ...profile,
           // Session grants win when role-scoped (do not re-expand to all user roles).

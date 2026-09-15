@@ -6,7 +6,7 @@ describe("fetchMcpAccess", () => {
     vi.resetModules();
   });
 
-  it("treats missing flags as both enabled", async () => {
+  it("treats missing flags as read on and write off", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -17,7 +17,7 @@ describe("fetchMcpAccess", () => {
     const { fetchMcpAccess } = await import("./auth.js");
     await expect(fetchMcpAccess("alice")).resolves.toEqual({
       mcpReadEnabled: true,
-      mcpWriteEnabled: true,
+      mcpWriteEnabled: false,
     });
   });
 

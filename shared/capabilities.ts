@@ -299,3 +299,14 @@ export const VIEW_ONLY_CAPABILITIES: ReadonlySet<CapabilityName> = new Set([
   "content_view",
   "read_redirects",
 ]);
+
+/**
+ * Caps kept on MCP when write is off (propose-only overlay).
+ * Includes view-only plus proposals_create so agents can file/update their own
+ * proposals but not apply/reject or freestyle YAML (live or draft).
+ * Do not fold into VIEW_ONLY_CAPABILITIES — that set still drives CMS metrics gates.
+ */
+export const MCP_WRITE_OFF_CAPABILITIES: ReadonlySet<CapabilityName> = new Set([
+  ...VIEW_ONLY_CAPABILITIES,
+  "proposals_create",
+]);

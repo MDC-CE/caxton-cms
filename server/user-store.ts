@@ -20,6 +20,7 @@ import {
   ALL_CAPABILITIES,
   CONTENT_MUTATE_CAPABILITIES,
   VIEW_ONLY_CAPABILITIES,
+  MCP_WRITE_OFF_CAPABILITIES,
   getCapabilityScopeKind,
   type ScopedCapability,
   type GlobalCapability,
@@ -123,13 +124,14 @@ export interface UserRecord {
   githubLogin?: string;
   /**
    * MCP-only access overlay (CMS roles unchanged).
-   * Missing ⇒ both true. Write requires read (read off ⇒ write off).
+   * Missing read ⇒ on; missing write ⇒ off (freestyle is explicit allowlist).
+   * Write requires read (read off ⇒ write off).
    */
   mcpReadEnabled?: boolean;
   mcpWriteEnabled?: boolean;
 }
 
-/** Normalized MCP access flags (defaults: both on; write implies read). */
+/** Normalized MCP access flags (defaults: read on, write off; write implies read). */
 export interface McpAccess {
   mcpReadEnabled: boolean;
   mcpWriteEnabled: boolean;
@@ -931,16 +933,16 @@ export function getOrCreateStaffUserId(username: string, email?: string): string
   return id;
 }
 
-/** Normalize raw/missing MCP flags. Missing ⇒ both true; write requires read. */
+/** Normalize raw/missing MCP flags. Missing read ⇒ on; missing write ⇒ off; write requires read. */
 export function normalizeMcpAccess(
   user?: Pick<UserRecord, "mcpReadEnabled" | "mcpWriteEnabled"> | null,
 ): McpAccess {
   const mcpReadEnabled = user?.mcpReadEnabled !== false;
-  const mcpWriteEnabled = mcpReadEnabled && user?.mcpWriteEnabled !== false;
+  const mcpWriteEnabled = mcpReadEnabled && user?.mcpWriteEnabled === true;
   return { mcpReadEnabled, mcpWriteEnabled };
 }
 
-/** MCP access for a staff identity (defaults when user missing: both on). */
+/** MCP access for a staff identity (defaults when user missing: read on, write off). */
 export function getMcpAccess(username: string, email?: string): McpAccess {
   ensureLoaded();
   const found = findUserEntry(username, email);
@@ -972,26 +974,26 @@ export function setMcpAccess(
   return { ok: true, access: { mcpReadEnabled, mcpWriteEnabled } };
 }
 
-/** Apply MCP access overlay to a grant list (view-only intersect when write off). */
+/** Apply MCP access overlay (propose-only intersect when write off). */
 export function applyMcpAccessToGrants(
   grants: CapabilityGrant[],
   access: McpAccess,
 ): CapabilityGrant[] {
   if (!access.mcpReadEnabled) return [];
   if (!access.mcpWriteEnabled) {
-    return grants.filter((g) => VIEW_ONLY_CAPABILITIES.has(g.name));
+    return grants.filter((g) => MCP_WRITE_OFF_CAPABILITIES.has(g.name));
   }
   return grants;
 }
 
 /**
  * True when MCP may use this capability under the user's MCP access overlay.
- * Read off ⇒ false. Write off ⇒ only VIEW_ONLY_CAPABILITIES.
+ * Read off ⇒ false. Write off ⇒ only MCP_WRITE_OFF_CAPABILITIES.
  */
 export function mcpAccessAllowsCapability(access: McpAccess, capName: string): boolean {
   if (!access.mcpReadEnabled) return false;
   if (!access.mcpWriteEnabled) {
-    return VIEW_ONLY_CAPABILITIES.has(capName as CapabilityName);
+    return MCP_WRITE_OFF_CAPABILITIES.has(capName as CapabilityName);
   }
   return true;
 }

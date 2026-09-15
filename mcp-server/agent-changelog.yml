@@ -6,6 +6,19 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "MCP write-off is propose-only; write defaults off"
+    agent_impact:
+      - "mcp_write_enabled false (default when unset) keeps view caps + proposals_create only — propose_change and author update_proposal; no direct draft/live tools; no proposals_review apply/reject over MCP."
+      - "Freestyle MCP writes require Security → Users MCP write on. Apply via a write-enabled reviewer or staff Proposals UI. Reconnect MCP after access changes; check get_current_user."
+    tools_changed: false
+    paths:
+      - shared/capabilities.ts
+      - server/user-store.ts
+      - mcp-server/lib/auth.ts
+      - mcp-server/tools/user.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/README.md
+  - date: "2026-09-15"
     summary: "Proposal escalated flag (steward hold)"
     agent_impact:
       - "Staff Platform Steward can escalate a proposal in the UI (required note). Status stays open|partial; escalated=true freezes ALL MCP update_proposal actions until release."

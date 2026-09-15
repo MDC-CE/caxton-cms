@@ -4,6 +4,8 @@ Agents and staff can **propose** entry field changes or **idea** briefs when the
 
 **Identity:** Mutating MCP requires a **role connector** (`/mcp/role/…`), `agent_session` start with exact `model` (`provider/model`), and `agent_session_id` on every mutate. Four-eyes and claims compare **username + role** (staff UI is separate). Exact model is stored for observability.
 
+**MCP write overlay:** When `mcp_write_enabled` is false (default if unset), the catalog keeps view caps + `proposals_create` only — use `propose_change` and the author `update_proposal` toolkit. Direct draft/live tools and `proposals_review` (apply/reject/accept) are stripped; a write-enabled reviewer over MCP or staff Proposals UI must apply. Check `get_current_user`.
+
 Agentic swarm role connectors may write **drafts** freely, may write **live** only with an active same-locale issue claim (same human+role), and must use proposals (not MCP promote/create) to go live — see agent-conventions §2.
 
 ## Tools (exactly 4)

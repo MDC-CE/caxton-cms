@@ -333,7 +333,7 @@ interface UserRecord {
 
 function normalizeUserMcpAccess(user: UserRecord): { mcpReadEnabled: boolean; mcpWriteEnabled: boolean } {
   const mcpReadEnabled = user.mcpReadEnabled !== false;
-  const mcpWriteEnabled = mcpReadEnabled && user.mcpWriteEnabled !== false;
+  const mcpWriteEnabled = mcpReadEnabled && user.mcpWriteEnabled === true;
   return { mcpReadEnabled, mcpWriteEnabled };
 }
 
@@ -1940,7 +1940,9 @@ function UsersTab() {
               >
                 <p className="font-medium text-foreground text-sm">MCP access on each user</p>
                 <p>
-                  MCP read lets agents look up and explain content. MCP write lets agents change content.
+                  MCP read lets agents look up and explain content. MCP write lets agents change
+                  content directly (drafts and live). When write is off, agents may only file and
+                  update proposals — someone with write on, or the Proposals screen, applies them.
                   These toggles do not change what the person can do in the CMS.
                 </p>
                 <details className="group">
@@ -1950,14 +1952,17 @@ function UsersTab() {
                   </summary>
                   <div className="pt-2 space-y-1.5">
                     <p>
-                      Write-off keeps only view capabilities for MCP:{" "}
+                      Write-off keeps MCP propose-only capabilities:{" "}
                       <code className="font-mono text-[11px]">content_view</code>,{" "}
                       <code className="font-mono text-[11px]">metrics_view</code>,{" "}
-                      <code className="font-mono text-[11px]">read_redirects</code>.
+                      <code className="font-mono text-[11px]">read_redirects</code>,{" "}
+                      <code className="font-mono text-[11px]">proposals_create</code>. Direct edit
+                      tools and <code className="font-mono text-[11px]">proposals_review</code>{" "}
+                      (apply/reject) are stripped — including draft freestyle.
                     </p>
                     <p>
                       Enforced on MCP requests via the server secret; CMS login and roles are unchanged.
-                      Missing flags default to both on.
+                      Missing read defaults on; missing write defaults off (freestyle is an allowlist).
                     </p>
                   </div>
                 </details>
@@ -2018,8 +2023,8 @@ function UsersTab() {
                       </Badge>
                     )}
                     {mcpReadEnabled && !mcpWriteEnabled && (
-                      <Badge variant="secondary" className="text-xs" data-testid={`badge-mcp-read-only-${user.username}`}>
-                        MCP read only
+                      <Badge variant="secondary" className="text-xs" data-testid={`badge-mcp-propose-only-${user.username}`}>
+                        MCP propose only
                       </Badge>
                     )}
                   </div>
