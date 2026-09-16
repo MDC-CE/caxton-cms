@@ -15,6 +15,39 @@ entries:
       - shared/component-registry/_common/schema.ts
       - mcp-server/explain/lead-forms.md
     tools_changed: false
+  - date: "2026-09-16"
+    summary: "explain topic serp-title-description-proposals — CTR SERP playbook"
+    agent_impact:
+      - "New explain_site topic serp-title-description-proposals: author + reviewer playbook for meta.page_title / meta.description (review_situations serp_title_description; checklist title_description_ctr)."
+      - "prefer review_situations:[\"serp_title_description\"] on SERP-only packets; sister of internal-links-proposals. Reconnect MCP for updated explain_site / propose_change hints."
+      - "Churn: SERP-only + same-field recent write → reject duplicate_weaker; mixed → revise_entries drop SERP then apply body."
+    tools_changed: true
+    paths:
+      - mcp-server/explain/serp-title-description-proposals.md
+      - mcp-server/tools/explain.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/overview.md
+      - mcp-server/explain/internal-links-proposals.md
+      - server/content-proposals/review-situations.ts
+      - scripts/stress/scenarios.ts
+      - shared/ask-agent-prompts/organic-low-ctr.md
+  - date: "2026-09-16"
+    summary: "Review situations catalog — declare or infer packs for proposal review"
+    agent_impact:
+      - "Edits propose_change accepts optional review_situations[] (internal_links, serp_title_description, body_copy_edit, selling_figures, new_public_content, promote_draft). Empty → infer from ops; multi packs reviewed independently; per-situation ship via revise_entries then apply."
+      - "update_proposal set_review_situations (authors). list_proposals review_context includes review_situations + situation_source. explain topics review-situations and internal-links-proposals. Reconnect MCP."
+      - "Hub link packets: prefer review_situations:[\"internal_links\"] — checklist scores facts/claims/links/force, not punchier copy."
+    tools_changed: true
+    paths:
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-context.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/internal-links-proposals.md
   - date: "2026-09-15"
     summary: "LeadForm hidden fields → lead body + GTM (hybrid wire)"
     agent_impact:

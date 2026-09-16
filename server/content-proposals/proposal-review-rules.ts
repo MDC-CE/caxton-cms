@@ -25,6 +25,7 @@ export type ChecklistId =
   | "notes_close"
   | "review_mode_inert"
   | "title_description_ctr"
+  | "internal_links"
   | "verify_copy"
   | "adjacent_findings"
   | "disposition"
@@ -42,6 +43,10 @@ export const MIXED_SERP_AND_BODY = "mixed_serp_and_body";
 /** Staff always-visible line when title_description_ctr is active (no "CTR" wording). */
 export const TITLE_DESCRIPTION_STAFF_NOTE =
   "Also check search title/description — honest and not worse than live.";
+
+/** Staff always-visible line when internal_links checklist is active. */
+export const INTERNAL_LINKS_STAFF_NOTE =
+  "Also check hub links — facts and locale targets intact, not punchier prose.";
 
 /** v1 stopgap — extend until strategy.selling (or similar) exists. */
 export const SELLING_CONTENT_TYPES = new Set([
@@ -211,6 +216,25 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     ],
     priority: 25,
   },
+  internal_links: {
+    id: "internal_links",
+    title: "Hub / internal links vs live",
+    why: "Raise hub visibility with honest same-locale links — not punchier copy. Forced pitch is polish; deleted facts are not.",
+    look_for: [
+      "score only: facts intact, no new unsupported claims, each new href exists + correct locale + topical hub/pillar/sibling, force (anchors on existing phrases vs minted CTAs)",
+      "facts: live numbers, years, employers, sources still present in proposed body",
+      "claims: no new salary/ranking/mejor/headcount the live article does not already support",
+      "links: destinations exist, same locale as the article, hub/pillar or in-cluster sibling — not broken placeholders or money-page spray",
+      "force: one link per idea is fine; sales sentence minted only to carry the link → add_blocker (wrap existing phrase; delete the pitch)",
+      "if gates 1–3 pass, apply even if prose is a bit wooden — do not reject as weaker-than-live copy",
+      "title/description also pending → leave-live on SERP (revise_entries to drop those ops) then apply body; do not reject the whole packet for the links",
+      "ops vs live only — ignore staff summary / Titulo/Meta blurb; never block because summary wording ≠ ops",
+      "same-field link churn already shipped + live not broken → leave live or reject duplicate_weaker; unrelated body/CTA writes alone ≠ reject",
+      "out-of-scope live defects → adjacent_findings notes; do not block apply",
+      "per-situation ship: failing packs' ops must be dropped or fixed via revise_entries before apply (apply is atomic)",
+    ],
+    priority: 28,
+  },
   verify_copy: {
     id: "verify_copy",
     title: "Check proposed fields against live",
@@ -220,6 +244,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "summary why/scope justified by ops (e.g. content refresh with meta-only → add_blocker)",
       "do not require the summary to paste proposed values",
       "no invented stats in the proposed text",
+      "when multiple review situations are active: score each pack's owned fields independently; drop or fix failing packs via revise_entries before apply",
     ],
     priority: 30,
   },
@@ -247,6 +272,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     why: "After optional research, decide apply, reject, add_blocker, or park adjacent notes.",
     look_for: [
       "apply only when every in-scope gate is clean and you would ship this yourself",
+      "multi-situation: review each pack independently; pass packs wait until failing packs' ops are dropped or fixed via revise_entries, then apply (atomic)",
       "title/description leave-live or block while other ops are fine → revise_entries to drop/fix SERP ops, then apply (no partial-field apply)",
       "same-field SERP churn after recent title/description writes + live not broken → reject duplicate_weaker (SERP-only) or revise_entries to drop SERP ops then apply (mixed); unrelated recent writes alone ≠ reject",
       "add_blocker when the proposed change is wrong or invents claims (then author revise_entries)",

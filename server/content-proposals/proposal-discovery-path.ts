@@ -7,6 +7,7 @@ import { parseContentTypeStrategy, type ContentTypeStrategy } from "../../shared
 import { TOOL_GATES } from "../../shared/mcp-tool-catalog.js";
 import { buildEntryKey } from "../../scripts/validation/shared/entryKey.js";
 import { hasTitleDescriptionOps } from "./proposal-review-rules.js";
+import { discoveryContentLookForForSituations, type ReviewSituationId } from "./review-situations.js";
 
 export type DiscoveryPathThinkItem = {
   kind: "think";
@@ -162,6 +163,7 @@ export type ReviewContextForDiscovery = {
   damage_class?: string;
   block_apply?: boolean;
   situation_changed_since_filed?: boolean;
+  review_situations?: string[];
   agent_preview?: {
     think_items?: AgentPreviewThink[];
     warnings?: DiscoveryWarning[];
@@ -322,6 +324,8 @@ export function buildEditsDiscoveryToolItems(opts: {
   entry?: { contentType: string; slug: string; locale?: string; variant?: string | null } | null;
   prioritizeActivity?: boolean;
   activityEntry?: ProposalDiscoveryEntry | null;
+  /** Extra look_for lines prepended on get_entry_content (situation overlays). */
+  contentLookFor?: string[];
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -334,9 +338,19 @@ export function buildEditsDiscoveryToolItems(opts: {
 
   const activityHint = activityArgsHint(activityEntry ?? (entry as ProposalDiscoveryEntry | null));
 
-  const core = CORE_EDITS_TOOLS.map((t) =>
-    t.id === "recent_writes" ? toToolItem(t, allowed, activityHint) : toToolItem(t, allowed),
-  );
+  const core = CORE_EDITS_TOOLS.map((t) => {
+    if (t.id === "recent_writes") return toToolItem(t, allowed, activityHint);
+    if (t.id === "preview_content" && opts.contentLookFor?.length) {
+      return toToolItem(
+        {
+          ...t,
+          look_for: [...opts.contentLookFor, ...t.look_for],
+        },
+        allowed,
+      );
+    }
+    return toToolItem(t, allowed);
+  });
 
   let items: DiscoveryPathToolItem[];
   if (prioritizeActivity) {
@@ -545,12 +559,17 @@ export function buildProposalDiscoveryPath(
   if (kind === "edits" && !reviewContext?.block_apply) {
     const pendingFieldPaths = collectPendingFieldPaths(proposal);
     const hasSerp = hasTitleDescriptionOps(proposal.entries ?? []);
+    const situations = (reviewContext?.review_situations ?? []) as ReviewSituationId[];
+    const contentLookFor = discoveryContentLookForForSituations(situations);
     const pending = pendingEntries(proposal);
     const gateWriteCount = pending.reduce(
       (s, e) => s + activityWriteCountForEntry(e, recentActivity),
       0,
     );
-    const prioritizeActivity = hasSerp || gateWriteCount > 0;
+    const prioritizeActivity =
+      hasSerp ||
+      situations.includes("serp_title_description") ||
+      gateWriteCount > 0;
 
     const hottest = pickHottestPendingEntry(proposal, recentActivity);
     const first = pending[0] ?? proposal.entries?.[0] ?? null;
@@ -567,6 +586,7 @@ export function buildProposalDiscoveryPath(
         : null,
       prioritizeActivity,
       activityEntry: hottest,
+      contentLookFor,
     });
     tools = built.items;
     if (built.anyCapped) {

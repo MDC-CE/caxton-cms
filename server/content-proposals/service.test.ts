@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
-import { clearSiteSqliteCacheForTests } from "../db";
+import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
 import { fingerprintEdits, fingerprintNotes } from "./fingerprint";
 import {
@@ -538,6 +538,67 @@ describe("content proposals", () => {
     });
     expect(combined.total).toBe(1);
     expect(combined.proposals[0]!.id).toBe(copyEditor.ok ? copyEditor.proposal.id : "");
+  });
+
+  it("listRecentProposers uses updated_at window and dedupes case-insensitively", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+
+    const recent = await svc.create(
+      {
+        title: "Recent proposer",
+        summary,
+        entries: [sampleEntry({ slug: "recent-post" })],
+      },
+      { username: "Alice@4geeks.com", actor: { type: "ui" } },
+    );
+    expect(recent.ok).toBe(true);
+
+    const alsoRecent = await svc.create(
+      {
+        title: "Also recent",
+        summary,
+        entries: [sampleEntry({ slug: "also-recent" })],
+      },
+      { username: "bob@4geeks.com", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(alsoRecent.ok).toBe(true);
+
+    const stale = await svc.create(
+      {
+        title: "Stale proposer",
+        summary,
+        entries: [sampleEntry({ slug: "stale-post" })],
+      },
+      { username: "carol@4geeks.com", actor: { type: "ui" } },
+    );
+    expect(stale.ok).toBe(true);
+
+    const db = getSiteSqlite(SITE);
+    const staleMs = Date.now() - 40 * 24 * 60 * 60 * 1000;
+    db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(
+      staleMs,
+      stale.ok ? stale.proposal.id : "",
+    );
+
+    // Same person, different casing — should collapse to one entry.
+    const dupCase = await svc.create(
+      {
+        title: "Dup case",
+        summary,
+        entries: [sampleEntry({ slug: "dup-case" })],
+      },
+      { username: "alice@4geeks.com", actor: { type: "ui" } },
+    );
+    expect(dupCase.ok).toBe(true);
+
+    const proposers = svc.listRecentProposers({ days: 30 });
+    expect(proposers.map((u) => u.toLowerCase()).sort()).toEqual([
+      "alice@4geeks.com",
+      "bob@4geeks.com",
+    ]);
+    expect(proposers.some((u) => u.toLowerCase() === "carol@4geeks.com")).toBe(false);
   });
 
   it("enforces one open proposal per variant", async () => {

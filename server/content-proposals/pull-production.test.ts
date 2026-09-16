@@ -51,6 +51,7 @@ function sampleSnapshot(overrides: Partial<ProposalRecord> = {}): ProposalRecord
     closed_by: null,
     closed_at: null,
     related_entries: [],
+    review_situations: [],
     review_context_snapshot: null,
     decision_debug: null,
     supersedes_proposal_id: null,

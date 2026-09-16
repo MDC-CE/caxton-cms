@@ -410,6 +410,44 @@ describe("buildProposalDiscoveryPath", () => {
       expect(serp.look_for.some((l) => /get_entry_activity/i.test(l))).toBe(true);
     }
   });
+
+  it("internal_links situation prepends href look_for on get_entry_content", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "x",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "content", value: "linked" }],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "existing_content",
+        review_situations: ["internal_links"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "internal_links",
+              title: "Hub links",
+              why: "Facts and locale",
+              look_for: ["facts intact"],
+            },
+          ],
+        },
+      },
+    });
+    const preview = discovery_path!.items.find((i) => i.kind === "tool" && i.id === "preview_content");
+    expect(preview?.kind).toBe("tool");
+    if (preview?.kind === "tool") {
+      expect(preview.look_for.some((l) => /added \[text\]\(href\)/i.test(l))).toBe(true);
+      expect(preview.look_for.some((l) => /locale/i.test(l))).toBe(true);
+    }
+  });
 });
 
 describe("assertCatalogToolNames", () => {

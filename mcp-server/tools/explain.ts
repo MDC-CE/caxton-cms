@@ -32,6 +32,9 @@ const VALID_TOPICS = [
   "redirects",
   "proposals",
   "reading-proposals",
+  "review-situations",
+  "internal-links-proposals",
+  "serp-title-description-proposals",
   "analytics",
 ] as const;
 type Topic = (typeof VALID_TOPICS)[number];
@@ -64,9 +67,15 @@ const TOPIC_DESC: Record<string, string> = {
   redirects:
     "CMS 301/302: two stores, first-match, test_redirect (read_redirects) + update_redirect (edit_redirects), before_from custom-only",
   proposals:
-    "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first",
+    "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first; optional review_situations",
   "reading-proposals":
-    "review_context damage/undo axes, checklist IDs incl. adjacent_findings, three disposition lanes, create refuses, target_missing apply block, discovery_path",
+    "review_context damage/undo axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses, target_missing apply block, discovery_path",
+  "review-situations":
+    "Catalog of review_situations ids for edits proposals; infer-when-empty; per-situation ship; links to author guides",
+  "internal-links-proposals":
+    "Author + reviewer playbook for hub/internal link body packets (review_situations internal_links)",
+  "serp-title-description-proposals":
+    "Author + reviewer playbook for SERP title/description packets (review_situations serp_title_description; checklist title_description_ctr)",
   analytics:
     "GA4 BigQuery reports via get_analytics_report; vs get_organic_traffic (GSC) and get_product_funnel_analytics (journey)",
 };
@@ -393,8 +402,11 @@ export function registerExplainTools(
       "'relation-fields' (relation editor, authors CT, listing vs hydrate, delete_entries reassign), " +
       "'lead-forms' (catalog source.content_type/database/related_field, required value_path/label_path, required query on ecommerce catalogs, purchasable vs actively_selling), " +
       "'redirects' (CMS 301/302, two stores, test_redirect / read_redirects, update_redirect / edit_redirects, first-match), " +
-      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity), " +
-      "'reading-proposals' (review_context axes, checklist IDs incl. adjacent_findings, three disposition lanes, create refuses, target_missing apply block), " +
+      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity; optional review_situations), " +
+      "'reading-proposals' (review_context axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses, target_missing apply block), " +
+      "'review-situations' (catalog of review_situations ids; infer-when-empty; per-situation ship), " +
+      "'internal-links-proposals' (hub/internal link author + reviewer playbook), " +
+      "'serp-title-description-proposals' (SERP title/description author + reviewer playbook), " +
       "'analytics' (GA4 BigQuery get_analytics_report; vs get_organic_traffic GSC and get_product_funnel_analytics). " +
       "Requires content_view. " +
       "Calling an unknown topic returns a clear error listing the valid options. " +
@@ -403,7 +415,7 @@ export function registerExplainTools(
       topic: z
         .string()
         .describe(
-          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, reading-proposals, analytics.",
+          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, reading-proposals, review-situations, internal-links-proposals, serp-title-description-proposals, analytics.",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },

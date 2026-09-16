@@ -23,6 +23,7 @@ describe("allowedProposalUpdateActions", () => {
     expect(a.has("withdraw")).toBe(true);
     expect(a.has("attach_variant")).toBe(true);
     expect(a.has("revise_entries")).toBe(true);
+    expect(a.has("set_review_situations")).toBe(true);
     expect(a.has("apply")).toBe(false);
     expect(a.has("reject")).toBe(false);
     expect(a.has("accept")).toBe(false);
@@ -30,9 +31,10 @@ describe("allowedProposalUpdateActions", () => {
     expect(a.size).toBe(PROPOSAL_AUTHOR_ACTIONS.length);
   });
 
-  it("review-only cannot revise_entries", () => {
+  it("review-only cannot revise_entries or set_review_situations", () => {
     const a = allowedProposalUpdateActions(false, true);
     expect(a.has("revise_entries")).toBe(false);
+    expect(a.has("set_review_situations")).toBe(false);
     expect(a.has("reject")).toBe(true);
   });
 

@@ -35,6 +35,11 @@ import {
 } from "./review-context";
 import type { ExistenceState } from "./proposal-review-rules";
 import {
+  parseReviewSituationIds,
+  refreshSituationsAfterRevise,
+  type ReviewSituationId,
+} from "./review-situations";
+import {
   buildDecisionDebug,
   type ProposalDecisionDebug,
 } from "./decision-debug";
@@ -195,6 +200,8 @@ export type ProposalRecord = {
   related_entries: RelatedEntryRef[];
   entries: ProposalEntryRow[];
   blockers: ProposalBlocker[];
+  /** Author-declared review situation ids (edits). Empty → infer on classify. */
+  review_situations: string[];
   /** Snapshot JSON for list badges — persisted. */
   review_context_snapshot: Record<string, unknown> | null;
   /** Staff-only freeze of checklist/menu at terminal decide — persisted. */
@@ -252,6 +259,8 @@ export type ProposalSummary = {
   closed_by: string | null;
   closed_at: number | null;
   related_entries: RelatedEntryRef[];
+  /** Author-declared review situation ids (edits triage). */
+  review_situations: string[];
   review_context_snapshot: Record<string, unknown> | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
@@ -302,6 +311,7 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     closed_by: record.closed_by,
     closed_at: record.closed_at,
     related_entries: record.related_entries,
+    review_situations: record.review_situations ?? [],
     review_context_snapshot: record.review_context_snapshot,
     supersedes_proposal_id: record.supersedes_proposal_id,
     replaced_by_proposal_id: record.replaced_by_proposal_id,
@@ -352,6 +362,7 @@ type ProposalRow = {
   closed_by: string | null;
   closed_at: number | null;
   related_entries_json: string | null;
+  review_situations_json?: string | null;
   review_context_snapshot_json: string | null;
   decision_debug_json?: string | null;
   supersedes_proposal_id: string | null;
@@ -407,6 +418,11 @@ export type CreateProposalInput = {
   related_entries?: RelatedEntryRef[];
   /** Optional: link a replacement to a rejected/withdrawn predecessor. */
   supersedes_proposal_id?: string;
+  /**
+   * Optional author-declared review situations (edits only).
+   * Empty/omit → classifier infers from pending ops. Unknown ids fail create.
+   */
+  review_situations?: string[];
 };
 
 export type SimilarProposal = { id: string; title: string; score: number };
@@ -426,6 +442,7 @@ export type ProposalUpdateAction =
   | "set_no_auto_retry"
   | "accept"
   | "revise_entries"
+  | "set_review_situations"
   | "escalate"
   | "deescalate";
 
@@ -457,6 +474,8 @@ export type ProposalUpdateCaller = {
   reject_kind?: string;
   /** revise_entries: replacement pending entry set. */
   entries?: ProposalEntryInput[];
+  /** set_review_situations: author-declared situation ids (edits). */
+  review_situations?: string[];
   /** escalate: required steward note (min MIN_CLOSE_NOTE). */
   escalated_note?: string;
 };
@@ -586,6 +605,7 @@ function mapProposal(
     closed_by: row.closed_by ?? null,
     closed_at: row.closed_at ?? null,
     related_entries: parseJson(row.related_entries_json ?? null, [] as RelatedEntryRef[]),
+    review_situations: parseJson(row.review_situations_json ?? null, [] as string[]),
     review_context_snapshot: parseJson(row.review_context_snapshot_json ?? null, null as Record<
       string,
       unknown
@@ -1269,6 +1289,28 @@ export function createProposalService(deps: ProposalServiceDeps) {
     };
   }
 
+  /** Distinct proposers with a proposal touched in the last `days` (by updated_at). */
+  function listRecentProposers(opts?: { days?: number; limit?: number }): string[] {
+    const days = Math.min(Math.max(opts?.days ?? 30, 1), 365);
+    const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 500);
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const db = dbFor(site);
+    const rows = db
+      .prepare(
+        `SELECT proposer_username AS username
+         FROM content_proposals
+         WHERE site = ?
+           AND proposer_username IS NOT NULL
+           AND TRIM(proposer_username) != ''
+           AND updated_at >= ?
+         GROUP BY LOWER(proposer_username)
+         ORDER BY MAX(updated_at) DESC, LOWER(proposer_username) ASC
+         LIMIT ?`,
+      )
+      .all(site, since, limit) as Array<{ username: string }>;
+    return rows.map((r) => r.username).filter((u) => Boolean(u?.trim()));
+  }
+
   function exportAll(): ProposalRecord[] {
     return exportAllProposals(site);
   }
@@ -1415,6 +1457,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
     } else {
       kind = "notes";
     }
+    let filedReviewSituations: ReviewSituationId[] = [];
+
+    if (kind !== "edits" && (input.review_situations?.length ?? 0) > 0) {
+      return {
+        ok: false,
+        code: "review_situations_edits_only",
+        error: "review_situations is only valid on edits proposals (not notes or ideas).",
+      };
+    }
 
     if (input.kind === "idea" && (entriesIn.length > 0 || promote_on_apply)) {
       return {
@@ -1471,6 +1522,16 @@ export function createProposalService(deps: ProposalServiceDeps) {
           return { ok: false, code: "updates_required", error: `Entry ${e.contentType}/${e.slug} has no field updates` };
         }
       }
+
+      const situationsParse = parseReviewSituationIds(input.review_situations ?? []);
+      if (!situationsParse.ok) {
+        return {
+          ok: false,
+          code: "invalid_review_situations",
+          error: situationsParse.error,
+        };
+      }
+      filedReviewSituations = situationsParse.ids;
 
       // Existence + mixed risk + competing entry
       const classTargets: Array<{
@@ -1769,8 +1830,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
         documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
-        review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
+        review_situations_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -1797,6 +1859,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       null,
       supersedesId,
       null,
+      JSON.stringify(filedReviewSituations),
     );
 
     if (supersedesId) {
@@ -2224,6 +2287,47 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return { ok: true, proposal: get(id)! };
     }
 
+    if (action === "set_review_situations") {
+      if (proposal.kind !== "edits") {
+        return {
+          ok: false,
+          code: "wrong_kind",
+          error: "set_review_situations is for edits proposals only",
+        };
+      }
+      if (proposal.status !== "open" && proposal.status !== "partial") {
+        return { ok: false, code: "closed", error: "Cannot change situations on a closed proposal" };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may set review situations",
+        };
+      }
+      const parsed = parseReviewSituationIds(caller.review_situations ?? []);
+      if (!parsed.ok) {
+        return { ok: false, code: "invalid_review_situations", error: parsed.error };
+      }
+      db.prepare(
+        `UPDATE content_proposals SET review_situations_json = ?, updated_at = ? WHERE id = ?`,
+      ).run(JSON.stringify(parsed.ids), now, id);
+      const after = getRaw(id)!;
+      classifyLive(after, { refreshSnapshot: true });
+      emitProposalEvent(site, "proposal_review_situations_set", id, caller.username, {
+        review_situations: parsed.ids,
+      });
+      return { ok: true, proposal: get(id)! };
+    }
+
     if (action === "revise_entries") {
       if (proposal.kind !== "edits") {
         return {
@@ -2531,6 +2635,19 @@ export function createProposalService(deps: ProposalServiceDeps) {
         `UPDATE content_proposals SET fingerprint = ?, search_text = ?, updated_at = ? WHERE id = ?`,
       ).run(fingerprint, searchBlob, now, id);
 
+      const afterOps = getRaw(id)!;
+      const priorDeclared = (afterOps.review_situations ?? []) as ReviewSituationId[];
+      const refreshed = refreshSituationsAfterRevise(priorDeclared, afterOps.entries, {
+        summary: afterOps.summary,
+        title: afterOps.title,
+        promoteOnApply: afterOps.promote_on_apply,
+      });
+      // Store author-declared ids that still own remaining ops (inferred extras stay live-only).
+      const stillDeclared = refreshed.situations.filter((s) => priorDeclared.includes(s));
+      db.prepare(
+        `UPDATE content_proposals SET review_situations_json = ?, updated_at = ? WHERE id = ?`,
+      ).run(JSON.stringify(stillDeclared), now, id);
+
       const after = getRaw(id)!;
       persistRollup(db, after);
       classifyLive(after, { refreshSnapshot: true });
@@ -2547,6 +2664,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
             message:
               "Open needs-changes still block apply. Resolve each blocker after fixing, then re-preview before apply.",
           },
+          ...refreshed.warnings,
         ],
       };
     }
@@ -2946,7 +3064,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
-  return { get, list, stats, exportAll, create, update, classifyLive };
+  return { get, list, stats, listRecentProposers, exportAll, create, update, classifyLive };
 }
 
 /** Full site dump for production → local pull (includes entries + blockers). */
@@ -2993,8 +3111,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       created_agent_session_id, promote_on_apply, no_auto_retry,
       close_reason, close_note, closed_by, closed_at, related_entries_json,
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-      escalated, escalated_at, escalated_by, escalated_note, decision_debug_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      escalated, escalated_at, escalated_by, escalated_note, decision_debug_json,
+      review_situations_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -3056,6 +3175,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.escalated_by ?? null,
         p.escalated_note ?? null,
         p.decision_debug ? JSON.stringify(p.decision_debug) : null,
+        JSON.stringify(p.review_situations ?? []),
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

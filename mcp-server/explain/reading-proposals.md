@@ -4,7 +4,7 @@ When you open a single open/partial proposal via `list_proposals(proposal_id)`, 
 
 List rows may include a **`review_context_snapshot`** (filed-at-create or last shape-change hint). Prefer live `review_context` for decisions.
 
-**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
+**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. Author-declared **`review_situations`** (optional) plus inferred packs drive which checklists fire — see **`explain` topic `review-situations`**. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
 
 **Role split:** proposers optimize opportunity (CTR / query fit) via create skills; reviewers use checklists to stop **harm** (invented claims, query drops, false scope) — not to rewrite for punchier copy.
 
@@ -29,8 +29,9 @@ Selling content types (`landing` / `landings` / `program` / `programs`) always c
 | `idea_accept` | Always on ideas |
 | `notes_close` | Notes kind |
 | `review_mode_inert` | Notes/idea (apply does not write YAML) |
-| `title_description_ctr` | Any remaining op on `meta.page_title` and/or `meta.description` — SERP harm scorecard (Query/Specifics/Claims). Stacks with other checklists; meta-only omits `verify_copy` |
-| `verify_copy` | Edits with non–title/desc fields (or no SERP ops) — proposed vs live; summary **why/scope** (not value paste-match) |
+| `title_description_ctr` | Any remaining op on `meta.page_title` and/or `meta.description` — SERP harm scorecard (Query/Specifics/Claims). Stacks with other checklists; meta-only omits `verify_copy`. Playbook: `explain` topic `serp-title-description-proposals` |
+| `internal_links` | Declared or inferred hub/internal-link body packs — facts/claims/links/force gates; apply if wooden; see `explain` topic `internal-links-proposals` |
+| `verify_copy` | Edits with non–title/desc fields (or no SERP ops) when not link-only — proposed vs live; summary **why/scope** (not value paste-match) |
 | `adjacent_findings` | Edits on existing live pages (`existing_metadata` / `existing_content` / `selling_page`) when apply is not blocked |
 | `disposition` | Baseline edits — apply / reject / blocker / adjacent notes park; leave-live on SERP → revise_entries then apply |
 | `existence_unknown` | Lookup could not confirm existence |

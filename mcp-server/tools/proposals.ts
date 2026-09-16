@@ -57,6 +57,7 @@ export const PROPOSAL_AUTHOR_ACTIONS = [
   "attach_variant",
   "set_no_auto_retry",
   "revise_entries",
+  "set_review_situations",
 ] as const;
 
 export const PROPOSAL_ALL_UPDATE_ACTIONS = [
@@ -74,6 +75,7 @@ export const PROPOSAL_ALL_UPDATE_ACTIONS = [
   "reopen_blocker",
   "set_no_auto_retry",
   "revise_entries",
+  "set_review_situations",
 ] as const;
 
 export type ProposalUpdateActionName = (typeof PROPOSAL_ALL_UPDATE_ACTIONS)[number];
@@ -165,6 +167,9 @@ export function registerProposalTools(
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
       "Do not use notes for new-spoke pitches — use kind idea. " +
       "Optional related_entries for idea context (slug need not exist yet). " +
+      "Edits: optional review_situations[] (catalog ids — see explain_site topic review-situations). Empty → reviewer infers from ops. " +
+      "Hub/internal links → prefer review_situations:[\"internal_links\"] and explain topic internal-links-proposals. " +
+      "SERP title/description → prefer review_situations:[\"serp_title_description\"] and explain topic serp-title-description-proposals. " +
       "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale). " +
       "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
@@ -209,6 +214,21 @@ export function registerProposalTools(
         .optional()
         .describe(
           "Optional plain-English picture of current live values (baseline context). Not proposed values — those go in updates[].",
+        ),
+      review_situations: z
+        .array(
+          z.enum([
+            "internal_links",
+            "serp_title_description",
+            "body_copy_edit",
+            "selling_figures",
+            "new_public_content",
+            "promote_draft",
+          ]),
+        )
+        .optional()
+        .describe(
+          "Edits only. Optional catalog ids for how the reviewer should score this packet. Empty → infer from ops. Multi allowed; each pack reviewed independently (per-situation ship). See explain_site topic review-situations.",
         ),
       agent_session_id: z.string().describe("Required. From agent_session start — attach_variant later in the same session."),
       promote_on_apply: z
@@ -264,6 +284,7 @@ export function registerProposalTools(
             confirm_distinct: args.confirm_distinct,
             confirm_recent_activity: args.confirm_recent_activity,
             situation_note: args.situation_note,
+            review_situations: args.review_situations,
             entries: args.entries,
             agent_session_id: args.agent_session_id,
             promote_on_apply: args.promote_on_apply,
@@ -805,11 +826,12 @@ export function registerProposalTools(
     "update_proposal",
     "Lifecycle for a proposal. Requires proposals_create and/or proposals_review — actions depend on caps. " +
       "proposals_review (Reviewer): claim | release | apply | reject | accept | close | acknowledge | blockers. Approve can change live/draft. " +
-      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries — cannot apply/reject/accept. " +
+      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations — cannot apply/reject/accept. " +
       "Both (Publisher): full set. " +
       "Reject is rare (bad/impossible/illegal/harmful/duplicate/target missing): confirm_reject + reject_kind + close_note (min 80). Prefer add_blocker for polish; then revise_entries (proposer; idle or self-claim). " +
       "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; no YAML. " +
       "close notes/ideas: close_reason + close_note. Withdraw: close_note min 20. Open blockers block apply/accept only (revise does not clear them). Four-eyes = username+role. " +
+      "Multi-situation: review each pack independently; drop failing ops via revise_entries then apply (atomic). " +
       "Before apply, list_proposals(proposal_id) for live review_context.",
     {
       proposal_id: z.string(),
@@ -828,6 +850,7 @@ export function registerProposalTools(
         "reopen_blocker",
         "set_no_auto_retry",
         "revise_entries",
+        "set_review_situations",
       ]),
       report: z.string().optional(),
       agent_session_id: z.string().describe("Required. From agent_session start."),
@@ -899,6 +922,21 @@ export function registerProposalTools(
         )
         .optional()
         .describe("For revise_entries: full replacement of pending/failed entries (done rows kept)"),
+      review_situations: z
+        .array(
+          z.enum([
+            "internal_links",
+            "serp_title_description",
+            "body_copy_edit",
+            "selling_figures",
+            "new_public_content",
+            "promote_draft",
+          ]),
+        )
+        .optional()
+        .describe(
+          "For set_review_situations: replace author-declared situations on open/partial edits (proposer or staff). Empty array clears declaration (infer on read).",
+        ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -912,7 +950,7 @@ export function registerProposalTools(
           `Action '${args.action}' is not allowed for your proposal caps ` +
             `(create=${hasCreate}, review=${hasReview}). ` +
             (hasReview && !hasCreate
-              ? "Reviewer cannot withdraw, attach_variant, set_no_auto_retry, or revise_entries."
+              ? "Reviewer cannot withdraw, attach_variant, set_no_auto_retry, revise_entries, or set_review_situations."
               : hasCreate && !hasReview
                 ? "Authors cannot apply, reject, accept, close, or manage blockers — use Proposal Reviewer or Publisher."
                 : "Need proposals_create and/or proposals_review."),
@@ -943,6 +981,7 @@ export function registerProposalTools(
             confirm_reject: args.confirm_reject,
             reject_kind: args.reject_kind,
             entries: args.entries,
+            review_situations: args.review_situations,
           }),
         });
         const data = (await res.json()) as Record<string, unknown>;
