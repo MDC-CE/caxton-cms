@@ -411,6 +411,10 @@ describe("classifyProposalReview", () => {
     expect(ctx.staff_summary.situation_description).toMatch(/search title\/description/i);
     const tpl = ctx.agent_preview.think_items.find((t) => t.id === "title_description_ctr");
     expect(tpl?.why.toLowerCase()).not.toMatch(/punchier|invite the click/);
+    expect(tpl?.look_for.some((l) => /get_entry_activity/i.test(l))).toBe(true);
+    expect(tpl?.look_for.some((l) => /duplicate_weaker|revise/i.test(l))).toBe(true);
+    const disp = ctx.agent_preview.think_items.find((t) => t.id === "disposition");
+    expect(disp?.look_for.some((l) => /same-field SERP churn/i.test(l))).toBe(true);
   });
 
   it("title/description mixed with body → both checklists + mixed_serp_and_body", () => {

@@ -265,6 +265,151 @@ describe("buildProposalDiscoveryPath", () => {
     expect(ids).toContain("journey_metrics");
     expect(ids).not.toContain("site_ga");
   });
+
+  it("SERP ops elevate get_entry_activity to first tool even with zero writes", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "how-much",
+            locale: "en",
+            status: "pending",
+            ops: [
+              { field_path: "meta.page_title", value: "New" },
+              { field_path: "meta.description", value: "Desc" },
+            ],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: { damage_class: "existing_metadata" },
+      recentActivity: [],
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools[0]).toMatchObject({ kind: "tool", id: "recent_writes", tool: "get_entry_activity" });
+    if (tools[0]?.kind === "tool") {
+      expect(tools[0].args_hint).toMatchObject({
+        contentType: "blog",
+        slug: "how-much",
+        locale: "en",
+      });
+      expect(tools[0].look_for.some((l) => /duplicate_weaker|revise_entries/i.test(l))).toBe(true);
+    }
+    expect(warnings.some((w) => w.code === "recent_entry_writes")).toBe(false);
+  });
+
+  it("no SERP + zero filtered writes keeps preview_content before recent_writes", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "landing",
+            slug: "ai-course",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "call_to_action.title", value: "Go" }],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: { damage_class: "existing_content" },
+      recentActivity: [{ entryKey: "landing/ai-course/en", writeCount: 0, windowDays: 14 }],
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const ids = tools.map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(ids.indexOf("preview_content")).toBeLessThan(ids.indexOf("recent_writes"));
+  });
+
+  it("filtered writes without SERP elevate activity + warn listing pending entries", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "landing",
+            slug: "ai-course",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "call_to_action.title", value: "Go" }],
+          },
+          {
+            contentType: "landing",
+            slug: "other",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "sections.0.data.title", value: "X" }],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: { damage_class: "existing_content" },
+      recentActivity: [
+        { entryKey: "landing/other/en", writeCount: 3, windowDays: 14 },
+        { entryKey: "landing/ai-course/en", writeCount: 1, windowDays: 14 },
+      ],
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools[0]).toMatchObject({ id: "recent_writes", tool: "get_entry_activity" });
+    if (tools[0]?.kind === "tool") {
+      // Hottest pending entry wins args_hint
+      expect(tools[0].args_hint).toMatchObject({
+        contentType: "landing",
+        slug: "other",
+        locale: "en",
+      });
+    }
+    const warn = warnings.find((w) => w.code === "recent_entry_writes");
+    expect(warn).toBeTruthy();
+    expect(warn!.message).toMatch(/landing\/other\/en/);
+    expect(warn!.message).toMatch(/landing\/ai-course\/en/);
+  });
+
+  it("title_description_ctr look_for mentions get_entry_activity churn when preview thinks are used", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "x",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "meta.page_title", value: "T" }],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "existing_metadata",
+        agent_preview: {
+          think_items: [
+            {
+              id: "title_description_ctr",
+              title: "Block bad SERP",
+              why: "SERP",
+              look_for: [
+                "when SERP ops or recent writes: get_entry_activity first — same-field title/description churn",
+              ],
+            },
+            {
+              id: "disposition",
+              title: "Choose",
+              why: "Decide",
+              look_for: ["same-field SERP churn after recent title/description writes"],
+            },
+          ],
+        },
+      },
+    });
+    const serp = discovery_path!.items.find((i) => i.kind === "think" && i.id === "title_description_ctr");
+    expect(serp?.kind).toBe("think");
+    if (serp?.kind === "think") {
+      expect(serp.look_for.some((l) => /get_entry_activity/i.test(l))).toBe(true);
+    }
+  });
 });
 
 describe("assertCatalogToolNames", () => {

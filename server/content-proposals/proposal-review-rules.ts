@@ -205,6 +205,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "ops vs live only — ignore staff summary / Titulo/Meta blurb; never block because blurb ≠ ops",
       "empty or reset title/description vs live — usually block",
       "judge only meta.page_title / meta.description — body breakage is verify_copy / disposition",
+      "when SERP ops or recent writes: get_entry_activity first — same-field title/description churn + live not broken → reject duplicate_weaker (SERP-only) or revise to drop SERP ops then apply (mixed); unrelated body/CTA writes alone ≠ reject",
       "non-goal: do not coach punchier copy or CTR tactics",
       "optional: get_organic_traffic mode=paths for the live URL before applying SERP changes",
     ],
@@ -247,6 +248,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     look_for: [
       "apply only when every in-scope gate is clean and you would ship this yourself",
       "title/description leave-live or block while other ops are fine → revise_entries to drop/fix SERP ops, then apply (no partial-field apply)",
+      "same-field SERP churn after recent title/description writes + live not broken → reject duplicate_weaker (SERP-only) or revise_entries to drop SERP ops then apply (mixed); unrelated recent writes alone ≠ reject",
       "add_blocker when the proposed change is wrong or invents claims (then author revise_entries)",
       "out-of-scope live defects → adjacent_findings notes park (same or other page); do not default every finding to add_blocker",
       "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",

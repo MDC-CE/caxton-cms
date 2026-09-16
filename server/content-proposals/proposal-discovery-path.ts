@@ -5,6 +5,8 @@
 
 import { parseContentTypeStrategy, type ContentTypeStrategy } from "../../shared/contentTypeStrategy.js";
 import { TOOL_GATES } from "../../shared/mcp-tool-catalog.js";
+import { buildEntryKey } from "../../scripts/validation/shared/entryKey.js";
+import { hasTitleDescriptionOps } from "./proposal-review-rules.js";
 
 export type DiscoveryPathThinkItem = {
   kind: "think";
@@ -36,8 +38,17 @@ export type DiscoveryPath = {
 export type DiscoveryWarning = { code: string; message: string };
 
 export const DISCOVERY_TOOL_CAPPED = "discovery_tool_capped";
+/** Pending entries have filtered recent writes — inspect get_entry_activity before apply. */
+export const RECENT_ENTRY_WRITES = "recent_entry_writes";
 
 const CATALOG_NAMES = new Set(Object.keys(TOOL_GATES));
+
+const RECENT_WRITES_LOOK_FOR = [
+  "overlapping writers on the same fields this proposal touches (title/description / same paths)",
+  "similar SERP fix already shipped and live not broken → SERP-only: reject duplicate_weaker; mixed: revise_entries to drop title/description ops then apply body",
+  "unrelated recent body/CTA writes alone → do not reject",
+  "only confirm/apply when live is still wrong or this change is clearly distinct",
+];
 
 const CORE_EDITS_TOOLS: Array<{
   id: string;
@@ -57,8 +68,8 @@ const CORE_EDITS_TOOLS: Array<{
   {
     id: "recent_writes",
     tool: "get_entry_activity",
-    why: "Check whether someone else edited the same entry recently.",
-    look_for: ["overlapping writers", "stale proposal context"],
+    why: "Check recent writes on the same fields before applying — stop title/description churn loops.",
+    look_for: [...RECENT_WRITES_LOOK_FOR],
   },
   {
     id: "seo_context",
@@ -111,6 +122,15 @@ export function proposalDiscoveryToolNames(): string[] {
 const TOOL_UNAVAILABLE_HINT =
   "This tool is not on your MCP role. Ask a human to enable the needed access, then refresh/reconnect the MCP connector.";
 
+export type ProposalDiscoveryEntry = {
+  contentType: string;
+  slug: string;
+  locale: string;
+  variant?: string | null;
+  status?: string;
+  ops?: Array<{ field_path?: string } | null> | null;
+};
+
 export type ProposalDiscoveryInput = {
   id: string;
   status: string;
@@ -119,16 +139,15 @@ export type ProposalDiscoveryInput = {
   summary?: string;
   escalated?: boolean;
   escalated_note?: string | null;
-  entries?: Array<{
-    contentType: string;
-    slug: string;
-    locale: string;
-    variant?: string | null;
-    status?: string;
-    ops?: Array<{ field_path?: string } | null> | null;
-  }>;
+  entries?: ProposalDiscoveryEntry[];
   open_blocker_count?: number;
   blockers?: unknown[];
+};
+
+export type RecentActivityForDiscovery = {
+  entryKey: string;
+  writeCount: number;
+  windowDays: number;
 };
 
 export type AgentPreviewThink = {
@@ -154,6 +173,8 @@ export type BuildProposalDiscoveryPathOpts = {
   allowedTools?: ReadonlySet<string> | readonly string[] | null;
   strategy?: ContentTypeStrategy | null;
   reviewContext?: ReviewContextForDiscovery | null;
+  /** Gate-filtered activity rows (same semantics as apply confirm_recent_activity). */
+  recentActivity?: RecentActivityForDiscovery[] | null;
 };
 
 function allowedSet(
@@ -174,6 +195,93 @@ function collectPendingFieldPaths(proposal: ProposalDiscoveryInput): string[] {
     }
   }
   return out;
+}
+
+function pendingEntries(proposal: ProposalDiscoveryInput): ProposalDiscoveryEntry[] {
+  const entries = proposal.entries ?? [];
+  const pending = entries.filter((e) => !e.status || e.status === "pending" || e.status === "failed");
+  return pending.length ? pending : entries.length ? [entries[0]!] : [];
+}
+
+/** Sum gate write counts for live + optional draft keys of one entry. */
+export function activityWriteCountForEntry(
+  entry: { contentType: string; slug: string; locale: string; variant?: string | null },
+  recentActivity: RecentActivityForDiscovery[] | null | undefined,
+): number {
+  if (!recentActivity?.length) return 0;
+  const live = buildEntryKey(entry.contentType, entry.slug, entry.locale);
+  const draft = entry.variant?.trim()
+    ? buildEntryKey(entry.contentType, entry.slug, entry.locale, entry.variant.trim())
+    : null;
+  let n = 0;
+  for (const row of recentActivity) {
+    if (row.entryKey === live || (draft && row.entryKey === draft)) {
+      n += row.writeCount;
+    }
+  }
+  return n;
+}
+
+export function pickHottestPendingEntry(
+  proposal: ProposalDiscoveryInput,
+  recentActivity: RecentActivityForDiscovery[] | null | undefined,
+): ProposalDiscoveryEntry | null {
+  const pending = pendingEntries(proposal);
+  if (!pending.length) return null;
+  let best = pending[0]!;
+  let bestCount = -1;
+  for (const e of pending) {
+    const c = activityWriteCountForEntry(e, recentActivity);
+    if (c > bestCount) {
+      best = e;
+      bestCount = c;
+    }
+  }
+  return best;
+}
+
+export function buildRecentEntryWritesWarning(
+  proposal: ProposalDiscoveryInput,
+  recentActivity: RecentActivityForDiscovery[] | null | undefined,
+): DiscoveryWarning | null {
+  if (!recentActivity?.length) return null;
+  const pending = pendingEntries(proposal);
+  const parts: string[] = [];
+  let windowDays = recentActivity[0]?.windowDays ?? 14;
+  for (const e of pending) {
+    const c = activityWriteCountForEntry(e, recentActivity);
+    if (c <= 0) continue;
+    const live = buildEntryKey(e.contentType, e.slug, e.locale);
+    const draft = e.variant?.trim()
+      ? buildEntryKey(e.contentType, e.slug, e.locale, e.variant.trim())
+      : null;
+    const label = draft ? `${live} (incl. draft): ${c}` : `${live}: ${c}`;
+    parts.push(label);
+    const row = recentActivity.find(
+      (r) => r.entryKey === live || (draft && r.entryKey === draft),
+    );
+    if (row?.windowDays) windowDays = row.windowDays;
+  }
+  if (!parts.length) return null;
+  return {
+    code: RECENT_ENTRY_WRITES,
+    message:
+      `Recent writes (${windowDays}d, gate-filtered) on pending entries: ${parts.join("; ")}. ` +
+      `Call get_entry_activity before apply. Same-field SERP churn + live not broken → reject duplicate_weaker (title/description-only) ` +
+      `or revise_entries to drop title/description ops then apply (mixed). Unrelated body/CTA writes alone do not justify reject.`,
+  };
+}
+
+function activityArgsHint(
+  entry: ProposalDiscoveryEntry | null,
+): Record<string, unknown> | undefined {
+  if (!entry?.contentType || !entry.slug || !entry.locale) return undefined;
+  return {
+    contentType: entry.contentType,
+    slug: entry.slug,
+    locale: entry.locale,
+    ...(entry.variant?.trim() ? { variant: entry.variant.trim() } : {}),
+  };
 }
 
 function toToolItem(
@@ -205,15 +313,39 @@ function toToolItem(
 /**
  * Core content tools + at most 2 traffic tools:
  * always organic; second is funnel analytics (selling/funnel) else site GA (live public damage).
+ * When prioritizeActivity, get_entry_activity is first among tools.
  */
 export function buildEditsDiscoveryToolItems(opts: {
   allowed: Set<string> | null;
   damageClass?: string | null;
   pendingFieldPaths?: string[];
-  entry?: { contentType: string; slug: string; locale?: string } | null;
+  entry?: { contentType: string; slug: string; locale?: string; variant?: string | null } | null;
+  prioritizeActivity?: boolean;
+  activityEntry?: ProposalDiscoveryEntry | null;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
-  const { allowed, damageClass, pendingFieldPaths = [], entry } = opts;
-  const items: DiscoveryPathToolItem[] = CORE_EDITS_TOOLS.map((t) => toToolItem(t, allowed));
+  const {
+    allowed,
+    damageClass,
+    pendingFieldPaths = [],
+    entry,
+    prioritizeActivity = false,
+    activityEntry = null,
+  } = opts;
+
+  const activityHint = activityArgsHint(activityEntry ?? (entry as ProposalDiscoveryEntry | null));
+
+  const core = CORE_EDITS_TOOLS.map((t) =>
+    t.id === "recent_writes" ? toToolItem(t, allowed, activityHint) : toToolItem(t, allowed),
+  );
+
+  let items: DiscoveryPathToolItem[];
+  if (prioritizeActivity) {
+    const recent = core.find((t) => t.id === "recent_writes");
+    const rest = core.filter((t) => t.id !== "recent_writes");
+    items = recent ? [recent, ...rest] : [...core];
+  } else {
+    items = [...core];
+  }
 
   items.push(toToolItem(ORGANIC_TOOL, allowed));
 
@@ -308,7 +440,7 @@ function fallbackIdeaThink(proposal: ProposalDiscoveryInput): DiscoveryPathItem[
 export function buildProposalDiscoveryPath(
   opts: BuildProposalDiscoveryPathOpts,
 ): { discovery_path: DiscoveryPath | null; warnings: DiscoveryWarning[] } {
-  const { proposal, strategy: _strategy, reviewContext } = opts;
+  const { proposal, strategy: _strategy, reviewContext, recentActivity } = opts;
   const status = proposal.status;
   if (status !== "open" && status !== "partial") {
     return { discovery_path: null, warnings: [] };
@@ -401,6 +533,7 @@ export function buildProposalDiscoveryPath(
           "add_blocker when the proposed change is wrong or invents claims (then revise_entries)",
           "out-of-scope live defects → adjacent_findings notes park; do not default every finding to add_blocker",
           "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",
+          "same-field SERP churn after recent title/description writes + live not broken → reject (SERP-only) or revise_entries to drop SERP ops then apply (mixed)",
         ],
       },
     ];
@@ -410,17 +543,30 @@ export function buildProposalDiscoveryPath(
 
   let tools: DiscoveryPathToolItem[] = [];
   if (kind === "edits" && !reviewContext?.block_apply) {
-    const entries = proposal.entries ?? [];
-    const first =
-      entries.find((e) => !e.status || e.status === "pending" || e.status === "failed") ??
-      entries[0];
+    const pendingFieldPaths = collectPendingFieldPaths(proposal);
+    const hasSerp = hasTitleDescriptionOps(proposal.entries ?? []);
+    const pending = pendingEntries(proposal);
+    const gateWriteCount = pending.reduce(
+      (s, e) => s + activityWriteCountForEntry(e, recentActivity),
+      0,
+    );
+    const prioritizeActivity = hasSerp || gateWriteCount > 0;
+
+    const hottest = pickHottestPendingEntry(proposal, recentActivity);
+    const first = pending[0] ?? proposal.entries?.[0] ?? null;
+
+    const activityWarn = buildRecentEntryWritesWarning(proposal, recentActivity);
+    if (activityWarn) warnings.push(activityWarn);
+
     const built = buildEditsDiscoveryToolItems({
       allowed,
       damageClass: reviewContext?.damage_class,
-      pendingFieldPaths: collectPendingFieldPaths(proposal),
+      pendingFieldPaths,
       entry: first
-        ? { contentType: first.contentType, slug: first.slug, locale: first.locale }
+        ? { contentType: first.contentType, slug: first.slug, locale: first.locale, variant: first.variant }
         : null,
+      prioritizeActivity,
+      activityEntry: hottest,
     });
     tools = built.items;
     if (built.anyCapped) {

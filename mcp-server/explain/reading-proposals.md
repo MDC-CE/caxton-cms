@@ -69,7 +69,7 @@ If live classify reports `target_missing` (page deleted after filing), `update_p
 ### Adjacent findings routing
 
 - **`verify_copy`:** proposed `value` vs live for fields this proposal writes; summary why/scope vs ops (do not require summary to paste values).
-- **`title_description_ctr`:** SERP fields only — ignore Titulo/Meta blurb; leave live ≠ reject; revise to drop SERP ops if body should still ship.
+- **`title_description_ctr`:** SERP fields only — ignore Titulo/Meta blurb; leave live ≠ reject; revise to drop SERP ops if body should still ship. When SERP ops or recent writes: prefer `get_entry_activity` first.
 - **`adjacent_findings`:** live body/SEO vs approved facts when research tools were used.
 - Same entry, ops do not touch → **notes** naming this page (content type / slug / locale). Prefer `related_entries`. Link `related_issue_ids` **only if** an issue already exists — do not invent tickets. Do **not** block apply.
 - Other entry → **notes** naming that page — never a blocker on this proposal.
@@ -86,6 +86,17 @@ If live classify reports `target_missing` (page deleted after filing), `update_p
 - `existence_unknown` — verify before inventing damage
 - `target_missing` — apply blocked
 - `mixed_serp_and_body` — title/description mixed with other field updates; prefer split next time
+- `recent_entry_writes` — gate-filtered recent writes on one or more pending entries (lists each page + count); call `get_entry_activity` before apply
+
+## Recent activity (priority on review)
+
+When `list_proposals(proposal_id)` builds `discovery_path` for open|partial **edits**:
+
+- **Elevate** `get_entry_activity` to the first discovery tool when there are pending `meta.page_title` / `meta.description` ops **or** gate-filtered write counts &gt; 0 (same filters as apply `confirm_recent_activity`: exclude this agent session when known; exclude this proposal’s already-applied entry writes).
+- Warning `recent_entry_writes` lists **every pending entry with writes**. Tool `args_hint` targets the **hottest** pending entry.
+- **Same-field churn:** only treat as title/description churn when recent writes overlap the fields this proposal touches. Unrelated body/CTA edits alone do **not** justify reject.
+- **Disposition:** similar SERP fix already shipped and live not broken → **reject** `duplicate_weaker` if the proposal is title/description-only; if mixed with body/other ops → **revise_entries** to drop SERP ops, then apply the rest.
+- Discovery remains optional (skip does not block). Apply still soft-gates with `confirm_recent_activity` — do not confirm when churn applies; reject or revise instead.
 
 ## Ideas
 

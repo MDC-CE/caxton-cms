@@ -71,7 +71,8 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 ## Recent activity gate
 
 - Edits create/apply: recent writes → `confirm_recent_activity` after `get_entry_activity`.
-- Confirming does **not** write YAML or complete validation issues.
+- On open review, `list_proposals(proposal_id)` may elevate `get_entry_activity` and warn `recent_entry_writes` when SERP ops or gate-filtered writes exist — see **`explain` topic `reading-proposals`**.
+- Confirming does **not** write YAML or complete validation issues. Same-field SERP churn + live not broken → reject (title/description-only) or revise to drop SERP ops (mixed) instead of confirming.
 
 ## Review modes (edits)
 

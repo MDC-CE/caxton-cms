@@ -1132,6 +1132,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       caller.actor && "role" in caller.actor && typeof caller.actor.role === "string"
         ? caller.actor.role
         : undefined;
+    const enriched = enrichRecentActivity(proposal, {
+      excludeAgentSessionId: caller.agent_session_id,
+    });
     const blob = buildDecisionDebug({
       action,
       proposal: {
@@ -1156,6 +1159,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           ? { type: caller.actor.type, ...(actorRole ? { role: actorRole } : {}) }
           : null,
       },
+      recentActivity: enriched.recent_activity ?? null,
     });
     persistDecisionDebug(proposal.id, blob);
   }
@@ -1187,7 +1191,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return ctx;
   }
 
-  function enrichRecentActivity(proposal: ProposalRecord): ProposalRecord {
+  function enrichRecentActivity(
+    proposal: ProposalRecord,
+    opts?: { excludeAgentSessionId?: string | null },
+  ): ProposalRecord {
     if (proposal.kind !== "edits" || proposal.entries.length === 0) return proposal;
     const resolved = runResolveActivity({
       entries: proposal.entries.map((e) => ({
@@ -1196,6 +1203,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
         locale: e.locale,
         variant: e.variant,
       })),
+      excludeAgentSessionId: opts?.excludeAgentSessionId,
+      // Match apply gate: ignore this proposal's already-applied entry writes.
+      excludeProposalApplies: proposal.entries
+        .filter((e) => e.status === "done")
+        .map((e) => ({
+          contentType: e.contentType,
+          slug: e.slug,
+          locale: e.locale,
+          variant: e.variant,
+          applied_at: e.applied_at,
+          applied_by: e.applied_by,
+        })),
     });
     if (!resolved.ok) {
       return { ...proposal, recent_activity_error: resolved.error };
@@ -1662,7 +1681,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
           ok: false,
           code: "confirm_recent_activity",
           error:
-            "This entry has recent writes. Inspect recent activity, then pass confirm_recent_activity: true if this proposal is still needed.",
+            "This entry has recent writes. Inspect get_entry_activity first. " +
+            "If recent writes already delivered a similar same-field SERP/meta fix and live is not broken: " +
+            "reject duplicate_weaker (title/description-only) or revise_entries to drop those SERP ops then apply (mixed) — do not confirm. " +
+            "Pass confirm_recent_activity: true only if this proposal is still needed and distinct from those writes.",
           activity: activityResult.activity,
         };
       }
@@ -2405,7 +2427,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
             ok: false,
             code: "confirm_recent_activity",
             error:
-              "Linked entries have recent writes. Inspect recent activity, then pass confirm_recent_activity: true to revise.",
+              "Linked entries have recent writes. Inspect get_entry_activity first. " +
+              "Same-field SERP churn + live not broken → reject (title/description-only) or revise to drop SERP ops (mixed); do not confirm. " +
+              "Pass confirm_recent_activity: true only to revise when the change is still needed and distinct.",
             activity: activityResult.activity,
             proposal: enrichRecentActivity({
               ...proposal,
@@ -2771,7 +2795,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
             ok: false,
             code: "confirm_recent_activity",
             error:
-              "Linked entries have recent writes. Inspect recent activity, then pass confirm_recent_activity: true to apply.",
+              "Linked entries have recent writes. Inspect get_entry_activity first. " +
+              "Same-field SERP churn + live not broken → reject duplicate_weaker (title/description-only) or revise_entries to drop SERP ops then apply (mixed); do not confirm. " +
+              "Pass confirm_recent_activity: true only if this proposal is still needed and distinct from those writes.",
             activity: activityResult.activity,
             proposal: enrichRecentActivity({
               ...proposal,

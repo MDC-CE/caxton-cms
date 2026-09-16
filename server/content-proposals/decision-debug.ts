@@ -46,6 +46,8 @@ export type BuildDecisionDebugOpts = {
   };
   allowedTools?: ReadonlySet<string> | readonly string[] | null;
   captured_at?: number;
+  /** Gate-filtered recent activity (same semantics as apply confirm). */
+  recentActivity?: Array<{ entryKey: string; writeCount: number; windowDays: number }> | null;
 };
 
 export function buildDecisionDebug(opts: BuildDecisionDebugOpts): ProposalDecisionDebug {
@@ -71,6 +73,7 @@ export function buildDecisionDebug(opts: BuildDecisionDebugOpts): ProposalDecisi
           agent_preview: reviewContext.agent_preview,
         }
       : null,
+    recentActivity: opts.recentActivity ?? null,
   });
 
   return {

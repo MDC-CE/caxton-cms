@@ -6,6 +6,18 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "Proposal review prioritizes get_entry_activity for SERP churn"
+    agent_impact:
+      - "list_proposals(proposal_id) discovery_path elevates get_entry_activity when pending title/description ops or gate-filtered recent writes; warning recent_entry_writes lists each pending entry with counts; args_hint = hottest entry."
+      - "Same-field churn: SERP-only → reject duplicate_weaker; mixed → revise_entries drop SERP then apply. Unrelated body/CTA writes alone ≠ reject. confirm_recent_activity copy steers the same way."
+      - "Re-bootstrap / explain reading-proposals for Recent activity section."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-discovery-path.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/tools/proposals.ts
+  - date: "2026-09-15"
     summary: "get_analytics_report — named GA4 BigQuery reports + discovery nudges"
     agent_impact:
       - "New read tool get_analytics_report(report, days?, …) — site_summary | top_pages | page_detail | events_by_name | traffic_sources. Cap metrics_view. page_detail accepts path or content_type+slug (not bare slug). Soft not_configured vs empty ok. Reconnect MCP."

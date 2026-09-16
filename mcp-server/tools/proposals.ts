@@ -202,7 +202,7 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe(
-          "Required after confirm_recent_activity action_required — set true only after inspecting get_entry_activity.",
+          "Required after confirm_recent_activity action_required — set true only after get_entry_activity, and only if still needed/distinct. Do not confirm same-field SERP churn (reject or revise instead).",
         ),
       situation_note: z
         .string()
@@ -306,7 +306,7 @@ export function registerProposalTools(
                 {
                   tool: "get_entry_activity",
                   reason:
-                    "Inspect recent writes on the linked entry (SEO/traffic may still be catching up).",
+                    "Inspect recent writes. Same-field SERP churn + live not broken → reject (title/description-only) or revise to drop SERP ops (mixed); unrelated body/CTA writes alone ≠ reject.",
                   priority: "required",
                   args_hint: firstEntry
                     ? {
@@ -324,7 +324,7 @@ export function registerProposalTools(
                 {
                   tool: "propose_change",
                   reason:
-                    "Retry with confirm_recent_activity: true only if this proposal is still distinct from recent edits.",
+                    "Retry with confirm_recent_activity: true only if still needed and distinct from recent same-field edits — not for SERP churn.",
                   priority: "required",
                   args_hint: { ...args, confirm_recent_activity: true },
                 },
@@ -736,6 +736,7 @@ export function registerProposalTools(
             }>;
             open_blocker_count?: number;
             blockers?: unknown[];
+            recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
           }>).find((p) => p.id === proposalId);
           if (match && (match.status === "open" || match.status === "partial")) {
             const entries = match.entries ?? [];
@@ -768,6 +769,7 @@ export function registerProposalTools(
               allowedTools: allowed,
               strategy,
               reviewContext: review_context,
+              recentActivity: match.recent_activity ?? null,
             });
             discovery_path = built.discovery_path;
             warnings.push(...built.warnings);
@@ -842,7 +844,7 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe(
-          "For apply/revise_entries: required after confirm_recent_activity action_required — set true only after get_entry_activity.",
+          "For apply/revise_entries: required after confirm_recent_activity action_required — set true only after get_entry_activity when still needed/distinct. Do not confirm same-field SERP churn.",
         ),
       close_reason: z
         .enum(["wont_fix", "fixed_elsewhere", "tracked_elsewhere", "other"])
@@ -1036,7 +1038,8 @@ export function registerProposalTools(
               [
                 {
                   tool: "get_entry_activity",
-                  reason: "Inspect recent writes before approving — traffic/CTR may still reflect prior edits.",
+                  reason:
+                    "Inspect recent writes before approving. Same-field SERP churn + live not broken → reject duplicate_weaker (title/description-only) or revise_entries to drop SERP ops (mixed); do not confirm churn.",
                   priority: "required",
                   args_hint: entry?.contentType
                     ? {
@@ -1054,7 +1057,7 @@ export function registerProposalTools(
                 {
                   tool: "update_proposal",
                   reason:
-                    "Retry apply with confirm_recent_activity: true after inspecting activity (compose with confirm_end_experiment when needed).",
+                    "Retry apply with confirm_recent_activity: true only if still needed and distinct (compose with confirm_end_experiment when needed) — not for same-field SERP churn.",
                   priority: "required",
                   args_hint: {
                     proposal_id: args.proposal_id,
@@ -1286,7 +1289,8 @@ export function registerProposalTools(
   mcp.tool(
     "get_entry_activity",
     "List recent people/agent writes for a CMS entry (14-day window). " +
-      "Use before confirm_recent_activity on propose_change / update_proposal apply. " +
+      "Priority on proposal review when title/description ops or recent writes exist — use before confirm_recent_activity on propose_change / update_proposal apply. " +
+      "Same-field SERP churn + live not broken → reject (title/description-only) or revise to drop SERP ops (mixed); unrelated body/CTA writes alone ≠ reject. " +
       "events[] is unfiltered history; gate_write_count excludes the current agent_session_id when provided. " +
       "Does not write YAML. Requires content_view, proposals_create, or proposals_review.",
     {
