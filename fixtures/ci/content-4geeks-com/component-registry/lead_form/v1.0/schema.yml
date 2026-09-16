@@ -92,8 +92,9 @@ props:
       Known UI slots (email, phone, program, …) plus optional extra keys for hidden
       payload/analytics defaults (e.g. event_id with visible: false and default:
       "{{ entry.id }}"). Extra keys are not rendered until a future generic field loop;
-      their resolved defaults still ship on lead body and GTM. Wire keeps hardcoded BC
-      fields and merges any other scalars through.
+      their resolved defaults still ship on lead body and GTM (string, number, or
+      boolean after resolveDeep). Wire keeps hardcoded BC fields and merges any other
+      scalars through.
     properties:
       email:
         type: object

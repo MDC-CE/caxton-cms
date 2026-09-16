@@ -181,7 +181,7 @@ conversion_name: event_order
 ```
 
 - Wire serialization keeps the **hardcoded BC field set** (`buildLeadPayload`) and **known GTM keys** (`trackFormSubmission`), then merges any other scalars through. `program` → `course`; `consent_whatsapp` → `consent`; `conversion_name` is lookup-only (not on the outbound body).
-- Extra keys are **not** rendered yet (UI slots stay hardcoded). Use `visible: false` + `default` for Learn-style `event_*` payload keys. `{{ entry.* }}` is resolved by section `resolveDeep` before the form mounts — submit just copies those values onto the lead body and dataLayer.
+- Extra keys are **not** rendered yet (UI slots stay hardcoded). Use `visible: false` + `default` for Learn-style `event_*` payload keys. `{{ entry.* }}` is resolved by section `resolveDeep` before the form mounts — submit copies those values onto the lead body and dataLayer. Resolved defaults may be **string, number, or boolean** (e.g. numeric `entry.id` → `event_id`); empty strings are skipped.
 - Do **not** put `fields` on `form_overrides` for phase differences — change `conversion_name` / webhook / success instead.
 
 ## Paths

@@ -85,15 +85,6 @@ function splitParagraphs(text: string): string[] {
     .filter(Boolean);
 }
 
-function toNum(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
 function normalizeStringList(raw: unknown): string[] {
   if (Array.isArray(raw)) {
     return raw.map((x) => String(x || "").trim()).filter(Boolean);
@@ -290,13 +281,10 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
       ? formatEventDate(startingAtIso, locale)
       : "";
 
-  const registered = toNum(data.seats?.registered_count);
-  const remaining = toNum(data.seats?.remaining);
-  const capacity = toNum(data.seats?.capacity);
   const registrants = normalizeRegistrants(data.seats?.registrants);
   const fallbackAvatars = normalizeStringList(data.seats?.fallback_avatars);
-  const hasSeatsInfo =
-    !!seatsCopy || registered != null || remaining != null || registrants.length > 0;
+  // Learn parity: hide the whole seats card when there are no checkins.
+  const hasSeatsInfo = registrants.length > 0;
   const [showAllSeats, setShowAllSeats] = useState(false);
   const seatsOverflow =
     registrants.length > SEATS_VISIBLE_THRESHOLD && !!loadMoreLabel;
@@ -767,121 +755,113 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
                       {seatsCopy}
                     </p>
                   ) : null}
-                  {registrants.length > 0 ? (
+                  <div
+                    className={
+                      seatsOverflow ? "flex min-h-0 flex-col" : undefined
+                    }
+                    style={
+                      seatsOverflow
+                        ? { height: SEATS_LIST_REGION_H }
+                        : undefined
+                    }
+                    data-testid="workshop-seats-viewport"
+                  >
                     <div
                       className={
-                        seatsOverflow ? "flex min-h-0 flex-col" : undefined
-                      }
-                      style={
                         seatsOverflow
-                          ? { height: SEATS_LIST_REGION_H }
+                          ? `min-h-0 flex-1 ${
+                              showAllSeats
+                                ? "overflow-y-auto overscroll-contain pr-0.5"
+                                : "overflow-hidden"
+                            }`
                           : undefined
                       }
-                      data-testid="workshop-seats-viewport"
                     >
-                      <div
-                        className={
-                          seatsOverflow
-                            ? `min-h-0 flex-1 ${
-                                showAllSeats
-                                  ? "overflow-y-auto overscroll-contain pr-0.5"
-                                  : "overflow-hidden"
-                              }`
-                            : undefined
-                        }
-                      >
-                        <TooltipProvider delayDuration={200}>
-                          <div
-                            className="grid gap-x-2 gap-y-4 justify-items-center"
-                            style={{
-                              gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
-                            }}
-                            data-testid="workshop-seats-grid"
-                          >
-                            {registrants.map((person, i) => {
-                              const label = person.name || `Participant ${i + 1}`;
-                              const resolvedAvatar =
-                                person.avatar_url ||
-                                (fallbackAvatars.length
-                                  ? fallbackAvatars[i % fallbackAvatars.length]
-                                  : "");
-                              const avatar = (
-                                <div
-                                  className="rounded-full overflow-hidden bg-background border border-border/80"
-                                  style={{
-                                    width: AVATAR_SIZE,
-                                    height: AVATAR_SIZE,
-                                  }}
-                                >
-                                  {resolvedAvatar ? (
-                                    <UniversalImage
-                                      id={resolvedAvatar}
-                                      alt={label}
-                                      className="w-full h-full object-cover"
-                                      fieldContext={{
-                                        arrayPath: person.avatar_url
-                                          ? "registrant_avatars"
-                                          : "fallback_avatars",
-                                        index: i,
-                                        srcField: person.avatar_url
-                                          ? "avatar_url"
-                                          : "",
-                                      }}
-                                    />
-                                  ) : (
-                                    <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
-                                      {(person.name || "?").charAt(0)}
-                                    </span>
-                                  )}
+                      <TooltipProvider delayDuration={200}>
+                        <div
+                          className="grid gap-x-2 gap-y-4 justify-items-center"
+                          style={{
+                            gridTemplateColumns: `repeat(${SEATS_COLS}, minmax(0, 1fr))`,
+                          }}
+                          data-testid="workshop-seats-grid"
+                        >
+                          {registrants.map((person, i) => {
+                            const label = person.name || `Participant ${i + 1}`;
+                            const resolvedAvatar =
+                              person.avatar_url ||
+                              (fallbackAvatars.length
+                                ? fallbackAvatars[i % fallbackAvatars.length]
+                                : "");
+                            const avatar = (
+                              <div
+                                className="rounded-full overflow-hidden bg-background border border-border/80"
+                                style={{
+                                  width: AVATAR_SIZE,
+                                  height: AVATAR_SIZE,
+                                }}
+                              >
+                                {resolvedAvatar ? (
+                                  <UniversalImage
+                                    id={resolvedAvatar}
+                                    alt={label}
+                                    className="w-full h-full object-cover"
+                                    fieldContext={{
+                                      arrayPath: person.avatar_url
+                                        ? "registrant_avatars"
+                                        : "fallback_avatars",
+                                      index: i,
+                                      srcField: person.avatar_url
+                                        ? "avatar_url"
+                                        : "",
+                                    }}
+                                  />
+                                ) : (
+                                  <span className="flex h-full w-full items-center justify-center text-[10px] font-bold text-muted-foreground">
+                                    {(person.name || "?").charAt(0)}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                            if (!person.name) {
+                              return (
+                                <div key={`${person.avatar_url}-${i}`}>
+                                  {avatar}
                                 </div>
                               );
-                              if (!person.name) {
-                                return (
-                                  <div key={`${person.avatar_url}-${i}`}>
+                            }
+                            return (
+                              <Tooltip
+                                key={`${person.avatar_url}-${i}-${person.name}`}
+                              >
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    aria-label={label}
+                                  >
                                     {avatar}
-                                  </div>
-                                );
-                              }
-                              return (
-                                <Tooltip
-                                  key={`${person.avatar_url}-${i}-${person.name}`}
-                                >
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                      aria-label={label}
-                                    >
-                                      {avatar}
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top" className="max-w-[14rem]">
-                                    {person.name}
-                                  </TooltipContent>
-                                </Tooltip>
-                              );
-                            })}
-                          </div>
-                        </TooltipProvider>
-                      </div>
-                      {canLoadMoreSeats && (
-                        <button
-                          type="button"
-                          className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
-                          onClick={() => setShowAllSeats(true)}
-                          data-testid="button-workshop-seats-load-more"
-                        >
-                          {loadMoreLabel}
-                        </button>
-                      )}
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" className="max-w-[14rem]">
+                                  {person.name}
+                                </TooltipContent>
+                              </Tooltip>
+                            );
+                          })}
+                        </div>
+                      </TooltipProvider>
                     </div>
-                  ) : (
-                    <div
-                      className="rounded-md bg-background/50"
-                      style={{ minHeight: SEATS_PLACEHOLDER_MIN_H }}
-                      aria-hidden
-                    />
-                  )}
+                    {canLoadMoreSeats && (
+                      <button
+                        type="button"
+                        className="mt-2 shrink-0 self-start text-sm font-semibold text-primary hover:underline underline-offset-2"
+                        onClick={() => setShowAllSeats(true)}
+                        data-testid="button-workshop-seats-load-more"
+                      >
+                        {loadMoreLabel}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </Card>

@@ -145,10 +145,22 @@ function mergeLeadFormOptions(
   return merged;
 }
 
+/** Hidden payload defaults may be numbers/bools after resolveDeep (e.g. entry.id). */
+type LeadFormFieldDefault = string | number | boolean;
+
+/** Non-empty string, or any number/boolean (ids like event_id). */
+function isNonEmptyLeadFormWireScalar(
+  value: unknown,
+): value is LeadFormFieldDefault {
+  if (typeof value === "string") return value.trim() !== "";
+  return typeof value === "number" || typeof value === "boolean";
+}
+
 interface FieldConfig {
   visible?: boolean;
   required?: boolean;
-  default?: string;
+  /** String in YAML; may be number/boolean after section resolveDeep. */
+  default?: LeadFormFieldDefault;
   default_country?: string; // e.g. "ES", "US" – passed to PhoneInput defaultCountry
   helper_text?: string;
   placeholder?: string;
@@ -1134,10 +1146,16 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         }
       }
       if (src.related_field || catalogSourceKey(src)) {
+        const normalizedDefault =
+          typeof baseConfig.default === "string"
+            ? baseConfig.default
+            : baseConfig.default !== undefined
+              ? String(baseConfig.default)
+              : undefined;
         const authoredDefault =
-          src.related_field && baseConfig.default === "auto"
+          src.related_field && normalizedDefault === "auto"
             ? { ...baseConfig, default: "" }
-            : baseConfig;
+            : { ...baseConfig, default: normalizedDefault };
         const { mode: _mode, ...card } = applyChoiceCardinality(authoredDefault, options);
         baseConfig = card;
       }
@@ -1153,12 +1171,17 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     if (typeof raw === "string" && raw.trim()) {
       return raw.trim() as LeadFormComponentRenderer;
     }
-    return defaultComponentRenderer(fieldName);
+    return defaultComponentRenderer(fieldName as string);
   };
 
-  const resolveDefault = (fieldName: string, configDefault?: string): string => {
-    if (!configDefault || configDefault !== "auto") {
-      return configDefault || "";
+  const resolveDefault = (
+    fieldName: string,
+    configDefault?: LeadFormFieldDefault,
+  ): string => {
+    if (configDefault === undefined || configDefault === null) return "";
+    if (typeof configDefault !== "string") return String(configDefault);
+    if (configDefault !== "auto") {
+      return configDefault;
     }
 
     switch (fieldName) {
@@ -1415,7 +1438,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       programContext ||
       resolveDefault("program", getFieldConfig("program").default);
 
-    const resolved: Record<string, string> = {
+    const resolved: Record<string, LeadFormFieldDefault> = {
       ...Object.fromEntries(
         Object.entries(values).filter(
           (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -1455,12 +1478,15 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     // expanded {{ entry.* }}; extras like event_id land here for lead body + GTM).
     for (const [key, cfg] of Object.entries(data.fields || {})) {
       if (!cfg || typeof cfg !== "object") continue;
-      const existing = resolved[key];
-      if (typeof existing === "string" && existing.trim() !== "") continue;
-      const rawDefault = typeof cfg.default === "string" ? cfg.default : "";
-      if (!rawDefault) continue;
-      const fromAuto = resolveDefault(key, rawDefault);
-      resolved[key] = fromAuto || rawDefault;
+      if (isNonEmptyLeadFormWireScalar(resolved[key])) continue;
+      const rawDefault = cfg.default;
+      if (!isNonEmptyLeadFormWireScalar(rawDefault)) continue;
+      if (typeof rawDefault === "string") {
+        const fromAuto = resolveDefault(key, rawDefault);
+        resolved[key] = fromAuto || rawDefault;
+      } else {
+        resolved[key] = rawDefault;
+      }
     }
 
     return resolved;
@@ -1484,8 +1510,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       const effectiveEmailConsent = consent_email || false;
       const effectiveWhatsappConsent = consent.marketing ? effectiveEmailConsent : (consent_whatsapp || false);
       const fieldScalars = Object.fromEntries(
-        Object.entries(fields).filter(
-          ([, value]) => typeof value === "string" && value.trim() !== "",
+        Object.entries(fields).filter(([, value]) =>
+          isNonEmptyLeadFormWireScalar(value),
         ),
       );
       const payload = {
@@ -1733,17 +1759,21 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             first_name: variables.first_name,
             last_name: variables.last_name,
             phone: variables.phone,
-            program: fields.program,
+            program: typeof fields.program === "string" ? fields.program : undefined,
             ...(resolvedProduct.ok
               ? { item_id: resolvedProduct.item_id, program_id: resolvedProduct.program_id }
               : {}),
-            plan: fields.plan,
-            location: fields.location,
-            region: fields.region,
-            coupon: fields.coupon,
-            referral_key: fields.referral_key,
+            plan: typeof fields.plan === "string" ? fields.plan : undefined,
+            location: typeof fields.location === "string" ? fields.location : undefined,
+            region: typeof fields.region === "string" ? fields.region : undefined,
+            coupon: typeof fields.coupon === "string" ? fields.coupon : undefined,
+            referral_key:
+              typeof fields.referral_key === "string" ? fields.referral_key : undefined,
             client_comments: variables.client_comments,
-            current_download: fields.current_download,
+            current_download:
+              typeof fields.current_download === "string"
+                ? fields.current_download
+                : undefined,
             consent_email: variables.consent_email,
             consent_sms: variables.consent_sms,
             consent_whatsapp: variables.consent_whatsapp,
@@ -1755,8 +1785,8 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
               ]),
             ),
             ...Object.fromEntries(
-              Object.entries(fields).filter(
-                ([, value]) => typeof value === "string" && value.trim() !== "",
+              Object.entries(fields).filter(([, value]) =>
+                isNonEmptyLeadFormWireScalar(value),
               ),
             ),
           }

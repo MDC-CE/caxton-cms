@@ -10,12 +10,12 @@ import {
   KNOWN_SEO_FIELDS,
   KNOWN_SPECIAL_FIELDS,
   SLUG_ALIAS_FIELD,
-  type ContentTypeConfig,
   type ContentTypeEditorHint,
 } from "../../server/content-types.js";
 import { ecommerceManager, PURCHASABLE_FIELD } from "../../server/ecommerce/ecommerce-manager.js";
 import { SEO_YAML_KEY } from "../../server/seo-field-defs.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
+import { type ContentTypeConfig } from "./content.js";
 import { SEO_INCLUDE_IN_CLUSTERING } from "./seo-cluster-toggle.js";
 import type { NextAction } from "./respond.js";
 

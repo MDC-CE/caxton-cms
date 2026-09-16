@@ -29,4 +29,15 @@ describe("trackFormSubmission extras", () => {
     expect(last.event_id).toBe("99");
     expect(last.event_slug).toBe("ai-lab");
   });
+
+  it("merges numeric extras like event_id from resolveDeep", async () => {
+    await trackFormSubmission("event_order", {
+      email: "a@b.com",
+      event_id: 2537,
+    });
+    const pushes = (window as unknown as { dataLayer: Record<string, unknown>[] })
+      .dataLayer;
+    const last = pushes[pushes.length - 1];
+    expect(last.event_id).toBe(2537);
+  });
 });

@@ -205,9 +205,16 @@ function WorkshopCard({
   );
 }
 
+/** Ignore micro-jitter so a normal click is not treated as a drag. */
+const DRAG_THRESHOLD_PX = 8;
+
+const INTERACTIVE_DRAG_IGNORE =
+  "a, button, input, textarea, select, label, [role='button']";
+
 /**
  * Horizontal drag-to-scroll track (Learn MktEventCards / DraggableContainer style).
  * Grab cursor + drag only when content actually overflows.
+ * Clicks on links/controls are never hijacked; scroll starts only after a real drag.
  */
 function useDragScroll(itemCount: number) {
   const ref = useRef<HTMLDivElement>(null);
@@ -240,21 +247,34 @@ function useDragScroll(itemCount: number) {
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     const el = ref.current;
     if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+
+    // Never start a drag from CTAs/controls — and clear any stale `moved`
+    // so a prior drag without a click cannot kill the next link navigation.
+    const target = e.target;
+    if (target instanceof Element && target.closest(INTERACTIVE_DRAG_IGNORE)) {
+      drag.current = { active: false, startX: 0, scrollLeft: 0, moved: false };
+      return;
+    }
+
     drag.current = {
       active: true,
       startX: e.clientX,
       scrollLeft: el.scrollLeft,
       moved: false,
     };
-    el.setPointerCapture(e.pointerId);
-    el.classList.add("cursor-grabbing");
+    // Capture only after threshold in onPointerMove so a simple click stays intact.
   }, []);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     const el = ref.current;
     if (!el || !drag.current.active) return;
     const dx = e.clientX - drag.current.startX;
-    if (Math.abs(dx) > 4) drag.current.moved = true;
+    if (!drag.current.moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD_PX) return;
+      drag.current.moved = true;
+      el.setPointerCapture(e.pointerId);
+      el.classList.add("cursor-grabbing");
+    }
     el.scrollLeft = drag.current.scrollLeft - dx;
   }, []);
 
@@ -264,7 +284,9 @@ function useDragScroll(itemCount: number) {
     drag.current.active = false;
     el.classList.remove("cursor-grabbing");
     try {
-      el.releasePointerCapture(e.pointerId);
+      if (el.hasPointerCapture(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId);
+      }
     } catch {
       /* already released */
     }
@@ -286,7 +308,6 @@ export default function ListWorkshopsCarouselDefault({
 }: ListWorkshopsCarouselProps) {
   const items = data.items ?? [];
   const titleHtml = coerceToHtml(data.title);
-  const showArrow = data.show_title_arrow !== false;
   const { ref, canDrag, onPointerDown, onPointerMove, endDrag, suppressClickIfDragged } =
     useDragScroll(items.length);
   const [now, setNow] = useState(() => Date.now());
@@ -304,19 +325,11 @@ export default function ListWorkshopsCarouselDefault({
       data-testid="section-list-workshops-carousel"
     >
       {titleHtml && (
-        <div className="flex items-center justify-between gap-8 mb-6">
-          <h2
-            className="text-h2 font-heading font-bold text-foreground"
-            dangerouslySetInnerHTML={{ __html: titleHtml }}
-            data-testid="text-workshops-heading"
-          />
-          {showArrow && (
-            <IconArrowNarrowRight
-              className="hidden sm:block w-14 h-8 text-foreground shrink-0"
-              aria-hidden
-            />
-          )}
-        </div>
+        <h2
+          className="text-h2 font-heading font-bold text-foreground mb-6"
+          dangerouslySetInnerHTML={{ __html: titleHtml }}
+          data-testid="text-workshops-heading"
+        />
       )}
 
       <div
