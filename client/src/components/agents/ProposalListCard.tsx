@@ -20,6 +20,7 @@ import {
   proposalCategoryLabel,
   proposalEntryProgress,
 } from "@/lib/proposalCardMeta";
+import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
 import { SituationSnapshotBadge, resolveSituationDisplay } from "@/components/agents/SituationReviewBadge";
 
 export type ProposalCardData = {
@@ -252,13 +253,7 @@ export function ProposalListCard({
                 </Badge>
               ) : null}
               {p.escalated ? (
-                <Badge
-                  variant="outline"
-                  className="gap-1 font-normal border-status-busy/40 text-status-busy"
-                  data-testid={`badge-proposal-escalated-${p.id}`}
-                >
-                  Escalated
-                </Badge>
+                <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />
               ) : null}
               <IconChevronRight
                 className="h-4 w-4 text-muted-foreground/40 transition-colors group-hover:text-foreground"
