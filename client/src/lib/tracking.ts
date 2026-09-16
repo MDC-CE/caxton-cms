@@ -489,6 +489,7 @@ export type FormSubmissionTrackingData = {
 
 /**
  * Helper to track form submission — pushes conversion event + collected form fields.
+ * Known marketing keys stay explicit; any other scalar on formData is merged through.
  */
 export async function trackFormSubmission(
   conversionName: ConversionName,
@@ -531,6 +532,19 @@ export async function trackFormSubmission(
     const normalized = formData.email.toLowerCase().trim();
     payload.email = normalized;
     payload.email_hash = await hashEmail(normalized);
+  }
+
+  for (const [key, value] of Object.entries(formData)) {
+    if (key === "email") continue;
+    if (Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    if (value === undefined || value === "") continue;
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      payload[key] = value;
+    }
   }
 
   trackConversion(conversionName, payload);

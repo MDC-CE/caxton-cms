@@ -165,6 +165,25 @@ form_overrides:
 - **`success.reload_entry_fields`:** invalidate entry page query after success so overrides re-resolve.
 - **Resolver:** `shared/resolveLeadFormOverride.ts`. Example: `stacked_with_routes.yml`. Detail: `explain_site` sections → Lead form form_overrides.
 
+## Hidden field defaults → lead body + GTM
+
+Declared `fields.*` values (including keys that are not UI slots) ship on **both** the webhook/lead body and the GTM `dataLayer` push.
+
+```yaml
+fields:
+  event_id:
+    visible: false
+    default: "{{ entry.id }}"
+  event_slug:
+    visible: false
+    default: "{{ entry.slug }}"
+conversion_name: event_order
+```
+
+- Wire serialization keeps the **hardcoded BC field set** (`buildLeadPayload`) and **known GTM keys** (`trackFormSubmission`), then merges any other scalars through. `program` → `course`; `consent_whatsapp` → `consent`; `conversion_name` is lookup-only (not on the outbound body).
+- Extra keys are **not** rendered yet (UI slots stay hardcoded). Use `visible: false` + `default` for Learn-style `event_*` payload keys. `{{ entry.* }}` is resolved by section `resolveDeep` before the form mounts — submit just copies those values onto the lead body and dataLayer.
+- Do **not** put `fields` on `form_overrides` for phase differences — change `conversion_name` / webhook / success instead.
+
 ## Paths
 
 - Parse: `shared/parseFormFieldSource.ts`

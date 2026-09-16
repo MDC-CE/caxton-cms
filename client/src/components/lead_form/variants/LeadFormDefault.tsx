@@ -213,6 +213,8 @@ export interface LeadFormData {
     client_comments?: FieldConfig;
     /** Sent on the lead webhook as current_download; usually hidden via visible: false. */
     current_download?: FieldConfig;
+    /** Extra hidden payload keys (e.g. event_id) — not rendered in UI slots. */
+    [key: string]: FieldConfig | undefined;
   };
   success?: {
     url?: string;
@@ -1413,8 +1415,12 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       programContext ||
       resolveDefault("program", getFieldConfig("program").default);
 
-    return {
-      ...values,
+    const resolved: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(values).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
       program: resolveSubmitValueFromOptions(rawProgram, programOpts) || rawProgram,
       location:
         singleLandingLocation ||
@@ -1444,6 +1450,20 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         resolveDefault("plan", getFieldConfig("plan").default) ||
         "",
     };
+
+    // Any fields.* default not already filled (SectionRenderer resolveDeep already
+    // expanded {{ entry.* }}; extras like event_id land here for lead body + GTM).
+    for (const [key, cfg] of Object.entries(data.fields || {})) {
+      if (!cfg || typeof cfg !== "object") continue;
+      const existing = resolved[key];
+      if (typeof existing === "string" && existing.trim() !== "") continue;
+      const rawDefault = typeof cfg.default === "string" ? cfg.default : "";
+      if (!rawDefault) continue;
+      const fromAuto = resolveDefault(key, rawDefault);
+      resolved[key] = fromAuto || rawDefault;
+    }
+
+    return resolved;
   };
 
   const submitMutation = useMutation({
@@ -1468,8 +1488,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       // When marketing consent is enabled, derive both email and whatsapp from consent_email checkbox
       const effectiveEmailConsent = consent_email || false;
       const effectiveWhatsappConsent = consent.marketing ? effectiveEmailConsent : (consent_whatsapp || false);
+      const fieldScalars = Object.fromEntries(
+        Object.entries(fields).filter(
+          ([, value]) => typeof value === "string" && value.trim() !== "",
+        ),
+      );
       const payload = {
         ...restValues,
+        ...fieldScalars,
         // Consent fields mapped to backend names
         consent_email: effectiveEmailConsent,
         sms_consent: consent_sms || false,
@@ -1707,6 +1733,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
                 `consent_${field}`,
                 Boolean(variables[`consent_${field}`]),
               ]),
+            ),
+            ...Object.fromEntries(
+              Object.entries(fields).filter(
+                ([key, value]) =>
+                  !LEAD_FORM_UI_FIELD_KEYS.has(key) &&
+                  typeof value === "string" &&
+                  value.trim() !== "",
+              ),
             ),
           }
         );

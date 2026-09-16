@@ -222,18 +222,23 @@ export const leadFormDataSchema = z.object({
   automations: z.string().optional(),
   // Form-level webhook — highest priority in the three-level chain
   webhook: webhookConfigSchema.optional(),
-  fields: z.object({
-    email: leadFormFieldConfigSchema.optional(),
-    first_name: leadFormFieldConfigSchema.optional(),
-    last_name: leadFormFieldConfigSchema.optional(),
-    phone: leadFormFieldConfigSchema.optional(),
-    program: leadFormFieldConfigSchema.optional(),
-    region: leadFormFieldConfigSchema.optional(),
-    location: leadFormFieldConfigSchema.optional(),
-    coupon: leadFormFieldConfigSchema.optional(),
-    referral_key: leadFormFieldConfigSchema.optional(),
-    client_comments: leadFormFieldConfigSchema.optional(),
-  }).optional(),
+  // Known UI slots + catchall for hidden payload keys (e.g. event_id).
+  // plan / current_download / event_* etc. are accepted via catchall.
+  fields: z
+    .object({
+      email: leadFormFieldConfigSchema.optional(),
+      first_name: leadFormFieldConfigSchema.optional(),
+      last_name: leadFormFieldConfigSchema.optional(),
+      phone: leadFormFieldConfigSchema.optional(),
+      program: leadFormFieldConfigSchema.optional(),
+      region: leadFormFieldConfigSchema.optional(),
+      location: leadFormFieldConfigSchema.optional(),
+      coupon: leadFormFieldConfigSchema.optional(),
+      referral_key: leadFormFieldConfigSchema.optional(),
+      client_comments: leadFormFieldConfigSchema.optional(),
+    })
+    .catchall(leadFormFieldConfigSchema)
+    .optional(),
   success: z.object({
     url: z.string().optional(),
     message: z.string().optional(),

@@ -6,6 +6,19 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "LeadForm hidden fields → lead body + GTM (hybrid wire)"
+    agent_impact:
+      - "Hidden fields.* defaults (keys outside UI slots) are copied at submit onto both webhook/lead body and GTM. {{ entry.* }} comes from section resolveDeep."
+      - "buildLeadPayload / trackFormSubmission keep hardcoded known fields; any other scalar merges through (e.g. event_id). program→course; conversion_name stays lookup-only."
+      - "UI still hardcoded slots only — no dynamic field renderer. Prefer conversion_name on overrides, not fields. Re-bootstrap_agent for explain."
+    paths:
+      - server/utils/buildLeadPayload.ts
+      - client/src/lib/tracking.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - shared/component-registry/_common/schema.ts
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
+  - date: "2026-09-15"
     summary: "Proposal review prioritizes get_entry_activity for SERP churn"
     agent_impact:
       - "list_proposals(proposal_id) discovery_path elevates get_entry_activity when pending title/description ops or gate-filtered recent writes; warning recent_entry_writes lists each pending entry with counts; args_hint = hottest entry."
