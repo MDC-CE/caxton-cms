@@ -1,7 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -19,6 +24,9 @@ export type ReviewContextPayload = {
   situation_changed_since_filed?: boolean;
   filed_damage_class?: string;
   active_checklists?: string[];
+  review_situations?: string[];
+  filed_review_situations?: string[];
+  situation_source?: string;
   summary?: string;
   staff_summary?: {
     badge_label: string;
@@ -505,6 +513,25 @@ export function ProposalSituationCallout({
         >
           {staff.situation_description}
         </p>
+        {(resolved.review_situations?.length ?? 0) > 0 ? (
+          <div className="flex flex-wrap gap-1 pt-0.5" data-testid="chips-review-situations-live">
+            {(resolved.review_situations ?? []).map((id) => (
+              <Badge
+                key={id}
+                variant="secondary"
+                className="font-mono text-[10px] font-normal"
+                data-testid={`chip-review-situation-${id}`}
+              >
+                {id}
+              </Badge>
+            ))}
+            {resolved.situation_source ? (
+              <span className="text-[10px] text-muted-foreground self-center">
+                ({resolved.situation_source})
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <DialogContent
         className="max-h-[85vh] max-w-lg overflow-y-auto"
@@ -519,5 +546,168 @@ export function ProposalSituationCallout({
         <SituationDialogBody reviewContext={resolved} staff={staff} />
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Catalog labels for staff multi-select (keep in sync with server review-situations). */
+export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
+  id: string;
+  label: string;
+  when_to_use: string;
+}> = [
+  {
+    id: "internal_links",
+    label: "Hub / internal links",
+    when_to_use: "Body adds same-locale hub or cluster links without rewriting facts or SERP.",
+  },
+  {
+    id: "serp_title_description",
+    label: "Search title / description",
+    when_to_use: "Changes to search title or meta description — honest vs live.",
+  },
+  {
+    id: "body_copy_edit",
+    label: "Body / field edit",
+    when_to_use: "General copy or field updates that are not link-only or SERP-only.",
+  },
+  {
+    id: "selling_figures",
+    label: "Selling-page figures",
+    when_to_use: "Program or landing where hire rates, salaries, or prices may move.",
+  },
+  {
+    id: "new_public_content",
+    label: "New public content",
+    when_to_use: "New or draft-backed public page — angle, facts, and funnel.",
+  },
+  {
+    id: "promote_draft",
+    label: "Promote draft",
+    when_to_use: "Go-live a named draft with empty or minimal field updates.",
+  },
+];
+
+/**
+ * Staff editor for author-declared review situations on open/partial edits.
+ * Empty selection = clear declaration (server will infer from edits).
+ */
+export function ReviewSituationsEditor({
+  filedSituations,
+  liveSituations,
+  situationSource,
+  disabled,
+  saving,
+  onSave,
+  className,
+}: {
+  filedSituations: string[];
+  liveSituations?: string[];
+  situationSource?: string;
+  disabled?: boolean;
+  saving?: boolean;
+  onSave: (ids: string[]) => void;
+  className?: string;
+}) {
+  const [selected, setSelected] = useState<string[]>(() => [...filedSituations]);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const filedKey = filedSituations.join(",");
+
+  useEffect(() => {
+    setSelected([...filedSituations]);
+  }, [filedKey]);
+
+  const dirty =
+    selected.length !== filedSituations.length ||
+    selected.some((id) => !filedSituations.includes(id));
+
+  function toggle(id: string) {
+    setSelected((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "rounded-md border border-card-border bg-muted/20 px-3 py-2.5 space-y-2",
+        className,
+      )}
+      data-testid="panel-review-situations-editor"
+    >
+      <p className="text-sm text-foreground/90" data-testid="text-review-situations-edu">
+        Pick what kind of change this is so review uses the right checklist. You can leave empty —
+        we&apos;ll infer from the edits. Multiple packs each get their own checklist; apply only
+        after failing slices are removed or fixed.
+      </p>
+      {(liveSituations?.length ?? 0) > 0 ? (
+        <p className="text-xs text-muted-foreground" data-testid="text-review-situations-live">
+          Live for review: {(liveSituations ?? []).join(", ")}
+          {situationSource ? ` (${situationSource})` : ""}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap gap-1.5">
+        {STAFF_REVIEW_SITUATION_OPTIONS.map((opt) => {
+          const on = selected.includes(opt.id);
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              disabled={disabled || saving}
+              title={opt.when_to_use}
+              onClick={() => toggle(opt.id)}
+              className={cn(
+                "rounded-md border px-2 py-1 text-xs transition-colors",
+                on
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-muted-foreground/20 bg-background text-foreground hover-elevate",
+              )}
+              data-testid={`toggle-review-situation-${opt.id}`}
+              aria-pressed={on}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          disabled={disabled || saving || !dirty}
+          onClick={() => onSave(selected)}
+          data-testid="button-save-review-situations"
+        >
+          {saving ? "Saving…" : "Save situations"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={disabled || saving || selected.length === 0}
+          onClick={() => setSelected([])}
+          data-testid="button-clear-review-situations"
+        >
+          Clear (infer)
+        </Button>
+      </div>
+      <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+        <CollapsibleTrigger
+          className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+          data-testid="button-review-situations-advanced"
+        >
+          Read more (advanced)
+        </CollapsibleTrigger>
+        <CollapsibleContent className="mt-1 space-y-1 text-xs text-muted-foreground">
+          <p>
+            Filed tags are author-declared. Live review may add inferred packs when the edits need
+            more checklists (soft mismatch — create still succeeds).
+          </p>
+          <p>
+            On revise, tags that no longer match remaining edits drop. Per-situation ship: drop or
+            fix failing packs&apos; fields, then apply the rest in one go.
+          </p>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
   );
 }

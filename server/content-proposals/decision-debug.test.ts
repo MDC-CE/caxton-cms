@@ -36,6 +36,7 @@ function baseProposal(
     related_entries: [],
     entries: [],
     blockers: [],
+    review_situations: [],
     review_context_snapshot: null,
     decision_debug: null,
     supersedes_proposal_id: null,

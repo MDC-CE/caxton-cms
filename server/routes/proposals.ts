@@ -62,6 +62,7 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "attach_variant",
   "set_no_auto_retry",
   "revise_entries",
+  "set_review_situations",
   "escalate",
   "deescalate",
 ]);
@@ -81,6 +82,7 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "reopen_blocker",
   "set_no_auto_retry",
   "revise_entries",
+  "set_review_situations",
   "escalate",
   "deescalate",
 ]);
@@ -251,6 +253,17 @@ export function registerProposalRoutes(app: Express): void {
     });
   });
 
+  api.get(app, "/api/admin/proposals/proposers", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireProposalRead(req, res);
+    if (!auth) return;
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const daysRaw = req.query.days != null ? Number(req.query.days) : 30;
+    const days = Number.isFinite(daysRaw) ? daysRaw : 30;
+    const proposers = svc.listRecentProposers({ days });
+    res.json({ proposers, days: Math.min(Math.max(days, 1), 365) });
+  });
+
   api.get(app, "/api/admin/proposals/:id", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireProposalRead(req, res);
     if (!auth) return;
@@ -345,6 +358,10 @@ export function registerProposalRoutes(app: Express): void {
       // Staff UI may flip without claim; MCP must claim (enforced in service via actor.type).
       asStaff = true;
     }
+    if (action === "set_review_situations") {
+      // Staff UI may retag; MCP authors must be proposer (enforced in service).
+      asStaff = actor?.type !== "mcp";
+    }
     if (action === "escalate" || action === "deescalate") {
       asStaff = true;
     }
@@ -425,6 +442,9 @@ export function registerProposalRoutes(app: Express): void {
       confirm_reject: req.body?.confirm_reject === true,
       reject_kind: typeof req.body?.reject_kind === "string" ? req.body.reject_kind : undefined,
       entries: Array.isArray(req.body?.entries) ? req.body.entries : undefined,
+      review_situations: Array.isArray(req.body?.review_situations)
+        ? req.body.review_situations
+        : undefined,
       escalated_note:
         typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
     });

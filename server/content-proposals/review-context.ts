@@ -10,6 +10,7 @@ import {
   UNDO_COPY,
   MIXED_SERP_AND_BODY,
   TITLE_DESCRIPTION_STAFF_NOTE,
+  INTERNAL_LINKS_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
@@ -19,7 +20,16 @@ import {
   type DamageClass,
   type ExistenceState,
   type UndoCost,
+  type ThinkTemplate,
 } from "./proposal-review-rules";
+import {
+  checklistIdsForSituations,
+  inferSituationsFromOps,
+  mergeSituations,
+  staffNotesForSituations,
+  type ReviewSituationId,
+  type SituationSource,
+} from "./review-situations";
 
 export type ReviewWarning = { code: string; message: string };
 
@@ -45,6 +55,11 @@ export type ReviewContext = {
   damage_class: DamageClass;
   review_mode_operative: boolean;
   active_checklists: ChecklistId[];
+  /** Live merged review situations (author ∪ inferred). */
+  review_situations: ReviewSituationId[];
+  /** Filed author-declared situations (may be empty). */
+  filed_review_situations: ReviewSituationId[];
+  situation_source: SituationSource;
   entries: ReviewEntryContext[];
   related_open_proposals?: RelatedOpenProposal[];
   summary: string;
@@ -87,6 +102,9 @@ export type ClassifyProposalReviewOpts = {
     | "related_entries"
     | "entries"
     | "summary"
+    | "title"
+    | "promote_on_apply"
+    | "review_situations"
   >;
   /** Per entry / related target existence. */
   lookups: EntryExistenceLookup[];
@@ -96,6 +114,31 @@ export type ClassifyProposalReviewOpts = {
 };
 
 const MAX_THINK = 6;
+
+/** Prefer situation packs + disposition over adjacent when over the think cap. */
+function selectThinkTemplates(checklists: Set<ChecklistId>): ThinkTemplate[] {
+  const all = [...checklists]
+    .map((id) => THINK_TEMPLATES[id])
+    .filter((t): t is ThinkTemplate => Boolean(t));
+  if (all.length <= MAX_THINK) {
+    return all.sort((a, b) => a.priority - b.priority);
+  }
+  const defer = new Set<ChecklistId>([
+    "adjacent_findings",
+    "review_mode_inert",
+    "dedup_coordinate",
+  ]);
+  const primary = all
+    .filter((t) => !defer.has(t.id))
+    .sort((a, b) => a.priority - b.priority);
+  const secondary = all
+    .filter((t) => defer.has(t.id))
+    .sort((a, b) => a.priority - b.priority);
+  if (primary.length >= MAX_THINK) {
+    return primary.slice(0, MAX_THINK);
+  }
+  return [...primary, ...secondary].slice(0, MAX_THINK);
+}
 
 export function damageClassForTarget(opts: {
   contentType: string;
@@ -167,6 +210,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   const checklists = new Set<ChecklistId>();
   const entryContexts: ReviewEntryContext[] = [];
   let block_apply = false;
+  let liveSituations: ReviewSituationId[] = [];
+  let filedReviewSituations: ReviewSituationId[] = [];
+  let situationSource: SituationSource = "inferred";
 
   const review_mode_operative = proposal.kind === "edits";
   const undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
@@ -241,17 +287,42 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     const workForOps = toClassify;
     const hasSerp = hasTitleDescriptionOps(workForOps);
     const serpOnly = isTitleDescriptionOnlyOps(workForOps);
+
+    const filedSituations = (proposal.review_situations ?? []) as ReviewSituationId[];
+    const inferred = inferSituationsFromOps(workForOps, {
+      summary: proposal.summary,
+      title: proposal.title,
+      promoteOnApply: proposal.promote_on_apply,
+      damageClass: damage_class === "none" ? null : damage_class,
+    });
+    const mergedSit = mergeSituations(filedSituations, inferred, workForOps, {
+      promoteOnApply: proposal.promote_on_apply,
+      damageClass: damage_class === "none" ? null : damage_class,
+    });
+    liveSituations = mergedSit.situations;
+    filedReviewSituations = filedSituations;
+    situationSource = mergedSit.source;
+    warnings.push(...mergedSit.warnings);
+
+    for (const c of checklistIdsForSituations(mergedSit.situations)) {
+      checklists.add(c);
+    }
+
+    const linkOnly =
+      mergedSit.situations.includes("internal_links") &&
+      !mergedSit.situations.includes("body_copy_edit");
+
     if (hasSerp) {
       checklists.add("title_description_ctr");
       if (!serpOnly) {
-        checklists.add("verify_copy");
+        if (!linkOnly) checklists.add("verify_copy");
         warnings.push({
           code: MIXED_SERP_AND_BODY,
           message:
-            "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and verify_copy. Create still succeeds.",
+            "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and body packs. Create still succeeds. Per-situation ship: drop failing SERP ops via revise_entries before apply.",
         });
       }
-    } else {
+    } else if (!linkOnly) {
       checklists.add("verify_copy");
     }
 
@@ -322,11 +393,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     // already added review_mode_inert
   }
 
-  const orderedIds = [...checklists]
-    .map((id) => THINK_TEMPLATES[id])
-    .filter(Boolean)
-    .sort((a, b) => a.priority - b.priority)
-    .slice(0, MAX_THINK);
+  const orderedIds = selectThinkTemplates(checklists);
 
   const meta = DAMAGE_CLASS_META[damage_class];
   let relatedStaff: string | undefined;
@@ -364,8 +431,22 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     summaryParts.push(`Changed since filed (was ${snapshot!.damage_class}).`);
   }
   const hasTitleDescChecklist = orderedIds.some((t) => t.id === "title_description_ctr");
+  const hasInternalLinksChecklist = orderedIds.some((t) => t.id === "internal_links");
   if (hasTitleDescChecklist && !block_apply) {
     summaryParts.push(TITLE_DESCRIPTION_STAFF_NOTE);
+  }
+  if (hasInternalLinksChecklist && !block_apply) {
+    summaryParts.push(INTERNAL_LINKS_STAFF_NOTE);
+  }
+  for (const note of staffNotesForSituations(liveSituations)) {
+    if (
+      !block_apply &&
+      note !== TITLE_DESCRIPTION_STAFF_NOTE &&
+      note !== INTERNAL_LINKS_STAFF_NOTE &&
+      !summaryParts.includes(note)
+    ) {
+      summaryParts.push(note);
+    }
   }
 
   let staffSituation = block_apply
@@ -374,12 +455,21 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   if (hasTitleDescChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
   }
+  if (hasInternalLinksChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${INTERNAL_LINKS_STAFF_NOTE}`;
+  }
+  if (liveSituations.length && !block_apply) {
+    staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
+  }
 
   return {
     undo_cost,
     damage_class,
     review_mode_operative,
     active_checklists: orderedIds.map((t) => t.id),
+    review_situations: liveSituations,
+    filed_review_situations: filedReviewSituations,
+    situation_source: situationSource,
     entries: entryContexts,
     ...(siblings.length ? { related_open_proposals: siblings } : {}),
     summary: summaryParts.join(" "),
@@ -452,6 +542,9 @@ export function snapshotFromReviewContext(ctx: ReviewContext): Record<string, un
     situation_description: ctx.staff_summary.situation_description,
     active_checklists: ctx.active_checklists,
     block_apply: ctx.block_apply,
+    review_situations: ctx.review_situations,
+    filed_review_situations: ctx.filed_review_situations,
+    situation_source: ctx.situation_source,
   };
 }
 

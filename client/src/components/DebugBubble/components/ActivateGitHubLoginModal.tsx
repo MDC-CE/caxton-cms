@@ -29,19 +29,19 @@ function StepCard({
   stepNumber,
   title,
   children,
-  defaultOpen = false,
+  open,
+  onOpenChange,
 }: {
   stepNumber: number;
   title: string;
   children: React.ReactNode;
-  defaultOpen?: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-
   return (
     <Collapsible
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={onOpenChange}
       className="rounded-md border border-border bg-card"
     >
       <CollapsibleTrigger asChild>
@@ -79,6 +79,9 @@ export function ActivateGitHubLoginModal({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const displayCallback = callbackUrl || PLACEHOLDER_CALLBACK;
   const hasPublicAddress = Boolean(siteUrl && callbackUrl);
+  const [openStepId, setOpenStepId] = useState<string | null>(
+    () => (!hasPublicAddress ? "public-address" : null),
+  );
 
   const steps: Step[] = [
     {
@@ -201,7 +204,8 @@ export function ActivateGitHubLoginModal({
               key={step.id}
               stepNumber={index + 1}
               title={step.title}
-              defaultOpen={index === 0 && !hasPublicAddress}
+              open={openStepId === step.id}
+              onOpenChange={(nextOpen) => setOpenStepId(nextOpen ? step.id : null)}
             >
               {step.body}
             </StepCard>

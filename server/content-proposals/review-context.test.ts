@@ -48,6 +48,7 @@ function baseProposal(
     related_entries: [],
     entries: [],
     blockers: [],
+    review_situations: [],
     review_context_snapshot: null,
     decision_debug: null,
     supersedes_proposal_id: null,
@@ -415,6 +416,71 @@ describe("classifyProposalReview", () => {
     expect(tpl?.look_for.some((l) => /duplicate_weaker|revise/i.test(l))).toBe(true);
     const disp = ctx.agent_preview.think_items.find((t) => t.id === "disposition");
     expect(disp?.look_for.some((l) => /same-field SERP churn/i.test(l))).toBe(true);
+  });
+
+  it("declared internal_links on content → internal_links checklist without verify_copy", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        review_situations: ["internal_links"],
+        summary: "Add same-locale internal links to the cluster hub without changing figures.",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "body with [hub](/en/hub)" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.review_situations).toContain("internal_links");
+    expect(ctx.active_checklists).toContain("internal_links");
+    expect(ctx.active_checklists).not.toContain("verify_copy");
+    expect(ctx.agent_preview.think_items.some((t) => t.id === "internal_links")).toBe(true);
+  });
+
+  it("empty situations + content without link keywords → body_copy_edit inferred", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        review_situations: [],
+        summary: "Clarify the opening paragraph for accuracy.",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "updated" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.review_situations).toContain("body_copy_edit");
+    expect(ctx.situation_source).toBe("inferred");
+    expect(ctx.active_checklists).toContain("verify_copy");
   });
 
   it("title/description mixed with body → both checklists + mixed_serp_and_body", () => {

@@ -45,6 +45,8 @@ type AgentSessionPickerModalProps = {
   value: string;
   onSelect: (value: "" | typeof SESSION_UNSCOPED | string) => void;
   formatRelative: (ts: number) => string;
+  /** When false, hide the “Unscoped (no session)” row. Default true. */
+  includeUnscoped?: boolean;
 };
 
 function sessionSearchHaystack(session: AgentSessionPickerSummary): string {
@@ -86,6 +88,7 @@ export function AgentSessionPickerModal({
   value,
   onSelect,
   formatRelative,
+  includeUnscoped = true,
 }: AgentSessionPickerModalProps) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortMode>("date");
@@ -108,7 +111,8 @@ export function AgentSessionPickerModal({
   const q = search.trim().toLowerCase();
   const showAll = !q || "all sessions".includes(q);
   const showUnscoped =
-    !q || "unscoped (no session)".includes(q) || "unscoped".includes(q) || "no session".includes(q);
+    includeUnscoped &&
+    (!q || "unscoped (no session)".includes(q) || "unscoped".includes(q) || "no session".includes(q));
 
   const pick = (next: "" | typeof SESSION_UNSCOPED | string) => {
     onSelect(next);

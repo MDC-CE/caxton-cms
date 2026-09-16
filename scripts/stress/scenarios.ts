@@ -510,6 +510,31 @@ export const SCENARIOS: Scenario[] = [
     class: "docs",
   },
   {
+    id: "explain_site_review_situations",
+    tool: "explain_site",
+    about: "Architecture docs: topic=review-situations (proposal situation catalog).",
+    buildArgs: (ctx) => withSite(ctx, { topic: "review-situations" }),
+    reps: 1,
+    class: "docs",
+  },
+  {
+    id: "explain_site_internal_links_proposals",
+    tool: "explain_site",
+    about: "Architecture docs: topic=internal-links-proposals (hub link author/reviewer guide).",
+    buildArgs: (ctx) => withSite(ctx, { topic: "internal-links-proposals" }),
+    reps: 1,
+    class: "docs",
+  },
+  {
+    id: "explain_site_serp_title_description_proposals",
+    tool: "explain_site",
+    about:
+      "Architecture docs: topic=serp-title-description-proposals (SERP title/description author/reviewer guide).",
+    buildArgs: (ctx) => withSite(ctx, { topic: "serp-title-description-proposals" }),
+    reps: 1,
+    class: "docs",
+  },
+  {
     id: "explain_site_seo",
     tool: "explain_site",
     about: "Architecture docs: topic=seo.",

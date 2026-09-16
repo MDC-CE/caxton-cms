@@ -88,6 +88,7 @@ import {
 import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
 import {
   ProposalSituationCallout,
+  ReviewSituationsEditor,
   type ReviewContextPayload,
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
@@ -203,6 +204,7 @@ type Proposal = {
   updated_at?: number;
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
+  review_situations?: string[];
   review_context_snapshot?: Record<string, unknown> | null;
   decision_debug?: {
     captured_at?: number;
@@ -1531,6 +1533,20 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     reviewContext={reviewContext}
                     snapshot={p.review_context_snapshot}
                     kind={p.kind}
+                  />
+                ) : null}
+                {p.kind === "edits" && !isTerminal ? (
+                  <ReviewSituationsEditor
+                    filedSituations={p.review_situations ?? []}
+                    liveSituations={reviewContext?.review_situations}
+                    situationSource={reviewContext?.situation_source}
+                    saving={mut.isPending}
+                    onSave={(ids) =>
+                      mut.mutate({
+                        action: "set_review_situations",
+                        body: { review_situations: ids },
+                      })
+                    }
                   />
                 ) : null}
                 {isTerminal && p.decision_debug ? (

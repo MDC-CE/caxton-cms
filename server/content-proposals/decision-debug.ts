@@ -70,6 +70,7 @@ export function buildDecisionDebug(opts: BuildDecisionDebugOpts): ProposalDecisi
           damage_class: reviewContext.damage_class,
           block_apply: reviewContext.block_apply,
           situation_changed_since_filed: reviewContext.situation_changed_since_filed,
+          review_situations: reviewContext.review_situations,
           agent_preview: reviewContext.agent_preview,
         }
       : null,

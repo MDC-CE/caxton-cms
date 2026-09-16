@@ -17,6 +17,8 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
+**Review situations:** optional `review_situations` on edits (`explain` topics **`review-situations`**, **`internal-links-proposals`**, **`serp-title-description-proposals`**). Empty → infer from ops.
+
 | `update_proposal` | `proposals_create` and/or `proposals_review` (actions filtered) | See action allowlists below. |
 | `get_entry_activity` | same as list | Read recent writes (14 days). Use before `confirm_recent_activity`. |
 
@@ -36,8 +38,8 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 
 | Caps | Allowed | Denied |
 |---|---|---|
-| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries |
-| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries | apply, reject, accept, close, blockers |
+| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations |
+| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations | apply, reject, accept, close, blockers |
 | both | full set | — |
 
 ## Kinds

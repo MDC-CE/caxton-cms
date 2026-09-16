@@ -43,9 +43,9 @@ Target:
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP. If you cannot resolve it, stop and say so.
 2. Find related live pages (same topic/cluster) via list_entries / content tools.
-3. Add contextual in-body links from those pages to this URL until inbound is on track (≥3). Prefer quality over volume.
+3. Add contextual in-body links from those pages to this URL until inbound is on track (≥3). Prefer quality over volume. File via propose_change with review_situations: ["internal_links"] (content-only; see explain_site topic internal-links-proposals).
 4. Summarize which pages now link here.
 
-Tools: list_entries, get_entry_content, update_fields, propose_change (if you cannot edit).
+Tools: list_entries, get_entry_content, update_fields, propose_change (if you cannot edit), explain_site topic internal-links-proposals.
 
-Don’t: invent a keyword strategy for this URL; add footer/nav spam; rewrite unrelated pages; run diagnostics with confirm:true; locale fan-out unless a tool next_action says so.
+Don’t: invent a keyword strategy for this URL; add footer/nav spam; rewrite unrelated pages; run diagnostics with confirm:true; locale fan-out unless a tool next_action says so; mix title/description into the same link proposal.
