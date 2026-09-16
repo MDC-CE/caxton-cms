@@ -94,6 +94,12 @@ import {
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { BlockersBadge } from "@/components/agents/BlockersBadge";
+import {
+  ProposalKindBadge,
+  ProposalProgressLabel,
+  ProposalStatusLabel,
+} from "@/components/agents/ProposalExplainBadges";
 import { EventWebhooksKpiButton } from "@/components/pipeline/EventWebhooksDialog";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { AskActivityGateCopy } from "@/components/DebugBubble/SolveWithAiAgentDropdown";
@@ -396,305 +402,6 @@ function previewHref(entry: EntryRow): string | null {
   return `/private/preview/${encodeURIComponent(entry.contentType)}/${encodeURIComponent(entry.slug)}?locale=${encodeURIComponent(entry.locale)}&force_variant=${encodeURIComponent(entry.variant)}`;
 }
 
-function proposalStatusExplain(
-  status: string,
-  kind: string,
-): { title: string; body: string; advanced: string[] } {
-  if (status === "open" && kind === "notes") {
-    return {
-      title: "Still being tracked",
-      body: "This handoff is on the open list as a reminder. Leave it open if work still needs doing, Claim if you are working it, or Close with a reason when you stop tracking it. Open does not change the live site.",
-      advanced: [
-        "Status stays open until Close, Withdraw, or Reject finishes the proposal.",
-        "No auto-retry (if on) only applies while the handoff stays open.",
-      ],
-    };
-  }
-  if (status === "open" && kind === "idea") {
-    return {
-      title: "Waiting for a greenlight",
-      body: "This is a brief, not a publish. Accept greenlights the idea with a next step; park it if you are stopping tracking. Open by itself does not change the live site.",
-      advanced: [
-        "Needs-change notes block Accept until they are cleared.",
-        "Accept is four-eyes for MCP roles; staff UI can always Accept.",
-      ],
-    };
-  }
-  if (status === "open") {
-    return {
-      title: "Waiting for review",
-      body: "Suggested changes are not live yet. Someone else with edit access can Approve to apply them, or Reject. Open by itself does not change the live site.",
-      advanced: [
-        "Needs-change notes block Approve until the claimant marks them done.",
-        "Apply/Reject are four-eyes: the proposer cannot approve their own edits.",
-      ],
-    };
-  }
-  if (status === "partial") {
-    return {
-      title: "Partly applied",
-      body: "Some suggested entries from this proposal are already live; others still need Approve. The live site only changed for the entries that were applied.",
-      advanced: ["Remaining open entries can still be applied or the proposal can be rejected/withdrawn."],
-    };
-  }
-  if (status === "finished" && kind === "notes") {
-    return {
-      title: "Closed",
-      body: "This handoff is finished and off the open list. Closing did not change the live site or complete linked issues by itself.",
-      advanced: ["Close reason and note are stored on the proposal for later context."],
-    };
-  }
-  if (status === "finished" && kind === "idea") {
-    return {
-      title: "Finished",
-      body: "This idea is off the open list — either accepted with a next step, or parked with a reason. Nothing on the live site changed from this card alone.",
-      advanced: ["Accept stores close_reason accepted plus the next-step note; park uses wont_fix, tracked_elsewhere, or other."],
-    };
-  }
-  if (status === "finished") {
-    return {
-      title: "Finished",
-      body: "This proposal’s remaining work is done. Applied entries are live for their locales; nothing else is waiting on this card.",
-      advanced: ["Finished clears any active claim on the proposal."],
-    };
-  }
-  if (status === "rejected") {
-    return {
-      title: "Rejected",
-      body: "A reviewer rejected this proposal. It is no longer waiting for Approve. Reject does not undo entries that were already applied earlier. The reason and note stay on this card for the next agent.",
-      advanced: [
-        "Reject is for bad/impossible/illegal/harmful ideas — not polish (use Needs changes).",
-        "A later proposal may link here as a replacement.",
-      ],
-    };
-  }
-  if (status === "withdrawn") {
-    return {
-      title: "Withdrawn",
-      body: "The proposer pulled this back. It is no longer waiting for review or tracking as an open handoff.",
-      advanced: ["Withdraw does not change the live site."],
-    };
-  }
-  return {
-    title: status || "Unknown status",
-    body: "This status is not one of the usual proposal states.",
-    advanced: [],
-  };
-}
-
-function ProposalStatusLabel({
-  status,
-  kind,
-  label,
-  className,
-}: {
-  status: string;
-  kind: string;
-  label: string;
-  className?: string;
-}) {
-  const [advanced, setAdvanced] = useState(false);
-  const explain = proposalStatusExplain(status, kind);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex shrink-0 text-xs font-medium hover-elevate rounded-sm px-0.5 -mx-0.5",
-            className,
-          )}
-          data-testid="badge-proposal-status"
-          aria-label={`${label} — what this means`}
-        >
-          {label}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-proposal-status">
-        <p className="font-medium text-foreground">{explain.title}</p>
-        <p className="text-muted-foreground leading-5">{explain.body}</p>
-        {explain.advanced.length > 0 ? (
-          <>
-            <button
-              type="button"
-              className="text-xs text-primary hover:underline"
-              data-testid="button-proposal-status-advanced"
-              onClick={() => setAdvanced((v) => !v)}
-            >
-              {advanced ? "Hide advanced" : "Read more (advanced)"}
-            </button>
-            {advanced ? (
-              <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-                {explain.advanced.map((line) => (
-                  <p key={line}>{line}</p>
-                ))}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function HandoffKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-handoff"
-          aria-label="Handoff — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Handoff
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-handoff-kind">
-        <p className="font-medium text-foreground">A reminder note, not a content change</p>
-        <p className="text-muted-foreground leading-5">
-          Someone (often a coding agent) hit a wall and left this open so the next person can pick it
-          up. There is nothing to Approve — leave it open as a reminder, Claim if you are working it,
-          or Close with a reason when you stop tracking it. Closing does not change the live site.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-handoff-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">notes</code> — no field
-              updates or draft promote on apply.
-            </p>
-            <p>
-              Close is not four-eyes (unlike Approve/Reject on Edits). Prefer an Edits proposal when
-              there is a concrete fix to review.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function EditsKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-edits"
-          aria-label="Edits — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Edits
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-edits-kind">
-        <p className="font-medium text-foreground">Proposed content changes to review</p>
-        <p className="text-muted-foreground leading-5">
-          Someone suggested field updates on the linked pages. Nothing on the live site changes until
-          a different person Approves. Reject leaves live unchanged. Use a Handoff when there is no
-          concrete fix to apply — only a reminder for the next person.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-edits-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">edits</code> — Approve
-              applies field updates and/or promotes a prepared draft; Reject does not write YAML.
-            </p>
-            <p>
-              Approve and Reject are four-eyes: the proposer cannot finish their own proposal. The
-              review-mode badge next to this one explains draft vs soft vs go-live.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function IdeaKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-idea"
-          aria-label="Idea — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Idea
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-idea-kind">
-        <p className="font-medium text-foreground">A brief to greenlight — not a publish</p>
-        <p className="text-muted-foreground leading-5">
-          This pitches work before any YAML change. Accept greenlights it with a next step. Needs-change
-          notes block Accept until cleared. A different agent role — or this staff UI — can Accept.
-          Agents pick a role under MCP Server → Connection.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-idea-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">idea</code> — Accept finishes
-              with <code className="text-foreground">close_reason: accepted</code> and a next-step note;
-              it does not write content.
-            </p>
-            <p>
-              Park (Close) uses wont_fix, tracked_elsewhere, or other — not fixed_elsewhere. Staff UI
-              is always a different identity from MCP roles, so Accept stays available here.
-            </p>
-            <p>
-              Role connectors: Private → MCP Server → Connection → choose one or more roles → Choose this Role / Choose these Roles.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function ProposalKindBadge({ kind }: { kind: string }) {
-  if (kind === "notes") return <HandoffKindBadge />;
-  if (kind === "idea") return <IdeaKindBadge />;
-  return <EditsKindBadge />;
-}
-
 function NoAutoRetryBadge({
   noAutoRetry,
   disabled,
@@ -925,7 +632,7 @@ export function ProposalListPanel() {
         </div>
         <EventWebhooksKpiButton
           className="w-full shrink-0 lg:w-64"
-          onClick={() => setLocation("/private/webhooks")}
+          onClick={() => setLocation("/private/webhooks/hooks")}
         />
       </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -1410,11 +1117,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     if (progress) {
       detailMeta.push({
         key: "progress",
-        node: (
-          <span className={progress.failed > 0 ? "font-medium text-destructive" : undefined}>
-            {progress.label}
-          </span>
-        ),
+        node: <ProposalProgressLabel progress={progress} className="text-xs" />,
       });
     }
     detailMeta.push({
@@ -1463,7 +1166,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     status={p.status}
                     kind={p.kind}
                     label={ui.label}
-                    className={ui.className}
+                    className={cn("text-xs", ui.className)}
                   />
                   <ProposalKindBadge kind={p.kind} />
                   {p.kind === "edits" ? (
@@ -1479,10 +1182,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     />
                   ) : null}
                   {blockersOpen ? (
-                    <Badge variant="destructive" className="gap-1 font-normal">
-                      <IconAlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
-                      {p.open_blocker_count} needs changes
-                    </Badge>
+                    <BlockersBadge
+                      count={p.open_blocker_count ?? 0}
+                      labelMode="needs_changes"
+                    />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}
                 </div>

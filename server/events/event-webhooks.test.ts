@@ -13,6 +13,7 @@ import {
   parseEventWebhookConfig,
   recordDelivery,
   listDeliveries,
+  previewDeliveryPayload,
   saveEventWebhookConfig,
   setHookBuffer,
   slimEventForWebhook,
@@ -240,6 +241,93 @@ describe("event-webhooks", () => {
     expect(rows[0]?.hook_id).toBe("h1");
     expect(rows[0]?.url_host).toBe("hooks.example.com");
     expect(rows[0]?.status).toBe("failure");
+  });
+
+  it("listDeliveries filters by hook, status, and order", () => {
+    const t0 = Date.now() - 60_000;
+    recordDelivery({
+      site: TEST_SITE,
+      eventType: "proposal_created",
+      hookId: "a",
+      eventIds: [1],
+      url: "https://a.example.com",
+      status: "success",
+      httpStatus: 200,
+      source: "live",
+    });
+    // bump created_at slightly by recording second after
+    recordDelivery({
+      site: TEST_SITE,
+      eventType: "proposal_closed",
+      hookId: "b",
+      eventIds: [2],
+      url: "https://b.example.com",
+      status: "failure",
+      source: "live",
+    });
+    const failures = listDeliveries(TEST_SITE, { status: "failure", limit: 20 });
+    expect(failures.every((r) => r.status === "failure")).toBe(true);
+    const hookB = listDeliveries(TEST_SITE, { hookId: "b", limit: 20 });
+    expect(hookB).toHaveLength(1);
+    expect(hookB[0]?.hook_id).toBe("b");
+    const asc = listDeliveries(TEST_SITE, { order: "asc", limit: 20 });
+    const desc = listDeliveries(TEST_SITE, { order: "desc", limit: 20 });
+    expect(asc.map((r) => r.id)).toEqual([...desc.map((r) => r.id)].reverse());
+    void t0;
+  });
+
+  it("previewDeliveryPayload rebuilds slim body or reports missing events", () => {
+    const ev = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_created",
+      payload: { proposal_id: "p-preview" },
+    });
+    const cfg: EventWebhookConfig = {
+      version: 1,
+      subscriptions: {
+        proposal_created: [
+          {
+            id: "preview-hook",
+            enabled: true,
+            url: "https://hooks.example.com/in",
+            method: "POST",
+            events_per_call: 1,
+          },
+        ],
+      },
+    };
+    saveEventWebhookConfig(tmpRoot, cfg);
+
+    const okId = recordDelivery({
+      site: TEST_SITE,
+      eventType: "proposal_created",
+      hookId: "preview-hook",
+      eventIds: [ev.id],
+      url: "https://hooks.example.com/in",
+      status: "success",
+      httpStatus: 200,
+      source: "live",
+    });
+    const ok = previewDeliveryPayload(TEST_SITE, tmpRoot, okId);
+    expect(ok).not.toBeNull();
+    expect(ok!.warnings).toContain("recreated_not_archived");
+    expect(ok!.payload).not.toBeNull();
+    expect(ok!.events_found).toBe(1);
+    const events = ok!.payload!.events as Array<{ payload?: { proposal_id?: string } }>;
+    expect(events[0]?.payload?.proposal_id).toBe("p-preview");
+
+    const missId = recordDelivery({
+      site: TEST_SITE,
+      eventType: "proposal_created",
+      hookId: "preview-hook",
+      eventIds: [999_999_999],
+      url: "https://hooks.example.com/in",
+      status: "failure",
+      source: "live",
+    });
+    const miss = previewDeliveryPayload(TEST_SITE, tmpRoot, missId);
+    expect(miss!.payload).toBeNull();
+    expect(miss!.warnings).toContain("events_missing");
   });
 
   it("slimEventForWebhook keeps proposal_id only in payload", () => {

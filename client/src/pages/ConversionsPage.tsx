@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import {
   IconAlertTriangle,
-  IconArrowLeft,
   IconArrowRight,
   IconBraces,
   IconChevronDown,
@@ -20,6 +19,7 @@ import {
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -56,6 +56,7 @@ import { ConsentCard } from "@/components/editing/ConsentCard";
 import type { ConsentValues } from "@/components/editing/ConsentCard";
 import { WebhookCard, headersRecordToText, parseHeadersText } from "@/components/editing/WebhookCard";
 import { SuccessCard } from "@/components/editing/SuccessCard";
+import { ConversionIntentCard } from "@/components/editing/ConversionIntentCard";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
@@ -87,6 +88,7 @@ interface EditingEventState {
   description: string;
   when_to_use: string;
   when_not_to_use: string;
+  intentEditing: boolean;
   automations: string;
   tags: string[];
   consent: ConsentValues;
@@ -107,6 +109,7 @@ function makeEditingState(entry: ConversionEventEntry): EditingEventState {
     description: entry.description ?? "",
     when_to_use: entry.when_to_use ?? "",
     when_not_to_use: entry.when_not_to_use ?? "",
+    intentEditing: false,
     automations: entry.automations ?? "",
     tags: entry.tags ?? [],
     consent: eventConsentToCardValues(entry.consent),
@@ -733,11 +736,7 @@ function ConversionsPageInner() {
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto px-4 py-8 space-y-8">
         <div className="flex items-center gap-3">
-          <Link href="/private/store/ecommerce">
-            <Button variant="ghost" size="icon" data-testid="button-back-conversions">
-              <IconArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back-conversions" iconClassName="h-4 w-4" />
           <div className="flex items-center gap-2">
             <IconTargetArrow className="h-6 w-6 text-muted-foreground" />
             <div>
@@ -1774,74 +1773,19 @@ function ConversionsPageInner() {
               </div>
 
               {editingEvent && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="edit-event-desc" className="text-sm font-medium">
-                    Description{" "}
-                    <span className="text-muted-foreground font-normal">(optional)</span>
-                  </Label>
-                  <Input
-                    id="edit-event-desc"
-                    placeholder="Short staff label"
-                    value={editingEvent.description}
-                    onChange={(e) =>
-                      setEditingEvent({ ...editingEvent, description: e.target.value })
-                    }
-                    data-testid="input-edit-event-desc"
-                  />
-                </div>
-              )}
-
-              {editingEvent && (
-                <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
-                  <p className="text-xs text-muted-foreground leading-snug">{INTENT_FIELD_HINT}</p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Advanced:{" "}
-                    <code className="text-[10px]">site_*/settings.yml</code> →{" "}
-                    <code className="text-[10px]">tracking.conversion_events</code>; agents read via
-                    MCP <code className="text-[10px]">explain_site</code> topic{" "}
-                    <code className="text-[10px]">component-behaviors</code>.
-                  </p>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor="edit-when-to-use" className="text-sm font-medium">
-                        When to use
-                      </Label>
-                      <IntentCharCount value={editingEvent.when_to_use} />
-                    </div>
-                    <Textarea
-                      id="edit-when-to-use"
-                      rows={3}
-                      maxLength={CONVERSION_INTENT_MAX_CHARS}
-                      placeholder="Visitor is applying / enrolling…"
-                      value={editingEvent.when_to_use}
-                      onChange={(e) =>
-                        setEditingEvent({ ...editingEvent, when_to_use: e.target.value })
-                      }
-                      data-testid="input-edit-when-to-use"
-                      className="text-sm"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor="edit-when-not-to-use" className="text-sm font-medium">
-                        When not to use
-                      </Label>
-                      <IntentCharCount value={editingEvent.when_not_to_use} />
-                    </div>
-                    <Textarea
-                      id="edit-when-not-to-use"
-                      rows={3}
-                      maxLength={CONVERSION_INTENT_MAX_CHARS}
-                      placeholder="Soft info-only, downloads, newsletter…"
-                      value={editingEvent.when_not_to_use}
-                      onChange={(e) =>
-                        setEditingEvent({ ...editingEvent, when_not_to_use: e.target.value })
-                      }
-                      data-testid="input-edit-when-not-to-use"
-                      className="text-sm"
-                    />
-                  </div>
-                </div>
+                <ConversionIntentCard
+                  description={editingEvent.description}
+                  whenToUse={editingEvent.when_to_use}
+                  whenNotToUse={editingEvent.when_not_to_use}
+                  editing={editingEvent.intentEditing}
+                  onEditingChange={(val) =>
+                    setEditingEvent({ ...editingEvent, intentEditing: val })
+                  }
+                  onChange={(field, value) =>
+                    setEditingEvent({ ...editingEvent, [field]: value })
+                  }
+                  testIdPrefix="event-intent"
+                />
               )}
 
               {/* Automations & Tags */}

@@ -1954,7 +1954,7 @@ export default function BackgroundPipelinePage() {
               disabled={!site}
               data-testid="button-event-webhooks"
             >
-              <Link href="/private/webhooks">
+              <Link href="/private/webhooks/hooks">
                 <IconWebhook className="w-4 h-4 mr-2" />
                 Event webhooks
               </Link>

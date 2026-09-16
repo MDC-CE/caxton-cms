@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  IconChevronDown,
   IconLoader2,
   IconPencil,
   IconPlus,
@@ -16,7 +17,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   ToggleButtonBar,
   ToggleButtonBarTrigger,
@@ -45,6 +45,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import JsonViewer from "@/components/editing/JsonViewer";
+import { EventWebhookLogsPanel } from "@/components/pipeline/EventWebhookLogsPanel";
 
 export type EventWebhookHook = {
   id: string;
@@ -82,6 +84,7 @@ type WebhookSummary = {
   enabled_hook_count: number;
   last_delivery: DeliveryRow | null;
   file?: string;
+  site?: string;
 };
 
 function bufferKey(eventType: string, hookId: string) {
@@ -129,14 +132,58 @@ function parseHeadersText(text: string): Record<string, string> {
   return out;
 }
 
+/** Matches server test body shape (triggered_at refreshes at send time). */
+function buildTestPayloadPreview(opts: {
+  site: string;
+  eventType: string;
+  hook: EventWebhookHook;
+}): Record<string, unknown> {
+  return {
+    event: "pipeline.events",
+    site: opts.site,
+    triggered_at: new Date().toISOString(),
+    source: "test",
+    hook_id: opts.hook.id,
+    event_type: opts.eventType,
+    throttle: {
+      events_per_call: opts.hook.events_per_call,
+      count_in_batch: 0,
+    },
+    events: [],
+    test: true,
+    message: "Event webhook test delivery",
+  };
+}
+
+function headerPreviewLines(headers?: Record<string, string>): string[] {
+  const base = ["Content-Type: application/json"];
+  if (!headers) return base;
+  for (const [k, v] of Object.entries(headers)) {
+    const sensitive = /auth|token|secret|key|password|bearer/i.test(k);
+    base.push(`${k}: ${sensitive ? "••••••••" : v}`);
+  }
+  return base;
+}
+
+function formatRelativeShort(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  const mins = Math.round(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
 type PendingDrop = {
   kind: "save" | "delete";
   count: number;
   apply: () => Promise<void>;
 };
 
-/** Full settings body for /private/webhooks (no dialog chrome). */
-export function EventWebhooksPanel() {
+/** Full settings body for /private/webhooks/hooks and /logs (no dialog chrome). */
+export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [advanced, setAdvanced] = useState(false);
@@ -146,8 +193,12 @@ export function EventWebhooksPanel() {
     headersText: string;
     isNew: boolean;
   } | null>(null);
-  const [selectedFailures, setSelectedFailures] = useState<Set<number>>(new Set());
   const [dropConfirm, setDropConfirm] = useState<PendingDrop | null>(null);
+  const [testConfirm, setTestConfirm] = useState<{
+    eventType: string;
+    hook: EventWebhookHook;
+  } | null>(null);
+  const [testHeadersOpen, setTestHeadersOpen] = useState(false);
 
   const summaryQuery = useQuery({
     queryKey: ["/api/admin/event-webhooks"],
@@ -159,19 +210,33 @@ export function EventWebhooksPanel() {
   });
 
   const deliveriesQuery = useQuery({
-    queryKey: ["/api/admin/event-webhooks/deliveries"],
+    queryKey: ["/api/admin/event-webhooks/deliveries", { hours: 48, for: "hook-rows" }],
     queryFn: async () => {
       const res = await apiFetch("/api/admin/event-webhooks/deliveries?hours=48");
       if (!res.ok) throw new Error("Failed to load deliveries");
       return res.json() as Promise<{ deliveries: DeliveryRow[] }>;
     },
-    refetchInterval: () => (document.hidden ? false : 15_000),
+    enabled: tab === "hooks",
+    refetchInterval: () => (tab === "hooks" && !document.hidden ? 15_000 : false),
   });
 
   const allowlist = summaryQuery.data?.allowlist ?? [];
   const config = summaryQuery.data?.config ?? { version: 1 as const, subscriptions: {} };
   const pending = summaryQuery.data?.pending ?? {};
   const eventTypes = useMemo(() => [...allowlist], [allowlist]);
+
+  const lastLiveByHook = useMemo(() => {
+    const map = new Map<string, { created_at: number; status: "success" | "failure" }>();
+    for (const d of deliveriesQuery.data?.deliveries ?? []) {
+      if (d.source !== "live") continue;
+      const key = bufferKey(d.event_type, d.hook_id);
+      const prev = map.get(key);
+      if (!prev || d.created_at > prev.created_at) {
+        map.set(key, { created_at: d.created_at, status: d.status });
+      }
+    }
+    return map;
+  }, [deliveriesQuery.data?.deliveries]);
 
   const saveMutation = useMutation({
     mutationFn: async (next: EventWebhookConfig) => {
@@ -224,32 +289,14 @@ export function EventWebhooksPanel() {
       return body;
     },
     onSuccess: () => {
+      setTestConfirm(null);
+      setTestHeadersOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["/api/admin/event-webhooks/deliveries"] });
       toast({ title: "Test sent", description: "Logged as Test in the 48h history." });
     },
     onError: (err: Error) => {
       void queryClient.invalidateQueries({ queryKey: ["/api/admin/event-webhooks/deliveries"] });
       toast({ title: "Test failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const retryMutation = useMutation({
-    mutationFn: async (deliveryIds: number[]) => {
-      const res = await apiRequestWithAuth("POST", "/api/admin/event-webhooks/deliveries/retry", {
-        deliveryIds,
-      });
-      return res.json() as Promise<{ retried: number; skipped: number }>;
-    },
-    onSuccess: (data) => {
-      setSelectedFailures(new Set());
-      void queryClient.invalidateQueries({ queryKey: ["/api/admin/event-webhooks/deliveries"] });
-      toast({
-        title: "Retry queued",
-        description: `Retried ${data.retried}, skipped ${data.skipped}.`,
-      });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Retry failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -369,85 +416,85 @@ export function EventWebhooksPanel() {
     void apply();
   };
 
-  const deliveries = deliveriesQuery.data?.deliveries ?? [];
-  const failureIds = deliveries.filter((d) => d.status === "failure").map((d) => d.id);
-
   return (
     <>
       <div className="space-y-6" data-testid="panel-event-webhooks">
-        <Collapsible open={advanced} onOpenChange={setAdvanced}>
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" size="sm" className="h-auto px-0 text-xs text-muted-foreground">
-              {advanced ? "Hide advanced" : "Read more (advanced)"}
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="text-xs text-muted-foreground space-y-1 pt-1">
-            <p>
-              File: <code className="font-mono">event-webhooks.yml</code>. Allowlisted proposal event
-              types only. Key <code className="font-mono">events_per_call</code>. Slim JSON payload;
-              optional code enrichers. Buffers and delivery rows live in site SQLite. Production
-              proposal import does not notify.
-            </p>
-          </CollapsibleContent>
-        </Collapsible>
-
-        {summaryQuery.isLoading ? (
-          <div className="flex items-center gap-2 text-muted-foreground py-8 justify-center">
-            <IconLoader2 className="h-4 w-4 animate-spin" />
-            Loading…
-          </div>
-        ) : (
+        {tab === "hooks" ? (
           <>
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <p className="text-sm text-muted-foreground">
-                {summaryQuery.data?.enabled_hook_count ?? 0} enabled hook
-                {(summaryQuery.data?.enabled_hook_count ?? 0) === 1 ? "" : "s"}
-              </p>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  void summaryQuery.refetch();
-                  void deliveriesQuery.refetch();
-                }}
-              >
-                <IconRefresh className="h-3.5 w-3.5 mr-1.5" />
-                Refresh
-              </Button>
-            </div>
+            <Collapsible open={advanced} onOpenChange={setAdvanced}>
+              <CollapsibleTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-auto px-0 text-xs text-muted-foreground">
+                  {advanced ? "Hide advanced" : "Read more (advanced)"}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="text-xs text-muted-foreground space-y-1 pt-1">
+                <p>
+                  File: <code className="font-mono">event-webhooks.yml</code>. Allowlisted proposal event
+                  types only. Key <code className="font-mono">events_per_call</code>. Slim JSON payload;
+                  optional code enrichers. Buffers and delivery rows live in site SQLite. Production
+                  proposal import does not notify.
+                </p>
+              </CollapsibleContent>
+            </Collapsible>
 
-            <div className="space-y-4">
-              {eventTypes.map((eventType) => {
-                const hooks = config.subscriptions[eventType] ?? [];
-                return (
-                  <div key={eventType} className="rounded-md border border-border p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <code className="text-xs font-mono">{eventType}</code>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setEditing({
-                            eventType,
-                            hook: emptyHook(`hook-${hooks.length + 1}`),
-                            headersText: "",
-                            isNew: true,
-                          })
-                        }
-                        data-testid={`button-add-hook-${eventType}`}
-                      >
-                        <IconPlus className="h-3.5 w-3.5 mr-1" />
-                        Add hook
-                      </Button>
-                    </div>
-                    {hooks.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">No hooks</p>
-                    ) : (
-                      <ul className="space-y-2">
+            {summaryQuery.isLoading ? (
+              <div className="flex items-center gap-2 text-muted-foreground py-8 justify-center">
+                <IconLoader2 className="h-4 w-4 animate-spin" />
+                Loading…
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <p className="text-sm text-muted-foreground">
+                    {summaryQuery.data?.enabled_hook_count ?? 0} enabled hook
+                    {(summaryQuery.data?.enabled_hook_count ?? 0) === 1 ? "" : "s"}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void summaryQuery.refetch();
+                      void deliveriesQuery.refetch();
+                    }}
+                  >
+                    <IconRefresh className="h-3.5 w-3.5 mr-1.5" />
+                    Refresh
+                  </Button>
+                </div>
+
+                <div className="space-y-4">
+                  {eventTypes.map((eventType) => {
+                    const hooks = config.subscriptions[eventType] ?? [];
+                    return (
+                      <div key={eventType} className="rounded-md border border-border p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <code className="text-xs font-mono">{eventType}</code>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setEditing({
+                                eventType,
+                                hook: emptyHook(`hook-${hooks.length + 1}`),
+                                headersText: "",
+                                isNew: true,
+                              })
+                            }
+                            data-testid={`button-add-hook-${eventType}`}
+                          >
+                            <IconPlus className="h-3.5 w-3.5 mr-1" />
+                            Add hook
+                          </Button>
+                        </div>
+                        {hooks.length === 0 ? (
+                          <p className="text-xs text-muted-foreground">No hooks</p>
+                        ) : (
+                          <ul className="space-y-2">
                         {hooks.map((hook) => {
                           const waiting = pending[bufferKey(eventType, hook.id)] ?? 0;
+                          const lastLive = lastLiveByHook.get(bufferKey(eventType, hook.id));
                           return (
                             <li
                               key={hook.id}
@@ -490,173 +537,71 @@ export function EventWebhooksPanel() {
                                 </div>
                                 <p className="text-xs text-muted-foreground truncate max-w-md">
                                   {hook.url ? hostOf(hook.url) : "No URL"}
+                                  <span className="text-muted-foreground/80"> · </span>
+                                  {lastLive ? (
+                                    <>
+                                      last{" "}
+                                      <span
+                                        className={cn(
+                                          lastLive.status === "success"
+                                            ? "text-status-online"
+                                            : "text-destructive",
+                                        )}
+                                      >
+                                        {formatRelativeShort(lastLive.created_at)}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <span>Never triggered</span>
+                                  )}
                                 </p>
                               </div>
-                              <div className="flex items-center gap-1 shrink-0">
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  disabled={!hook.url || testMutation.isPending}
-                                  onClick={() =>
-                                    testMutation.mutate({ eventType, hookId: hook.id })
-                                  }
-                                >
-                                  <IconSend className="h-3.5 w-3.5 mr-1" />
-                                  Test
-                                </Button>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  aria-label="Edit hook"
-                                  onClick={() =>
-                                    setEditing({
-                                      eventType,
-                                      hook: { ...hook },
-                                      headersText: headersToText(hook.headers),
-                                      isNew: false,
-                                    })
-                                  }
-                                >
-                                  <IconPencil className="h-3.5 w-3.5" />
-                                </Button>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-sm font-medium">Delivery log (48 hours)</h3>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={selectedFailures.size === 0 || retryMutation.isPending}
-                  onClick={() => retryMutation.mutate([...selectedFailures])}
-                  data-testid="button-retry-selected-webhooks"
-                >
-                  Retry selected ({selectedFailures.size})
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Retry / Retry selected work on failures only. Older than 48 hours is dropped.
-              </p>
-              {deliveriesQuery.isLoading ? (
-                <p className="text-xs text-muted-foreground">Loading deliveries…</p>
-              ) : deliveries.length === 0 ? (
-                <p
-                  className="text-xs text-muted-foreground"
-                  data-testid="text-webhook-deliveries-empty"
-                >
-                  No webhook calls in the last 48 hours.
-                </p>
-              ) : (
-                <div className="overflow-x-auto rounded-md border border-border">
-                  <table className="w-full text-xs">
-                    <thead className="bg-muted/50 text-left">
-                      <tr>
-                        <th className="p-2 w-8">
-                          <Checkbox
-                            checked={
-                              failureIds.length > 0 &&
-                              failureIds.every((id) => selectedFailures.has(id))
-                            }
-                            onCheckedChange={(checked) => {
-                              if (checked) setSelectedFailures(new Set(failureIds));
-                              else setSelectedFailures(new Set());
-                            }}
-                            aria-label="Select all failures"
-                          />
-                        </th>
-                        <th className="p-2">Time</th>
-                        <th className="p-2">Type</th>
-                        <th className="p-2">Hook</th>
-                        <th className="p-2">Status</th>
-                        <th className="p-2">Source</th>
-                        <th className="p-2">Host</th>
-                        <th className="p-2" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {deliveries.map((d) => {
-                        const isFailure = d.status === "failure";
-                        return (
-                          <tr key={d.id} className="border-t border-border">
-                            <td className="p-2">
-                              {isFailure ? (
-                                <Checkbox
-                                  checked={selectedFailures.has(d.id)}
-                                  onCheckedChange={(checked) => {
-                                    setSelectedFailures((prev) => {
-                                      const next = new Set(prev);
-                                      if (checked) next.add(d.id);
-                                      else next.delete(d.id);
-                                      return next;
-                                    });
-                                  }}
-                                  aria-label={`Select delivery ${d.id}`}
-                                />
-                              ) : null}
-                            </td>
-                            <td className="p-2 whitespace-nowrap">
-                              {new Date(d.created_at).toLocaleString()}
-                            </td>
-                            <td className="p-2 font-mono">{d.event_type}</td>
-                            <td className="p-2">{d.hook_id}</td>
-                            <td className="p-2">
-                              <span
-                                className={cn(
-                                  d.status === "success"
-                                    ? "text-status-online"
-                                    : "text-destructive",
-                                )}
-                              >
-                                {d.status}
-                                {d.http_status != null ? ` ${d.http_status}` : ""}
-                              </span>
-                              {d.error ? (
-                                <p
-                                  className="text-muted-foreground max-w-[12rem] truncate"
-                                  title={d.error}
-                                >
-                                  {d.error}
-                                </p>
-                              ) : null}
-                            </td>
-                            <td className="p-2">{d.source}</td>
-                            <td className="p-2 truncate max-w-[8rem]">{d.url_host || "—"}</td>
-                            <td className="p-2">
-                              {isFailure ? (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2"
-                                  disabled={retryMutation.isPending}
-                                  onClick={() => retryMutation.mutate([d.id])}
-                                >
-                                  Retry
-                                </Button>
-                              ) : null}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={!hook.url || testMutation.isPending}
+                                      onClick={() => setTestConfirm({ eventType, hook })}
+                                      data-testid={`button-test-hook-${eventType}-${hook.id}`}
+                                    >
+                                      <IconSend className="h-3.5 w-3.5 mr-1" />
+                                      Test
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      aria-label="Edit hook"
+                                      onClick={() =>
+                                        setEditing({
+                                          eventType,
+                                          hook: { ...hook },
+                                          headersText: headersToText(hook.headers),
+                                          isNew: false,
+                                        })
+                                      }
+                                    >
+                                      <IconPencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </div>
+              </>
+            )}
           </>
-        )}
+        ) : null}
+
+        {tab === "logs" ? (
+          <EventWebhookLogsPanel config={config} allowlist={allowlist} />
+        ) : null}
       </div>
 
       <Dialog
@@ -812,6 +757,121 @@ export function EventWebhooksPanel() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={!!testConfirm}
+        onOpenChange={(open) => {
+          if (!open && !testMutation.isPending) {
+            setTestConfirm(null);
+            setTestHeadersOpen(false);
+          }
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-lg bg-background text-foreground"
+          data-testid="dialog-event-webhook-test"
+        >
+          {testConfirm ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Send test webhook?</DialogTitle>
+                <DialogDescription>
+                  We will POST a sample JSON body to this hook&apos;s URL right away. It is logged
+                  as Test in the 48-hour delivery history. Waiting events and the live throttle
+                  buffer are not changed.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 text-sm">
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Endpoint
+                  </p>
+                  <p className="font-mono text-xs break-all rounded-md border border-border bg-muted/40 px-2 py-1.5">
+                    <span className="inline-block rounded bg-zinc-800 text-zinc-100 px-1.5 py-0.5 mr-1.5 font-semibold tracking-wide">
+                      POST
+                    </span>
+                    {testConfirm.hook.url}
+                  </p>
+                </div>
+                <Collapsible open={testHeadersOpen} onOpenChange={setTestHeadersOpen}>
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-auto px-0 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
+                    >
+                      <IconChevronDown
+                        className={cn(
+                          "h-3.5 w-3.5 mr-1 transition-transform",
+                          testHeadersOpen && "rotate-180",
+                        )}
+                      />
+                      Headers
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-1 pt-1">
+                    <pre className="font-mono text-xs whitespace-pre-wrap break-all rounded-md border border-border bg-muted/40 px-2 py-1.5 max-h-28 overflow-y-auto">
+                      {headerPreviewLines(testConfirm.hook.headers).join("\n")}
+                    </pre>
+                  </CollapsibleContent>
+                </Collapsible>
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Payload
+                  </p>
+                  <div className="overflow-hidden rounded-md border border-border max-h-56">
+                    <JsonViewer
+                      value={JSON.stringify(
+                        buildTestPayloadPreview({
+                          site: summaryQuery.data?.site || "(current site)",
+                          eventType: testConfirm.eventType,
+                          hook: testConfirm.hook,
+                        }),
+                        null,
+                        2,
+                      )}
+                      className="[&_.cm-editor]:!max-w-full [&_.cm-scroller]:!overflow-auto [&_.cm-editor]:!max-h-56 [&_.cm-editor]:!text-xs"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    <code className="font-mono">events</code> is empty for tests.{" "}
+                    <code className="font-mono">triggered_at</code> is set again at send time.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setTestConfirm(null)}
+                  disabled={testMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() =>
+                    testMutation.mutate({
+                      eventType: testConfirm.eventType,
+                      hookId: testConfirm.hook.id,
+                    })
+                  }
+                  disabled={testMutation.isPending}
+                  data-testid="button-confirm-webhook-test"
+                >
+                  {testMutation.isPending ? (
+                    <IconLoader2 className="h-4 w-4 animate-spin mr-1.5" />
+                  ) : (
+                    <IconSend className="h-4 w-4 mr-1.5" />
+                  )}
+                  Send test
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={!!dropConfirm} onOpenChange={(o) => !o && setDropConfirm(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -839,7 +899,7 @@ export function EventWebhooksPanel() {
   );
 }
 
-/** Compact KPI for proposals list — navigates to /private/webhooks. */
+/** Compact KPI for proposals list — navigates to /private/webhooks/hooks. */
 export function EventWebhooksKpiButton({
   onClick,
   className,

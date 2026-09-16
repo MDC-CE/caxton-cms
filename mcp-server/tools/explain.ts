@@ -5,8 +5,9 @@ import { z } from "zod";
 import yaml from "js-yaml";
 import { resolveSiteContext, hasMultipleSites } from "../lib/content.js";
 import { SITE_PARAM_DESC, siteFailResult } from "../lib/entry-helpers.js";
-import { denyUnlessContentView } from "../lib/auth.js";
+import { denyUnlessContentView, getActiveRoleId } from "../lib/auth.js";
 import type { CatalogGrant } from "../lib/tool-catalog.js";
+import { buildConnectorTeachFields } from "../lib/role-connector-guide.js";
 import { listProductRows } from "../../server/product/product-io.js";
 
 // Use cwd so this resolves correctly both under tsx (mcp-server/…) and the
@@ -339,15 +340,23 @@ export function registerExplainTools(
         return siteFailResult(result.error, "bootstrap_agent", { site });
       }
       const { payload } = result;
+      const teach = await buildConnectorTeachFields({
+        mcpToken,
+        activeRoleId: getActiveRoleId() ?? null,
+      });
       const multiSiteNoBrand =
         payload.skill.branding.mode === "generic" && hasMultipleSites();
       const next_actions = [
-        {
-          tool: "agent_session",
-          reason: "Start a content session; pass returned agent_session_id on mutates.",
-          priority: "recommended" as const,
-          args_hint: { action: "start" },
-        },
+        ...(teach.primary_blocker === "role_connector_required"
+          ? []
+          : [
+              {
+                tool: "agent_session",
+                reason: "Start a content session; pass returned agent_session_id on mutates.",
+                priority: "recommended" as const,
+                args_hint: { action: "start" },
+              },
+            ]),
         ...(multiSiteNoBrand
           ? [
               {
@@ -359,21 +368,53 @@ export function registerExplainTools(
             ]
           : []),
       ];
-      const warnings = multiSiteNoBrand
-        ? [
-            {
-              code: "conventions_generic_no_site",
-              message:
-                "Conventions are generic (no site brand). Pass site on bootstrap_agent after list_sites so link examples use the correct domain.",
-            },
-          ]
-        : [];
+      const warnings = [
+        ...(multiSiteNoBrand
+          ? [
+              {
+                code: "conventions_generic_no_site",
+                message:
+                  "Conventions are generic (no site brand). Pass site on bootstrap_agent after list_sites so link examples use the correct domain.",
+              },
+            ]
+          : []),
+        ...(teach.primary_blocker === "role_connector_required"
+          ? [
+              {
+                code: "role_connector_required",
+                message:
+                  "Production plain /mcp cannot write. Reconnect with role URLs from connector_guide before mutates.",
+              },
+            ]
+          : []),
+        ...(teach.mcp_write_guide
+          ? [
+              {
+                code: "mcp_write_disabled",
+                message: teach.mcp_write_guide.message,
+              },
+            ]
+          : []),
+      ];
+      const session_guidance = [
+        ...payload.session_guidance,
+        ...teach.session_guidance_extra,
+      ];
       return ok(
         {
           ...payload,
+          session_guidance,
+          primary_blocker: teach.primary_blocker,
+          production_unscoped: teach.production_unscoped,
+          ...(teach.connector_guide ? { connector_guide: teach.connector_guide } : {}),
+          ...(teach.mcp_write_guide ? { mcp_write_guide: teach.mcp_write_guide } : {}),
           message:
-            "Bootstrapped. Keep skill.content (when present) as standing conventions for this chat; " +
-            "call agent_session start next; pass agent_session_id + report on mutates.",
+            teach.primary_blocker === "role_connector_required"
+              ? "Bootstrapped on production plain /mcp (read-only for writes). See connector_guide — reconnect with role URLs before mutates."
+              : teach.mcp_write_guide
+                ? "Bootstrapped. MCP write is off for this user — see mcp_write_guide.course_of_action. Keep skill.content as standing conventions."
+                : "Bootstrapped. Keep skill.content (when present) as standing conventions for this chat; " +
+                  "call agent_session start next; pass agent_session_id + report on mutates.",
         },
         {
           warnings,

@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  IconArrowLeft,
   IconArrowRight,
   IconBraces,
   IconChartBar,
@@ -29,6 +28,7 @@ import {
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -2038,11 +2038,7 @@ function TrackingPageInner() {
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
           <div className="flex items-start gap-4 min-w-0 flex-1">
-            <Button variant="ghost" size="icon" asChild data-testid="button-back-tracking">
-              <Link href="/private/diagnostics">
-                <IconArrowLeft className="h-5 w-5" />
-              </Link>
-            </Button>
+            <PrivateHistoryBackButton data-testid="button-back-tracking" />
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2">
                 <IconChartBar className="h-5 w-5 text-muted-foreground" />

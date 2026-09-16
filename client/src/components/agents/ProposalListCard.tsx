@@ -1,17 +1,16 @@
-import type { ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
-  IconAlertTriangle,
-  IconBulb,
+  IconCheck,
   IconChevronRight,
+  IconCopy,
   IconLink,
-  IconNote,
-  IconPencil,
   IconRocket,
 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { proposalStatusUi } from "@/lib/proposalStatusUi";
 import {
@@ -19,9 +18,22 @@ import {
   proposalAttributionLines,
   proposalCategoryLabel,
   proposalEntryProgress,
+  shortProposalId,
 } from "@/lib/proposalCardMeta";
+import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import {
+  ProposalKindBadge,
+  ProposalProgressLabel,
+  ProposalStatusLabel,
+} from "@/components/agents/ProposalExplainBadges";
 import { SituationSnapshotBadge, resolveSituationDisplay } from "@/components/agents/SituationReviewBadge";
+
+/** Wouter Link navigates unless defaultPrevented — use on badge / action clicks inside the card. */
+function preventProposalCardNavigation(e: MouseEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+}
 
 export type ProposalCardData = {
   id: string;
@@ -122,6 +134,45 @@ export function ProposalMetaRow({
   );
 }
 
+/** Compact id chip; click copies the full proposal id without opening the card. */
+function ProposalIdCopyBadge({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  const { toast } = useToast();
+  const shortId = shortProposalId(id);
+
+  function handleClick(e: MouseEvent) {
+    preventProposalCardNavigation(e);
+    void navigator.clipboard.writeText(id).then(() => {
+      setCopied(true);
+      toast({ title: "Copied proposal id" });
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      title={`Copy id ${id}`}
+      aria-label={`Copy proposal id ending in ${shortId}`}
+      className="inline-flex shrink-0"
+      data-testid={`badge-proposal-id-${id}`}
+    >
+      <Badge
+        variant="outline"
+        className="cursor-pointer gap-1 font-mono text-[10px] font-normal tabular-nums hover-elevate"
+      >
+        {copied ? (
+          <IconCheck className="h-3 w-3 shrink-0" aria-hidden />
+        ) : (
+          <IconCopy className="h-3 w-3 shrink-0" aria-hidden />
+        )}
+        {shortId}
+      </Badge>
+    </button>
+  );
+}
+
 export function ProposalListCard({
   proposal: p,
   href,
@@ -131,10 +182,6 @@ export function ProposalListCard({
 }) {
   const ui = proposalStatusUi(p.status);
   const StatusIcon = ui.icon;
-  const KindIcon =
-    p.kind === "notes" ? IconNote : p.kind === "idea" ? IconBulb : IconPencil;
-  const kindLabel =
-    p.kind === "notes" ? "Handoff" : p.kind === "idea" ? "Idea" : p.kind;
   const attribution = proposalAttributionLines({
     proposerUsername: p.proposer_username,
     proposerActor: p.proposer_actor,
@@ -153,19 +200,31 @@ export function ProposalListCard({
         kind: p.kind,
       })?.staff_summary?.situation_description
     : null;
+  const explainSuffix = `-${p.id}`;
 
   const meta: Array<{ key: string; node: ReactNode }> = [
     {
       key: "status",
-      node: <span className={cn("font-medium", ui.className)}>{ui.label}</span>,
+      node: (
+        <ProposalStatusLabel
+          status={p.status}
+          kind={p.kind}
+          label={ui.label}
+          className={ui.className}
+          stopLinkNavigation
+          testIdSuffix={explainSuffix}
+        />
+      ),
     },
     {
       key: "kind",
       node: (
-        <span className="inline-flex items-center gap-1 capitalize">
-          <KindIcon className="h-3 w-3 shrink-0" aria-hidden />
-          {kindLabel}
-        </span>
+        <ProposalKindBadge
+          kind={p.kind}
+          appearance="meta"
+          stopLinkNavigation
+          testIdSuffix={explainSuffix}
+        />
       ),
     },
   ];
@@ -173,9 +232,11 @@ export function ProposalListCard({
     meta.push({
       key: "progress",
       node: (
-        <span className={progress.failed > 0 ? "font-medium text-destructive" : undefined}>
-          {progress.label}
-        </span>
+        <ProposalProgressLabel
+          progress={progress}
+          stopLinkNavigation
+          testIdSuffix={explainSuffix}
+        />
       ),
     });
   }
@@ -207,6 +268,13 @@ export function ProposalListCard({
   return (
     <Link
       href={href}
+      onClick={(e) => {
+        // Wouter navigates unless defaultPrevented. Badge clicks set data-stop-card-nav.
+        const target = e.target as HTMLElement | null;
+        if (target?.closest("[data-stop-card-nav]")) {
+          e.preventDefault();
+        }
+      }}
       className="group block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       data-testid={`link-proposal-${p.id}`}
     >
@@ -233,28 +301,37 @@ export function ProposalListCard({
               {p.title}
             </h3>
             <div className="flex shrink-0 items-center gap-1.5">
-              {showSituationChip ? (
-                <SituationSnapshotBadge snapshot={p.review_context_snapshot} kind={p.kind} />
-              ) : null}
-              {goLive ? (
-                <Badge variant="secondary" className="gap-1 font-normal">
-                  <IconRocket className="h-3 w-3 shrink-0" aria-hidden />
-                  Go-live draft
-                </Badge>
-              ) : null}
-              {blockers > 0 ? (
-                <Badge
-                  variant="destructive"
-                  className="gap-1 font-normal"
-                  data-testid={`badge-proposal-blockers-${p.id}`}
-                >
-                  <IconAlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
-                  {blockers} blocker{blockers === 1 ? "" : "s"}
-                </Badge>
-              ) : null}
-              {p.escalated ? (
-                <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />
-              ) : null}
+              <div
+                className="flex shrink-0 items-center gap-1.5"
+                data-stop-card-nav
+                onClick={preventProposalCardNavigation}
+              >
+                <ProposalIdCopyBadge id={p.id} />
+                {showSituationChip ? (
+                  <SituationSnapshotBadge
+                    snapshot={p.review_context_snapshot}
+                    kind={p.kind}
+                    stopLinkNavigation
+                    testIdSuffix={`-${p.id}`}
+                  />
+                ) : null}
+                {goLive ? (
+                  <Badge variant="secondary" className="gap-1 font-normal">
+                    <IconRocket className="h-3 w-3 shrink-0" aria-hidden />
+                    Go-live draft
+                  </Badge>
+                ) : null}
+                {blockers > 0 ? (
+                  <BlockersBadge
+                    count={blockers}
+                    stopLinkNavigation
+                    testIdSuffix={`-${p.id}`}
+                  />
+                ) : null}
+                {p.escalated ? (
+                  <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />
+                ) : null}
+              </div>
               <IconChevronRight
                 className="h-4 w-4 text-muted-foreground/40 transition-colors group-hover:text-foreground"
                 aria-hidden

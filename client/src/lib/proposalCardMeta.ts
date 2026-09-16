@@ -31,11 +31,11 @@ export function proposalCategoryLabel(category: string): string {
   return category;
 }
 
-/** Short id for display; copy actions should still use the full UUID. */
-export function shortProposalId(id: string): string {
+/** Short id for display (last chars of UUID); copy actions should still use the full id. */
+export function shortProposalId(id: string, length = 6): string {
   const compact = id.replace(/-/g, "");
-  const head = compact.slice(0, 8) || id.slice(0, 8);
-  return head ? `${head}…` : id;
+  const tail = compact.slice(-length) || id.slice(-length);
+  return tail || id;
 }
 
 export function formatProposalRelativeUpdatedAt(

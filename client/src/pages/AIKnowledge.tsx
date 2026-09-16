@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { ArrowLeft, BookOpen, Brain, Check, ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Image, Loader2, Pencil, Plus, Search, Send, Trash2, Upload, User, Wrench, X } from "lucide-react";
+import { BookOpen, Brain, Check, ChevronDown, ChevronRight, Cpu, Eye, EyeOff, Image, Loader2, Pencil, Plus, Search, Send, Trash2, Upload, User, Wrench, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -445,11 +446,7 @@ export default function AIKnowledge() {
     <div className="min-h-screen bg-background flex flex-col">
       <div className="border-b">
         <div className="max-w-4xl mx-auto flex items-center gap-3 px-6 py-3">
-          <Link href="/">
-            <Button size="icon" variant="ghost" data-testid="button-back-knowledge">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back-knowledge" iconClassName="h-4 w-4" />
           <div className="flex items-center gap-3 flex-1">
             <div className="shrink-0 w-10 h-10 rounded-md border bg-muted flex items-center justify-center overflow-hidden">
               {agentIcon ? (
