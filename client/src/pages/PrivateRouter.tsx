@@ -37,6 +37,7 @@ const McpServerPage = lazy(() => import("@/pages/McpServerPage"));
 const AgentsOrgChartPage = lazy(() => import("@/pages/AgentsOrgChartPage"));
 const ErrorLogPage = lazy(() => import("@/pages/ErrorLogPage"));
 const BackgroundPipelinePage = lazy(() => import("@/pages/BackgroundPipelinePage"));
+const EventWebhooksPage = lazy(() => import("@/pages/EventWebhooksPage"));
 const PrivateOverlays = lazy(() => import("@/pages/PrivateOverlays"));
 const VariablesPage = lazy(() => import("@/pages/VariablesPage"));
 
@@ -179,6 +180,7 @@ export default function PrivateRouter() {
           <Route path="/private/agents" component={AgentsRedirect} />
           <Route path="/private/error-log" component={ErrorLogPage} />
           <Route path="/private/background-pipeline" component={BackgroundPipelinePage} />
+          <Route path="/private/webhooks" component={EventWebhooksPage} />
           <Route path="/private/proposals/:id" component={ProposalsRedirect} />
           <Route path="/private/proposals" component={ProposalsRedirect} />
           <Route path="/private/overlays" component={PrivateOverlays} />

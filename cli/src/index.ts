@@ -4,6 +4,7 @@ import * as p from "@clack/prompts";
 import { parseArgs, printHelp } from "./parse-args.js";
 import { resolveConfig } from "./resolve-config.js";
 import { createProject } from "./commands/create-project.js";
+import { ensureSitesYml } from "./commands/ensure-sites-yml.js";
 import { startServer, waitForLocalServer } from "./commands/start-server.js";
 import {
   startMcpServer,
@@ -70,6 +71,11 @@ async function main(): Promise<void> {
     if (config.detect.kind === "empty") {
       await createProject(config);
       p.log.success("Created site folder and sites.yml");
+    } else if (config.detect.kind === "needs_sites_yml") {
+      const entries = await ensureSitesYml(config);
+      const summary = entries.map((e) => `${e.domain} → ${e.contentFolder}`).join(", ");
+      p.log.success(`Created sites.yml (${summary})`);
+      ensureEnvFile(config.projectRoot);
     } else {
       ensureEnvFile(config.projectRoot);
     }

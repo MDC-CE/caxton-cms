@@ -6,6 +6,7 @@ import { SyncStateFlushJob } from "./definitions/sync-state-flush";
 import { BindingPropagationJob } from "./definitions/binding-propagation";
 import { AiImageGcJob } from "./definitions/ai-image-gc";
 import { SeoIndexRefreshJob } from "./definitions/seo-index-refresh";
+import { EventWebhookDeliveryJob } from "./definitions/event-webhook-delivery";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -15,4 +16,5 @@ export function registerAllJobs(): void {
   registerJobClass("binding_propagation", BindingPropagationJob);
   registerJobClass("ai_image_gc", AiImageGcJob);
   registerJobClass("seo_index_refresh", SeoIndexRefreshJob);
+  registerJobClass("event_webhook_delivery", EventWebhookDeliveryJob);
 }

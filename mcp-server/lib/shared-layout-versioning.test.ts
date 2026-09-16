@@ -2,7 +2,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { hasEntryLevelVersioningDir, versioningApiSlug } from "./shared-layout.js";
+import {
+  hasEntryLevelVersioningDir,
+  needsTemplateVariantConfirm,
+  versioningApiSlug,
+} from "./shared-layout.js";
 
 describe("versioningApiSlug / entry-level drafts", () => {
   let tempDir: string;
@@ -49,5 +53,50 @@ describe("versioningApiSlug / entry-level drafts", () => {
     fs.mkdirSync(entryDir, { recursive: true });
     fs.writeFileSync(path.join(entryDir, "_common.yml"), "slug: my-post\ndetached: true\n");
     expect(versioningApiSlug("blog", "my-post", contentPath)).toBe("my-post");
+  });
+});
+
+describe("needsTemplateVariantConfirm", () => {
+  it("requires confirm when an entry slug remaps to template", () => {
+    expect(
+      needsTemplateVariantConfirm({
+        requestedSlug: "my-post",
+        versioningSlug: "template",
+      }),
+    ).toBe(true);
+  });
+
+  it("skips when confirm_template_variant is true", () => {
+    expect(
+      needsTemplateVariantConfirm({
+        requestedSlug: "my-post",
+        versioningSlug: "template",
+        confirmed: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips when caller already passed template/single", () => {
+    expect(
+      needsTemplateVariantConfirm({
+        requestedSlug: "template",
+        versioningSlug: "template",
+      }),
+    ).toBe(false);
+    expect(
+      needsTemplateVariantConfirm({
+        requestedSlug: "single",
+        versioningSlug: "template",
+      }),
+    ).toBe(false);
+  });
+
+  it("skips when versioning stays on the entry (detached / entry drafts)", () => {
+    expect(
+      needsTemplateVariantConfirm({
+        requestedSlug: "my-post",
+        versioningSlug: "my-post",
+      }),
+    ).toBe(false);
   });
 });

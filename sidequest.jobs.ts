@@ -9,3 +9,6 @@ export { OnSaveValidationJob } from "./server/jobs/definitions/on-save-validatio
 export { SyncStateFlushJob } from "./server/jobs/definitions/sync-state-flush";
 export { BindingPropagationJob } from "./server/jobs/definitions/binding-propagation";
 export { SeoIndexRefreshJob } from "./server/jobs/definitions/seo-index-refresh";
+export { EventWebhookDeliveryJob } from "./server/jobs/definitions/event-webhook-delivery";
+export { EntryDeleteCleanupJob } from "./server/jobs/definitions/entry-delete-cleanup";
+export { AiImageGcJob } from "./server/jobs/definitions/ai-image-gc";

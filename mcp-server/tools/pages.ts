@@ -110,6 +110,7 @@ import type { SeoBlock } from "../../server/seo-fields.js";
 import {
   pathForLayoutTarget,
   versioningApiSlug,
+  needsTemplateVariantConfirm,
   sharedTemplateBlastSideEffect,
   SHARED_TEMPLATE_HTML_CACHE_WARNING,
   ADD_SECTION_NO_BINDING_FANOUT,
@@ -118,7 +119,12 @@ import {
   REORDER_NO_BINDING_FANOUT,
   CREATE_ENTRY_SHARED_LAYOUT_WARNING,
 } from "../lib/shared-layout.js";
-import { isTemplateVersioningSlug, variantTemplateBasename } from "@shared/sharedLayoutPaths";
+import {
+  isTemplateVersioningSlug,
+  variantTemplateBasename,
+  TEMPLATE_VERSIONING_SLUG,
+  LAYOUT_TARGET_TYPE_TEMPLATE,
+} from "@shared/sharedLayoutPaths";
 import {
   assessSlugLocaleMatch,
   SLUG_LOCALE_MISMATCH_CODE,
@@ -5271,17 +5277,40 @@ let renameResult: Record<string, unknown> | null = null;
     "to {variantSlug}.{locale}.yml and registering it in versioning.yml at 0% traffic allocation. " +
     "Works on unpublished draft entries (copies from an existing draft). " +
     "Returns the new variant slug. Edit with variant: <variantSlug>. " +
-    "For unpublished entries use publish_draft to go live (all locales); for live pages use promote_variant (one locale).",
+    "For unpublished entries use publish_draft to go live (all locales); for live pages use promote_variant (one locale). " +
+    "Attached shared-layout entry slugs remap to the type template (unless detached or entry-level drafts exist); " +
+    "that remap requires principal (human/orchestrator) approval then confirm_template_variant: true. " +
+    "For per-entry title/content/field refreshes use propose_change or update_fields on the entry — not create_variant. " +
+    "Prefer declarative variantSlug values describing what differs from live/promoted (not reserved names like template).",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
-      slug: z.string().describe("Page slug"),
-      variantSlug: z.string().describe("Slug for the new variant, e.g. 'draft-v2' or 'ab-test-headline'. Lowercase letters, numbers, and hyphens only."),
+      slug: z.string().describe("Page slug (or template/single for the shared shell)"),
+      variantSlug: z
+        .string()
+        .describe(
+          "Slug for the new variant, e.g. 'ab-hero-short' or 'bls-may-2025'. Lowercase letters, numbers, and hyphens only. Prefer names that describe what differs from live.",
+        ),
       locale: z.string().default("en").describe("Locale to copy, e.g. 'en' or 'es'"),
       sourceVariant: z.string().optional().describe("When page is unpublished, optional draft slug to copy from (defaults to 'draft' or first available)."),
+      confirm_template_variant: z
+        .boolean()
+        .optional()
+        .describe(
+          "Required when an attached entry slug remaps to the shared template. Set true only after human/orchestrator approval for intentional shared-shell A/B. Do not self-confirm.",
+        ),
       ...requiredAgentSessionIdField,
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ contentType, slug, variantSlug, locale, sourceVariant, agent_session_id, site }) => {
+    async ({
+      contentType,
+      slug,
+      variantSlug,
+      locale,
+      sourceVariant,
+      confirm_template_variant,
+      agent_session_id,
+      site,
+    }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { domain, contentPath } = siteResult;
@@ -5303,6 +5332,82 @@ let renameResult: Record<string, unknown> | null = null;
 
       try {
         const versioningSlug = versioningApiSlug(contentType, slug, contentPath);
+        const templateMode = isTemplateVersioningSlug(versioningSlug);
+        const filePreview = templateMode
+          ? variantTemplateBasename(variantSlug, locale)
+          : `${variantSlug}.${locale}.yml`;
+
+        if (
+          needsTemplateVariantConfirm({
+            requestedSlug: slug,
+            versioningSlug,
+            confirmed: confirm_template_variant === true,
+          })
+        ) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: "confirm_template_variant",
+              code: "confirm_template_variant",
+              message:
+                `Creating a variant for attached entry "${slug}" remaps to the shared ${contentType} shell — ` +
+                `file ${filePreview}, not a draft under this article. That draft affects all attached entries. ` +
+                `For title, content, or other per-entry field updates, use propose_change or update_fields on this entry instead. ` +
+                `Only after human or orchestrator approval for intentional shared-shell A/B, re-call with confirm_template_variant: true ` +
+                `(do not self-confirm). Prefer a declarative variantSlug describing what differs from live.`,
+              details: {
+                requested_slug: slug,
+                versioning_slug: versioningSlug,
+                variantSlug,
+                locale,
+                file_preview: filePreview,
+              },
+              warnings: [
+                {
+                  code: "shared_template_remap",
+                  message:
+                    "No per-entry draft file is created while attached. Entry field refreshes must not use create_variant.",
+                },
+              ],
+            },
+            [
+              {
+                tool: "propose_change",
+                priority: "recommended",
+                reason:
+                  "Propose per-entry field updates (title, content, SEO, etc.) without shared-template pollution.",
+                args_hint: { contentType, slug, locale },
+              },
+              {
+                tool: "update_fields",
+                priority: "optional",
+                reason: "Direct entry overlay edit when MCP writes are enabled.",
+                args_hint: {
+                  contentType,
+                  slug,
+                  locale,
+                  layout_target: "entry",
+                },
+              },
+              {
+                tool: "create_variant",
+                priority: "optional",
+                reason:
+                  "Only after principal approval: create intentional shared-shell A/B with a declarative variantSlug.",
+                args_hint: {
+                  contentType,
+                  slug,
+                  locale,
+                  variantSlug,
+                  confirm_template_variant: true,
+                  ...(sourceVariant ? { sourceVariant } : {}),
+                  ...(site ? { site } : {}),
+                },
+              },
+            ],
+          );
+        }
+
         const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
         const res = await fetch(url, {
           method: "POST",
@@ -5311,26 +5416,149 @@ let renameResult: Record<string, unknown> | null = null;
         });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
-          return fail((data.error as string) || `Server error: ${res.status}`);
+          const errMsg = (data.error as string) || `Server error: ${res.status}`;
+          if (/already exists/i.test(errMsg)) {
+            const shellSlug = templateMode ? TEMPLATE_VERSIONING_SLUG : slug;
+            return actionRequired(
+              {
+                success: false,
+                action_required: "variant_already_exists",
+                code: "variant_already_exists",
+                message:
+                  `${errMsg}. Reuse that draft, pick a new declarative variantSlug, or delete the leftover ` +
+                  `(delete_variant requires its own confirms). Do not auto-delete.`,
+                details: {
+                  requested_slug: slug,
+                  versioning_slug: versioningSlug,
+                  variantSlug,
+                  locale,
+                  file_preview: filePreview,
+                  templateMode,
+                },
+                warnings: [],
+              },
+              [
+                {
+                  tool: "list_variants",
+                  priority: "recommended",
+                  reason: "Inspect the existing variant on this versioning target before editing.",
+                  args_hint: { contentType, slug: shellSlug, ...(site ? { site } : {}) },
+                },
+                {
+                  tool: "update_fields",
+                  priority: "recommended",
+                  reason: "Edit the existing draft; use shell identity when templateMode.",
+                  args_hint: {
+                    contentType,
+                    slug: shellSlug,
+                    locale,
+                    variant: variantSlug,
+                    ...(templateMode ? { layout_target: LAYOUT_TARGET_TYPE_TEMPLATE } : {}),
+                  },
+                },
+                {
+                  tool: "create_variant",
+                  priority: "optional",
+                  reason: "Create under a new declarative variantSlug if this name is taken.",
+                  args_hint: {
+                    contentType,
+                    slug,
+                    locale,
+                    variantSlug: `${variantSlug}-v2`,
+                    ...(needsTemplateVariantConfirm({
+                      requestedSlug: slug,
+                      versioningSlug,
+                      confirmed: false,
+                    })
+                      ? { confirm_template_variant: true }
+                      : {}),
+                    ...(sourceVariant ? { sourceVariant } : {}),
+                    ...(site ? { site } : {}),
+                  },
+                },
+                {
+                  tool: "delete_variant",
+                  priority: "optional",
+                  reason:
+                    "Discard the leftover shared draft only with principal approval (confirm + confirm_template_delete when on template).",
+                  args_hint: {
+                    contentType,
+                    slug: shellSlug,
+                    locale,
+                    variantSlug,
+                    confirm: true,
+                    ...(templateMode ? { confirm_template_delete: true } : {}),
+                    ...(site ? { site } : {}),
+                  },
+                },
+              ],
+            );
+          }
+          return fail(errMsg);
         }
+
+        const createdVariant = (data.variantSlug as string) ?? variantSlug;
+        if (templateMode) {
+          return ok(
+            {
+              variantSlug: createdVariant,
+              locale: data.locale,
+              filePath: data.filePath,
+              versioningSlug,
+              templateMode: true,
+              requested_slug: slug,
+              seededFromDraft: data.seededFromDraft === true,
+            },
+            {
+              warnings: [
+                ...VARIANT_WARNINGS,
+                {
+                  code: "shared_template_variant",
+                  message:
+                    `Draft lives on the shared shell (${filePreview}), not under entry "${slug}". ` +
+                    `Do not propose_change / get_entry_content with the article slug + this variant — that yields entry_not_found. ` +
+                    `Edit with slug template (or layout_target type_template) and variant set.`,
+                },
+              ],
+              side_effects: [{
+                kind: "variant_isolated",
+                summary:
+                  `Created shared-shell draft ${filePreview} (all attached entries); live template.*.yml unchanged. Not an entry draft for "${slug}".`,
+                paths: typeof data.filePath === "string" ? [data.filePath] : undefined,
+              }],
+              next_actions: [{
+                tool: "update_fields",
+                priority: "recommended",
+                reason:
+                  "Edit the shared-shell draft with layout_target type_template and variant set; live shell unchanged until promote.",
+                args_hint: {
+                  contentType,
+                  slug: TEMPLATE_VERSIONING_SLUG,
+                  locale,
+                  variant: createdVariant,
+                  layout_target: LAYOUT_TARGET_TYPE_TEMPLATE,
+                },
+              }],
+            },
+          );
+        }
+
         return ok(
           {
-            variantSlug: data.variantSlug,
+            variantSlug: createdVariant,
             locale: data.locale,
             filePath: data.filePath,
             versioningSlug,
-            templateMode: versioningSlug === "single" || versioningSlug === "template",
+            templateMode: false,
             seededFromDraft: data.seededFromDraft === true,
           },
           {
             warnings: [...VARIANT_WARNINGS],
             side_effects: [{
               kind: "variant_isolated",
-              summary: versioningSlug === "single" || versioningSlug === "template"
-                ? "Created template draft (shared by all attached entries); live template.*.yml unchanged"
-                : data.seededFromDraft
-                  ? "Created additional draft from existing draft; still unpublished"
-                  : "Created draft only; live locale YAML unchanged",
+              summary: data.seededFromDraft
+                ? "Created additional draft from existing draft; still unpublished"
+                : "Created draft only; live locale YAML unchanged",
             }],
             next_actions: [{
               tool: "update_fields",
@@ -5338,10 +5566,9 @@ let renameResult: Record<string, unknown> | null = null;
               reason: "Edit the draft with variant set; live bindings/shared-layout will not run until publish/promote + live edits.",
               args_hint: {
                 contentType,
-                slug: versioningSlug === "single" || versioningSlug === "template" ? slug : slug,
+                slug,
                 locale,
-                variant: data.variantSlug ?? variantSlug,
-                layout_target: versioningSlug === "single" || versioningSlug === "template" ? "type_template" : undefined,
+                variant: createdVariant,
               },
             }],
           },

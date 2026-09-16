@@ -94,6 +94,7 @@ import {
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { EventWebhooksKpiButton } from "@/components/pipeline/EventWebhooksDialog";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { AskActivityGateCopy } from "@/components/DebugBubble/SolveWithAiAgentDropdown";
 import { ValidationIssueDetailModal } from "@/components/diagnostics/ValidationIssueDetailModal";
@@ -901,25 +902,31 @@ export function ProposalListPanel() {
 
   return (
     <div className="space-y-5" data-testid="panel-agents-proposals">
-      <div className="max-w-3xl">
-        <p className="text-sm leading-6 text-muted-foreground">
-          Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
-          open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
-          does not change the live site). Needs changes mean not ready to approve — use that for polish;
-          Reject only when the idea must not ship.
-        </p>
-        <Collapsible open={advanced} onOpenChange={setAdvanced}>
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" size="sm" className="h-auto px-0 mt-1 text-xs text-muted-foreground">
-              {advanced ? "Hide advanced" : "Read more (advanced)"}
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="text-xs text-muted-foreground space-y-1 mt-1">
-            <p>Stored in per-site SQLite (data/&lt;site&gt;/app.db). Exact fingerprint blocks clones; similar open proposals need confirm_distinct. One open proposal per draft variant.</p>
-            <p>Notes default to no auto-retry on linked issues. Close reasons: wont_fix, fixed_elsewhere, tracked_elsewhere, other. Apply/Reject are four-eyes; Close is not. MCP must claim before clearing no_auto_retry.</p>
-            <p>Issue panels only list proposals linked to that issue. This page lists everything.</p>
-          </CollapsibleContent>
-        </Collapsible>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="max-w-3xl min-w-0 flex-1">
+          <p className="text-sm leading-6 text-muted-foreground">
+            Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
+            open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
+            does not change the live site). Needs changes mean not ready to approve — use that for polish;
+            Reject only when the idea must not ship.
+          </p>
+          <Collapsible open={advanced} onOpenChange={setAdvanced}>
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-auto px-0 mt-1 text-xs text-muted-foreground">
+                {advanced ? "Hide advanced" : "Read more (advanced)"}
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="text-xs text-muted-foreground space-y-1 mt-1">
+              <p>Stored in per-site SQLite (data/&lt;site&gt;/app.db). Exact fingerprint blocks clones; similar open proposals need confirm_distinct. One open proposal per draft variant.</p>
+              <p>Notes default to no auto-retry on linked issues. Close reasons: wont_fix, fixed_elsewhere, tracked_elsewhere, other. Apply/Reject are four-eyes; Close is not. MCP must claim before clearing no_auto_retry.</p>
+              <p>Issue panels only list proposals linked to that issue. This page lists everything.</p>
+            </CollapsibleContent>
+          </Collapsible>
+        </div>
+        <EventWebhooksKpiButton
+          className="w-full shrink-0 lg:w-64"
+          onClick={() => setLocation("/private/webhooks")}
+        />
       </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1">

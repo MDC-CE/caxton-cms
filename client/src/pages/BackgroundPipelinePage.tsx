@@ -9,7 +9,7 @@ import {
 } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { AGENT_FILTER_OTHER } from "@shared/event-log-filters";
 import {
   EVENT_LOG_VIEW_DEFAULTS,
@@ -51,6 +51,7 @@ import {
   IconRoute,
   IconSparkles,
   IconTrash,
+  IconWebhook,
 } from "@tabler/icons-react";
 import {
   AlertDialog,
@@ -1945,16 +1946,30 @@ export default function BackgroundPipelinePage() {
               open a session for a short summary built from those events.
             </p>
           </div>
-          <Button
-            variant="outline"
-            size="default"
-            onClick={() => refetch()}
-            disabled={isFetching || !site}
-            data-testid="button-refresh-pipeline"
-          >
-            <IconRefresh className={cn("w-4 h-4 mr-2", isFetching && "animate-spin")} />
-            Refresh
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="default"
+              asChild
+              disabled={!site}
+              data-testid="button-event-webhooks"
+            >
+              <Link href="/private/webhooks">
+                <IconWebhook className="w-4 h-4 mr-2" />
+                Event webhooks
+              </Link>
+            </Button>
+            <Button
+              variant="outline"
+              size="default"
+              onClick={() => refetch()}
+              disabled={isFetching || !site}
+              data-testid="button-refresh-pipeline"
+            >
+              <IconRefresh className={cn("w-4 h-4 mr-2", isFetching && "animate-spin")} />
+              Refresh
+            </Button>
+          </div>
         </div>
 
         {isLoading || !data ? (

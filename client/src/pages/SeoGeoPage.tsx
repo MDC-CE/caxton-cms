@@ -1017,6 +1017,53 @@ type ClusterMember = {
   traffic?: PathTrafficStats;
 };
 
+function compareClusterMembersByName(a: ClusterMember, b: ClusterMember): number {
+  return clusterListLabel(a.keyword, a.path || a.slug).localeCompare(
+    clusterListLabel(b.keyword, b.path || b.slug),
+    undefined,
+    { sensitivity: "base" },
+  );
+}
+
+/** Sort spokes with the same Cluster Map sort key/direction as hubs. */
+function sortClusterMembers(
+  members: ClusterMember[],
+  sortBy: ClusterSortBy,
+  sortDir: ClusterSortDir,
+  metrics: {
+    traffic: Map<string, PathTrafficStats | undefined>;
+    potential: Map<string, PotentialMetrics>;
+    integrity: Map<string, IntegrityMetrics>;
+    activity: Map<string, number>;
+  },
+): ClusterMember[] {
+  return [...members].sort((a, b) => {
+    let cmp = 0;
+    if (sortBy === "clicks") {
+      const aClicks = metrics.traffic.get(a.id)?.clicks ?? a.traffic?.clicks ?? -1;
+      const bClicks = metrics.traffic.get(b.id)?.clicks ?? b.traffic?.clicks ?? -1;
+      cmp = aClicks - bClicks;
+    } else if (sortBy === "volume") {
+      const aVol = metrics.potential.get(a.id)?.kw_monthly_volume ?? -1;
+      const bVol = metrics.potential.get(b.id)?.kw_monthly_volume ?? -1;
+      cmp = aVol - bVol;
+    } else if (sortBy === "issues") {
+      const aIn = metrics.integrity.get(a.id);
+      const bIn = metrics.integrity.get(b.id);
+      const aIss = aIn ? aIn.errorCount + aIn.warningCount : -1;
+      const bIss = bIn ? bIn.errorCount + bIn.warningCount : -1;
+      cmp = aIss - bIss;
+    } else if (sortBy === "writes") {
+      const aW = metrics.activity.get(a.id) ?? -1;
+      const bW = metrics.activity.get(b.id) ?? -1;
+      cmp = aW - bW;
+    }
+    // name, page-count, priority (hub-only) → name; also tie-break for metrics
+    if (cmp === 0) cmp = compareClusterMembersByName(a, b);
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+}
+
 type KeywordMetricsInfo = {
   openrush_configured: boolean;
   source: "openrush_cache" | "yaml_fallback" | "none";
@@ -4975,7 +5022,7 @@ export function SeoTab({
                   const hubId = cluster.hubId || cluster.pillarUrl;
                   const hubTarget = parseSeoIndexEntryId(cluster.hubId);
                   const hubLocale = cluster.locale || "en";
-                  const members =
+                  const rawMembers =
                     cluster.members && cluster.members.length > 0
                       ? cluster.members
                       : cluster.clusterSlugs.map((slug) => ({
@@ -4985,11 +5032,6 @@ export function SeoTab({
                           locale: hubLocale,
                           path: "",
                         }));
-                  const excludePaths = [
-                    cluster.pillarUrl,
-                    ...members.map((m) => m.path).filter(Boolean),
-                  ];
-                  const excludeIds = members.map((m) => m.id).filter(Boolean);
                   const trafficOverlay = trafficByHub.get(hubId);
                   const potentialOverlay = potentialByHub.get(hubId);
                   const integrityOverlay = integrityByHub.get(hubId);
@@ -5006,6 +5048,22 @@ export function SeoTab({
                   const memberActivity = new Map(
                     (activityOverlay?.members ?? []).map((m) => [m.id, m.writeCount] as const),
                   );
+                  const members = sortClusterMembers(
+                    rawMembers,
+                    clusterSortBy,
+                    clusterSortDir,
+                    {
+                      traffic: memberTraffic,
+                      potential: memberPotential,
+                      integrity: memberIntegrity,
+                      activity: memberActivity,
+                    },
+                  );
+                  const excludePaths = [
+                    cluster.pillarUrl,
+                    ...members.map((m) => m.path).filter(Boolean),
+                  ];
+                  const excludeIds = members.map((m) => m.id).filter(Boolean);
 
                   let hubMetricChips: ReactNode = null;
                   if (perspective === "traffic") {

@@ -168,6 +168,15 @@ export function emitEvent(opts: EmitEventOpts): EmitResult {
   if (published === 0) {
     _wakeDispatcher();
   }
+  try {
+    const {
+      maybeEnqueueEventWebhook,
+      resolveContentRootForSite,
+    } = require("./event-webhooks") as typeof import("./event-webhooks");
+    maybeEnqueueEventWebhook(event, resolveContentRootForSite(opts.site));
+  } catch {
+    // Never fail emit because of webhooks
+  }
   return event;
 }
 

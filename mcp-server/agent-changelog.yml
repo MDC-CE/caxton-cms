@@ -6,6 +6,30 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "Non-production plain /mcp allows freestyle mutates"
+    agent_impact:
+      - "Production: plain /mcp stays read-only; mutates need /mcp/role/… + agent_session. Non-production (local/tunnels): plain /mcp registers mutating tools without role or agent_session_id gate — caps and MCP write still apply."
+      - "Optional agent_session on freestyle still helps staff event trails (otherwise Unscoped). Re-bootstrap_agent for playbook/conventions; reconnect if tools/list was stale."
+    tools_changed: false
+    paths:
+      - mcp-server/index.ts
+      - mcp-server/lib/tool-catalog.ts
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/README.md
+  - date: "2026-09-16"
+    summary: "create_variant gates attached→template remap (confirm_template_variant)"
+    agent_impact:
+      - "Attached shared-layout entry slug remaps to template; create_variant returns action_required confirm_template_variant until principal approval + confirm_template_variant:true. Prefer propose_change/update_fields for per-entry fields."
+      - "Success/clash envelopes teach shell identity (slug template + layout_target type_template); already-exists offers reuse/rename/delete_variant — no auto-delete. Reconnect MCP for tool schema."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/shared-layout.ts
+      - mcp-server/lib/shared-layout-versioning.test.ts
+      - mcp-server/explain/shared-layout.md
+      - mcp-server/explain/content_system.md
+  - date: "2026-09-16"
     summary: "LeadForm hidden defaults keep numeric/boolean scalars (e.g. event_id)"
     agent_impact:
       - "fields.*.default after resolveDeep may be number/boolean; LeadForm copies them onto lead body + GTM (not string-only)."

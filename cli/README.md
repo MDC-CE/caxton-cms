@@ -12,7 +12,24 @@ npm run weblify
 npx tsx cli/src/index.ts
 ```
 
-After `npm run build`, the published entry is `dist/cli.js` (`bin`: `weblify`).
+After `npm run build`, the published entry is `dist/cli.js` (`bin`: `weblify`). From the repo root, `npm link` then run `weblify` from any folder.
+
+**Site path:** default is cwd. To point at another folder without `cd`:
+
+```bash
+WEBLIFY_PROJECT_ROOT=/path/to/my-site npx weblify
+```
+
+See `.env.example` and [INSTALL.md](../INSTALL.md) (Weblify CLI / package paths). There is no `--path` flag.
+
+**Existing `site_*` without `sites.yml`:** Weblify detects content folders and asks which hostnames to register, then writes a minimal `sites.yml`. Non-interactive:
+
+```bash
+# one site_* folder
+weblify --yes
+# several — pick one for localhost
+weblify --yes --slug my-site
+```
 
 **Quiet by default.** After start you get plain-English steps for the agent you chose. Full engine / Vite logs:
 
