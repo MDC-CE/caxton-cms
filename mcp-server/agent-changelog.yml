@@ -5,6 +5,16 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-16"
+    summary: "LeadForm hidden defaults keep numeric/boolean scalars (e.g. event_id)"
+    agent_impact:
+      - "fields.*.default after resolveDeep may be number/boolean; LeadForm copies them onto lead body + GTM (not string-only)."
+      - "event_id from {{ entry.id }} now ships; empty strings still skipped. Re-bootstrap_agent for explain/lead-forms."
+    paths:
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - shared/component-registry/_common/schema.ts
+      - mcp-server/explain/lead-forms.md
+    tools_changed: false
   - date: "2026-09-15"
     summary: "LeadForm hidden fields → lead body + GTM (hybrid wire)"
     agent_impact:

@@ -52,6 +52,14 @@ describe("buildLeadPayload", () => {
     expect(out.tags).toBe("workshop");
   });
 
+  it("merges numeric event_id from resolveDeep without stringifying away", () => {
+    const out = buildLeadPayload({
+      email: "a@b.com",
+      event_id: 2537,
+    });
+    expect(out.event_id).toBe(2537);
+  });
+
   it("folds ref into referral and skips empty extras", () => {
     const out = buildLeadPayload({
       email: "a@b.com",

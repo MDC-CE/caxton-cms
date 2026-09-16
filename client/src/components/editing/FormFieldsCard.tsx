@@ -35,7 +35,7 @@ const COMPONENT_RENDERERS = [
 export interface FormFieldConfig {
   visible?: boolean;
   required?: boolean;
-  default?: string;
+  default?: string | number | boolean;
   component_renderer?: string;
   [key: string]: unknown;
 }
@@ -100,6 +100,8 @@ function summarizeField(cfg: FormFieldConfig): string[] {
   if (cfg.required === false) parts.push("optional");
   if (typeof cfg.default === "string" && cfg.default.trim()) {
     parts.push(`default: ${cfg.default}`);
+  } else if (typeof cfg.default === "number" || typeof cfg.default === "boolean") {
+    parts.push(`default: ${String(cfg.default)}`);
   }
   if (
     typeof cfg.component_renderer === "string" &&
@@ -140,7 +142,12 @@ function FormFieldEditorRow({
   const [open, setOpen] = useState(false);
   const visible = cfg.visible === true;
   const required = cfg.required === true;
-  const defaultValue = typeof cfg.default === "string" ? cfg.default : "";
+  const defaultValue =
+    typeof cfg.default === "string"
+      ? cfg.default
+      : typeof cfg.default === "number" || typeof cfg.default === "boolean"
+        ? String(cfg.default)
+        : "";
   const hasRenderer =
     typeof cfg.component_renderer === "string" && cfg.component_renderer.trim();
   const renderer = hasRenderer ? cfg.component_renderer!.trim() : undefined;
