@@ -404,28 +404,133 @@ function rowToDelivery(row: Record<string, unknown>): EventWebhookDeliveryRow {
 
 export function listDeliveries(
   site: string,
-  opts?: { sinceMs?: number; eventType?: string; limit?: number },
+  opts?: {
+    sinceMs?: number;
+    untilMs?: number;
+    eventType?: string;
+    hookId?: string;
+    status?: EventWebhookDeliveryStatus;
+    order?: "asc" | "desc";
+    limit?: number;
+  },
 ): EventWebhookDeliveryRow[] {
   ensureSchema(site);
   const since = opts?.sinceMs ?? Date.now() - EVENT_WEBHOOK_DELIVERY_RETENTION_MS;
   const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 500);
+  const order = opts?.order === "asc" ? "ASC" : "DESC";
   const db = getSiteSqlite(site);
-  const rows = opts?.eventType
-    ? (db
-        .prepare(
-          `SELECT * FROM event_webhook_deliveries
-           WHERE site = ? AND created_at >= ? AND event_type = ?
-           ORDER BY created_at DESC, id DESC LIMIT ?`,
-        )
-        .all(site, since, opts.eventType, limit) as Record<string, unknown>[])
-    : (db
-        .prepare(
-          `SELECT * FROM event_webhook_deliveries
-           WHERE site = ? AND created_at >= ?
-           ORDER BY created_at DESC, id DESC LIMIT ?`,
-        )
-        .all(site, since, limit) as Record<string, unknown>[]);
+
+  const clauses: string[] = ["site = ?", "created_at >= ?"];
+  const params: unknown[] = [site, since];
+
+  if (typeof opts?.untilMs === "number" && Number.isFinite(opts.untilMs)) {
+    clauses.push("created_at <= ?");
+    params.push(opts.untilMs);
+  }
+  if (opts?.eventType) {
+    clauses.push("event_type = ?");
+    params.push(opts.eventType);
+  }
+  if (opts?.hookId) {
+    clauses.push("hook_id = ?");
+    params.push(opts.hookId);
+  }
+  if (opts?.status === "success" || opts?.status === "failure") {
+    clauses.push("status = ?");
+    params.push(opts.status);
+  }
+
+  params.push(limit);
+  const rows = db
+    .prepare(
+      `SELECT * FROM event_webhook_deliveries
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY created_at ${order}, id ${order}
+       LIMIT ?`,
+    )
+    .all(...params) as Record<string, unknown>[];
   return rows.map(rowToDelivery);
+}
+
+/** Rebuild outbound body for a logged delivery (read-only preview). */
+export function previewDeliveryPayload(
+  site: string,
+  contentRoot: string,
+  deliveryId: number,
+): {
+  delivery: EventWebhookDeliveryRow;
+  payload: Record<string, unknown> | null;
+  events_found: number;
+  events_requested: number;
+  hook: {
+    id: string;
+    enabled: boolean;
+    url_host: string;
+    events_per_call: number;
+  } | null;
+  warnings: string[];
+} | null {
+  const delivery = getDeliveryById(site, deliveryId);
+  if (!delivery) return null;
+
+  const warnings: string[] = ["recreated_not_archived"];
+  const config = loadEventWebhookConfigSafe(contentRoot);
+  const hook = findHook(config, delivery.event_type, delivery.hook_id);
+  const hookSummary = hook
+    ? {
+        id: hook.id,
+        enabled: hook.enabled,
+        url_host: urlHost(hook.url),
+        events_per_call: hook.events_per_call,
+      }
+    : null;
+
+  if (!hook) warnings.push("hook_missing");
+  else if (!hook.enabled) warnings.push("hook_disabled");
+
+  const eventsRequested = delivery.event_ids.length;
+  const events = loadEventsForDelivery(site, delivery.event_ids);
+  const eventsFound = events.length;
+
+  if (eventsFound === 0) {
+    warnings.push("events_missing");
+    return {
+      delivery,
+      payload: null,
+      events_found: 0,
+      events_requested: eventsRequested,
+      hook: hookSummary,
+      warnings,
+    };
+  }
+  if (eventsFound < eventsRequested) {
+    warnings.push("events_partial");
+  }
+
+  const bodyHook: EventWebhookHook = hook ?? {
+    id: delivery.hook_id,
+    enabled: false,
+    url: "",
+    method: "POST",
+    events_per_call: Math.max(1, delivery.batch_size || 1),
+  };
+
+  const payload = buildWebhookBody({
+    site,
+    eventType: delivery.event_type,
+    hook: bodyHook,
+    events,
+    source: delivery.source,
+  });
+
+  return {
+    delivery,
+    payload,
+    events_found: eventsFound,
+    events_requested: eventsRequested,
+    hook: hookSummary,
+    warnings,
+  };
 }
 
 export function getDeliveryById(site: string, id: number): EventWebhookDeliveryRow | null {

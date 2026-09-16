@@ -473,7 +473,11 @@ export function EventLogFiltersDialog({
                     Add page
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent align="start" className="w-72 p-0 bg-popover" sideOffset={4}>
+                <PopoverContent
+                  align="start"
+                  className="z-[10001] w-72 p-0 bg-popover"
+                  sideOffset={4}
+                >
                   <SitemapSearch
                     embedded
                     value=""

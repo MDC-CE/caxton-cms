@@ -140,7 +140,8 @@ export function EventLogAuthorCombobox({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-[--radix-popover-trigger-width] min-w-[16rem] p-0 bg-popover"
+        // Above Dialog (z-[10000]); SelectContent uses the same stack.
+        className="z-[10001] w-[--radix-popover-trigger-width] min-w-[16rem] p-0 bg-popover"
         sideOffset={4}
         data-testid="popover-event-author-filter"
       >

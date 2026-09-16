@@ -16,12 +16,13 @@ import {
   IconClick,
 } from "@tabler/icons-react";
 import { Link, useParams } from "wouter";
-import { ArrowLeft, ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, Plus } from "lucide-react";
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { isActivelySelling } from "@/lib/ecommerceProductMap";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -827,11 +828,7 @@ export default function StoreProductDetailPage() {
     <div className="min-h-screen bg-background text-foreground">
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-[300px] space-y-6">
         <div className="flex items-center gap-3">
-          <Link href="/private/store/ecommerce">
-            <button className="p-1.5 rounded-md hover-elevate" data-testid="button-back">
-              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-            </button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back" iconClassName="h-4 w-4 text-muted-foreground" />
           <IconShoppingBag className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold" data-testid="heading-product-funnel">
             {data?.product.name ?? slug}

@@ -180,6 +180,8 @@ export default function PrivateRouter() {
           <Route path="/private/agents" component={AgentsRedirect} />
           <Route path="/private/error-log" component={ErrorLogPage} />
           <Route path="/private/background-pipeline" component={BackgroundPipelinePage} />
+          <Route path="/private/webhooks/hooks" component={EventWebhooksPage} />
+          <Route path="/private/webhooks/logs" component={EventWebhooksPage} />
           <Route path="/private/webhooks" component={EventWebhooksPage} />
           <Route path="/private/proposals/:id" component={ProposalsRedirect} />
           <Route path="/private/proposals" component={ProposalsRedirect} />

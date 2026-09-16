@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ArrowUp, ArrowUpDown, Brain, Check, ChevronDown, Copy, Crosshair, Download, DownloadCloud, ExternalLink, Filter, Globe, History, Info, Loader2, MoreVertical, MousePointerClick, Network, Pencil, Plus, RefreshCw, ShieldCheck, Star, TrendingUp, Unlink, type LucideIcon } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowRight, ArrowRightLeft, ArrowUp, ArrowUpDown, Brain, Check, ChevronDown, Copy, Crosshair, Download, DownloadCloud, ExternalLink, Filter, Globe, History, Info, Loader2, MoreVertical, MousePointerClick, Network, Pencil, Plus, RefreshCw, ShieldCheck, Star, TrendingUp, Unlink, type LucideIcon } from "lucide-react";
 import { OpenRushFetchControl } from "@/components/seo/OpenRushFetchControl";
 import { formatOpenRushFetchedAge } from "@/components/seo/openrushFetchAge";
 import { SeoIndexReindexControl } from "@/components/seo/SeoIndexReindexControl";
@@ -7,6 +7,7 @@ import * as CountryFlags from "country-flag-icons/react/3x2";
 import { SiGoogle } from "react-icons/si";
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -5573,11 +5574,7 @@ export default function SeoGeoPage() {
         <Tabs defaultValue="seo">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
             <div className="flex items-center gap-3">
-              <Link href="/private/diagnostics">
-                <Button variant="ghost" size="icon" data-testid="button-back-diagnostics">
-                  <ArrowLeft className="h-5 w-5" />
-                </Button>
-              </Link>
+              <PrivateHistoryBackButton data-testid="button-back-diagnostics" />
               <div className="flex items-center gap-2">
                 <Crosshair className="h-5 w-5 text-primary" />
                 <h1 className="text-lg font-semibold text-foreground" data-testid="text-seo-geo-title">

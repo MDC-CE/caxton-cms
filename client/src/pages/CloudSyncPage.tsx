@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, AlertTriangle, Check, ChevronDown, Cloud, Copy, Info, Loader2, RefreshCw, Stethoscope, XCircle } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, Cloud, Copy, Info, Loader2, RefreshCw, Stethoscope, XCircle } from "lucide-react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
@@ -670,11 +671,12 @@ export default function CloudSyncPage() {
     <div className="min-h-screen bg-background p-6 space-y-6 max-w-6xl mx-auto">
       <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-4 items-start">
         <div className="flex items-start gap-3 min-w-0">
-          <Link href="/" className="shrink-0">
-            <Button variant="ghost" size="icon" data-testid="button-back-from-cloud-sync">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton
+            fallbackHref="/"
+            data-testid="button-back-from-cloud-sync"
+            className="shrink-0"
+            iconClassName="h-4 w-4"
+          />
           <div className="min-w-0">
             <h1 className="text-2xl font-bold flex items-center gap-2" data-testid="text-cloud-sync-title">
               <Cloud className="h-6 w-6 text-muted-foreground shrink-0" />

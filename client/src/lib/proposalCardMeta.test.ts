@@ -16,7 +16,8 @@ describe("proposalCardMeta", () => {
   });
 
   it("shortens proposal ids for display", () => {
-    expect(shortProposalId("e6a1b7a7-4001-425c-9dba-eb8e3ad78f25")).toBe("e6a1b7a7…");
+    expect(shortProposalId("e6a1b7a7-4001-425c-9dba-eb8e3ad78f25")).toBe("d78f25");
+    expect(shortProposalId("e6a1b7a7-4001-425c-9dba-eb8e3ad78f25", 8)).toBe("3ad78f25");
   });
 
   it("formats relative updated_at", () => {

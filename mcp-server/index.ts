@@ -51,9 +51,10 @@ import {
   IDENTITY_TOOLS,
   allowedToolNames,
   applyToolCatalogFilter,
-  shouldStripUnscopedMutating,
+  shouldDenyUnscopedMutating,
   type CatalogGrant,
 } from "./lib/tool-catalog.js";
+import { oauthPlainMcpNotice } from "./lib/role-connector-guide.js";
 
 const PORT = parseInt(process.env.MCP_PORT || "3001", 10);
 // MCP_SERVER_SECRET (formerly MCP_API_KEY) is used exclusively as an internal
@@ -183,7 +184,7 @@ function renderAuthorizePage(opts: {
   roleDescription?: string;
   allowedTools?: string[];
   /** When set, only that auth method step is shown. */
-  authStep?: "choose" | "token" | "login";
+  authStep?: "choose" | "token";
   /** No staff users yet — token-only bootstrap (hide GitHub / choose). */
   tokenOnly?: boolean;
 }): string {
@@ -221,17 +222,28 @@ function renderAuthorizePage(opts: {
     <p class="tools-heading">Tools this connector exposes (${tools.length})</p>
     ${toolList}
   </div>`;
+  } else {
+    const notice = oauthPlainMcpNotice();
+    roleHtml = `
+  <div class="card role-card" data-testid="oauth-plain-mcp-notice">
+    <h2>${escapeHtml(notice.title)}</h2>
+    <p class="muted"><code>/mcp</code></p>
+    <p class="desc">${escapeHtml(notice.body)}</p>
+  </div>`;
   }
 
+  // GitHub goes straight to the IdP — no intermediate "Continue to GitHub" step.
   const chooseHtml = `
   <div class="card">
     <h2>How do you want to verify?</h2>
     <p class="muted">Staff sign-in uses GitHub (or a pasted staff session). Only pre-registered people can get in.</p>
-    <form method="GET" action="/oauth/authorize/step" class="stack">
-      <input type="hidden" name="nonce" value="${escapeHtml(opts.nonce)}">
-      <button type="submit" name="method" value="login">Log in with GitHub</button>
-      <button type="submit" name="method" value="token" class="secondary">Paste staff session token</button>
-    </form>
+    <div class="stack">
+      <a class="login-link" href="${escapeHtml(githubStartUrl)}">Log in with GitHub</a>
+      <form method="GET" action="/oauth/authorize/step">
+        <input type="hidden" name="nonce" value="${escapeHtml(opts.nonce)}">
+        <button type="submit" name="method" value="token" class="secondary">Paste staff session token</button>
+      </form>
+    </div>
   </div>`;
 
   const backLink = tokenOnly
@@ -255,16 +267,7 @@ function renderAuthorizePage(opts: {
     ${backLink}
   </div>`;
 
-  const loginHtml = `
-  <div class="card">
-    <h2>Log in with GitHub</h2>
-    <p class="muted">You need a verified email on GitHub. Only pre-registered staff can sign in.</p>
-    <a class="login-link" href="${escapeHtml(githubStartUrl)}">Continue to GitHub</a>
-    ${backLink}
-  </div>`;
-
-  const bodyCard =
-    step === "token" ? tokenHtml : step === "login" ? loginHtml : chooseHtml;
+  const bodyCard = step === "token" ? tokenHtml : chooseHtml;
 
   const subtitle = tokenOnly
     ? "Authorize with the connection token from Weblify to finish connecting."
@@ -379,11 +382,13 @@ async function createMcpServer(
 
   const isRoleScoped = Boolean(opts?.activeRoleId);
   applyToolCatalogFilter(mcp, allowed, {
-    stripMutating: shouldStripUnscopedMutating({
+    stripMutating: false,
+    requireIdentityOnMutate: isRoleScoped,
+    denyUnscopedMutating: shouldDenyUnscopedMutating({
       isRoleScoped,
       nodeEnv: process.env.NODE_ENV,
     }),
-    requireIdentityOnMutate: isRoleScoped,
+    mcpToken,
   });
   registerPageTools(mcp, mcpAuthor, mcpToken, grants);
   registerSeoClusterTools(mcp, mcpToken, grants);
@@ -674,14 +679,24 @@ app.get("/oauth/authorize/step", async (req, res) => {
     return;
   }
 
+  const tokenOnly = !(await hasStaffUsersConfigured());
+
+  // Legacy links with method=login used to show a redundant confirm page; send them to GitHub.
+  if (method === "login" && !tokenOnly) {
+    const githubStartUrl = `${getCmsBase()}/api/staff/oauth/github/start?return_to=${encodeURIComponent(
+      `${getMcpPublicBase()}/oauth/staff-return?nonce=${nonce}`,
+    )}`;
+    res.redirect(githubStartUrl);
+    return;
+  }
+
   let roleMeta: Awaited<ReturnType<typeof fetchRoleInfo>> = null;
   if (pending.roleId) {
     roleMeta = await fetchRoleInfo(pending.roleId);
   }
 
-  const tokenOnly = !(await hasStaffUsersConfigured());
-  let authStep: "choose" | "token" | "login" =
-    method === "token" || method === "login" || method === "choose" ? method : "choose";
+  let authStep: "choose" | "token" =
+    method === "token" || method === "choose" ? method : "choose";
   if (tokenOnly) authStep = "token";
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -717,7 +732,7 @@ app.post("/oauth/authorize", async (req, res) => {
   const roleMeta = pending.roleId ? await fetchRoleInfo(pending.roleId) : null;
   const tokenOnly = !(await hasStaffUsersConfigured());
 
-  async function reRender(error: string, authStep: "choose" | "token" | "login" = "token") {
+  async function reRender(error: string, authStep: "choose" | "token" = "token") {
     const freshNonce = createPendingAuth(
       pending!.clientId,
       pending!.redirectUri,
@@ -1151,8 +1166,13 @@ async function handleMcpRequest(
   });
   try {
     maybeAnnounceMcpConnected(res, req.body);
-    await mcp.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await runInMcpSession(
+      { mcpToken: credentialToken || undefined },
+      async () => {
+        await mcp.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      },
+    );
     res.on("finish", () => mcp.close());
   } catch (err) {
     console.error("[MCP] Request error:", err);

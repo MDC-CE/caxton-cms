@@ -6,6 +6,20 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "Production plain /mcp teach + hard-deny; mcp_write_disabled guide"
+    agent_impact:
+      - "Production plain /mcp: mutates return role_connector_required with connector_guide.role_connectors + swarm_setup (one connection per role). bootstrap_agent / get_current_user expose primary_blocker. OAuth consent warns humans."
+      - "MCP write off (Security → Users): mcp_write_disabled + mcp_write_guide.course_of_action on bootstrap/get_current_user and direct mutates; propose-only remains. Precedence: unscoped prod > write-off > session/caps."
+      - "Reconnect MCP after role/write changes. Re-bootstrap_agent for playbook/conventions."
+    tools_changed: true
+    paths:
+      - mcp-server/lib/role-connector-guide.ts
+      - mcp-server/lib/tool-catalog.ts
+      - mcp-server/index.ts
+      - mcp-server/tools/user.ts
+      - mcp-server/tools/explain.ts
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/agent-conventions.md
     summary: "Staff GitHub login returns to the multi-site host you started from"
     agent_impact:
       - "OAuth callback still uses SITE_URL (e.g. 4geeks.com); return_to may be absolute to another sites.yml domain (e.g. fl.4geeksacademy.com) so the staff session is minted there."

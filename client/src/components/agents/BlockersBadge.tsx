@@ -1,23 +1,30 @@
 import { useState, type MouseEvent } from "react";
-import { IconFlame } from "@tabler/icons-react";
+import { IconAlertTriangle } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-type EscalatedBadgeProps = {
+type BlockersBadgeProps = {
+  count: number;
   /** When true, stop click from bubbling (e.g. badge inside a list card Link). */
   stopLinkNavigation?: boolean;
   className?: string;
   /** Suffix for test ids — detail uses none; list uses `-${id}`. */
   testIdSuffix?: string;
+  /** List cards say “blocker(s)”; detail header says “needs changes”. */
+  labelMode?: "blockers" | "needs_changes";
 };
 
-export function EscalatedBadge({
+export function BlockersBadge({
+  count,
   stopLinkNavigation = false,
   className,
   testIdSuffix = "",
-}: EscalatedBadgeProps) {
+  labelMode = "blockers",
+}: BlockersBadgeProps) {
   const [advanced, setAdvanced] = useState(false);
+
+  if (count <= 0) return null;
 
   const onTriggerClick = stopLinkNavigation
     ? (e: MouseEvent) => {
@@ -26,44 +33,48 @@ export function EscalatedBadge({
       }
     : undefined;
 
+  const label =
+    labelMode === "needs_changes"
+      ? `${count} needs changes`
+      : `${count} blocker${count === 1 ? "" : "s"}`;
+
   return (
     <Popover>
       <PopoverTrigger asChild>
         <button
           type="button"
           className="inline-flex shrink-0"
-          data-testid={`badge-proposal-escalated${testIdSuffix}`}
-          aria-label="Escalated — what this means"
+          data-testid={`badge-proposal-blockers${testIdSuffix}`}
+          aria-label={`${label} — what this means`}
           onClick={onTriggerClick}
         >
           <Badge
-            variant="outline"
-            className={cn(
-              "cursor-pointer gap-1 font-normal border-status-busy/40 text-status-busy hover-elevate",
-              className,
-            )}
+            variant="destructive"
+            className={cn("cursor-pointer gap-1 font-normal", className)}
           >
-            <IconFlame className="h-3 w-3 shrink-0 text-status-busy" aria-hidden />
-            Escalated
+            <IconAlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
+            {label}
           </Badge>
         </button>
       </PopoverTrigger>
       <PopoverContent
         className="w-80 space-y-3 text-sm"
         align="start"
-        data-testid={`popover-proposal-escalated${testIdSuffix}`}
+        data-testid={`popover-proposal-blockers${testIdSuffix}`}
         onClick={onTriggerClick}
       >
-        <p className="font-medium text-foreground">Agent work is paused</p>
+        <p className="font-medium text-foreground">Needs changes before approve</p>
         <p className="text-muted-foreground leading-5">
-          A steward put a hold on this proposal. Agents cannot claim, add blockers, or decide again
-          until a steward releases it. Staff can still Approve, Reject, or clear needs-change notes.
-          Open blockers still block Approve until someone resolves them.
+          {count === 1
+            ? "Someone left one open change request on this proposal."
+            : `Someone left ${count} open change requests on this proposal.`}{" "}
+          Approve (and Accept for ideas) stay blocked until each request is marked resolved.
+          Reject and withdraw still work.
         </p>
         <button
           type="button"
           className="text-xs text-primary hover:underline"
-          data-testid={`button-escalated-advanced${testIdSuffix}`}
+          data-testid={`button-blockers-advanced${testIdSuffix}`}
           onClick={() => setAdvanced((v) => !v)}
         >
           {advanced ? "Hide advanced" : "Read more (advanced)"}
@@ -71,10 +82,14 @@ export function EscalatedBadge({
         {advanced ? (
           <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
             <p>
-              Escalated is a flag on top of Open/Partial — the proposal status does not change.
+              Open blockers block apply / accept only — reject, withdraw, and close still succeed.
             </p>
             <p>
-              MCP agents fail every update while the flag is on; staff UI actions still work.
+              Clearing a blocker does not ship the proposal; re-preview, then Approve with four-eyes.
+            </p>
+            <p>
+              Only the active claimant resolves a blocker; reviewers can reopen one after it was
+              cleared.
             </p>
           </div>
         ) : null}

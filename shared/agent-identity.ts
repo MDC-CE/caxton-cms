@@ -26,7 +26,7 @@ export const AGENT_SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 export const ROLE_CONNECTOR_UI_HINT =
   "Private → MCP Server → Connection → choose one or more roles (e.g. Copy Editor) → Choose this Role / Choose these Roles. " +
   "Reconnect to a role URL such as /mcp/role/copy_editor (local example: http://localhost:3001/mcp/role/copy_editor). " +
-  "Plain /mcp is read-only.";
+  "Production plain /mcp is read-only (write tools disabled); non-production plain /mcp may write when MCP write is enabled.";
 
 /** Normalize OAuth client name for open-session scope (blank → unknown-client). */
 export function normalizeMcpClientName(client: unknown): string {

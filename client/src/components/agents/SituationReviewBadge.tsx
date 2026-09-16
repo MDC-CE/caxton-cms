@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type MouseEvent } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 export type ReviewContextPayload = {
@@ -207,30 +208,94 @@ export function resolveSituationDisplay(opts: {
   return live ?? null;
 }
 
-/** List chip from persisted snapshot (no modal — open detail for live audit). */
+/** List chip from persisted snapshot — popover explains the review situation in plain English. */
 export function SituationSnapshotBadge({
   snapshot,
   kind,
   className,
+  stopLinkNavigation = false,
+  testIdSuffix = "",
 }: {
   snapshot?: Record<string, unknown> | null;
   /** When set, hide chip if label duplicates the kind badge. */
   kind?: string;
   className?: string;
+  /** When true, stop click from bubbling (e.g. badge inside a list card Link). */
+  stopLinkNavigation?: boolean;
+  /** Suffix for test ids — list uses `-${id}`. */
+  testIdSuffix?: string;
 }) {
-  const resolved = resolveSituationDisplay({ snapshot });
-  const label = resolved?.staff_summary?.badge_label ?? null;
-  if (!label) return null;
+  const [advanced, setAdvanced] = useState(false);
+  const resolved = resolveSituationDisplay({ snapshot, kind });
+  const staff = resolved?.staff_summary;
+  const label = staff?.badge_label ?? null;
+  if (!label || !staff) return null;
   const kindLabel = kindDisplayLabel(kind);
   if (kindLabel && label === kindLabel) return null;
+
+  const onTriggerClick = stopLinkNavigation
+    ? (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    : undefined;
+
+  const description =
+    staff.situation_description ||
+    "Open the proposal for the full review situation.";
+
   return (
-    <Badge
-      variant="outline"
-      className={cn("font-normal", className)}
-      data-testid="badge-proposal-situation-snapshot"
-    >
-      {label}
-    </Badge>
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex shrink-0"
+          data-testid={`badge-proposal-situation-snapshot${testIdSuffix}`}
+          aria-label={`${label} — what this situation means`}
+          onClick={onTriggerClick}
+        >
+          <Badge
+            variant="outline"
+            className={cn("cursor-pointer font-normal hover-elevate", className)}
+          >
+            {label}
+          </Badge>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-80 space-y-3 text-sm"
+        align="start"
+        data-testid={`popover-proposal-situation-snapshot${testIdSuffix}`}
+        onClick={onTriggerClick}
+      >
+        <p className="font-medium text-foreground">{label}</p>
+        <p className="text-muted-foreground leading-5">
+          This chip is the proposal&apos;s review situation — a short label for the kind of change
+          you are deciding on, not a status or a blocker.
+        </p>
+        <p className="text-muted-foreground leading-5">{description}</p>
+        <button
+          type="button"
+          className="text-xs text-primary hover:underline"
+          data-testid={`button-situation-snapshot-advanced${testIdSuffix}`}
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          {advanced ? "Hide advanced" : "Read more (advanced)"}
+        </button>
+        {advanced ? (
+          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
+            {staff.risk && staff.risk !== "—" ? <p>Risk: {staff.risk}</p> : null}
+            {staff.undo && staff.undo !== "—" ? <p>Undo: {staff.undo}</p> : null}
+            {resolved?.damage_class ? (
+              <p>
+                Snapshot damage class: <span className="font-mono">{resolved.damage_class}</span>
+              </p>
+            ) : null}
+            <p>Open the proposal for the live audit (checklists, related proposals, apply gates).</p>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
   );
 }
 

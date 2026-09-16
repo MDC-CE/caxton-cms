@@ -1,5 +1,5 @@
 import { useParams, useLocation } from "wouter";
-import { ArrowLeft, Braces, Check, ChevronDown, ChevronRight, Code, ExternalLink, FileCode, GripVertical, Info, Link as LinkIcon, Megaphone, Menu, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from "lucide-react";
+import { Braces, Check, ChevronDown, ChevronRight, Code, ExternalLink, FileCode, GripVertical, Info, Link as LinkIcon, Megaphone, Menu, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import { getDebugUserName } from "@/hooks/useDebugAuth";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useState, useEffect, useRef, useMemo } from "react";
@@ -10,6 +10,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -1638,14 +1639,7 @@ export default function MenuEditor() {
       <header className="sticky top-0 z-50 bg-background border-b">
         <div className="container mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => navigate("/")}
-              data-testid="button-back"
-            >
-              <ArrowLeft className="h-5 w-5" />
-            </Button>
+            <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back" />
             <div>
               <h1 className="text-lg font-semibold flex items-center gap-2">
                 <Menu className="h-5 w-5 text-primary" />

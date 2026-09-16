@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { Link, useLocation, useParams } from "wouter";
+import { useLocation, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
-import { IconArrowLeft, IconClipboardList, IconInfoCircle, IconLoader2, IconSearch } from "@tabler/icons-react";
+import { IconClipboardList, IconInfoCircle, IconLoader2, IconSearch } from "@tabler/icons-react";
 import { Geekchart } from "geekchart";
 import "geekchart/fonts.css";
 import { allowedToolNames } from "@shared/mcp-tool-catalog";
@@ -12,6 +12,7 @@ import {
   type AgenticSwarmRoleId,
 } from "@shared/agentic-swarm-roles";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -297,11 +298,7 @@ export default function AgentsOrgChartPage() {
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
           <div className="flex items-start gap-4 min-w-0 flex-1">
-            <Button variant="ghost" size="icon" asChild data-testid="button-agents-back">
-              <Link href="/private/mcp-server">
-                <IconArrowLeft className="h-5 w-5" />
-              </Link>
-            </Button>
+            <PrivateHistoryBackButton data-testid="button-agents-back" />
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2">
                 <Bot className="h-5 w-5 text-muted-foreground" />

@@ -1,11 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import {AlertTriangle, ArrowLeft, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
+import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -3048,11 +3049,7 @@ export default function DiagnosticsPage() {
           <Tabs value={activeTab} onValueChange={onTabChange}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
               <div className="flex items-center gap-3">
-                <Link href="/">
-                  <Button variant="ghost" size="icon" data-testid="button-back-home">
-                    <ArrowLeft className="h-5 w-5" />
-                  </Button>
-                </Link>
+                <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back-home" />
                 <div className="flex items-center gap-2">
                   <Stethoscope className="h-5 w-5 text-primary" />
                   <h1 className="text-lg font-semibold text-foreground" data-testid="text-diagnostics-title">

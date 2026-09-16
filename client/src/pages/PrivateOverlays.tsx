@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, lazy, Suspense } from "react";
 import {
-  IconArrowLeft,
   IconPlus,
   IconTrash,
   IconCheck,
@@ -25,6 +24,7 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -63,7 +63,6 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SearchableMultiSelect } from "@/components/ui/searchable-multi-select";
 import { COUNTRY_OPTIONS, REGION_OPTIONS } from "@/lib/geoData";
 
-import { Link } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
@@ -685,11 +684,7 @@ export default function PrivateOverlays() {
     <div className="max-w-4xl mx-auto py-8 px-4 space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" asChild>
-            <Link href="/private/diagnostics">
-              <IconArrowLeft size={18} />
-            </Link>
-          </Button>
+          <PrivateHistoryBackButton />
           <div>
             <h1 className="text-xl font-semibold flex items-center gap-2">
               <IconLayersIntersect size={20} />
