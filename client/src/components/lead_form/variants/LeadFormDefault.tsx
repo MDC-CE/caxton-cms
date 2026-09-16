@@ -1645,26 +1645,11 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       let response: Response;
       if (deliveryOverride?.url) {
         const resolvedUrl = resolveTemplatedUrl(deliveryOverride.url) || deliveryOverride.url;
-        if (/\{\{/.test(resolvedUrl)) {
-          throw new Error(
-            locale === "es"
-              ? "No se pudo preparar la sesión para el registro. Intenta de nuevo."
-              : "Could not prepare your session for registration. Please try again.",
-          );
-        }
         const resolvedHeaders: Record<string, string> = {};
         if (deliveryOverride.headers) {
           for (const [hk, hv] of Object.entries(deliveryOverride.headers)) {
             if (typeof hv !== "string") continue;
-            const resolved = resolveTemplatedUrl(hv) || hv;
-            if (/\{\{/.test(resolved)) {
-              throw new Error(
-                locale === "es"
-                  ? "No se pudo preparar la sesión para el registro. Intenta de nuevo."
-                  : "Could not prepare your session for registration. Please try again.",
-              );
-            }
-            resolvedHeaders[hk] = resolved;
+            resolvedHeaders[hk] = resolveTemplatedUrl(hv) || hv;
           }
         }
         const body: Record<string, unknown> = {
