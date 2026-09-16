@@ -8,7 +8,11 @@ export type CallSample = {
   est_tokens: number;
   ok: boolean;
   error?: string;
+  /** Soft metrics setup gap (not a hard error). */
+  not_configured?: boolean;
 };
+
+export type NotConfiguredKind = "ga" | "organic";
 
 export type ScenarioStats = {
   scenario_id: string;
@@ -26,6 +30,10 @@ export type ScenarioStats = {
   hard_error: boolean;
   errors: string[];
   skipped?: string;
+  /** Soft metrics setup gap on any sample. */
+  not_configured?: boolean;
+  /** Popover family when not_configured. */
+  not_configured_kind?: NotConfiguredKind;
 };
 
 export type ProbeStats = {
@@ -55,6 +63,7 @@ export type StressReport = {
     hard_errors: number;
     over_band: number;
     skipped: number;
+    not_configured: number;
     slowest_scenario?: string;
     largest_payload_scenario?: string;
   };
@@ -68,6 +77,39 @@ function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
   const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
   return sorted[Math.max(0, idx)]!;
+}
+
+/** Popover family from MCP tool name. */
+export function notConfiguredKindForTool(tool: string): NotConfiguredKind {
+  if (tool === "get_organic_traffic") return "organic";
+  return "ga";
+}
+
+/**
+ * Setup-gap only: GA/journey soft status, or organic not configured.
+ * Does not flag empty-but-OK windows or incomplete-while-configured.
+ */
+export function detectNotConfiguredPayload(
+  payload: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!payload || typeof payload !== "object") return false;
+
+  const status = payload.status;
+  if (status === "not_configured" || status === "unavailable") return true;
+
+  if (payload.configured === false) return true;
+  if (payload.source === "none") return true;
+
+  const warnings = payload.warnings;
+  if (Array.isArray(warnings)) {
+    for (const w of warnings) {
+      if (w && typeof w === "object" && (w as { code?: string }).code === "organic_not_configured") {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 export function aggregateSamples(
@@ -110,6 +152,7 @@ export function aggregateSamples(
   const over_band: string[] = [];
   if (p95 > budget.p95_ms) over_band.push("latency_p95");
   if (maxTokens > budget.est_tokens) over_band.push("est_tokens");
+  const not_configured = samples.some((s) => s.not_configured === true);
 
   return {
     scenario_id,
@@ -125,6 +168,9 @@ export function aggregateSamples(
     over_band,
     hard_error,
     errors: [...new Set(errors)].slice(0, 5),
+    ...(not_configured
+      ? { not_configured: true, not_configured_kind: notConfiguredKindForTool(tool) }
+      : {}),
   };
 }
 
@@ -145,6 +191,7 @@ export function buildReport(partial: Omit<StressReport, "ok" | "summary" | "guid
   const measured = partial.scenarios.filter((s) => !s.skipped);
   const hard_errors = measured.filter((s) => s.hard_error).length;
   const over_band = measured.filter((s) => s.over_band.length > 0).length;
+  const not_configured = measured.filter((s) => s.not_configured).length;
   const slowest = [...measured].sort((a, b) => b.duration_ms.p95 - a.duration_ms.p95)[0];
   const largest = [...measured].sort((a, b) => b.est_tokens.max - a.est_tokens.max)[0];
 
@@ -158,6 +205,7 @@ export function buildReport(partial: Omit<StressReport, "ok" | "summary" | "guid
       hard_errors,
       over_band,
       skipped: partial.skipped.length,
+      not_configured,
       slowest_scenario: slowest?.scenario_id,
       largest_payload_scenario: largest?.scenario_id,
     },
@@ -265,6 +313,37 @@ function scenarioCell(s: ScenarioStats): string {
   </td>`;
 }
 
+const NC_TIP_GA =
+  "Metrics backend not configured (BigQuery / GA4 tracking). The tool returned a soft not-configured status — the call succeeded, but no live metrics data was queried. Configure staff /private/tracking/ga4 to measure real query latency.";
+
+const NC_TIP_ORGANIC =
+  "Search Console organic day cache is not loaded. The tool succeeded, but this is not zero traffic — data is unavailable. Staff: Diagnostics → SEO → Organic (or Search Console settings).";
+
+export function notConfiguredTip(kind: NotConfiguredKind | undefined): string {
+  return kind === "organic" ? NC_TIP_ORGANIC : NC_TIP_GA;
+}
+
+function notConfiguredMarkdownNote(kind: NotConfiguredKind | undefined): string {
+  return kind === "organic"
+    ? "N.C. (not configured — organic day cache)"
+    : "N.C. (not configured — BigQuery / GA4)";
+}
+
+function notConfiguredBadgeHtml(s: ScenarioStats): string {
+  if (!s.not_configured) return "";
+  const tip = notConfiguredTip(s.not_configured_kind);
+  return `<span class="nc-badge" title="Not configured">N.C.</span><button type="button" class="info-btn nc-info" aria-label="About not configured" data-tip="${escapeHtml(tip)}">i</button>`;
+}
+
+function notesCellHtml(parts: string[], s: ScenarioStats): string {
+  const text = parts.filter(Boolean).join("; ");
+  const badge = notConfiguredBadgeHtml(s);
+  if (!text && !badge) return `<td class="muted"></td>`;
+  if (!badge) return `<td class="muted">${escapeHtml(text)}</td>`;
+  if (!text) return `<td class="notes-nc">${badge}</td>`;
+  return `<td class="notes-nc"><span class="muted">${escapeHtml(text)}</span> ${badge}</td>`;
+}
+
 export function renderHtml(report: StressReport): string {
   const measured = report.scenarios.filter((s) => !s.skipped);
   const byLatency = [...measured].sort((a, b) => b.duration_ms.p95 - a.duration_ms.p95);
@@ -291,7 +370,7 @@ export function renderHtml(report: StressReport): string {
         <td class="num ${sevClass(p50s)}">${fmtMs(s.duration_ms.p50)}</td>
         <td class="num strong ${sevClass(p95s)}">${fmtMs(s.duration_ms.p95)}</td>
         <td class="num ${sevClass(maxs)}">${fmtMs(s.duration_ms.max)}</td>
-        <td class="muted">${escapeHtml(notes.join("; "))}</td>
+        ${notesCellHtml(notes, s)}
       </tr>`;
     })
     .join("\n");
@@ -310,7 +389,7 @@ export function renderHtml(report: StressReport): string {
         <td class="num">${s.response_bytes.max.toLocaleString()}</td>
         <td class="num strong ${sevClass(tokSev)}">${s.est_tokens.max.toLocaleString()}</td>
         <td class="num muted">${s.budget.est_tokens.toLocaleString()}</td>
-        <td class="muted">${escapeHtml(notes.join("; "))}</td>
+        ${notesCellHtml(notes, s)}
       </tr>`;
     })
     .join("\n");
@@ -347,6 +426,22 @@ export function renderHtml(report: StressReport): string {
           (s) =>
             `<li><span class="mono">${escapeHtml(s.scenario_id)}</span> — ${escapeHtml(s.errors.join(" | ") || "error")}</li>`,
         )
+        .join("\n")}
+    </ul>
+  </section>`;
+
+  const ncList = measured.filter((s) => s.not_configured);
+  const ncBlock =
+    ncList.length === 0
+      ? ""
+      : `<section>
+    <h2>Not configured (N.C.)</h2>
+    <ul class="list">
+      ${ncList
+        .map((s) => {
+          const tip = notConfiguredTip(s.not_configured_kind);
+          return `<li class="notes-nc"><span class="mono">${escapeHtml(s.scenario_id)}</span> <span class="nc-badge">N.C.</span><button type="button" class="info-btn nc-info" aria-label="About not configured for ${escapeHtml(s.scenario_id)}" data-tip="${escapeHtml(tip)}">i</button> <span class="muted">${escapeHtml(s.tool)}</span></li>`;
+        })
         .join("\n")}
     </ul>
   </section>`;
@@ -429,6 +524,19 @@ export function renderHtml(report: StressReport): string {
     td.sev-mid { color: var(--mid); }
     td.sev-bad { color: var(--fail); }
     tr.warn { background: var(--warn-bg); }
+    .nc-badge {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--fail);
+      border: 1px solid rgba(224, 112, 112, 0.45);
+      padding: 0.1rem 0.35rem;
+      vertical-align: middle;
+      margin-right: 0.15rem;
+    }
+    td.notes-nc { white-space: nowrap; }
     ul.list { margin: 0; padding-left: 1.1rem; color: var(--fg); font-size: 0.9rem; }
     ul.list li { margin: 0.35rem 0; }
     footer { margin-top: 2.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; }
@@ -488,7 +596,7 @@ export function renderHtml(report: StressReport): string {
         <div><strong>Ports</strong> app :${report.ports.app} · mcp :${report.ports.mcp}</div>
         <div><strong>Auth</strong> ${escapeHtml(report.auth)}</div>
         <div><strong>Load</strong> concurrency ${report.concurrency}${report.heavy ? " · heavy" : ""} · fail_on_budget=${report.fail_on_budget}</div>
-        <div><strong>Summary</strong> hard_errors=${report.summary.hard_errors} · over_band=${report.summary.over_band} · skipped=${report.summary.skipped}</div>
+        <div><strong>Summary</strong> hard_errors=${report.summary.hard_errors} · over_band=${report.summary.over_band} · skipped=${report.summary.skipped} · not_configured=${report.summary.not_configured}</div>
       </div>
       <p class="guidance">${escapeHtml(report.guidance)}</p>
     </header>
@@ -504,7 +612,7 @@ export function renderHtml(report: StressReport): string {
             ${thInfo("p50", "Median latency in milliseconds — half the calls were faster than this. Typical speed.", true)}
             ${thInfo("p95", "95th percentile latency in milliseconds — only about 5% of calls were slower. Use this for budgets.", true)}
             ${thInfo("max", "Slowest single call in this sample, in milliseconds.", true)}
-            ${thInfo("Notes", "Warnings such as over-band or hard errors for this row.")}
+            ${thInfo("Notes", "Warnings such as over-band, hard errors, or red N.C. (metrics not configured).")}
           </tr>
         </thead>
         <tbody>
@@ -523,7 +631,7 @@ ${latencyRows}
             ${thInfo("Bytes", "Largest response body size in bytes across the samples.", true)}
             ${thInfo("Tokens", "Estimated tokens from ceil(chars/4) on the text payload agents receive. Ranking heuristic, not an exact tokenizer.", true)}
             ${thInfo("Budget", "Current token budget for this scenario’s band. Soft warn by default unless fail-on-budget is on.", true)}
-            ${thInfo("Notes", "Warnings such as over token budget, or docs-band classification.")}
+            ${thInfo("Notes", "Warnings such as over token budget, docs-band, or red N.C. (metrics not configured).")}
           </tr>
         </thead>
         <tbody>
@@ -560,10 +668,12 @@ ${tokenRows}
 
     ${overBlock}
     ${hardBlock}
+    ${ncBlock}
     ${skippedBlock}
 
     <footer>
       <p><strong>Colors</strong> — green ok · yellow caution (≥50% of budget, or latency ≥400&nbsp;ms / tokens ≥20k) · red over budget (or latency ≥1.5&nbsp;s / tokens ≥50k).</p>
+      <p><strong>N.C.</strong> — soft not-configured (metrics setup gap). Call succeeded; live metrics were not queried. Does not fail the report.</p>
       <p><strong>Latency</strong> — tools that can make the local site feel stuck under agent load.</p>
       <p><strong>est_tokens</strong> — ceil(chars/4) on the text payload agents get back (ranking heuristic, not tiktoken).</p>
     </footer>
@@ -649,7 +759,7 @@ function renderMarkdown(report: StressReport): string {
   lines.push(`- **Auth:** ${report.auth}`);
   lines.push(`- **Concurrency:** ${report.concurrency}${report.heavy ? " (heavy)" : ""}`);
   lines.push(
-    `- **Result:** ${report.ok ? "OK" : "FAIL"} (hard_errors=${report.summary.hard_errors}, over_band=${report.summary.over_band}, fail_on_budget=${report.fail_on_budget})`,
+    `- **Result:** ${report.ok ? "OK" : "FAIL"} (hard_errors=${report.summary.hard_errors}, over_band=${report.summary.over_band}, not_configured=${report.summary.not_configured}, fail_on_budget=${report.fail_on_budget})`,
   );
   lines.push("");
   lines.push(`_${report.guidance}_`);
@@ -665,6 +775,7 @@ function renderMarkdown(report: StressReport): string {
       notes.push(`over latency budget ${s.budget.p95_ms}ms`);
     }
     if (s.hard_error) notes.push("hard error");
+    if (s.not_configured) notes.push(notConfiguredMarkdownNote(s.not_configured_kind));
     lines.push(
       `| ${s.scenario_id} | ${s.tool} | ${s.calls} | ${s.duration_ms.p50}ms | **${s.duration_ms.p95}ms** | ${s.duration_ms.max}ms | ${notes.join("; ") || ""} |`,
     );
@@ -679,6 +790,7 @@ function renderMarkdown(report: StressReport): string {
     const notes: string[] = [];
     if (s.over_band.includes("est_tokens")) notes.push("over token budget");
     if (s.class === "docs") notes.push("docs band");
+    if (s.not_configured) notes.push(notConfiguredMarkdownNote(s.not_configured_kind));
     lines.push(
       `| ${s.scenario_id} | ${s.tool} | ${s.response_bytes.max} | **${s.est_tokens.max}** | ${s.budget.est_tokens} | ${notes.join("; ") || ""} |`,
     );
@@ -715,6 +827,18 @@ function renderMarkdown(report: StressReport): string {
     lines.push("");
   }
 
+  const ncMd = measured.filter((s) => s.not_configured);
+  if (ncMd.length) {
+    lines.push("## Not configured (N.C.)");
+    lines.push("");
+    for (const s of ncMd) {
+      lines.push(
+        `- \`${s.scenario_id}\` (${s.tool}) — ${notConfiguredMarkdownNote(s.not_configured_kind)}`,
+      );
+    }
+    lines.push("");
+  }
+
   if (report.skipped.length) {
     lines.push("## Skipped");
     lines.push("");
@@ -729,6 +853,9 @@ function renderMarkdown(report: StressReport): string {
   lines.push("- **Latency** → tools that can make the local site feel stuck under agent load.");
   lines.push(
     "- **est_tokens** → `ceil(chars/4)` on the text payload agents get back (ranking heuristic, not tiktoken).",
+  );
+  lines.push(
+    "- **N.C.** → soft not-configured (metrics setup gap). Call succeeded; does not fail the report.",
   );
   lines.push("");
 

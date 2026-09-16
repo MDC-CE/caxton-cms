@@ -1593,9 +1593,18 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                               data-testid={`badge-related-entry-${e.id}`}
                             >
                               <IconLink className="h-3 w-3 shrink-0" aria-hidden />
-                              <span className="truncate">
-                                {e.contentType}/{e.slug}
-                                <span className="text-muted-foreground"> · {e.locale}</span>
+                              <span className="inline-flex items-center gap-1 truncate">
+                                <span className="truncate">
+                                  {e.contentType}/{e.slug}
+                                </span>
+                                <span
+                                  className="inline-flex shrink-0 text-muted-foreground"
+                                  title={e.locale}
+                                  aria-label={e.locale}
+                                >
+                                  ·{" "}
+                                  <LocaleFlag locale={e.locale} className="w-3.5 h-2.5 rounded-sm" />
+                                </span>
                                 {e.variant ? (
                                   <span className="text-muted-foreground"> · draft {e.variant}</span>
                                 ) : null}
@@ -1635,10 +1644,19 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         data-testid={`badge-idea-related-entry-${i}`}
                       >
                         <IconLink className="h-3 w-3 shrink-0" aria-hidden />
-                        <span className="truncate">
-                          {ref.contentType}/{ref.slug}
+                        <span className="inline-flex items-center gap-1 truncate">
+                          <span className="truncate">
+                            {ref.contentType}/{ref.slug}
+                          </span>
                           {ref.locale ? (
-                            <span className="text-muted-foreground"> · {ref.locale}</span>
+                            <span
+                              className="inline-flex shrink-0 text-muted-foreground"
+                              title={ref.locale}
+                              aria-label={ref.locale}
+                            >
+                              ·{" "}
+                              <LocaleFlag locale={ref.locale} className="w-3.5 h-2.5 rounded-sm" />
+                            </span>
                           ) : null}
                         </span>
                       </Badge>
@@ -2018,9 +2036,21 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           >
                             <LocaleFlag locale={e.locale} className="w-3.5 h-2.5 rounded-sm" />
                           </span>
-                          <span className="truncate">
-                            {e.contentType}/{e.slug}
-                          </span>
+                          <RelatedEntryPopover
+                            contentType={e.contentType}
+                            slug={e.slug}
+                            locale={e.locale}
+                            variant={e.variant}
+                            previewHref={href}
+                            testId={`popover-proposed-entry-${e.id}`}
+                          >
+                            <span
+                              className="truncate hover:underline underline-offset-2"
+                              data-testid={`text-proposed-entry-${e.id}`}
+                            >
+                              {e.contentType}/{e.slug}
+                            </span>
+                          </RelatedEntryPopover>
                         </p>
                         {e.variant ? (
                           <p className="mt-0.5 text-xs text-muted-foreground">

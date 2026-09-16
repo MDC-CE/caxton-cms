@@ -18,6 +18,7 @@ import {
   aggregateProbe,
   aggregateSamples,
   buildReport,
+  detectNotConfiguredPayload,
   writeReports,
   type CallSample,
   type ScenarioStats,
@@ -383,12 +384,14 @@ async function runScenario(
   const samples: CallSample[] = [];
   for (let i = 0; i < reps; i++) {
     const result = await client.callTool(scenario.tool, args);
+    const payload = result.ok ? client.parseJson(result.text) : null;
     samples.push({
       duration_ms: result.duration_ms,
       response_bytes: result.response_bytes,
       est_tokens: result.est_tokens,
       ok: result.ok,
       error: result.error,
+      not_configured: result.ok ? detectNotConfiguredPayload(payload) : false,
     });
   }
 
@@ -454,12 +457,14 @@ async function runBurst(
     const scenario = active[i % active.length]!;
     const args = resolveArgs(scenario, ctx);
     const result = await client.callTool(scenario.tool, args);
+    const payload = result.ok ? client.parseJson(result.text) : null;
     const sample: CallSample = {
       duration_ms: result.duration_ms,
       response_bytes: result.response_bytes,
       est_tokens: result.est_tokens,
       ok: result.ok,
       error: result.error,
+      not_configured: result.ok ? detectNotConfiguredPayload(payload) : false,
     };
     byScenario.get(scenario.id)!.samples.push(sample);
   });
@@ -546,7 +551,7 @@ async function main(): Promise<void> {
         console.log(`ERROR ${stats.duration_ms.p95}ms`);
       } else {
         console.log(
-          `${stats.duration_ms.p95}ms p95 / ${stats.est_tokens.max} tokens${stats.over_band.length ? " [over band]" : ""}`,
+          `${stats.duration_ms.p95}ms p95 / ${stats.est_tokens.max} tokens${stats.over_band.length ? " [over band]" : ""}${stats.not_configured ? " [N.C.]" : ""}`,
         );
       }
     }
@@ -619,7 +624,7 @@ async function main(): Promise<void> {
     console.log(`[stress] wrote ${mdPath}`);
     console.log(`[stress] wrote ${htmlPath}`);
     console.log(
-      `[stress] summary: hard_errors=${report.summary.hard_errors} over_band=${report.summary.over_band} skipped=${report.summary.skipped}`,
+      `[stress] summary: hard_errors=${report.summary.hard_errors} over_band=${report.summary.over_band} skipped=${report.summary.skipped} not_configured=${report.summary.not_configured}`,
     );
     if (report.summary.slowest_scenario) {
       console.log(`[stress] slowest: ${report.summary.slowest_scenario}`);

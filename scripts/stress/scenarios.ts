@@ -392,6 +392,14 @@ export const SCENARIOS: Scenario[] = [
     buildArgs: (ctx) => withSite(ctx, { slug: ctx.productSku! }),
     skipIf: needProduct,
   },
+  {
+    id: "get_product_funnel_analytics",
+    tool: "get_product_funnel_analytics",
+    about:
+      "GA4 page performance for the discovered product journey (default page_performance). Soft N.C. when BigQuery tracking is unset.",
+    buildArgs: (ctx) => withSite(ctx, { slug: ctx.productSku! }),
+    skipIf: needProduct,
+  },
 
   {
     id: "list_databases",
@@ -430,6 +438,27 @@ export const SCENARIOS: Scenario[] = [
     tool: "get_organic_traffic",
     about: "Site-mode GSC organic traffic from day cache (mode=site). Read-only.",
     buildArgs: (ctx) => withSite(ctx, { mode: "site" }),
+  },
+  {
+    id: "get_organic_traffic_leaderboard",
+    tool: "get_organic_traffic",
+    about:
+      "Top paths by clicks from organic day cache (mode=leaderboard, default limit). Soft N.C. when day cache is empty.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "leaderboard" }),
+  },
+  {
+    id: "get_analytics_report_site_summary",
+    tool: "get_analytics_report",
+    about:
+      "GA4 BigQuery site_summary report (default 28-day window). Soft N.C. when tracking.bigquery is unset.",
+    buildArgs: (ctx) => withSite(ctx, { report: "site_summary" }),
+  },
+  {
+    id: "get_analytics_report_top_pages",
+    tool: "get_analytics_report",
+    about:
+      "GA4 BigQuery top_pages report (default limit). Soft N.C. when tracking.bigquery is unset.",
+    buildArgs: (ctx) => withSite(ctx, { report: "top_pages" }),
   },
   {
     id: "list_proposals",
