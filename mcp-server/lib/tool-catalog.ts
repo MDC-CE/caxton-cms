@@ -20,6 +20,17 @@ type CatalogFilterOpts = {
   requireIdentityOnMutate?: boolean;
 };
 
+/**
+ * Production strips mutating tools on plain `/mcp` (no active role).
+ * Non-production keeps mutates registered for local freestyle (no role/session gate).
+ */
+export function shouldStripUnscopedMutating(opts: {
+  isRoleScoped: boolean;
+  nodeEnv?: string;
+}): boolean {
+  return !opts.isRoleScoped && opts.nodeEnv === "production";
+}
+
 const DISABLED_TOOL = {
   enabled: false,
   enable() {},

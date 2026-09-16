@@ -8,13 +8,13 @@ import path from "path";
 import { createHash } from "crypto";
 
 /** Bump when the technical playbook markdown below changes. */
-export const PLAYBOOK_VERSION = "6";
+export const PLAYBOOK_VERSION = "7";
 
 /**
  * Explicit conventions seed version. Bump when editing mcp-server/agent-conventions.md
  * so agents re-fetch skill.content (known_skill_version mismatch).
  */
-export const CONVENTIONS_VERSION = "21";
+export const CONVENTIONS_VERSION = "22";
 
 export const CONVENTIONS_PATH = "mcp-server/agent-conventions.md";
 
@@ -30,9 +30,10 @@ For remote chat agents (Claude.ai, Grok, custom connectors). Conversation style 
 
 ## Identity (required for writes)
 
-- Connect via a **role URL** (\`/mcp/role/copy_editor\`, etc.) — plain \`/mcp\` is read-only.
-- Call \`agent_session\` \`start\` with exact \`model\` as \`provider/model\` (e.g. \`claude/sonnet-4.5\` or \`xai/grok-4\`). Family-only labels like \`claude\` fail. There is no \`MCP_AGENT_MODEL\` env.
-- Every mutating tool requires \`agent_session_id\` from that start (no unscoped writes). Sessions are per site; scope is username + role + OAuth client.
+- **Production:** Connect via a **role URL** (\`/mcp/role/copy_editor\`, etc.) — plain \`/mcp\` is read-only (mutating tools are not registered).
+- **Non-production (local / tunnels):** Plain \`/mcp\` may mutate freestyle — no role connector and no \`agent_session_id\` gate. Caps and MCP write still apply. Optional \`agent_session\` still helps staff event trails (otherwise writes show as Unscoped).
+- On a **role connector** (any environment): call \`agent_session\` \`start\` with exact \`model\` as \`provider/model\` (e.g. \`claude/sonnet-4.5\` or \`xai/grok-4\`). Family-only labels like \`claude\` fail. There is no \`MCP_AGENT_MODEL\` env.
+- Every mutating tool on a role connector requires \`agent_session_id\` from that start (no unscoped writes). Sessions are per site; scope is username + role + OAuth client.
 - If an open session already exists for that scope: \`action_required: session_conflict\` — retry with \`resume:true\` (same model) or \`force_new:true\` + report (abandon). Idle 24h fully expires a session.
 - Staff path: Private → MCP Server → Connection → choose one or more roles → reconnect.
 - Ownership / four-eyes = username + role (not model). Exact model is stored for staff observability.

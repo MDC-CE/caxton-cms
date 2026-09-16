@@ -51,6 +51,7 @@ import {
   IDENTITY_TOOLS,
   allowedToolNames,
   applyToolCatalogFilter,
+  shouldStripUnscopedMutating,
   type CatalogGrant,
 } from "./lib/tool-catalog.js";
 
@@ -378,7 +379,10 @@ async function createMcpServer(
 
   const isRoleScoped = Boolean(opts?.activeRoleId);
   applyToolCatalogFilter(mcp, allowed, {
-    stripMutating: !isRoleScoped,
+    stripMutating: shouldStripUnscopedMutating({
+      isRoleScoped,
+      nodeEnv: process.env.NODE_ENV,
+    }),
     requireIdentityOnMutate: isRoleScoped,
   });
   registerPageTools(mcp, mcpAuthor, mcpToken, grants);
