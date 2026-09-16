@@ -213,6 +213,8 @@ export interface LeadFormData {
     client_comments?: FieldConfig;
     /** Sent on the lead webhook as current_download; usually hidden via visible: false. */
     current_download?: FieldConfig;
+    /** Extra hidden payload keys (e.g. event_id) — not rendered in UI slots. */
+    [key: string]: FieldConfig | undefined;
   };
   success?: {
     url?: string;
@@ -1413,8 +1415,12 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       programContext ||
       resolveDefault("program", getFieldConfig("program").default);
 
-    return {
-      ...values,
+    const resolved: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(values).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
       program: resolveSubmitValueFromOptions(rawProgram, programOpts) || rawProgram,
       location:
         singleLandingLocation ||
@@ -1444,6 +1450,20 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         resolveDefault("plan", getFieldConfig("plan").default) ||
         "",
     };
+
+    // Any fields.* default not already filled (SectionRenderer resolveDeep already
+    // expanded {{ entry.* }}; extras like event_id land here for lead body + GTM).
+    for (const [key, cfg] of Object.entries(data.fields || {})) {
+      if (!cfg || typeof cfg !== "object") continue;
+      const existing = resolved[key];
+      if (typeof existing === "string" && existing.trim() !== "") continue;
+      const rawDefault = typeof cfg.default === "string" ? cfg.default : "";
+      if (!rawDefault) continue;
+      const fromAuto = resolveDefault(key, rawDefault);
+      resolved[key] = fromAuto || rawDefault;
+    }
+
+    return resolved;
   };
 
   const submitMutation = useMutation({
@@ -1459,17 +1479,18 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         resolveConditionValue,
         singleEntry as Record<string, unknown> | undefined,
       );
-
-      const resolveTemplatedUrl = (raw: string | undefined): string | undefined => {
-        if (!raw) return undefined;
-        return resolveTemplateValue(raw);
-      };
       
       // When marketing consent is enabled, derive both email and whatsapp from consent_email checkbox
       const effectiveEmailConsent = consent_email || false;
       const effectiveWhatsappConsent = consent.marketing ? effectiveEmailConsent : (consent_whatsapp || false);
+      const fieldScalars = Object.fromEntries(
+        Object.entries(fields).filter(
+          ([, value]) => typeof value === "string" && value.trim() !== "",
+        ),
+      );
       const payload = {
         ...restValues,
+        ...fieldScalars,
         // Consent fields mapped to backend names
         consent_email: effectiveEmailConsent,
         sms_consent: consent_sms || false,
@@ -1501,6 +1522,9 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         conversion_name: effective.conversion_name,
         token: turnstileToken,
       };
+
+      // Token written during this submit (signup) — cookie may lag React state; prefer this.
+      let submitAuthToken: string | null = null;
 
       // Signup mode: guests are registered first via the site auth endpoint;
       // logged-in users skip this and go straight to the lead/conversion flow.
@@ -1568,7 +1592,10 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             data?: { access_token?: string; token?: string };
           };
           const newToken = signupJson?.data?.access_token || signupJson?.data?.token;
-          if (newToken) setConsumerToken(newToken);
+          if (newToken) {
+            setConsumerToken(newToken);
+            submitAuthToken = newToken;
+          }
           trackConversion(authConversionCfg.signup_event_name, {
             email: typeof values.email === "string" ? values.email : undefined,
             first_name: typeof values.first_name === "string" ? values.first_name : undefined,
@@ -1584,6 +1611,25 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           });
         }
       }
+
+      // Resolve templates with a fresh visitor bag (post-signup token), not the render-time closure.
+      const resolveTemplatedUrl = (raw: string | undefined): string | undefined => {
+        if (!raw) return undefined;
+        const token = submitAuthToken || getConsumerToken();
+        const visitor: Record<string, unknown> = {
+          ...(visitorBag ?? {}),
+          ...(token ? { token } : {}),
+        };
+        return resolveTemplateString(
+          raw,
+          variableDefinitions ?? {},
+          variableContext,
+          {
+            singleEntry: (singleEntry as Record<string, unknown> | undefined) ?? undefined,
+            visitor: Object.keys(visitor).length > 0 ? visitor : undefined,
+          },
+        ).text;
+      };
 
       // Webhook priority: per-form (YAML) → per-event → global.
       const formWebhook = effective.formWebhook;
@@ -1707,6 +1753,11 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
                 `consent_${field}`,
                 Boolean(variables[`consent_${field}`]),
               ]),
+            ),
+            ...Object.fromEntries(
+              Object.entries(fields).filter(
+                ([, value]) => typeof value === "string" && value.trim() !== "",
+              ),
             ),
           }
         );

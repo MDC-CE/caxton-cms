@@ -1,8 +1,25 @@
 import { getTrackingSettings } from "../settings";
 
+/** Form / lookup aliases — remapped or omitted; never copied as-is onto the wire. */
+const LEAD_BODY_ALIASES = new Set([
+  "conversion_name",
+  "program", // → course
+  "consent_whatsapp", // → consent
+  "ref", // folded into referral
+]);
+
+function isWireScalar(value: unknown): value is string | number | boolean {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
 /**
  * Builds a lead payload for Breathecode /v2/marketing/lead from raw form input.
- * Maps program → course, tags/automations fallbacks from conversion events, ref → referral.
+ * Known BC fields stay hardcoded (program → course, tags/automations fallbacks, ref → referral).
+ * Any other scalar on the input is merged through (e.g. hidden event_id).
  */
 export function buildLeadPayload(
   leadData: Record<string, unknown>,
@@ -30,7 +47,7 @@ export function buildLeadPayload(
     matchingEvent?.automations ||
     "strong";
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     first_name: leadData.first_name || null,
     last_name: leadData.last_name || null,
     phone: leadData.phone || null,
@@ -83,8 +100,18 @@ export function buildLeadPayload(
     }
   }
 
+  const out: Record<string, unknown> = { ...payload, ...extraConsent };
+
+  for (const [key, value] of Object.entries(leadData)) {
+    if (LEAD_BODY_ALIASES.has(key)) continue;
+    if (Object.prototype.hasOwnProperty.call(out, key)) continue;
+    if (!isWireScalar(value)) continue;
+    if (value === "") continue;
+    out[key] = value;
+  }
+
   return Object.fromEntries(
-    Object.entries({ ...payload, ...extraConsent }).filter(
+    Object.entries(out).filter(
       ([_, value]) => value !== null && value !== undefined && value !== "",
     ),
   );
