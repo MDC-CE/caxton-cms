@@ -153,21 +153,65 @@ export function FunnelFieldsForm({
   const [addProductOpen, setAddProductOpen] = useState(false);
   const [addProductKey, setAddProductKey] = useState(0);
   const [pendingProduct, setPendingProduct] = useState<string | null>(null);
+  const [pendingPersonaIds, setPendingPersonaIds] = useState<string[]>([]);
+  const [pendingOmitPersona, setPendingOmitPersona] = useState(false);
 
   const productBySlug = new Map(productOptions.map((p) => [p.content_slug, p]));
   const bindingKey = (b: FunnelBinding) => `${b.product}\0${b.persona ?? ""}`;
   const selectedKeys = new Set(selectedBindings.map(bindingKey));
 
+  const clearPendingPicker = () => {
+    setPendingProduct(null);
+    setPendingPersonaIds([]);
+    setPendingOmitPersona(false);
+  };
+
   const removeBinding = (b: FunnelBinding) => {
     onSelectedBindingsChange(selectedBindings.filter((x) => bindingKey(x) !== bindingKey(b)));
   };
 
-  const addBinding = (b: FunnelBinding) => {
-    if (selectedKeys.has(bindingKey(b))) return;
-    onSelectedBindingsChange([...selectedBindings, b]);
-    setPendingProduct(null);
+  const addBindings = (bindings: FunnelBinding[]) => {
+    const next = [...selectedBindings];
+    const keys = new Set(selectedKeys);
+    for (const b of bindings) {
+      const key = bindingKey(b);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      next.push(b);
+    }
+    onSelectedBindingsChange(next);
+    clearPendingPicker();
     setAddProductOpen(false);
     setAddProductKey((k) => k + 1);
+  };
+
+  const addBinding = (b: FunnelBinding) => {
+    addBindings([b]);
+  };
+
+  const openPersonaPicker = (slug: string) => {
+    setPendingProduct(slug);
+    setPendingPersonaIds([]);
+    setPendingOmitPersona(false);
+    setAddProductOpen(false);
+    setAddProductKey((k) => k + 1);
+  };
+
+  const togglePendingPersona = (personaId: string) => {
+    setPendingOmitPersona(false);
+    setPendingPersonaIds((prev) =>
+      prev.includes(personaId) ? prev.filter((id) => id !== personaId) : [...prev, personaId],
+    );
+  };
+
+  const applyPendingPersonas = () => {
+    if (!pendingProduct) return;
+    if (pendingOmitPersona) {
+      addBinding({ product: pendingProduct });
+      return;
+    }
+    if (pendingPersonaIds.length === 0) return;
+    addBindings(pendingPersonaIds.map((persona) => ({ product: pendingProduct, persona })));
   };
 
   const tryAddProduct = (slug: string) => {
@@ -182,7 +226,7 @@ export function FunnelFieldsForm({
         addBinding({ product: slug });
         return;
       }
-      setPendingProduct(null);
+      clearPendingPicker();
       setAddProductOpen(false);
       return;
     }
@@ -192,17 +236,8 @@ export function FunnelFieldsForm({
       return;
     }
 
-    if (isSelf) {
-      // Program catalog may omit persona — still offer picker
-      setPendingProduct(slug);
-      return;
-    }
-
-    if (personas.length === 1) {
-      addBinding({ product: slug, persona: personas[0]!.id });
-      return;
-    }
-    setPendingProduct(slug);
+    // Always open picker so staff can multi-select personas (or omit on self)
+    openPersonaPicker(slug);
   };
 
   return (
@@ -448,45 +483,84 @@ export function FunnelFieldsForm({
                 data-testid="funnel-persona-picker"
               >
                 <p className="text-xs text-muted-foreground">
-                  Pick a persona for <strong>{pendingProduct}</strong>
+                  Select personas for <strong>{pendingProduct}</strong>, then Apply
                   {isProgram && contentSlug === pendingProduct
-                    ? " (optional on this program page)"
+                    ? " (persona optional on this program page)"
                     : ""}
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {(productBySlug.get(pendingProduct)?.personas ?? []).map((persona) => (
-                    <Button
-                      key={persona.id}
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      className="h-7 text-xs"
-                      onClick={() => addBinding({ product: pendingProduct, persona: persona.id })}
-                      data-testid={`button-funnel-persona-${persona.id}`}
-                    >
-                      {persona.label || persona.id}
-                    </Button>
-                  ))}
+                  {(productBySlug.get(pendingProduct)?.personas ?? []).map((persona) => {
+                    const selected = pendingPersonaIds.includes(persona.id);
+                    const alreadyBound = selectedKeys.has(
+                      bindingKey({ product: pendingProduct, persona: persona.id }),
+                    );
+                    return (
+                      <Button
+                        key={persona.id}
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className={cn(
+                          "h-7 text-xs gap-1",
+                          selected &&
+                            "bg-primary/10 text-primary border border-primary/30 hover:bg-primary/15",
+                          alreadyBound && !selected && "opacity-50",
+                        )}
+                        disabled={alreadyBound && !selected}
+                        onClick={() => togglePendingPersona(persona.id)}
+                        data-testid={`button-funnel-persona-${persona.id}`}
+                        aria-pressed={selected}
+                      >
+                        {selected ? <Check className="h-3 w-3" /> : null}
+                        {persona.label || persona.id}
+                      </Button>
+                    );
+                  })}
                   {isProgram && contentSlug === pendingProduct && (
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="h-7 text-xs"
-                      onClick={() => addBinding({ product: pendingProduct })}
+                      className={cn(
+                        "h-7 text-xs gap-1",
+                        pendingOmitPersona &&
+                          "bg-primary/10 text-primary border-primary/30 hover:bg-primary/15",
+                      )}
+                      onClick={() => {
+                        setPendingPersonaIds([]);
+                        setPendingOmitPersona((v) => !v);
+                      }}
                       data-testid="button-funnel-persona-omit"
+                      aria-pressed={pendingOmitPersona}
                     >
+                      {pendingOmitPersona ? <Check className="h-3 w-3" /> : null}
                       No persona (catalog)
                     </Button>
                   )}
+                </div>
+                <div className="flex flex-wrap gap-1.5 justify-end">
                   <Button
                     type="button"
                     size="sm"
                     variant="ghost"
                     className="h-7 text-xs"
-                    onClick={() => setPendingProduct(null)}
+                    onClick={clearPendingPicker}
+                    data-testid="button-funnel-persona-cancel"
                   >
                     Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 text-xs"
+                    disabled={!pendingOmitPersona && pendingPersonaIds.length === 0}
+                    onClick={applyPendingPersonas}
+                    data-testid="button-funnel-persona-apply"
+                  >
+                    Apply
+                    {!pendingOmitPersona && pendingPersonaIds.length > 0
+                      ? ` (${pendingPersonaIds.length})`
+                      : ""}
                   </Button>
                 </div>
               </div>
