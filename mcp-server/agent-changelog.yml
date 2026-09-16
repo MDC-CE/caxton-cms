@@ -6,6 +6,64 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "funnel_classification review situation — persona → product → stage"
+    agent_impact:
+      - "New review_situations id funnel_classification (checklist funnel_persona_product_stage). Pure funnel.* ops infer this pack instead of body_copy_edit. Prefer declare on propose_change; explain_site topic funnel-classification-proposals."
+      - "Reviewer discovery_path adds list_products + get_product; score buyer persona → product binding → stage. products:all only when no better single-product persona fit. Soft batch ≤10. Reconnect MCP for enum/topic."
+      - "Funnel blockers: cite which cascade step fails (persona/product/stage) and the correct binding — breadth-only disagreement is not a reject."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/explain.ts
+      - mcp-server/explain/funnel-classification-proposals.md
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - server/content-proposals/review-context.ts
+      - client/src/components/agents/SituationReviewBadge.tsx
+
+  - date: "2026-09-16"
+    summary: "list_proposals attention filter + role-aware default sort"
+    agent_impact:
+      - "Scoped list_proposals defaults to sort=attention (reviewers: escalated → awaiting_rereview → no_feedback → blocked; create-only: blocked earlier) and open|partial when status omitted. Pass sort updated_at|created_at for chronology."
+      - "New filter attention + summary fields attention / resolved_blocker_count; stats.by_attention. Create-only may get attention_author_scope_hint without proposer_username/agent_session_id. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/attention.ts
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
+    summary: "get_analytics_report traffic_source_conversions — leads by source/medium/campaign"
+    agent_impact:
+      - "New report traffic_source_conversions: sessions + Count-as-lead event counts by source/medium/campaign; default attribution session_last_click; first_user for TOFU; optional item_id filters leads only."
+      - "Warnings: no_lead_events_configured, leads_unattributed, leads_missing_item_id, attribution_fallback_traffic_source, lead_rate_channel_sessions. Reconnect MCP for new enum/args."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/analytics.ts
+      - mcp-server/explain/analytics.md
+      - server/analytics/reports.ts
+      - server/routes/analytics.ts
+
+  - date: "2026-09-16"
+    summary: "counts_as_lead on conversion events; product Purchases KPI in journey analytics"
+    agent_impact:
+      - "explain_site conversion_events catalog shows counts_as_lead (yes/no); unset shown as unset."
+      - "get_product_funnel_analytics returns lead_event_names, counts_as_lead_configured, and product.purchases (purchase is product-scoped only)."
+      - "Lead KPIs use tracking.conversion_events counts_as_lead (signup always on). Re-bootstrap after reconnect if catalog text looked stale."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/explain.ts
+      - mcp-server/tools/ecommerce.ts
+      - server/ecommerce/journey-analytics.ts
+      - server/settings.ts
+
+  - date: "2026-09-16"
     summary: "Production plain /mcp teach + hard-deny; mcp_write_disabled guide"
     agent_impact:
       - "Production plain /mcp: mutates return role_connector_required with connector_guide.role_connectors + swarm_setup (one connection per role). bootstrap_agent / get_current_user expose primary_blocker. OAuth consent warns humans."

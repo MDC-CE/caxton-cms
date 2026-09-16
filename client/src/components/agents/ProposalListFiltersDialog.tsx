@@ -31,9 +31,11 @@ import {
 import { apiFetch } from "@/lib/queryClient";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
+  PROPOSAL_ATTENTION_OPTIONS,
   PROPOSAL_KIND_OPTIONS,
   PROPOSAL_STATUS_OPTIONS,
   type ProposalListActorType,
+  type ProposalListAttention,
   type ProposalListFilters,
   type ProposalListKind,
   type ProposalListStats,
@@ -49,6 +51,7 @@ export type ProposalListFilterDims = Pick<
   | "proposerActorRole"
   | "agentSessionId"
   | "escalatedOnly"
+  | "attention"
 >;
 
 const ROLE_ANY = "__any__";
@@ -63,6 +66,7 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     proposerActorRole: filters.proposerActorRole,
     agentSessionId: filters.agentSessionId,
     escalatedOnly: filters.escalatedOnly,
+    attention: filters.attention,
   };
 }
 
@@ -120,6 +124,7 @@ export function ProposalListFiltersDialog({
     filters.proposerActorRole,
     filters.agentSessionId,
     filters.escalatedOnly,
+    filters.attention,
   ]);
 
   const { data: siteInfo } = useQuery<{ contentFolder: string }>({
@@ -183,6 +188,12 @@ export function ProposalListFiltersDialog({
     return n != null ? `${label} (${n})` : label;
   }
 
+  function attentionLabel(value: ProposalListAttention, label: string): string {
+    if (value === "all") return label;
+    const n = stats?.by_attention?.[value];
+    return n != null ? `${label} (${n})` : label;
+  }
+
   const roleSelectValue = draft.proposerActorRole.trim() || ROLE_ANY;
 
   return (
@@ -237,8 +248,9 @@ export function ProposalListFiltersDialog({
           <DialogHeader>
             <DialogTitle>Filters</DialogTitle>
             <DialogDescription>
-              Narrow which proposals appear in the list by status, kind, or who filed them. Nothing is
-              written until someone acts on a proposal. Sort stays on the Sort control next to Filters.
+              Narrow which proposals appear in the list by status, kind, attention, or who filed them.
+              Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
+              to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -299,6 +311,36 @@ export function ProposalListFiltersDialog({
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="proposal-attention-filter" className="text-xs text-muted-foreground">
+                Attention
+              </Label>
+              <Select
+                value={draft.attention}
+                onValueChange={(attention) =>
+                  patchDraft({ attention: attention as ProposalListAttention })
+                }
+              >
+                <SelectTrigger
+                  id="proposal-attention-filter"
+                  className="h-8 text-sm"
+                  data-testid="select-proposal-attention-filter"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PROPOSAL_ATTENTION_OPTIONS.map((opt) => (
+                    <SelectItem
+                      key={opt.value}
+                      value={opt.value}
+                      data-testid={`option-proposal-attention-${opt.value}`}
+                    >
+                      {attentionLabel(opt.value, opt.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1">
               <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">

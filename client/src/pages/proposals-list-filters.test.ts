@@ -35,9 +35,15 @@ describe("parseProposalListSearch", () => {
         proposerActorRole: "",
         agentSessionId: "",
         escalatedOnly: false,
+        attention: "all",
       },
       q: "hero",
     });
+  });
+
+  it("parses attention and needs_attention sort", () => {
+    expect(parseProposalListSearch("attention=blocked").filters.attention).toBe("blocked");
+    expect(parseProposalListSearch("sort=attention").filters.sort).toBe("attention");
   });
 
   it("parses proposer filters", () => {
@@ -101,6 +107,7 @@ describe("serializeProposalListSearch", () => {
         proposerActorRole: "copy_editor",
         agentSessionId: "sess-9",
         escalatedOnly: true,
+        attention: "blocked" as const,
       },
       q: "pricing",
     };
@@ -132,6 +139,7 @@ describe("countActiveProposalFilters", () => {
   it("counts status, kind, and proposer dims", () => {
     expect(
       countActiveProposalFilters({
+        ...DEFAULT_PROPOSAL_LIST_FILTERS,
         status: "finished",
         kind: "notes",
         sort: "created_at",
@@ -141,8 +149,9 @@ describe("countActiveProposalFilters", () => {
         proposerActorRole: "seo_specialist",
         agentSessionId: "s1",
         escalatedOnly: true,
+        attention: "no_feedback",
       }),
-    ).toBe(7);
+    ).toBe(8);
   });
 });
 
@@ -150,6 +159,7 @@ describe("clearProposalListFilters", () => {
   it("resets status, kind, and proposer dims but keeps sort", () => {
     expect(
       clearProposalListFilters({
+        ...DEFAULT_PROPOSAL_LIST_FILTERS,
         status: "finished",
         kind: "notes",
         sort: "created_at",
@@ -159,6 +169,7 @@ describe("clearProposalListFilters", () => {
         proposerActorRole: "copy_editor",
         agentSessionId: "sess",
         escalatedOnly: true,
+        attention: "blocked",
       }),
     ).toEqual({
       status: "open",
@@ -170,6 +181,7 @@ describe("clearProposalListFilters", () => {
       proposerActorRole: "",
       agentSessionId: "",
       escalatedOnly: false,
+      attention: "all",
     });
   });
 });
@@ -227,10 +239,30 @@ describe("toProposalListApiQuery", () => {
     });
   });
 
+  it("maps attention sort with reviewer perspective", () => {
+    expect(
+      toProposalListApiQuery(
+        {
+          ...DEFAULT_PROPOSAL_LIST_FILTERS,
+          sort: "attention",
+          attention: "awaiting_rereview",
+        },
+        "",
+      ),
+    ).toEqual({
+      status: "open",
+      sort: "attention",
+      sort_dir: "desc",
+      attention: "awaiting_rereview",
+      attention_perspective: "reviewer",
+    });
+  });
+
   it("builds search params string", () => {
     const qs = proposalListApiSearchParams(
       toProposalListApiQuery(
         {
+          ...DEFAULT_PROPOSAL_LIST_FILTERS,
           status: "partial",
           kind: "edits",
           sort: "created_at",

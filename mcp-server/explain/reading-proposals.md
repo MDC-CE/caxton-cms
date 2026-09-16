@@ -31,6 +31,7 @@ Selling content types (`landing` / `landings` / `program` / `programs`) always c
 | `review_mode_inert` | Notes/idea (apply does not write YAML) |
 | `title_description_ctr` | Any remaining op on `meta.page_title` and/or `meta.description` — SERP harm scorecard (Query/Specifics/Claims). Stacks with other checklists; meta-only omits `verify_copy`. Playbook: `explain` topic `serp-title-description-proposals` |
 | `internal_links` | Declared or inferred hub/internal-link body packs — facts/claims/links/force gates; apply if wooden; see `explain` topic `internal-links-proposals` |
+| `funnel_persona_product_stage` | Declared or inferred `funnel.stage` / `funnel.products` packs — Persona → Product → Stage; funnel-only omits `verify_copy`. Playbook: `explain` topic `funnel-classification-proposals` |
 | `verify_copy` | Edits with non–title/desc fields (or no SERP ops) when not link-only — proposed vs live; summary **why/scope** (not value paste-match) |
 | `adjacent_findings` | Edits on existing live pages (`existing_metadata` / `existing_content` / `selling_page`) when apply is not blocked |
 | `disposition` | Baseline edits — apply / reject / blocker / adjacent notes park; leave-live on SERP → revise_entries then apply |

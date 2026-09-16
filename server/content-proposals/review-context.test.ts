@@ -483,6 +483,53 @@ describe("classifyProposalReview", () => {
     expect(ctx.active_checklists).toContain("verify_copy");
   });
 
+  it("funnel.* only → funnel_persona_product_stage without verify_copy", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        review_situations: [],
+        summary:
+          "Classify funnel for career-outcomes intent to ai-engineering awareness. Funnel fields only.",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/outcomes",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [
+              { field_path: "funnel.stage", value: "awareness" },
+              {
+                field_path: "funnel.products",
+                value: [{ product: "ai-engineering", persona: "the-career-changer" }],
+              },
+            ],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "outcomes",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "outcomes", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.review_situations).toContain("funnel_classification");
+    expect(ctx.review_situations).not.toContain("body_copy_edit");
+    expect(ctx.active_checklists).toContain("funnel_persona_product_stage");
+    expect(ctx.active_checklists).not.toContain("verify_copy");
+    expect(ctx.agent_preview.think_items.some((t) => t.id === "funnel_persona_product_stage")).toBe(
+      true,
+    );
+    expect(ctx.staff_summary.situation_description).toMatch(/buyer|funnel|product/i);
+    const tpl = ctx.agent_preview.think_items.find((t) => t.id === "funnel_persona_product_stage");
+    expect(tpl?.look_for.some((l) => /Persona/i.test(l))).toBe(true);
+    expect(tpl?.look_for.some((l) => /products:all|breadth/i.test(l))).toBe(true);
+  });
+
   it("title/description mixed with body → both checklists + mixed_serp_and_body", () => {
     const ctx = classifyProposalReview({
       proposal: baseProposal({

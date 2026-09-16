@@ -30,7 +30,19 @@ export {
   type ProposalUpdateAction,
   type ProposalRejectKind,
   type ReviewMode,
+  type AttentionPerspective,
+  type ProposalAttention,
 } from "./service";
+export {
+  deriveProposalAttention,
+  compareByAttention,
+  parseProposalAttention,
+  parseAttentionPerspective,
+  resolvedBlockerCount,
+  PROPOSAL_ATTENTION_VALUES,
+  ATTENTION_PERSPECTIVES,
+  isProposalAttention,
+} from "./attention";
 export {
   resolveProposalEntryActivity,
   listEntryActivityEvents,

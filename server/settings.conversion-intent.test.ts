@@ -28,14 +28,35 @@ describe("updateTrackingSettings conversion intent", () => {
     expect(() =>
       updateTrackingSettings(
         {
-          conversion_events: [{ name: "student_application", description: "Apply" }],
+          conversion_events: [
+            { name: "student_application", description: "Apply", counts_as_lead: true },
+          ],
         },
         root,
       ),
     ).toThrow(/when_to_use/);
   });
 
-  it("persists valid intent fields", () => {
+  it("rejects non-auth events missing counts_as_lead", () => {
+    const root = makeContentRoot();
+    expect(() =>
+      updateTrackingSettings(
+        {
+          conversion_events: [
+            {
+              name: "student_application",
+              description: "Apply / enroll",
+              when_to_use: whenToUse,
+              when_not_to_use: whenNot,
+            },
+          ],
+        },
+        root,
+      ),
+    ).toThrow(/counts_as_lead/);
+  });
+
+  it("persists valid intent fields and counts_as_lead", () => {
     const root = makeContentRoot();
     updateTrackingSettings(
       {
@@ -45,6 +66,7 @@ describe("updateTrackingSettings conversion intent", () => {
             description: "Apply / enroll",
             when_to_use: whenToUse,
             when_not_to_use: whenNot,
+            counts_as_lead: true,
           },
         ],
       },
@@ -54,5 +76,6 @@ describe("updateTrackingSettings conversion intent", () => {
     expect(raw).toContain("when_to_use:");
     expect(raw).toContain("when_not_to_use:");
     expect(raw).toContain("student_application");
+    expect(raw).toContain("counts_as_lead: true");
   });
 });

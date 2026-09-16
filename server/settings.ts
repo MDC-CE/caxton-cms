@@ -18,6 +18,9 @@ import {
   DEFAULT_AUTH_CONVERSION_EVENTS,
   DEFAULT_LOGIN_EVENT_INTENT,
   DEFAULT_SIGNUP_EVENT_INTENT,
+  isAuthConversionName,
+  isLoginConversionName,
+  isSignupConversionName,
   parseAuthConversionEventConfig,
   validateAuthConversionEventConfig,
   type AuthConversionEventConfig,
@@ -120,6 +123,11 @@ export interface ConversionEventEntry {
   when_to_use?: string;
   /** Confusable neighbors — when not to use this name (required on save). */
   when_not_to_use?: string;
+  /**
+   * When true, this event is included in product journey lead conversion KPIs.
+   * Optional only for legacy YAML until migrated; required on save for non-auth events.
+   */
+  counts_as_lead?: boolean;
   automations?: string;
   tags?: string[];
   consent?: ConsentDefaults;
@@ -915,6 +923,9 @@ function loadSettings(contentRoot?: string): SiteSettings {
                 ...(typeof e.when_not_to_use === "string" && e.when_not_to_use.trim()
                   ? { when_not_to_use: e.when_not_to_use.trim() }
                   : {}),
+                ...(typeof e.counts_as_lead === "boolean"
+                  ? { counts_as_lead: e.counts_as_lead }
+                  : {}),
                 ...(typeof e.automations === "string" && e.automations ? { automations: e.automations } : {}),
                 ...(Array.isArray(e.tags) && e.tags.length > 0
                   ? { tags: e.tags.filter((t) => typeof t === "string") as string[] }
@@ -1261,6 +1272,47 @@ export function getAuthConversionEventConfig(contentRoot?: string): AuthConversi
     signup_event_aliases: t.signup_event_aliases,
     login_event_aliases: t.login_event_aliases,
   };
+}
+
+/**
+ * True when every conversion event has an explicit counts_as_lead boolean
+ * (site has been configured / migrated). Empty catalog → false.
+ */
+export function isCountsAsLeadConfigured(
+  events: ConversionEventEntry[] | undefined | null,
+): boolean {
+  if (!Array.isArray(events) || events.length === 0) return false;
+  return events.every((e) => typeof e.counts_as_lead === "boolean");
+}
+
+/**
+ * Event names included in product journey lead conversion KPIs.
+ * Missing counts_as_lead → not a lead. Always unions the current canonical
+ * signup_event_name. Login is never forced on.
+ */
+export function getLeadConversionEventNames(contentRoot?: string): string[] {
+  const tracking = getTrackingSettings(contentRoot);
+  const auth = getAuthConversionEventConfig(contentRoot);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of tracking.conversion_events) {
+    if (!e?.name) continue;
+    const name = e.name.trim();
+    if (!name) continue;
+    let counts = e.counts_as_lead === true;
+    if (isSignupConversionName(name, auth)) counts = true;
+    if (isLoginConversionName(name, auth)) counts = false;
+    if (!counts) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  const signup = auth.signup_event_name.trim();
+  if (signup && !seen.has(signup)) {
+    seen.add(signup);
+    out.push(signup);
+  }
+  return out;
 }
 
 export function getRobotsSettings(contentRoot?: string): RobotsSettings {
@@ -1811,6 +1863,21 @@ export function updateTrackingSettings(input: {
   }
 
   if (input.conversion_events !== undefined) {
+    const authForValidate = parseAuthConversionEventConfig(
+      {
+        signup_event_name: input.signup_event_name,
+        login_event_name: input.login_event_name,
+        signup_event_aliases: input.signup_event_aliases,
+        login_event_aliases: input.login_event_aliases,
+      },
+      (() => {
+        try {
+          return getAuthConversionEventConfig(contentRoot);
+        } catch {
+          return DEFAULT_AUTH_CONVERSION_EVENTS;
+        }
+      })(),
+    );
     for (const entry of input.conversion_events) {
       if (typeof entry.name !== "string" || !entry.name.trim()) {
         throw new Error("Each conversion event must have a non-empty name");
@@ -1820,6 +1887,12 @@ export function updateTrackingSettings(input: {
       }
       const intentErr = validateConversionEventIntent(entry);
       if (intentErr) throw new Error(intentErr);
+      const name = entry.name.trim();
+      if (!isAuthConversionName(name, authForValidate) && typeof entry.counts_as_lead !== "boolean") {
+        throw new Error(
+          `Conversion event "${name}" must set counts_as_lead to true or false`,
+        );
+      }
     }
   }
 
@@ -1846,11 +1919,41 @@ export function updateTrackingSettings(input: {
   const nextTracking: Record<string, unknown> = { ...currentTracking };
 
   if (input.conversion_events !== undefined) {
+    const authForSerialize = parseAuthConversionEventConfig(
+      nextTracking as Record<string, unknown>,
+      (() => {
+        try {
+          return getAuthConversionEventConfig(contentRoot);
+        } catch {
+          return DEFAULT_AUTH_CONVERSION_EVENTS;
+        }
+      })(),
+    );
+    // Prefer incoming auth rename fields if present in the same update
+    if (typeof input.signup_event_name === "string" && input.signup_event_name.trim()) {
+      authForSerialize.signup_event_name = input.signup_event_name.trim();
+    }
+    if (typeof input.login_event_name === "string" && input.login_event_name.trim()) {
+      authForSerialize.login_event_name = input.login_event_name.trim();
+    }
+    if (input.signup_event_aliases !== undefined) {
+      authForSerialize.signup_event_aliases = input.signup_event_aliases;
+    }
+    if (input.login_event_aliases !== undefined) {
+      authForSerialize.login_event_aliases = input.login_event_aliases;
+    }
+
     nextTracking.conversion_events = input.conversion_events.map((e) => {
-      const serialized: Record<string, unknown> = { name: e.name.trim() };
+      const name = e.name.trim();
+      let countsAsLead = e.counts_as_lead === true;
+      if (isSignupConversionName(name, authForSerialize)) countsAsLead = true;
+      if (isLoginConversionName(name, authForSerialize)) countsAsLead = false;
+
+      const serialized: Record<string, unknown> = { name };
       if (e.description?.trim()) serialized.description = e.description.trim();
       serialized.when_to_use = e.when_to_use!.trim();
       serialized.when_not_to_use = e.when_not_to_use!.trim();
+      serialized.counts_as_lead = countsAsLead;
       if (e.automations?.trim()) serialized.automations = e.automations.trim();
       if (e.tags && e.tags.length > 0) serialized.tags = e.tags;
       if (e.consent && Object.keys(e.consent).length > 0) serialized.consent = e.consent;

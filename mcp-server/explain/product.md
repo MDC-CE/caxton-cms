@@ -53,6 +53,7 @@ funnel:
 - Same product twice with different personas is allowed.
 - When audience exists: landings **must** include a valid `persona`. **Program self-page** may omit persona.
 - Codes: `missing_product_audience`, `missing_funnel_persona`, `unknown_persona`.
+- Reviewing proposed funnel bindings in proposals → topic **`funnel-classification-proposals`** (persona → product → stage).
 
 ## Journey tools
 

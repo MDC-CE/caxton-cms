@@ -111,6 +111,16 @@ The following conversion events are tracked and should be configured as GA4 conv
 
 Auth events are configured on Conversions → Signup and Login (`signup_event_name` / `login_event_name`). They push to the dataLayer only (not the lead conversion webhook). When a form’s `conversion_name` is the signup/login event, do not expect a second form-submission push of the same name.
 
+### Count as lead (`counts_as_lead`)
+
+Each `tracking.conversion_events[]` entry has a required `counts_as_lead` boolean (staff must choose on create/save). Product journey **lead conversion** KPIs only count events with `counts_as_lead: true`, plus the current canonical signup event (always on). Login is never counted as a lead.
+
+This is independent of GTM / Google Ads / Meta conversion mapping: the form still fires to the dataLayer either way; ads platforms only count the event if you map that event name there. It is also independent of Leads diagnostics allowlists (`leads_expected_conversion_names`).
+
+### Purchases KPI
+
+GA4 `purchase` is fired off-site (checkout), not on marketing page URLs. Product journey analytics expose a product-scoped **Purchases** total (matched by `item_id` / `program_id` / `program`) separate from lead conversions and ecommerce intent. Page rows do not show purchases (path-scoped purchase would almost always be zero).
+
 All conversion events include `visitor_id` in the dataLayer push.
 
 ### Product identity on conversions (`item_id`)
@@ -124,6 +134,8 @@ When resolve succeeds, the conversion dataLayer push **dual-writes**:
 - `program_id` — content slug
 
 GTM must register `item_id` (and ideally `program_id`) as GA4 event parameters on conversion tags so BigQuery exports include them. If the user pick is outside the page funnel, CRM still receives `program` but analytics `item_id` is omitted.
+
+Site-wide **leads by traffic source** (`get_analytics_report` → `traffic_source_conversions`) uses Count as lead event names, session last-click attribution by default (falls back to `collected_traffic_source` / `traffic_source` when needed), and optional `item_id` to slice product leads. Empty `item_id` on lead events is excluded from that slice (reported as a warning) — this change does not add a content validator for forms.
 
 ## General Tracking Events
 

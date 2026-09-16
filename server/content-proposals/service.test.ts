@@ -456,6 +456,118 @@ describe("content proposals", () => {
     expect(desc.proposals[0]!.updated_at).toBeGreaterThanOrEqual(desc.proposals[1]!.updated_at);
   });
 
+  it("list attention sort, filter, status bias, and summary fields", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const body =
+      "The CTA is too vague for this locale. Fixed looks like a concrete next step. Why: conversion. ".repeat(
+        2,
+      );
+
+    const none = await svc.create(
+      {
+        title: "No feedback",
+        summary,
+        entries: [sampleEntry({ slug: "att-none" })],
+      },
+      { username: "alice" },
+    );
+    expect(none.ok).toBe(true);
+    if (!none.ok) return;
+
+    const blocked = await svc.create(
+      {
+        title: "Blocked",
+        summary,
+        entries: [sampleEntry({ slug: "att-blocked" })],
+      },
+      { username: "alice" },
+    );
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    const addB = await svc.update(blocked.proposal.id, "add_blocker", {
+      username: "blake",
+      body,
+    });
+    expect(addB.ok).toBe(true);
+
+    const rereview = await svc.create(
+      {
+        title: "Rereview",
+        summary,
+        entries: [sampleEntry({ slug: "att-rereview" })],
+      },
+      { username: "alice" },
+    );
+    expect(rereview.ok).toBe(true);
+    if (!rereview.ok) return;
+    const addR = await svc.update(rereview.proposal.id, "add_blocker", {
+      username: "blake",
+      body,
+    });
+    expect(addR.ok).toBe(true);
+    const bid = svc.get(rereview.proposal.id)!.blockers[0]!.id;
+    await svc.update(rereview.proposal.id, "claim", { username: "alice" });
+    const resolved = await svc.update(rereview.proposal.id, "resolve_blocker", {
+      username: "alice",
+      blocker_id: bid,
+      resolve_note: "Updated the CTA copy to match the review feedback.",
+    });
+    expect(resolved.ok).toBe(true);
+
+    const stats = svc.stats();
+    expect(stats.by_attention.no_feedback).toBeGreaterThanOrEqual(1);
+    expect(stats.by_attention.blocked).toBeGreaterThanOrEqual(1);
+    expect(stats.by_attention.awaiting_rereview).toBeGreaterThanOrEqual(1);
+
+    const reviewer = svc.list({
+      sort: "attention",
+      attention_perspective: "reviewer",
+      limit: 20,
+    });
+    expect(reviewer.status_bias_applied).toBe(true);
+    expect(reviewer.attention_perspective).toBe("reviewer");
+    const titles = reviewer.proposals.map((p) => p.title);
+    const iRereview = titles.indexOf("Rereview");
+    const iNone = titles.indexOf("No feedback");
+    const iBlocked = titles.indexOf("Blocked");
+    expect(iRereview).toBeGreaterThanOrEqual(0);
+    expect(iNone).toBeGreaterThan(iRereview);
+    expect(iBlocked).toBeGreaterThan(iNone);
+
+    const author = svc.list({
+      sort: "attention",
+      attention_perspective: "author",
+      limit: 20,
+    });
+    const authorTitles = author.proposals.map((p) => p.title);
+    expect(authorTitles.indexOf("Blocked")).toBeLessThan(authorTitles.indexOf("Rereview"));
+
+    const onlyRereview = svc.list({
+      attention: "awaiting_rereview",
+      sort: "attention",
+      limit: 20,
+    });
+    expect(onlyRereview.proposals.every((p) => p.title === "Rereview")).toBe(true);
+
+    const finishedOnly = svc.list({
+      status: "finished",
+      sort: "attention",
+      limit: 20,
+    });
+    expect(finishedOnly.status_bias_applied).toBe(false);
+    expect(finishedOnly.total).toBe(0);
+
+    const chrono = svc.list({ kind: "edits", sort: "updated_at", limit: 20 });
+    expect(chrono.status_bias_applied).toBe(false);
+
+    const summaryRow = toProposalSummary(svc.get(rereview.proposal.id)!);
+    expect(summaryRow.attention).toBe("awaiting_rereview");
+    expect(summaryRow.resolved_blocker_count).toBe(1);
+    expect(summaryRow.open_blocker_count).toBe(0);
+  });
+
   it("parseProposerActorType accepts enums and rejects invalid", () => {
     expect(parseProposerActorType(undefined)).toEqual({ ok: true, type: undefined });
     expect(parseProposerActorType("")).toEqual({ ok: true, type: undefined });

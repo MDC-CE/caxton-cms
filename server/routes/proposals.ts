@@ -11,6 +11,10 @@ import {
   type CreateProposalInput,
   type ProposalUpdateAction,
 } from "../content-proposals/service";
+import {
+  parseProposalAttention,
+  parseAttentionPerspective,
+} from "../content-proposals/attention";
 import { child } from "../logger";
 import { resolveEventActor } from "./_helpers";
 
@@ -185,6 +189,21 @@ export function registerProposalRoutes(app: Express): void {
       res.status(400).json({ error: parsedEscalated.error });
       return;
     }
+    const attentionRaw = typeof req.query.attention === "string" ? req.query.attention : undefined;
+    const parsedAttention = parseProposalAttention(attentionRaw);
+    if (!parsedAttention.ok) {
+      res.status(400).json({ error: parsedAttention.error });
+      return;
+    }
+    const perspectiveRaw =
+      typeof req.query.attention_perspective === "string"
+        ? req.query.attention_perspective
+        : undefined;
+    const parsedPerspective = parseAttentionPerspective(perspectiveRaw);
+    if (!parsedPerspective.ok) {
+      res.status(400).json({ error: parsedPerspective.error });
+      return;
+    }
     const limitRaw = req.query.limit ? Number(req.query.limit) : undefined;
     const offsetRaw = req.query.offset ? Number(req.query.offset) : undefined;
     const sortRaw = typeof req.query.sort === "string" ? req.query.sort : undefined;
@@ -207,7 +226,10 @@ export function registerProposalRoutes(app: Express): void {
       return;
     }
     const stats = svc.stats();
-    let { proposals, total } = svc.list({
+    const attentionPerspective =
+      parsedPerspective.perspective ??
+      (parsedSort.sort === "attention" ? "reviewer" : undefined);
+    let { proposals, total, status_bias_applied, attention_perspective } = svc.list({
       issue_id: issueId,
       status: status as never,
       kind: kind as never,
@@ -218,10 +240,13 @@ export function registerProposalRoutes(app: Express): void {
       proposer_actor_role: proposerActorRole,
       agent_session_id: agentSessionId,
       escalated: parsedEscalated.escalated,
+      attention: parsedAttention.attention,
       limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
       offset: Number.isFinite(offsetRaw) ? offsetRaw : undefined,
       sort: parsedSort.sort,
       sortDir: parsedSort.sortDir,
+      attention_perspective: attentionPerspective,
+      caller_username: auth.actor,
     });
 
     let review_context = null as ReturnType<typeof svc.classifyLive> | null;
@@ -237,6 +262,8 @@ export function registerProposalRoutes(app: Express): void {
         stats,
         sort: parsedSort.sort,
         sort_dir: parsedSort.sortDir,
+        status_bias_applied,
+        attention_perspective,
         proposals_view: "full",
         ...(review_context ? { review_context } : {}),
       });
@@ -249,6 +276,8 @@ export function registerProposalRoutes(app: Express): void {
       stats,
       sort: parsedSort.sort,
       sort_dir: parsedSort.sortDir,
+      status_bias_applied,
+      attention_perspective,
       proposals_view: "summary",
     });
   });

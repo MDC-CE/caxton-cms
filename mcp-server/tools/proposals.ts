@@ -7,11 +7,13 @@ import { loadContentTypes, resolveSiteContext } from "../lib/content.js";
 import { buildLoopbackHeaders } from "../lib/loopback.js";
 import { SITE_PARAM_DESC, siteFailResult } from "../lib/entry-helpers.js";
 import {
+  attentionPerspectiveFromGrants,
   clampProposalLimit,
   clampProposalOffset,
   isProposalsScoped,
-  parseProposalSort,
   proposalNextOffset,
+  resolveListProposalsSort,
+  shouldWarnAuthorAttentionScope,
 } from "../lib/list-proposals-mcp.js";
 import {
   buildProposalDiscoveryPath,
@@ -152,7 +154,9 @@ async function requireUpdateCap(mcpToken: string | undefined, grants: CatalogGra
 }
 
 const BLOCKER_BODY_HINT =
-  "Plain text min 80 chars: (1) what's wrong, (2) what fixed looks like, (3) why it matters. Do not list MCP tools.";
+  "Plain text min 80 chars: (1) what's wrong, (2) what fixed looks like, (3) why it matters. " +
+  "For funnel.stage/products blockers: cite which cascade step fails (persona / product / stage) and the correct binding. " +
+  "Do not list MCP tools.";
 
 export function registerProposalTools(
   mcp: McpServer,
@@ -170,6 +174,7 @@ export function registerProposalTools(
       "Edits: optional review_situations[] (catalog ids — see explain_site topic review-situations). Empty → reviewer infers from ops. " +
       "Hub/internal links → prefer review_situations:[\"internal_links\"] and explain topic internal-links-proposals. " +
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] and explain topic serp-title-description-proposals. " +
+      "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] and explain topic funnel-classification-proposals (persona → product → stage). " +
       "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale). " +
       "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
@@ -220,6 +225,7 @@ export function registerProposalTools(
           z.enum([
             "internal_links",
             "serp_title_description",
+            "funnel_classification",
             "body_copy_edit",
             "selling_figures",
             "new_public_content",
@@ -516,9 +522,11 @@ export function registerProposalTools(
 
   mcp.tool(
     "list_proposals",
-    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only. " +
-      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, or escalated for paginated summary rows " +
-      "(detail:\"summary\": identity, entry_count, field_paths, slim entry stubs — no ops/values/baselines). " +
+    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only (incl. by_attention). " +
+      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, or attention for paginated summary rows " +
+      "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, slim stubs — no ops/values/baselines). " +
+      "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted. " +
+      "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
@@ -567,16 +575,27 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe("When true, only proposals with a steward escalate hold. When false, only non-escalated."),
+      attention: z
+        .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked"])
+        .optional()
+        .describe(
+          "Triage bucket filter. awaiting_rereview = blockers fixed, needs re-check; no_feedback = never had blockers; " +
+            "blocked = open needs-changes; escalated = steward hold.",
+        ),
       limit: z.number().optional().describe("Page size when scoped (default 20, max 200)"),
       offset: z.number().optional().describe("Offset when scoped"),
       sort: z
         .string()
         .optional()
-        .describe("Scoped only: created_at | updated_at (default updated_at). Invalid values fail."),
+        .describe(
+          "Scoped only: attention (default when omitted) | created_at | updated_at. Invalid values fail.",
+        ),
       sort_dir: z
         .string()
         .optional()
-        .describe("Scoped only: asc | desc (default desc). Invalid values fail."),
+        .describe(
+          "Scoped only: asc | desc (default desc). Ignored when sort is attention (rank is fixed; within-bucket newest first).",
+        ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -590,13 +609,14 @@ export function registerProposalTools(
       const offset = clampProposalOffset(args.offset);
       const warnings: Array<{ code: string; message: string }> = [];
       const sortArgsPresent = args.sort != null || args.sort_dir != null;
+      const perspective = attentionPerspectiveFromGrants(grants);
 
       if (!scoped) {
         warnings.push({
           code: "proposals_need_filter",
           message:
             "Unscoped list_proposals returns proposal_stats only. Pass status, kind, query, issue_id, proposal_id, " +
-            "proposer_username, proposer_actor, agent_session_id, or escalated to load proposals[].",
+            "proposer_username, proposer_actor, agent_session_id, escalated, or attention to load proposals[].",
         });
         if (args.limit != null || args.offset != null) {
           warnings.push({
@@ -615,10 +635,21 @@ export function registerProposalTools(
       let sort = "updated_at";
       let sort_dir = "desc";
       if (scoped) {
-        const parsed = parseProposalSort(args.sort, args.sort_dir);
-        if (!parsed.ok) return fail(parsed.error, { code: "invalid_sort" });
-        sort = parsed.sort;
-        sort_dir = parsed.sortDir;
+        try {
+          const resolved = resolveListProposalsSort(args);
+          sort = resolved.sort;
+          sort_dir = resolved.sortDir;
+        } catch (e) {
+          return fail((e as Error).message, { code: "invalid_sort" });
+        }
+        if (sort === "attention" && shouldWarnAuthorAttentionScope(perspective, args)) {
+          warnings.push({
+            code: "attention_author_scope_hint",
+            message:
+              "Author attention order ranks blocked work first across the whole site. " +
+              "Pass proposer_username or agent_session_id to focus on your own queue.",
+          });
+        }
       }
 
       const qs = new URLSearchParams();
@@ -636,10 +667,14 @@ export function registerProposalTools(
         if (args.agent_session_id?.trim()) qs.set("agent_session_id", args.agent_session_id.trim());
         if (args.escalated === true) qs.set("escalated", "1");
         if (args.escalated === false) qs.set("escalated", "0");
+        if (args.attention) qs.set("attention", args.attention);
         qs.set("limit", String(limit));
         qs.set("offset", String(offset));
         qs.set("sort", sort);
         qs.set("sort_dir", sort_dir);
+        if (sort === "attention") {
+          qs.set("attention_perspective", perspective);
+        }
       } else {
         qs.set("limit", "1");
         qs.set("offset", "0");
@@ -654,6 +689,10 @@ export function registerProposalTools(
           stats?: unknown;
           error?: string;
           proposals_view?: "summary" | "full";
+          sort?: string;
+          sort_dir?: string;
+          status_bias_applied?: boolean;
+          attention_perspective?: string | null;
           review_context?: {
             summary?: string;
             damage_class?: string;
@@ -687,7 +726,7 @@ export function registerProposalTools(
           warnings.push({
             code: "proposals_summary_only",
             message:
-              "Multi-row list returns summary rows (entry_count, field_paths, slim stubs — no ops/values/baselines). Pass proposal_id for full detail before apply/reject.",
+              "Multi-row list returns summary rows (entry_count, field_paths, attention, slim stubs — no ops/values/baselines). Pass proposal_id for full detail before apply/reject.",
           });
         }
         for (const p of proposals as Array<{
@@ -808,8 +847,11 @@ export function registerProposalTools(
             limit,
             offset,
             next_offset,
-            sort,
-            sort_dir,
+            sort: data.sort ?? sort,
+            sort_dir: data.sort_dir ?? sort_dir,
+            attention_perspective:
+              data.attention_perspective ?? (sort === "attention" ? perspective : null),
+            status_bias_applied: Boolean(data.status_bias_applied),
             discovery_path,
             ...(review_context ? { review_context } : {}),
             next_actions: [],
@@ -927,6 +969,7 @@ export function registerProposalTools(
           z.enum([
             "internal_links",
             "serp_title_description",
+            "funnel_classification",
             "body_copy_edit",
             "selling_figures",
             "new_public_content",

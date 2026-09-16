@@ -631,9 +631,15 @@ export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
     when_to_use: "Changes to search title or meta description — honest vs live.",
   },
   {
+    id: "funnel_classification",
+    label: "Funnel stage / products",
+    when_to_use:
+      "Funnel stage or products — who the buyer is, which product owns them, then how ready they are.",
+  },
+  {
     id: "body_copy_edit",
     label: "Body / field edit",
-    when_to_use: "General copy or field updates that are not link-only or SERP-only.",
+    when_to_use: "General copy or field updates that are not link-only, SERP-only, or funnel-only.",
   },
   {
     id: "selling_figures",

@@ -11,6 +11,7 @@ import {
   MIXED_SERP_AND_BODY,
   TITLE_DESCRIPTION_STAFF_NOTE,
   INTERNAL_LINKS_STAFF_NOTE,
+  FUNNEL_CLASSIFICATION_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
@@ -311,18 +312,22 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     const linkOnly =
       mergedSit.situations.includes("internal_links") &&
       !mergedSit.situations.includes("body_copy_edit");
+    const funnelOnly =
+      mergedSit.situations.includes("funnel_classification") &&
+      !mergedSit.situations.includes("body_copy_edit") &&
+      !mergedSit.situations.includes("internal_links");
 
     if (hasSerp) {
       checklists.add("title_description_ctr");
       if (!serpOnly) {
-        if (!linkOnly) checklists.add("verify_copy");
+        if (!linkOnly && !funnelOnly) checklists.add("verify_copy");
         warnings.push({
           code: MIXED_SERP_AND_BODY,
           message:
             "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and body packs. Create still succeeds. Per-situation ship: drop failing SERP ops via revise_entries before apply.",
         });
       }
-    } else if (!linkOnly) {
+    } else if (!linkOnly && !funnelOnly) {
       checklists.add("verify_copy");
     }
 
@@ -432,17 +437,22 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
   const hasTitleDescChecklist = orderedIds.some((t) => t.id === "title_description_ctr");
   const hasInternalLinksChecklist = orderedIds.some((t) => t.id === "internal_links");
+  const hasFunnelChecklist = orderedIds.some((t) => t.id === "funnel_persona_product_stage");
   if (hasTitleDescChecklist && !block_apply) {
     summaryParts.push(TITLE_DESCRIPTION_STAFF_NOTE);
   }
   if (hasInternalLinksChecklist && !block_apply) {
     summaryParts.push(INTERNAL_LINKS_STAFF_NOTE);
   }
+  if (hasFunnelChecklist && !block_apply) {
+    summaryParts.push(FUNNEL_CLASSIFICATION_STAFF_NOTE);
+  }
   for (const note of staffNotesForSituations(liveSituations)) {
     if (
       !block_apply &&
       note !== TITLE_DESCRIPTION_STAFF_NOTE &&
       note !== INTERNAL_LINKS_STAFF_NOTE &&
+      note !== FUNNEL_CLASSIFICATION_STAFF_NOTE &&
       !summaryParts.includes(note)
     ) {
       summaryParts.push(note);
@@ -457,6 +467,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
   if (hasInternalLinksChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${INTERNAL_LINKS_STAFF_NOTE}`;
+  }
+  if (hasFunnelChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${FUNNEL_CLASSIFICATION_STAFF_NOTE}`;
   }
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;

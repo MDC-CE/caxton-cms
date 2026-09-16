@@ -46,6 +46,8 @@ export type ProposalCardData = {
   review_mode?: string;
   promote_on_apply?: boolean;
   open_blocker_count?: number;
+  resolved_blocker_count?: number;
+  attention?: string | null;
   escalated?: boolean;
   escalated_note?: string | null;
   proposer_username: string;
@@ -327,6 +329,27 @@ export function ProposalListCard({
                     stopLinkNavigation
                     testIdSuffix={`-${p.id}`}
                   />
+                ) : null}
+                {p.attention === "awaiting_rereview" ? (
+                  <Badge
+                    variant="secondary"
+                    className="font-normal"
+                    data-testid={`badge-attention-awaiting_rereview-${p.id}`}
+                  >
+                    Ready for re-check
+                    {(p.resolved_blocker_count ?? 0) > 0
+                      ? ` (${p.resolved_blocker_count})`
+                      : ""}
+                  </Badge>
+                ) : null}
+                {p.attention === "no_feedback" ? (
+                  <Badge
+                    variant="outline"
+                    className="font-normal"
+                    data-testid={`badge-attention-no_feedback-${p.id}`}
+                  >
+                    No feedback yet
+                  </Badge>
                 ) : null}
                 {p.escalated ? (
                   <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />

@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  attentionPerspectiveFromGrants,
   clampProposalLimit,
   clampProposalOffset,
   isProposalsScoped,
   parseProposalSort,
   proposalNextOffset,
+  resolveListProposalsSort,
+  shouldWarnAuthorAttentionScope,
 } from "./list-proposals-mcp";
 
 describe("list-proposals-mcp", () => {
@@ -16,9 +19,10 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ query: "cta" })).toBe(true);
   });
 
-  it("treats escalated boolean as scoped", () => {
+  it("treats escalated boolean and attention as scoped", () => {
     expect(isProposalsScoped({ escalated: true })).toBe(true);
     expect(isProposalsScoped({ escalated: false })).toBe(true);
+    expect(isProposalsScoped({ attention: "blocked" })).toBe(true);
   });
 
   it("treats proposer filters as scoped", () => {
@@ -48,7 +52,46 @@ describe("list-proposals-mcp", () => {
       sort: "created_at",
       sortDir: "asc",
     });
+    expect(parseProposalSort("attention", "desc")).toEqual({
+      ok: true,
+      sort: "attention",
+      sortDir: "desc",
+    });
     expect(parseProposalSort("published_at", "desc").ok).toBe(false);
     expect(parseProposalSort("updated_at", "sideways").ok).toBe(false);
+  });
+
+  it("resolveListProposalsSort defaults scoped lists to attention", () => {
+    expect(resolveListProposalsSort({})).toEqual({
+      sort: "attention",
+      sortDir: "desc",
+      sortDefaultedToAttention: true,
+    });
+    expect(resolveListProposalsSort({ sort: "updated_at" })).toEqual({
+      sort: "updated_at",
+      sortDir: "desc",
+      sortDefaultedToAttention: false,
+    });
+  });
+
+  it("attentionPerspectiveFromGrants is role-aware", () => {
+    expect(attentionPerspectiveFromGrants([{ name: "proposals_review" } as never])).toBe(
+      "reviewer",
+    );
+    expect(
+      attentionPerspectiveFromGrants([
+        { name: "proposals_create" } as never,
+        { name: "proposals_review" } as never,
+      ]),
+    ).toBe("reviewer");
+    expect(attentionPerspectiveFromGrants([{ name: "proposals_create" } as never])).toBe("author");
+    expect(attentionPerspectiveFromGrants([{ name: "content_view" } as never])).toBe("reviewer");
+  });
+
+  it("shouldWarnAuthorAttentionScope when create-only without self filter", () => {
+    expect(shouldWarnAuthorAttentionScope("author", {})).toBe(true);
+    expect(shouldWarnAuthorAttentionScope("author", { proposer_username: "a" })).toBe(false);
+    expect(shouldWarnAuthorAttentionScope("author", { agent_session_id: "s" })).toBe(false);
+    expect(shouldWarnAuthorAttentionScope("reviewer", {})).toBe(false);
   });
 });

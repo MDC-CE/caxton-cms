@@ -79,4 +79,56 @@ describe("review-situations", () => {
   it("promote-only infers promote_draft", () => {
     expect(inferSituationsFromOps([], { promoteOnApply: true })).toEqual(["promote_draft"]);
   });
+
+  it("infers funnel_classification only for pure funnel.* ops", () => {
+    const ids = inferSituationsFromOps([
+      {
+        status: "pending",
+        ops: [
+          { field_path: "funnel.stage" },
+          { field_path: "funnel.products" },
+        ],
+      },
+    ]);
+    expect(ids).toEqual(["funnel_classification"]);
+    expect(ids).not.toContain("body_copy_edit");
+  });
+
+  it("infers funnel_classification and body_copy_edit when funnel + content", () => {
+    const ids = inferSituationsFromOps([
+      {
+        status: "pending",
+        ops: [{ field_path: "funnel.products" }, { field_path: "content" }],
+      },
+    ]);
+    expect(ids).toEqual(expect.arrayContaining(["funnel_classification", "body_copy_edit"]));
+  });
+
+  it("mismatch when funnel_classification declared without funnel paths", () => {
+    const merged = mergeSituations(
+      ["funnel_classification"],
+      ["body_copy_edit"],
+      [{ status: "pending", ops: [{ field_path: "content" }] }],
+    );
+    expect(merged.warnings.some((w) => w.code === "situation_ops_mismatch")).toBe(true);
+    expect(merged.situations).toEqual(
+      expect.arrayContaining(["funnel_classification", "body_copy_edit"]),
+    );
+  });
+
+  it("checklist ids for funnel_classification", () => {
+    expect(checklistIdsForSituations(["funnel_classification"])).toEqual([
+      "funnel_persona_product_stage",
+    ]);
+  });
+
+  it("refresh after revise drops funnel when only content remains", () => {
+    const refreshed = refreshSituationsAfterRevise(
+      ["funnel_classification", "body_copy_edit"],
+      [{ status: "pending", ops: [{ field_path: "content" }] }],
+      { summary: "Body only remaining." },
+    );
+    expect(refreshed.situations).toContain("body_copy_edit");
+    expect(refreshed.situations).not.toContain("funnel_classification");
+  });
 });

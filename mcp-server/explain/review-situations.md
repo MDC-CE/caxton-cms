@@ -20,7 +20,8 @@ Notes and ideas do **not** use situations.
 |---|---|---|
 | `internal_links` | Body adds same-locale hub/cluster links; keep facts; no SERP in the same packet | `explain_site` topic **`internal-links-proposals`** |
 | `serp_title_description` | `meta.page_title` / `meta.description` only (or mixed — leave-live SERP then apply body) | `explain_site` topic **`serp-title-description-proposals`** (+ checklist `title_description_ctr`) |
-| `body_copy_edit` | General body/field edits that are not link-only or SERP-only | This topic + `verify_copy` |
+| `funnel_classification` | `funnel.stage` / `funnel.products` — persona → product → stage, not topical breadth | `explain_site` topic **`funnel-classification-proposals`** (+ checklist `funnel_persona_product_stage`) |
+| `body_copy_edit` | General body/field edits that are not link-only, SERP-only, or funnel-only | This topic + `verify_copy` |
 | `selling_figures` | Program/landing where outcome figures may move | This topic + `selling_page_figures` |
 | `new_public_content` | New or draft-backed public page | This topic + `new_content_brand` |
 | `promote_draft` | Promote named draft with empty/minimal updates | This topic — summary = why draft should go live |
@@ -33,6 +34,7 @@ Legacy / empty filed list → infer (often `body_copy_edit`) with warning `situa
 
 - Prefer one situation per packet when possible; SERP rewrite = second proposal (`serp_title_description` + topic `serp-title-description-proposals`).
 - Hub links: `review_situations: ["internal_links"]` + content-only ops + summary that promises no figure/SERP changes.
+- Funnel: `review_situations: ["funnel_classification"]` + `funnel.*` only — topic `funnel-classification-proposals` (persona → product → stage; soft batch ≤10).
 - After `revise_entries`, author-declared tags that no longer own remaining ops are dropped; inferred packs refresh on the next `list_proposals`.
 
 ## Reviewer tips
@@ -40,5 +42,6 @@ Legacy / empty filed list → infer (often `body_copy_edit`) with warning `situa
 - Open `list_proposals(proposal_id)` — use `review_situations`, checklists, and `discovery_path`.
 - Score each active pack on the ops it owns; do not reject a good link packet because SERP was weak — drop SERP ops first.
 - Forced CTA for links → `add_blocker`, not reject-as-weaker-copy.
+- Funnel breadth-only disagreement → `add_blocker` citing cascade step, not reject.
 
-See also: `explain` topics **`proposals`**, **`reading-proposals`**, **`internal-links-proposals`**, **`serp-title-description-proposals`**.
+See also: `explain` topics **`proposals`**, **`reading-proposals`**, **`internal-links-proposals`**, **`serp-title-description-proposals`**, **`funnel-classification-proposals`**.

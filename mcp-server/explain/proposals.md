@@ -13,7 +13,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 | Tool | Caps | Job |
 |---|---|---|
 | `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
-| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first.** Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` (`type`\|`role`) / `agent_session_id` / `escalated` → **summary** rows (`entry_count`, `field_paths`, slim stubs; no ops/values). `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
+| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first** (`by_attention` in stats). Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` / `agent_session_id` / `escalated` / `attention` → **summary** rows (`entry_count`, `field_paths`, `attention`, blocker counts; no ops/values). Scoped default **`sort=attention`** (role-aware) + open\|partial when status omitted; pass `sort: updated_at` for chronology. `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
@@ -117,7 +117,8 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **Allowed shape:** live missing but named draft exists → `new_public_content` (promote later).
 - **Apply block:** `target_missing` when the page was deleted after filing — reject/withdraw/close still work.
 - Live `review_context` on `list_proposals(proposal_id)` for open|partial; snapshot on list rows is a filed hint only.
-- Multi-row list is **summary only** (`proposals_view: "summary"`, warning `proposals_summary_only`): use `entry_count` + `field_paths` to triage; pass `proposal_id` for ops/baselines before apply.
+- Multi-row list is **summary only** (`proposals_view: "summary"`, warning `proposals_summary_only`): use `attention`, `entry_count`, `field_paths` to triage; pass `proposal_id` for ops/baselines before apply.
+- **Attention triage:** buckets `escalated` → `awaiting_rereview` (blockers fixed) → `no_feedback` → `blocked` (reviewer order). Create-only agents get blocked earlier in the default sort; may see warning `attention_author_scope_hint` unless they pass `proposer_username` / `agent_session_id`. Filter with `attention`. Escalated rows still freeze `update_proposal` until release.
 - Before apply, prefer `list_proposals(proposal_id)` + `explain` → `reading-proposals`.
 
 Full checklist IDs and axes: `explain` → `reading-proposals`.

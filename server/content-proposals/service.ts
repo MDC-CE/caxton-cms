@@ -43,8 +43,18 @@ import {
   buildDecisionDebug,
   type ProposalDecisionDebug,
 } from "./decision-debug";
+import {
+  compareByAttention,
+  deriveProposalAttention,
+  emptyAttentionCounts,
+  resolvedBlockerCount,
+  type AttentionPerspective,
+  type ProposalAttention,
+} from "./attention";
 
 const log = child({ module: "content-proposals" });
+
+export type { AttentionPerspective, ProposalAttention };
 
 export const PROPOSAL_CLAIM_TTL_MS = 30 * 60 * 1000;
 export const RAG_SIMILARITY_THRESHOLD = 0.82;
@@ -249,6 +259,9 @@ export type ProposalSummary = {
   promote_on_apply: boolean;
   review_mode: ReviewMode;
   open_blocker_count: number;
+  resolved_blocker_count: number;
+  /** Derived triage bucket; null when finished/rejected/withdrawn. */
+  attention: ProposalAttention | null;
   no_auto_retry: boolean;
   escalated: boolean;
   escalated_at: number | null;
@@ -281,6 +294,13 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     }
   }
   const field_paths = [...pathSet].sort();
+  const resolved_count = resolvedBlockerCount(record.blockers);
+  const attention = deriveProposalAttention({
+    status: record.status,
+    escalated: record.escalated,
+    open_blocker_count: record.open_blocker_count,
+    resolved_blocker_count: resolved_count,
+  });
   return {
     detail: "summary",
     id: record.id,
@@ -301,6 +321,8 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     promote_on_apply: record.promote_on_apply,
     review_mode: record.review_mode,
     open_blocker_count: record.open_blocker_count,
+    resolved_blocker_count: resolved_count,
+    attention,
     no_auto_retry: record.no_auto_retry,
     escalated: record.escalated,
     escalated_at: record.escalated_at,
@@ -804,6 +826,8 @@ export type ProposalStats = {
   by_status: Record<ProposalStatus, number>;
   by_kind: Record<ProposalKind, number>;
   escalated_count: number;
+  /** Open|partial rows by derived attention (escalated label wins when flagged). */
+  by_attention: Record<ProposalAttention, number>;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -841,7 +865,7 @@ function fourEyesBlocked(
   );
 }
 
-export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at"] as const;
+export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at", "attention"] as const;
 export type ProposalSortField = (typeof PROPOSAL_SORT_FIELDS)[number];
 export type ProposalSortDir = "asc" | "desc";
 
@@ -855,12 +879,13 @@ export function parseProposalSort(
   | { ok: true; sort: ProposalSortField; sortDir: ProposalSortDir }
   | { ok: false; error: string } {
   const fieldRaw = sort == null || String(sort).trim() === "" ? "updated_at" : String(sort).trim();
-  if (fieldRaw !== "created_at" && fieldRaw !== "updated_at") {
+  if (fieldRaw !== "created_at" && fieldRaw !== "updated_at" && fieldRaw !== "attention") {
     return {
       ok: false,
-      error: `Invalid sort '${fieldRaw}'. Allowed: created_at, updated_at`,
+      error: `Invalid sort '${fieldRaw}'. Allowed: created_at, updated_at, attention`,
     };
   }
+  // Attention rank is fixed; sort_dir is accepted but ignored by list().
   const dirRaw =
     sortDir == null || String(sortDir).trim() === "" ? "desc" : String(sortDir).trim();
   if (dirRaw !== "asc" && dirRaw !== "desc") {
@@ -913,6 +938,12 @@ function compareProposalsBySort(
   sort: ProposalSortField,
   sortDir: ProposalSortDir,
 ): number {
+  if (sort === "attention") {
+    // Callers should use compareByAttention; keep a safe chronological fallback.
+    const factor = sortDir === "asc" ? 1 : -1;
+    if (a.updated_at !== b.updated_at) return (a.updated_at - b.updated_at) * factor;
+    return a.id.localeCompare(b.id);
+  }
   const factor = sortDir === "asc" ? 1 : -1;
   const av = a[sort];
   const bv = b[sort];
@@ -1261,6 +1292,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const db = dbFor(site);
     const by_status = { ...EMPTY_STATUS_COUNTS };
     const by_kind = { ...EMPTY_KIND_COUNTS };
+    const by_attention = emptyAttentionCounts();
     const statusRows = db
       .prepare(`SELECT status, COUNT(*) AS n FROM content_proposals WHERE site = ? GROUP BY status`)
       .all(site) as Array<{ status: ProposalStatus; n: number }>;
@@ -1281,11 +1313,44 @@ export function createProposalService(deps: ProposalServiceDeps) {
         `SELECT COUNT(*) AS n FROM content_proposals WHERE site = ? AND escalated = 1`,
       )
       .get(site) as { n: number };
+
+    try {
+      const attentionRows = db
+        .prepare(
+          `SELECT p.id, p.status, p.escalated,
+                  (SELECT COUNT(*) FROM content_proposal_blockers b
+                   WHERE b.proposal_id = p.id AND b.status = 'open') AS open_n,
+                  (SELECT COUNT(*) FROM content_proposal_blockers b
+                   WHERE b.proposal_id = p.id AND b.status = 'resolved') AS resolved_n
+           FROM content_proposals p
+           WHERE p.site = ? AND p.status IN ('open', 'partial')`,
+        )
+        .all(site) as Array<{
+        id: string;
+        status: ProposalStatus;
+        escalated: number;
+        open_n: number;
+        resolved_n: number;
+      }>;
+      for (const row of attentionRows) {
+        const bucket = deriveProposalAttention({
+          status: row.status,
+          escalated: Boolean(row.escalated),
+          open_blocker_count: Number(row.open_n) || 0,
+          resolved_blocker_count: Number(row.resolved_n) || 0,
+        });
+        if (bucket) by_attention[bucket] += 1;
+      }
+    } catch {
+      // Blockers table missing in older DBs — leave by_attention zeros.
+    }
+
     return {
       total: Number(totalRow?.n) || 0,
       by_status,
       by_kind,
       escalated_count: Number(escalatedRow?.n) || 0,
+      by_attention,
     };
   }
 
@@ -1326,27 +1391,45 @@ export function createProposalService(deps: ProposalServiceDeps) {
     proposer_actor_role?: string;
     agent_session_id?: string;
     escalated?: boolean;
+    attention?: ProposalAttention;
     limit?: number;
     offset?: number;
     sort?: ProposalSortField;
     sortDir?: ProposalSortDir;
-  }): { proposals: ProposalRecord[]; total: number } {
+    attention_perspective?: AttentionPerspective;
+    /** Username for within-bucket foreign-claim demotion (attention sort). */
+    caller_username?: string;
+  }): {
+    proposals: ProposalRecord[];
+    total: number;
+    status_bias_applied: boolean;
+    attention_perspective: AttentionPerspective | null;
+  } {
     if (opts.proposal_id) {
       const one = get(opts.proposal_id);
-      return { proposals: one ? [one] : [], total: one ? 1 : 0 };
+      return {
+        proposals: one ? [one] : [],
+        total: one ? 1 : 0,
+        status_bias_applied: false,
+        attention_perspective: null,
+      };
     }
     const db = dbFor(site);
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
     const offset = Math.max(0, opts.offset ?? 0);
     const sort: ProposalSortField = opts.sort ?? "updated_at";
     const sortDir: ProposalSortDir = opts.sortDir ?? "desc";
-    const orderSql = `ORDER BY ${sort} ${sortDir.toUpperCase()}, id ASC`;
+    const perspective: AttentionPerspective = opts.attention_perspective ?? "reviewer";
+    const useAttentionPath = sort === "attention" || opts.attention != null;
+    const statusBiasApplied = useAttentionPath && opts.status == null;
 
     let where = `WHERE site = ?`;
     const params: unknown[] = [site];
     if (opts.status) {
       where += ` AND status = ?`;
       params.push(opts.status);
+    } else if (statusBiasApplied) {
+      where += ` AND status IN ('open', 'partial')`;
     }
     if (opts.kind) {
       where += ` AND kind = ?`;
@@ -1385,21 +1468,75 @@ export function createProposalService(deps: ProposalServiceDeps) {
       where += ` AND escalated = 0`;
     }
 
-    if (opts.issue_id) {
+    const mapRow = (r: ProposalRow) =>
+      mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id));
+
+    const withAttentionMeta = (p: ProposalRecord) => {
+      const resolved = resolvedBlockerCount(p.blockers);
+      const attention = deriveProposalAttention({
+        status: p.status,
+        escalated: p.escalated,
+        open_blocker_count: p.open_blocker_count,
+        resolved_blocker_count: resolved,
+      });
+      return { proposal: p, attention, resolved };
+    };
+
+    if (useAttentionPath || opts.issue_id) {
+      const orderSql =
+        sort === "attention"
+          ? `ORDER BY updated_at DESC, id ASC`
+          : `ORDER BY ${sort === "created_at" ? "created_at" : "updated_at"} ${sortDir.toUpperCase()}, id ASC`;
       const rows = db
         .prepare(`SELECT * FROM content_proposals ${where} ${orderSql}`)
         .all(...params) as ProposalRow[];
-      let records = rows
-        .map((r) => mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)))
-        .filter((p) => p.related_issue_ids.includes(opts.issue_id!));
-      records = [...records].sort((a, b) => compareProposalsBySort(a, b, sort, sortDir));
-      const total = records.length;
+      let records = rows.map(mapRow);
+      if (opts.issue_id) {
+        records = records.filter((p) => p.related_issue_ids.includes(opts.issue_id!));
+      }
+
+      let decorated = records.map(withAttentionMeta);
+      if (opts.attention) {
+        decorated = decorated.filter((d) => d.attention === opts.attention);
+      }
+
+      if (sort === "attention") {
+        decorated = [...decorated].sort((a, b) =>
+          compareByAttention(
+            {
+              id: a.proposal.id,
+              updated_at: a.proposal.updated_at,
+              attention: a.attention,
+              claim: a.proposal.claim,
+            },
+            {
+              id: b.proposal.id,
+              updated_at: b.proposal.updated_at,
+              attention: b.attention,
+              claim: b.proposal.claim,
+            },
+            perspective,
+            opts.caller_username,
+          ),
+        );
+      } else if (opts.issue_id) {
+        decorated = [...decorated].sort((a, b) =>
+          compareProposalsBySort(a.proposal, b.proposal, sort, sortDir),
+        );
+      }
+
+      const total = decorated.length;
       return {
-        proposals: records.slice(offset, offset + limit).map((p) => withSiblings(enrichRecentActivity(p))),
+        proposals: decorated
+          .slice(offset, offset + limit)
+          .map((d) => withSiblings(enrichRecentActivity(d.proposal))),
         total,
+        status_bias_applied: statusBiasApplied,
+        attention_perspective: sort === "attention" ? perspective : null,
       };
     }
 
+    const orderSql = `ORDER BY ${sort} ${sortDir.toUpperCase()}, id ASC`;
     const totalRow = db
       .prepare(`SELECT COUNT(*) AS n FROM content_proposals ${where}`)
       .get(...params) as { n: number };
@@ -1410,9 +1547,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
       )
       .all(...params, limit, offset) as ProposalRow[];
     const proposals = rows.map((r) =>
-      withSiblings(enrichRecentActivity(mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)))),
+      withSiblings(enrichRecentActivity(mapRow(r))),
     );
-    return { proposals, total };
+    return {
+      proposals,
+      total,
+      status_bias_applied: false,
+      attention_perspective: null,
+    };
   }
 
   async function create(

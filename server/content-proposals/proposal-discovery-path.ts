@@ -103,6 +103,29 @@ const FUNNEL_ANALYTICS_TOOL = {
   look_for: ["weak journey stages", "path sessions vs conversions"],
 } as const;
 
+const LIST_PRODUCTS_TOOL = {
+  id: "product_inventory",
+  tool: "list_products",
+  why: "See purchasable products and persona ids before judging funnel bindings.",
+  look_for: [
+    "which products have personas that match this content's buyer intent",
+    "audience_status missing/minimal → product-only binding OK with warn; do not invent persona ids",
+    "do not map broad topic to products:all without checking persona fit first",
+  ],
+} as const;
+
+const GET_PRODUCT_TOOL = {
+  id: "product_audience",
+  tool: "get_product",
+  why: "Read offer + personas for the product(s) this proposal binds — cascade starts at persona.",
+  look_for: [
+    "Persona: content intent vs persona id / who_its_for / avatar (pass|fail|warn)",
+    "Product: proposed funnel.products follow that fit; multi-bind OK when two+ personas truly fit",
+    "Stage: proposed funnel.stage matches readiness even if only stage or only products moved",
+    "products:all only when no single product's personas fit better; all never carries personas",
+  ],
+} as const;
+
 const SITE_ANALYTICS_TOOL = {
   id: "site_ga",
   tool: "get_analytics_report",
@@ -116,6 +139,8 @@ export function proposalDiscoveryToolNames(): string[] {
     ...CORE_EDITS_TOOLS.map((t) => t.tool),
     ORGANIC_TOOL.tool,
     FUNNEL_ANALYTICS_TOOL.tool,
+    LIST_PRODUCTS_TOOL.tool,
+    GET_PRODUCT_TOOL.tool,
     SITE_ANALYTICS_TOOL.tool,
   ];
 }
@@ -326,6 +351,8 @@ export function buildEditsDiscoveryToolItems(opts: {
   activityEntry?: ProposalDiscoveryEntry | null;
   /** Extra look_for lines prepended on get_entry_content (situation overlays). */
   contentLookFor?: string[];
+  /** When funnel_classification is active, include list_products / get_product. */
+  includeProductAudienceTools?: boolean;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -334,12 +361,23 @@ export function buildEditsDiscoveryToolItems(opts: {
     entry,
     prioritizeActivity = false,
     activityEntry = null,
+    includeProductAudienceTools = false,
   } = opts;
 
   const activityHint = activityArgsHint(activityEntry ?? (entry as ProposalDiscoveryEntry | null));
 
   const core = CORE_EDITS_TOOLS.map((t) => {
-    if (t.id === "recent_writes") return toToolItem(t, allowed, activityHint);
+    if (t.id === "recent_writes") {
+      const look_for = includeProductAudienceTools
+        ? [
+            "overlapping writers on funnel.stage / funnel.products (same paths)",
+            "similar funnel classification already shipped and live not broken → leave live or reject duplicate_weaker",
+            "unrelated recent body/CTA writes alone → do not reject",
+            ...t.look_for,
+          ]
+        : [...t.look_for];
+      return toToolItem({ ...t, look_for }, allowed, activityHint);
+    }
     if (t.id === "preview_content" && opts.contentLookFor?.length) {
       return toToolItem(
         {
@@ -359,6 +397,11 @@ export function buildEditsDiscoveryToolItems(opts: {
     items = recent ? [recent, ...rest] : [...core];
   } else {
     items = [...core];
+  }
+
+  if (includeProductAudienceTools) {
+    items.push(toToolItem(LIST_PRODUCTS_TOOL, allowed));
+    items.push(toToolItem(GET_PRODUCT_TOOL, allowed));
   }
 
   items.push(toToolItem(ORGANIC_TOOL, allowed));
@@ -559,7 +602,10 @@ export function buildProposalDiscoveryPath(
   if (kind === "edits" && !reviewContext?.block_apply) {
     const pendingFieldPaths = collectPendingFieldPaths(proposal);
     const hasSerp = hasTitleDescriptionOps(proposal.entries ?? []);
+    const hasFunnelOp = pendingFieldPaths.some((p) => p === "funnel" || p.startsWith("funnel."));
     const situations = (reviewContext?.review_situations ?? []) as ReviewSituationId[];
+    const funnelClassification =
+      situations.includes("funnel_classification") || hasFunnelOp;
     const contentLookFor = discoveryContentLookForForSituations(situations);
     const pending = pendingEntries(proposal);
     const gateWriteCount = pending.reduce(
@@ -568,7 +614,9 @@ export function buildProposalDiscoveryPath(
     );
     const prioritizeActivity =
       hasSerp ||
+      hasFunnelOp ||
       situations.includes("serp_title_description") ||
+      situations.includes("funnel_classification") ||
       gateWriteCount > 0;
 
     const hottest = pickHottestPendingEntry(proposal, recentActivity);
@@ -587,6 +635,7 @@ export function buildProposalDiscoveryPath(
       prioritizeActivity,
       activityEntry: hottest,
       contentLookFor,
+      includeProductAudienceTools: funnelClassification,
     });
     tools = built.items;
     if (built.anyCapped) {

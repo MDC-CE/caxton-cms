@@ -461,10 +461,24 @@ export const SCENARIOS: Scenario[] = [
     buildArgs: (ctx) => withSite(ctx, { report: "top_pages" }),
   },
   {
+    id: "get_analytics_report_traffic_source_conversions",
+    tool: "get_analytics_report",
+    about:
+      "GA4 BigQuery traffic_source_conversions (default session_last_click, no item_id). Soft N.C. when tracking.bigquery is unset.",
+    buildArgs: (ctx) => withSite(ctx, { report: "traffic_source_conversions" }),
+  },
+  {
     id: "list_proposals",
     tool: "list_proposals",
     about: "Unscoped proposals call — returns proposal_stats only (no filter).",
     buildArgs: (ctx) => withSite(ctx, {}),
+  },
+  {
+    id: "list_proposals_open_attention",
+    tool: "list_proposals",
+    about:
+      "Scoped open proposals list — default attention sort + summary rows (attention triage hot path).",
+    buildArgs: (ctx) => withSite(ctx, { status: "open", limit: 20 }),
   },
   {
     id: "get_entry_activity",
@@ -531,6 +545,15 @@ export const SCENARIOS: Scenario[] = [
     about:
       "Architecture docs: topic=serp-title-description-proposals (SERP title/description author/reviewer guide).",
     buildArgs: (ctx) => withSite(ctx, { topic: "serp-title-description-proposals" }),
+    reps: 1,
+    class: "docs",
+  },
+  {
+    id: "explain_site_funnel_classification_proposals",
+    tool: "explain_site",
+    about:
+      "Architecture docs: topic=funnel-classification-proposals (funnel stage/products author/reviewer guide; persona → product → stage).",
+    buildArgs: (ctx) => withSite(ctx, { topic: "funnel-classification-proposals" }),
     reps: 1,
     class: "docs",
   },

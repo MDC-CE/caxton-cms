@@ -122,6 +122,7 @@ import {
 import { McpCopyButton } from "@/components/mcp/McpSetupUi";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
+  PROPOSAL_ATTENTION_OPTIONS,
   PROPOSAL_KIND_OPTIONS,
   PROPOSAL_SORT_PRESETS,
   PROPOSAL_STATUS_OPTIONS,
@@ -185,6 +186,8 @@ type Proposal = {
   review_mode?: string;
   promote_on_apply?: boolean;
   open_blocker_count?: number;
+  resolved_blocker_count?: number;
+  attention?: string | null;
   no_auto_retry?: boolean;
   escalated?: boolean;
   escalated_at?: number | null;
@@ -551,6 +554,12 @@ export function ProposalListPanel() {
       parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
     }
     if (view.filters.escalatedOnly) parts.push("Escalated");
+    if (view.filters.attention !== "all") {
+      parts.push(
+        PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === view.filters.attention)?.label ??
+          view.filters.attention,
+      );
+    }
     return parts.join(" · ");
   }, [
     view.filters.status,
@@ -560,6 +569,7 @@ export function ProposalListPanel() {
     view.filters.proposerActorRole,
     view.filters.agentSessionId,
     view.filters.escalatedOnly,
+    view.filters.attention,
   ]);
 
   const { data, isLoading } = useQuery({

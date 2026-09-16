@@ -106,8 +106,9 @@ export function registerEcommerceTools(
     "Page performance (or stage_flow stub) for a purchasable product journey from GA4 BigQuery. " +
       "Returns per-page sessions/views plus path-scoped lead conversions and ecommerce intent " +
       "(same event set on every stage), stage distinct sessions, shared vs product-specific session counts, " +
-      "and product-scoped conversions/ecommerce intent (item_id). Does not imply stage-to-stage flow. " +
-      "Requires content_view. Configure dataset at /private/tracking/ga4.",
+      "product-scoped lead conversions / ecommerce intent / purchases (item_id; purchase is product-level only, not path-scoped). " +
+      "Lead events come from tracking.conversion_events counts_as_lead (signup always included). " +
+      "Does not imply stage-to-stage flow. Requires content_view. Configure dataset at /private/tracking/ga4.",
     {
       slug: z.string().describe("Product content slug, e.g. ai-fluency"),
       mode: z

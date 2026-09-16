@@ -12,6 +12,7 @@ import {
 export const REVIEW_SITUATION_IDS = [
   "internal_links",
   "serp_title_description",
+  "funnel_classification",
   "body_copy_edit",
   "selling_figures",
   "new_public_content",
@@ -72,6 +73,25 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     discovery_content_look_for: [],
     author_summary_hints: [
       "Fix search title and/or description vs live. Claims must stay honest. No body rewrite in this packet.",
+    ],
+  },
+  funnel_classification: {
+    id: "funnel_classification",
+    label: "Funnel stage / products",
+    when_to_use:
+      "Changes to funnel.stage or funnel.products — match buyer persona → product → stage, not whether the article feels broad.",
+    explain_topic: "funnel-classification-proposals",
+    checklist_ids: ["funnel_persona_product_stage"],
+    staff_note:
+      "Also check funnel — who the buyer is, which product owns them, then how ready they are (not whether the article feels broad).",
+    discovery_content_look_for: [
+      "content intent vs product personas (list_products → get_product) — not topical breadth alone",
+      "proposed funnel.products bindings (or all) follow persona → product fit; all never carries personas",
+      "proposed funnel.stage matches readiness even if only stage or only products moved",
+      "do not map broad/company-wide topic to products:all or a non-fitting product without persona fit",
+    ],
+    author_summary_hints: [
+      "Classify funnel.stage and/or funnel.products only. Intent matches persona → product → stage. Soft batch ≤10 related posts. No body or SERP in this packet.",
     ],
   },
   body_copy_edit: {
@@ -205,10 +225,25 @@ function pendingFieldPaths(entries: OpsEntryForSituation[]): string[] {
 function isBodyFieldPath(fieldPath: string): boolean {
   const p = fieldPath.trim();
   if (isTitleDescriptionFieldPath(p)) return false;
+  if (isFunnelFieldPath(p)) return false;
   if (p === "content" || p.startsWith("content.")) return true;
   if (p === "sections" || p.startsWith("sections[")) return true;
   if (p.includes(".content") || p.endsWith("content")) return true;
   return false;
+}
+
+/** Funnel targeting fields on `_common.yml` (locale-agnostic). */
+export function isFunnelFieldPath(fieldPath: string): boolean {
+  const p = fieldPath.trim();
+  return p === "funnel" || p.startsWith("funnel.");
+}
+
+function isNonFunnelOtherPath(fieldPath: string): boolean {
+  return (
+    !isTitleDescriptionFieldPath(fieldPath) &&
+    !isBodyFieldPath(fieldPath) &&
+    !isFunnelFieldPath(fieldPath)
+  );
 }
 
 function hasAnyPendingOps(entries: OpsEntryForSituation[]): boolean {
@@ -229,7 +264,8 @@ export function situationsRelevantToOps(
   const paths = pendingFieldPaths(entries);
   const hasSerp = paths.some(isTitleDescriptionFieldPath);
   const hasBody = paths.some(isBodyFieldPath);
-  const hasOther = paths.some((p) => !isTitleDescriptionFieldPath(p) && !isBodyFieldPath(p));
+  const hasFunnel = paths.some(isFunnelFieldPath);
+  const hasOther = paths.some(isNonFunnelOtherPath);
   const promoteOnly = isPromoteOnly(entries, opts?.promoteOnApply);
   const damage = opts?.damageClass ?? null;
 
@@ -239,8 +275,10 @@ export function situationsRelevantToOps(
         return hasSerp;
       case "internal_links":
         return hasBody;
+      case "funnel_classification":
+        return hasFunnel;
       case "body_copy_edit":
-        return hasBody || hasOther || (paths.length > 0 && !hasSerp);
+        return hasBody || hasOther;
       case "selling_figures":
         return damage === "selling_page" || paths.length > 0;
       case "new_public_content":
@@ -280,9 +318,11 @@ export function inferSituationsFromOps(
 
   const hasSerp = paths.some(isTitleDescriptionFieldPath);
   const hasBody = paths.some(isBodyFieldPath);
-  const hasOther = paths.some((p) => !isTitleDescriptionFieldPath(p) && !isBodyFieldPath(p));
+  const hasFunnel = paths.some(isFunnelFieldPath);
+  const hasOther = paths.some(isNonFunnelOtherPath);
 
   if (hasSerp) out.add("serp_title_description");
+  if (hasFunnel) out.add("funnel_classification");
 
   if (hasBody && linkIntent) {
     out.add("internal_links");
@@ -357,6 +397,7 @@ export function mergeSituations(
   const declaredNotImplied = declared.filter((d) => {
     if (d === "internal_links") return !pathsSuggestBody(entries);
     if (d === "serp_title_description") return !pathsSuggestSerp(entries);
+    if (d === "funnel_classification") return !pathsSuggestFunnel(entries);
     if (d === "promote_draft") return !isPromoteOnly(entries, opts?.promoteOnApply);
     if (d === "selling_figures") return opts?.damageClass !== "selling_page" && !hasAnyPendingOps(entries);
     if (d === "new_public_content") {
@@ -388,6 +429,10 @@ function pathsSuggestSerp(entries: OpsEntryForSituation[]): boolean {
 
 function pathsSuggestBody(entries: OpsEntryForSituation[]): boolean {
   return pendingFieldPaths(entries).some(isBodyFieldPath);
+}
+
+function pathsSuggestFunnel(entries: OpsEntryForSituation[]): boolean {
+  return pendingFieldPaths(entries).some(isFunnelFieldPath);
 }
 
 /**

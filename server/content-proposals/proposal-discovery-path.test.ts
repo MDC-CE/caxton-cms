@@ -448,6 +448,52 @@ describe("buildProposalDiscoveryPath", () => {
       expect(preview.look_for.some((l) => /locale/i.test(l))).toBe(true);
     }
   });
+
+  it("funnel_classification includes list_products and get_product; prioritizes activity", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "outcomes-report",
+            locale: "en",
+            status: "pending",
+            ops: [
+              { field_path: "funnel.stage", value: "awareness" },
+              { field_path: "funnel.products", value: [{ product: "ai-engineering" }] },
+            ],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "existing_content",
+        review_situations: ["funnel_classification"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "funnel_persona_product_stage",
+              title: "Check persona → product → stage",
+              why: "Buyer fit",
+              look_for: ["Persona / Product / Stage"],
+            },
+          ],
+        },
+      },
+    });
+    const tools = (discovery_path!.items.filter((i) => i.kind === "tool") as Array<{ id: string; tool: string }>).map(
+      (t) => t.tool,
+    );
+    expect(tools).toContain("list_products");
+    expect(tools).toContain("get_product");
+    expect(tools[0]).toBe("get_entry_activity");
+    const preview = discovery_path!.items.find((i) => i.kind === "tool" && i.id === "preview_content");
+    expect(preview?.kind).toBe("tool");
+    if (preview?.kind === "tool") {
+      expect(preview.look_for.some((l) => /persona/i.test(l))).toBe(true);
+    }
+  });
 });
 
 describe("assertCatalogToolNames", () => {

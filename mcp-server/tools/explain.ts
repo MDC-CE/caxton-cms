@@ -36,6 +36,7 @@ const VALID_TOPICS = [
   "review-situations",
   "internal-links-proposals",
   "serp-title-description-proposals",
+  "funnel-classification-proposals",
   "analytics",
 ] as const;
 type Topic = (typeof VALID_TOPICS)[number];
@@ -77,6 +78,8 @@ const TOPIC_DESC: Record<string, string> = {
     "Author + reviewer playbook for hub/internal link body packets (review_situations internal_links)",
   "serp-title-description-proposals":
     "Author + reviewer playbook for SERP title/description packets (review_situations serp_title_description; checklist title_description_ctr)",
+  "funnel-classification-proposals":
+    "Author + reviewer playbook for funnel.stage/products packets (review_situations funnel_classification; checklist funnel_persona_product_stage; persona → product → stage)",
   analytics:
     "GA4 BigQuery reports via get_analytics_report; vs get_organic_traffic (GSC) and get_product_funnel_analytics (journey)",
 };
@@ -182,8 +185,8 @@ function resolveConversionEvents(contentPath: string): string {
     return "_No tracking.conversion_events defined in settings.yml_";
   }
   const lines: string[] = [
-    "| Name | Default tags |",
-    "|---|---|",
+    "| Name | Counts as lead | Default tags |",
+    "|---|---|---|",
   ];
   const intentBlocks: string[] = ["", "### Intent", ""];
   for (const entry of events) {
@@ -194,7 +197,9 @@ function resolveConversionEvents(contentPath: string): string {
     const tags = Array.isArray(e.tags)
       ? e.tags.filter((t): t is string => typeof t === "string").map((t) => `\`${t}\``).join(", ")
       : "—";
-    lines.push(`| \`${name}\` | ${tags || "—"} |`);
+    const counts =
+      typeof e.counts_as_lead === "boolean" ? (e.counts_as_lead ? "yes" : "no") : "—";
+    lines.push(`| \`${name}\` | ${counts} | ${tags || "—"} |`);
 
     const whenToUse =
       typeof e.when_to_use === "string" && e.when_to_use.trim() ? e.when_to_use.trim() : "—";
@@ -205,6 +210,9 @@ function resolveConversionEvents(contentPath: string): string {
     intentBlocks.push(`#### \`${name}\``);
     intentBlocks.push(`- **when_to_use:** ${whenToUse}`);
     intentBlocks.push(`- **when_not_to_use:** ${whenNot}`);
+    intentBlocks.push(
+      `- **counts_as_lead:** ${typeof e.counts_as_lead === "boolean" ? String(e.counts_as_lead) : "unset"}`,
+    );
     intentBlocks.push("");
   }
   return [...lines, ...intentBlocks].join("\n").trimEnd();
@@ -448,6 +456,7 @@ export function registerExplainTools(
       "'review-situations' (catalog of review_situations ids; infer-when-empty; per-situation ship), " +
       "'internal-links-proposals' (hub/internal link author + reviewer playbook), " +
       "'serp-title-description-proposals' (SERP title/description author + reviewer playbook), " +
+      "'funnel-classification-proposals' (funnel.stage/products author + reviewer playbook; persona → product → stage), " +
       "'analytics' (GA4 BigQuery get_analytics_report; vs get_organic_traffic GSC and get_product_funnel_analytics). " +
       "Requires content_view. " +
       "Calling an unknown topic returns a clear error listing the valid options. " +
@@ -456,7 +465,7 @@ export function registerExplainTools(
       topic: z
         .string()
         .describe(
-          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, reading-proposals, review-situations, internal-links-proposals, serp-title-description-proposals, analytics.",
+          "The architectural topic to explain. One of: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, reading-proposals, review-situations, internal-links-proposals, serp-title-description-proposals, funnel-classification-proposals, analytics.",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },

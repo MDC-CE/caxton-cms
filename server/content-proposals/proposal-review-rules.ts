@@ -26,6 +26,7 @@ export type ChecklistId =
   | "review_mode_inert"
   | "title_description_ctr"
   | "internal_links"
+  | "funnel_persona_product_stage"
   | "verify_copy"
   | "adjacent_findings"
   | "disposition"
@@ -47,6 +48,10 @@ export const TITLE_DESCRIPTION_STAFF_NOTE =
 /** Staff always-visible line when internal_links checklist is active. */
 export const INTERNAL_LINKS_STAFF_NOTE =
   "Also check hub links — facts and locale targets intact, not punchier prose.";
+
+/** Staff always-visible line when funnel_persona_product_stage is active. */
+export const FUNNEL_CLASSIFICATION_STAFF_NOTE =
+  "Also check funnel — who the buyer is, which product owns them, then how ready they are (not whether the article feels broad).";
 
 /** v1 stopgap — extend until strategy.selling (or similar) exists. */
 export const SELLING_CONTENT_TYPES = new Set([
@@ -234,6 +239,25 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "per-situation ship: failing packs' ops must be dropped or fixed via revise_entries before apply (apply is atomic)",
     ],
     priority: 28,
+  },
+  funnel_persona_product_stage: {
+    id: "funnel_persona_product_stage",
+    title: "Check persona → product → stage",
+    why: "Funnel targeting is buyer fit, not topical breadth. Wrong product or stage misroutes journey membership.",
+    look_for: [
+      "score Persona / Product / Stage then Ship: pass|fail|warn / pass|fail / pass|fail / yes|no — in that order",
+      "Persona: content intent matches a real persona id on a product (list_products → get_product); missing audience → product-only OK with warn (do not invent persona ids); wrong/invented persona → block",
+      "Product: proposed bindings follow from that fit; multiple { product, persona? } OK when two+ personas truly fit; products:all only when no single product's personas fit better; breadth/company-report alone ≠ all; all never carries personas",
+      "Stage: awareness|consideration|decision|post-enrollment matches readiness — re-check full cascade even if only stage or only products moved",
+      "ops vs live funnel + product audience — ignore staff summary / Titulo/Meta blurb; never block because blurb ≠ ops",
+      "batch: score each entry row independently; soft prefer ≤10 related posts (no create refuse for larger)",
+      "same-field funnel churn + live not broken + no real cascade change → leave live or reject duplicate_weaker; unrelated body writes alone ≠ reject",
+      "body/SERP also pending → score packs independently; revise_entries to drop/fix failing pack then apply (atomic)",
+      "topical breadth disagreement alone is not reject — add_blocker citing which cascade step fails and what correct binding looks like",
+      "out-of-scope live body defects → adjacent_findings notes; do not block funnel apply",
+      "optional: get_entry_activity for funnel.* recent writes; get_product_funnel_analytics for journey context",
+    ],
+    priority: 26,
   },
   verify_copy: {
     id: "verify_copy",
