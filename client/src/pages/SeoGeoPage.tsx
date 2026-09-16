@@ -1017,6 +1017,53 @@ type ClusterMember = {
   traffic?: PathTrafficStats;
 };
 
+function compareClusterMembersByName(a: ClusterMember, b: ClusterMember): number {
+  return clusterListLabel(a.keyword, a.path || a.slug).localeCompare(
+    clusterListLabel(b.keyword, b.path || b.slug),
+    undefined,
+    { sensitivity: "base" },
+  );
+}
+
+/** Sort spokes with the same Cluster Map sort key/direction as hubs. */
+function sortClusterMembers(
+  members: ClusterMember[],
+  sortBy: ClusterSortBy,
+  sortDir: ClusterSortDir,
+  metrics: {
+    traffic: Map<string, PathTrafficStats | undefined>;
+    potential: Map<string, PotentialMetrics>;
+    integrity: Map<string, IntegrityMetrics>;
+    activity: Map<string, number>;
+  },
+): ClusterMember[] {
+  return [...members].sort((a, b) => {
+    let cmp = 0;
+    if (sortBy === "clicks") {
+      const aClicks = metrics.traffic.get(a.id)?.clicks ?? a.traffic?.clicks ?? -1;
+      const bClicks = metrics.traffic.get(b.id)?.clicks ?? b.traffic?.clicks ?? -1;
+      cmp = aClicks - bClicks;
+    } else if (sortBy === "volume") {
+      const aVol = metrics.potential.get(a.id)?.kw_monthly_volume ?? -1;
+      const bVol = metrics.potential.get(b.id)?.kw_monthly_volume ?? -1;
+      cmp = aVol - bVol;
+    } else if (sortBy === "issues") {
+      const aIn = metrics.integrity.get(a.id);
+      const bIn = metrics.integrity.get(b.id);
+      const aIss = aIn ? aIn.errorCount + aIn.warningCount : -1;
+      const bIss = bIn ? bIn.errorCount + bIn.warningCount : -1;
+      cmp = aIss - bIss;
+    } else if (sortBy === "writes") {
+      const aW = metrics.activity.get(a.id) ?? -1;
+      const bW = metrics.activity.get(b.id) ?? -1;
+      cmp = aW - bW;
+    }
+    // name, page-count, priority (hub-only) → name; also tie-break for metrics
+    if (cmp === 0) cmp = compareClusterMembersByName(a, b);
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+}
+
 type KeywordMetricsInfo = {
   openrush_configured: boolean;
   source: "openrush_cache" | "yaml_fallback" | "none";
@@ -3423,6 +3470,7 @@ function OrganicTrafficStatCard({
   compareToClicks,
   canCatchUp = false,
   bqConfigured = false,
+  organicMarket = "worldwide",
 }: {
   window: { start: string; end: string } | null;
   daysInWindow: number;
@@ -3437,9 +3485,11 @@ function OrganicTrafficStatCard({
   canCatchUp?: boolean;
   /** Clusters catch-up: Search Console BigQuery configured. */
   bqConfigured?: boolean;
+  /** Selected organic market — used for market-empty catch-up eligibility. */
+  organicMarket?: string;
 }) {
   const { toast } = useToast();
-  const catchUp = useOrganicDaysCatchUp();
+  const catchUp = useOrganicDaysCatchUp(organicMarket);
   const empty = !window || daysInWindow === 0;
   const daysIncomplete = Boolean(window) && daysInWindow < daysExpected;
   const clicksLabel = empty ? "—" : fmtTrafficClicks(totals?.clicks ?? 0);
@@ -3495,7 +3545,7 @@ function OrganicTrafficStatCard({
     : "stat-card-organic-incomplete";
   const incompleteHelp = isSite
     ? `We asked BigQuery for the last ${daysExpected} complete days. It only returned traffic for ${daysInWindow} of them. Search Console’s website can still show a full month while the BigQuery export is catching up. The clicks and impressions above only include the days BigQuery returned.`
-    : `We look for the last ${daysExpected} complete days. Only ${daysInWindow} of those days have traffic data so far — empty day files do not count. The clicks and impressions above only include days with data. Use the refresh control to pull only days we do not have yet; progress shows as a percent. The badge can stay incomplete after catch-up if Search Console has not exported a full month.`;
+    : `We look for the last ${daysExpected} complete days. Only ${daysInWindow} of those days have traffic for the selected market so far. Refresh retries missing day files and days with no rows for this market when the last pull is older than 12 hours. The badge can stay incomplete if Search Console has not exported that day yet.`;
   const catchUpDisabledReason = !canCatchUp
     ? "Needs SEO settings access"
     : !bqConfigured
@@ -3521,7 +3571,7 @@ function OrganicTrafficStatCard({
     toast({
       title: "Caught up missing days",
       description:
-        "Window may still be incomplete if Search Console hasn’t exported a full month yet.",
+        "Retried missing files and market-empty days older than 12 hours. The window may still be incomplete if Search Console hasn’t exported rows yet.",
     });
   }
 
@@ -3682,9 +3732,9 @@ function OrganicTrafficStatCard({
                             <code className="font-mono text-[10px]">
                               .cache/{"{site}"}/gsc-organic-days
                             </code>
-                            . Catch-up only fills missing day files; empty stubs need Settings → Search
-                            Console → Reset cache. Does not change page content or whole-site BigQuery
-                            totals.
+                            . Catch-up fills missing/stale day files and re-pulls days with no rows for
+                            the selected market when last fetched more than 12 hours ago. Does not change
+                            page content or whole-site BigQuery totals.
                           </p>
                         </CollapsibleContent>
                       </Collapsible>
@@ -4720,6 +4770,7 @@ export function SeoTab({
               series={trafficMetrics?.organicTraffic?.series}
               canCatchUp={hasCapability("seo_settings")}
               bqConfigured={Boolean(trafficMetrics?.siteOrganicTraffic?.configured)}
+              organicMarket={organicMarket}
             />
             <OrganicTrafficStatCard
               scope="site"
@@ -4879,7 +4930,7 @@ export function SeoTab({
               </Collapsible>
             </div>
             <div
-              className="flex flex-wrap items-center justify-end gap-2 mb-2"
+              className="sticky top-0 z-10 -mx-1 mb-2 flex flex-wrap items-center justify-end gap-2 bg-card px-1 py-2"
               data-testid="cluster-sort-bar"
             >
               <SitemapLocaleFilter
@@ -4971,7 +5022,7 @@ export function SeoTab({
                   const hubId = cluster.hubId || cluster.pillarUrl;
                   const hubTarget = parseSeoIndexEntryId(cluster.hubId);
                   const hubLocale = cluster.locale || "en";
-                  const members =
+                  const rawMembers =
                     cluster.members && cluster.members.length > 0
                       ? cluster.members
                       : cluster.clusterSlugs.map((slug) => ({
@@ -4981,11 +5032,6 @@ export function SeoTab({
                           locale: hubLocale,
                           path: "",
                         }));
-                  const excludePaths = [
-                    cluster.pillarUrl,
-                    ...members.map((m) => m.path).filter(Boolean),
-                  ];
-                  const excludeIds = members.map((m) => m.id).filter(Boolean);
                   const trafficOverlay = trafficByHub.get(hubId);
                   const potentialOverlay = potentialByHub.get(hubId);
                   const integrityOverlay = integrityByHub.get(hubId);
@@ -5002,6 +5048,22 @@ export function SeoTab({
                   const memberActivity = new Map(
                     (activityOverlay?.members ?? []).map((m) => [m.id, m.writeCount] as const),
                   );
+                  const members = sortClusterMembers(
+                    rawMembers,
+                    clusterSortBy,
+                    clusterSortDir,
+                    {
+                      traffic: memberTraffic,
+                      potential: memberPotential,
+                      integrity: memberIntegrity,
+                      activity: memberActivity,
+                    },
+                  );
+                  const excludePaths = [
+                    cluster.pillarUrl,
+                    ...members.map((m) => m.path).filter(Boolean),
+                  ];
+                  const excludeIds = members.map((m) => m.id).filter(Boolean);
 
                   let hubMetricChips: ReactNode = null;
                   if (perspective === "traffic") {

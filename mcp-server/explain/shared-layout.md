@@ -47,8 +47,9 @@ Only when this entry must diverge from `template.{locale}.yml`: `set_entry_attac
 - Calling `list_entry_seo` without `slugs` expecting a full dump (unfiltered returns a **minimal sample** only).
 - Inventing new URL-param values without principal approval.
 - Putting **URL pattern params on `_common.yml`** or reusing the other locale's slug (e.g. `ai-tools` on an `es` post when peers use `herramientas-ia`).
+- Calling `create_variant` on an **attached** article slug for title/`content`/salary-style field updates — that remaps to the shared shell (`action_required: confirm_template_variant`). Use `propose_change` or `update_fields` on the entry instead. Shared-shell A/B only after human/orchestrator approval + `confirm_template_variant: true`. Do **not** pair an article slug with a shell variant in later reads/proposes (`entry_not_found`); edit with slug `template` / `layout_target: type_template`.
 
 ## Related tools
 
-- `get_content_type_info`, `create_entry`, `update_content_type` (enable shared layout), `list_entry_seo`, `get_entry_seo`, `get_entry_content`, `update_fields`, `translate_entry`, `set_entry_attachment`, `list_sites`
+- `get_content_type_info`, `create_entry`, `update_content_type` (enable shared layout), `list_entry_seo`, `get_entry_seo`, `get_entry_content`, `update_fields`, `translate_entry`, `set_entry_attachment`, `create_variant`, `list_sites`
 - Topic `content_system` for merge / drafts / translate + attachment loop

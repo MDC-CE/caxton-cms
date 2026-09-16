@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 17;
+export const PIPELINE_SCHEMA_VERSION = 18;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -362,6 +362,34 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
           "ALTER TABLE content_proposals ADD COLUMN review_situations_json TEXT NOT NULL DEFAULT '[]'",
         );
       }
+    },
+  },
+  {
+    version: 18,
+    name: "event_webhook_deliveries",
+    up(db) {
+      if (tableExists(db, "event_webhook_deliveries")) return;
+      db.exec(`
+        CREATE TABLE event_webhook_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          site TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          hook_id TEXT NOT NULL,
+          event_ids_json TEXT NOT NULL DEFAULT '[]',
+          url_host TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          http_status INTEGER,
+          error TEXT,
+          duration_ms INTEGER,
+          batch_size INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT 'live',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_event_webhook_deliveries_site_created
+          ON event_webhook_deliveries (site, created_at DESC);
+        CREATE INDEX idx_event_webhook_deliveries_site_type_hook
+          ON event_webhook_deliveries (site, event_type, hook_id, created_at DESC);
+      `);
     },
   },
 ];

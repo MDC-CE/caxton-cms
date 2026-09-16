@@ -253,6 +253,7 @@ import { registerMediaRoutes } from "./media";
 import { registerAiRoutes } from "./ai";
 import { registerValidationRoutes } from "./validation";
 import { registerProposalRoutes } from "./proposals";
+import { registerEventWebhookRoutes } from "./event-webhooks";
 import { registerEcommerceRoutes } from "./ecommerce";
 import { registerAnalyticsRoutes } from "./analytics";
 import { registerFunnelRoutes } from "./funnel";
@@ -338,6 +339,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerAiRoutes(app);
   registerValidationRoutes(app);
   registerProposalRoutes(app);
+  registerEventWebhookRoutes(app);
   registerEcommerceRoutes(app);
   registerAnalyticsRoutes(app);
   registerFunnelRoutes(app);

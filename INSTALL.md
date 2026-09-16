@@ -113,6 +113,16 @@ Variables are listed by category. "Required" means the feature that depends on t
 | `REPLIT_DEV_DOMAIN` | No | — | Set automatically by the Replit platform. Used as a fallback base URL when `SITE_URL` is not set. Has no effect outside the Replit environment. | Dev-environment URL resolution | None (platform-managed) |
 | `REPL_ID` | No | — | Set automatically by the Replit platform when the project runs inside Replit. When present in non-production mode, Vite loads the `@replit/vite-plugin-cartographer` and `@replit/vite-plugin-dev-banner` plugins. Has no effect outside the Replit environment. | Replit-specific dev tooling in Vite | None (platform-managed) |
 
+### Weblify CLI / package paths
+
+When you run `npx weblify` (or a globally linked `weblify`), the **engine** and the **site folder** can live in different directories. Leave these unset in a normal monorepo checkout (`npm run dev` / `npm run weblify` from the repo root).
+
+| Variable | Required | Default | Description | Features enabled | Extra config needed |
+|---|---|---|---|---|---|
+| `WEBLIFY_PROJECT_ROOT` | No | `process.cwd()` | Absolute path to the site project (`sites.yml`, `site_*`, `.env`, `data/`, `.cache/`, `.local/`). Set in the **shell** when the site is not your current directory, e.g. `WEBLIFY_PROJECT_ROOT=/path/to/my-site npx weblify`. The CLI loads `.env` from this directory, so putting the var only inside that `.env` cannot retarget create/resume from elsewhere. | `npx weblify` / linked CLI against a non-cwd site | Site folder with `sites.yml` (or empty folder to create) |
+| `WEBLIFY_PACKAGE_ROOT` | No | Directory of the installed Weblify package | Absolute path to the engine (server, client, shared, `dist/`). Rare override for unusual installs. | Force engine path when package resolution is wrong | Built/installable Weblify tree |
+| `WEBLIFY_ALLOW_CONNECTION_TOKEN_STAFF` | No | unset (off) | When GitHub App + public `SITE_URL` are configured, connection tokens no longer unlock the Debug bubble as staff. Set to `1` to allow that path again (recovery / bootstrap). | Staff login via Weblify connection token | Connection token from CLI |
+
 ### API Integrations
 
 | Variable | Required | Default | Description | Features enabled | Extra config needed |

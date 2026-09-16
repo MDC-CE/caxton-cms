@@ -6,8 +6,10 @@ import { CACHE_DIR } from "./db-cache";
 import {
   anyKeepRulesStale,
   buildKeepContext,
+  EMPTY_DAY_RETRY_MS,
   gscOrganicDaysDir,
   loadOrganicDay,
+  organicDayNeedsCatchUp,
   pruneOrganicDays,
   saveOrganicDay,
   type GscOrganicDayFile,
@@ -15,6 +17,7 @@ import {
 import { KEEP_RULES_VERSION } from "./gsc-keep-filter";
 import { aggregateDayRows } from "./seo-organic-opportunities";
 import { resetSettings } from "./settings";
+import type { OrganicMarket } from "./gsc-organic-markets";
 
 const FOLDER = "vitest-gsc-organic-days";
 
@@ -141,5 +144,101 @@ describe("buildKeepContext hosts", () => {
     resetSettings(tmp);
     const ctx = buildKeepContext(tmp);
     expect(ctx.ourHosts.size).toBe(0);
+  });
+});
+
+describe("organicDayNeedsCatchUp", () => {
+  const worldwide: OrganicMarket = {
+    id: "worldwide",
+    label: "Worldwide",
+    countries: [],
+    kind: "rollup",
+  };
+  const spain: OrganicMarket = {
+    id: "spain",
+    label: "Spain",
+    countries: ["esp"],
+    kind: "country",
+  };
+  const now = Date.parse("2026-09-16T12:00:00.000Z");
+
+  function file(partial: Partial<GscOrganicDayFile> & { date?: string }): GscOrganicDayFile {
+    return {
+      date: partial.date ?? "2026-09-01",
+      fetched_at: partial.fetched_at ?? "2026-09-16T11:00:00.000Z",
+      keep_rules_version: partial.keep_rules_version ?? KEEP_RULES_VERSION,
+      truncated: partial.truncated ?? false,
+      rows: partial.rows ?? [],
+    };
+  }
+
+  const usaRow = {
+    query: "bootcamp",
+    url: "https://4geeks.com/us",
+    country: "usa",
+    clicks: 1,
+    impressions: 10,
+    sum_position: 50,
+    ctr: 0.1,
+  };
+  const espRow = {
+    ...usaRow,
+    url: "https://4geeks.com/es",
+    country: "esp",
+  };
+
+  it("treats absent file as eligible", () => {
+    expect(organicDayNeedsCatchUp(null, worldwide, now)).toBe(true);
+  });
+
+  it("treats stale keep_rules_version as eligible", () => {
+    expect(
+      organicDayNeedsCatchUp(file({ keep_rules_version: 0, rows: [usaRow] }), worldwide, now),
+    ).toBe(true);
+  });
+
+  it("skips non-empty worldwide file", () => {
+    expect(organicDayNeedsCatchUp(file({ rows: [usaRow] }), worldwide, now)).toBe(false);
+  });
+
+  it("skips fresh empty file (age gate)", () => {
+    expect(
+      organicDayNeedsCatchUp(
+        file({ rows: [], fetched_at: "2026-09-16T11:00:00.000Z" }),
+        worldwide,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("retries empty file older than 12h", () => {
+    const aged = new Date(now - EMPTY_DAY_RETRY_MS - 1).toISOString();
+    expect(organicDayNeedsCatchUp(file({ rows: [], fetched_at: aged }), worldwide, now)).toBe(true);
+  });
+
+  it("treats invalid fetched_at on empty file as eligible", () => {
+    expect(
+      organicDayNeedsCatchUp(file({ rows: [], fetched_at: "not-a-date" }), worldwide, now),
+    ).toBe(true);
+  });
+
+  it("country market: rows only for other countries are empty for market; age gate applies", () => {
+    const fresh = file({ rows: [usaRow], fetched_at: "2026-09-16T11:00:00.000Z" });
+    expect(organicDayNeedsCatchUp(fresh, spain, now)).toBe(false);
+
+    const aged = file({
+      rows: [usaRow],
+      fetched_at: new Date(now - EMPTY_DAY_RETRY_MS - 1).toISOString(),
+    });
+    expect(organicDayNeedsCatchUp(aged, spain, now)).toBe(true);
+  });
+
+  it("country market: matching country rows are not eligible", () => {
+    expect(organicDayNeedsCatchUp(file({ rows: [espRow, usaRow] }), spain, now)).toBe(false);
+  });
+
+  it("worldwide: any non-empty file is not eligible", () => {
+    expect(organicDayNeedsCatchUp(file({ rows: [usaRow] }), worldwide, now)).toBe(false);
+    expect(organicDayNeedsCatchUp(file({ rows: [espRow] }), worldwide, now)).toBe(false);
   });
 });

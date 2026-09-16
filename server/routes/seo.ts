@@ -1777,12 +1777,17 @@ export function registerSeoRoutes(app: Express): void {
     try {
       const mode = req.body?.mode === "rebuild_60" ? "rebuild_60" : "missing";
       const since = typeof req.body?.since === "string" && req.body.since.trim() ? req.body.since.trim() : undefined;
+      const market =
+        mode === "missing" && typeof req.body?.market === "string" && req.body.market.trim()
+          ? req.body.market.trim()
+          : undefined;
       const { ingestNextMissingDay } = await import("../gsc-organic-days");
       const result = await ingestNextMissingDay({
         contentRoot: getContentRoot(res),
         contentFolder: getContentRootName(res),
         forceAll: mode === "rebuild_60",
         since: mode === "rebuild_60" ? since : undefined,
+        market: mode === "missing" ? market : undefined,
       });
       res.status(result.ok ? 200 : 400).json({ ...result, mode });
     } catch (err) {

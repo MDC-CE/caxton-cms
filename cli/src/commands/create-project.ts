@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { ensureSiteScaffold } from "../../../server/site-scaffold.js";
-import { contentFolderName, sitesYmlForLocalhost, projectGitignore } from "../resolve-config.js";
+import { contentFolderName, sitesYmlForLocalhost, projectGitignore } from "../lib/project-files.js";
 import { ensureEnvFile } from "../lib/env-file.js";
 import { resetPathCaches } from "../../../shared/paths.js";
 import type { ResolvedConfig } from "../types.js";

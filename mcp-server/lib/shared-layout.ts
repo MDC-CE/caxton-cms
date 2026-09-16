@@ -67,6 +67,21 @@ export function hasEntryLevelVersioningDir(entryDir: string): boolean {
   return false;
 }
 
+/**
+ * True when create_variant must gate: caller passed an entry slug that remaps to the
+ * shared template, and confirm_template_variant is not set.
+ * Skip when slug is already template/single, when versioning stays on the entry, or confirmed.
+ */
+export function needsTemplateVariantConfirm(opts: {
+  requestedSlug: string;
+  versioningSlug: string;
+  confirmed?: boolean;
+}): boolean {
+  if (opts.confirmed === true) return false;
+  if (isTemplateVersioningSlug(opts.requestedSlug)) return false;
+  return isTemplateVersioningSlug(opts.versioningSlug);
+}
+
 export function getContentTypeConfig(
   contentType: string,
   contentPath?: string,

@@ -68,4 +68,22 @@ export async function askAgentChoice(): Promise<"local" | "cloud"> {
   return value === "cloud" ? "cloud" : "local";
 }
 
+export async function askMultiselect(
+  question: string,
+  options: { value: string; label: string; hint?: string }[],
+  initialValues?: string[],
+): Promise<string[]> {
+  if (!canPrompt()) {
+    throw new Error(`Non-interactive terminal: missing answer for: ${question}`);
+  }
+  const value = await p.multiselect({
+    message: question,
+    options,
+    initialValues: initialValues ?? options.map((o) => o.value),
+    required: true,
+  });
+  handleCancel(value);
+  return value as string[];
+}
+
 export { PromptCancelled };

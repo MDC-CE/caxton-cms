@@ -1,6 +1,7 @@
 /**
  * Catch up missing GSC organic day-cache files (mode: "missing" only).
  * Percent is based on the gap at start of this run, not the full 60-day horizon.
+ * Empty (for market) days older than 12h are eligible; fresh empties are skipped.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,11 +19,17 @@ type BackfillBody = {
   date?: string;
 };
 
-async function postMissingDay(signal?: AbortSignal): Promise<BackfillBody> {
+async function postMissingDay(
+  market: string | undefined,
+  signal?: AbortSignal,
+): Promise<BackfillBody> {
   const res = await apiFetch("/api/seo/organic/days/backfill", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "missing" }),
+    body: JSON.stringify({
+      mode: "missing",
+      ...(market && market.trim() ? { market: market.trim() } : {}),
+    }),
     signal,
   });
   const body = (await res.json()) as BackfillBody;
@@ -41,15 +48,16 @@ function clampPercent(n: number): number {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-export function useOrganicDaysCatchUp() {
+export function useOrganicDaysCatchUp(market?: string) {
   const [running, setRunning] = useState(false);
   const [percent, setPercent] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  /** After a successful catch-up with remaining===0, hide the control until remount. */
+  /** After a successful catch-up with remaining===0, hide the control until remount / market change. */
   const [nothingLeftToPull, setNothingLeftToPull] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
   const runningRef = useRef(false);
+  const marketRef = useRef(market);
 
   useEffect(() => {
     return () => {
@@ -59,6 +67,13 @@ export function useOrganicDaysCatchUp() {
       runningRef.current = false;
     };
   }, []);
+
+  // Switching market may leave different empty days eligible — show the control again.
+  useEffect(() => {
+    if (marketRef.current === market) return;
+    marketRef.current = market;
+    setNothingLeftToPull(false);
+  }, [market]);
 
   const start = useCallback(async (): Promise<OrganicDaysCatchUpResult> => {
     if (runningRef.current) {
@@ -77,6 +92,7 @@ export function useOrganicDaysCatchUp() {
     setError(null);
 
     let initialRemaining: number | null = null;
+    const marketForRun = marketRef.current;
 
     const finishAbort = (): OrganicDaysCatchUpResult => {
       runningRef.current = false;
@@ -91,7 +107,7 @@ export function useOrganicDaysCatchUp() {
           return finishAbort();
         }
 
-        const body = await postMissingDay(ac.signal);
+        const body = await postMissingDay(marketForRun, ac.signal);
         if (ac.signal.aborted || runId !== runIdRef.current) {
           return finishAbort();
         }

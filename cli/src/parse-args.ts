@@ -63,10 +63,15 @@ Options (all optional):
   --agent local|cloud       Choose agent path without prompting
   --no-mcp-tunnel           Never start Cloudflare tunnel
   --debug                   Full engine / Vite logs (same as DEBUG=true)
-  --name <name>             Display name when creating a site
-  --slug <slug>             Content folder slug (site_<slug>) when creating
+  --name <name>             Display name when creating a site (empty folder)
+  --slug <slug>             Content folder slug (site_<slug>) when creating,
+                            or which site_* to register when writing sites.yml
   --yes, -y                 Accept safe defaults when non-interactive allows
   --help, -h                Show this help
+
+If the folder already has site_* content but no sites.yml, Weblify asks which
+folders/hostnames to register and writes a minimal sites.yml (or use --yes /
+--slug non-interactively).
 
 Environment:
   WEBLIFY_PROJECT_ROOT      Site project directory (default: cwd)

@@ -3,6 +3,7 @@ import {
   allowedToolNames,
   grantsCanMutateMetrics,
   hasCapAnyScope,
+  shouldStripUnscopedMutating,
   visibleContentTypes,
   type CatalogGrant,
 } from "./tool-catalog";
@@ -303,5 +304,31 @@ describe("hasCapAnyScope", () => {
   it("treats a scoped grant as present without requiring *", () => {
     expect(hasCapAnyScope(blogEditor, "content_view")).toBe(true);
     expect(hasCapAnyScope(blogEditor, "seo_edit")).toBe(false);
+  });
+});
+
+describe("shouldStripUnscopedMutating", () => {
+  it("strips on plain /mcp in production", () => {
+    expect(
+      shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: "production" }),
+    ).toBe(true);
+  });
+
+  it("does not strip on role connectors in production", () => {
+    expect(
+      shouldStripUnscopedMutating({ isRoleScoped: true, nodeEnv: "production" }),
+    ).toBe(false);
+  });
+
+  it("does not strip on plain /mcp in development", () => {
+    expect(
+      shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: "development" }),
+    ).toBe(false);
+  });
+
+  it("does not strip on plain /mcp when NODE_ENV is unset", () => {
+    expect(shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: undefined })).toBe(
+      false,
+    );
   });
 });
