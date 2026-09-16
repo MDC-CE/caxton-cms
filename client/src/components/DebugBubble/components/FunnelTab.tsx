@@ -1,4 +1,10 @@
-import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import {
+  useEffect,
+  useState,
+  type ComponentType,
+  type ReactNode,
+  type SyntheticEvent,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconSchool,
@@ -34,6 +40,7 @@ import {
   FUNNEL_STAGE_TONE,
 } from "@/lib/funnel-stage-ui";
 import { FUNNEL_STAGES, type FunnelBlock } from "@shared/funnel";
+import type { ProductPersona } from "@shared/productAudience";
 import type { SeoModalSavedDetail } from "@/components/editing/seoModalSaved";
 import { notifySeoModalSaved } from "@/components/editing/seoModalSaved";
 import type { ContentInfo } from "../types";
@@ -45,6 +52,160 @@ type ProductOption = {
   audience_status?: "missing" | "minimal" | "complete";
   personas?: { id: string; label: string }[];
 };
+
+type ProductAudienceResponse = {
+  audience: { personas?: ProductPersona[] } | null;
+  product?: { personas?: ProductPersona[] };
+};
+
+function personasFromAudienceResponse(
+  data: ProductAudienceResponse | undefined,
+): ProductPersona[] {
+  return data?.audience?.personas ?? data?.product?.personas ?? [];
+}
+
+function stopPersonaInfoEvent(e: SyntheticEvent) {
+  e.stopPropagation();
+}
+
+function PersonaReminderBody({
+  personaId,
+  label,
+  detail,
+  isLoading,
+}: {
+  personaId: string;
+  label: string;
+  detail: ProductPersona | undefined;
+  isLoading: boolean;
+}) {
+  const title = detail?.label || label || personaId;
+  const meta = [detail?.role, detail?.industry_or_context, detail?.demographics]
+    .map((s) => s?.trim())
+    .filter(Boolean) as string[];
+  const dialogue = detail?.avatar?.internal_dialogue?.trim();
+  const fears = (detail?.avatar?.fears ?? []).map((f) => f.trim()).filter(Boolean).slice(0, 2);
+
+  if (isLoading) {
+    return <p className="text-muted-foreground">Loading…</p>;
+  }
+  if (!detail) {
+    return (
+      <p className="text-muted-foreground">
+        No persona details yet. Edit this product&apos;s Audience in Store.
+      </p>
+    );
+  }
+  return (
+    <>
+      <p className="font-medium text-foreground text-sm leading-tight">{title}</p>
+      {meta.length > 0 && (
+        <p className="text-muted-foreground leading-snug">{meta.join(" · ")}</p>
+      )}
+      {dialogue && (
+        <p className="italic text-foreground/90 leading-relaxed line-clamp-3">
+          &ldquo;{dialogue}&rdquo;
+        </p>
+      )}
+      {fears.length > 0 && (
+        <ul className="space-y-0.5 text-muted-foreground">
+          {fears.map((fear) => (
+            <li key={fear} className="truncate">
+              · {fear}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!meta.length && !dialogue && fears.length === 0 && (
+        <p className="text-muted-foreground">Sparse brief — only the id/label is filled in.</p>
+      )}
+    </>
+  );
+}
+
+function PersonaReminderPopover({
+  productSlug,
+  personaId,
+  label,
+  detail: detailProp,
+  isLoading: loadingProp = false,
+  trigger = "icon",
+}: {
+  productSlug: string;
+  personaId: string;
+  label?: string;
+  detail?: ProductPersona;
+  isLoading?: boolean;
+  trigger?: "icon" | "text";
+}) {
+  const [open, setOpen] = useState(false);
+  const needsFetch = !detailProp;
+  const { data, isLoading: fetchLoading } = useQuery<ProductAudienceResponse>({
+    queryKey: [`/api/product/${productSlug}`, { content_type: "program" }],
+    enabled: open && needsFetch && Boolean(productSlug),
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/product/${productSlug}?content_type=program`,
+      );
+      return res.json();
+    },
+    staleTime: 60_000,
+  });
+
+  const detail =
+    detailProp ??
+    personasFromAudienceResponse(data).find((p) => p.id === personaId);
+  const isLoading = detailProp ? loadingProp : fetchLoading;
+  const title = detail?.label || label || personaId;
+
+  return (
+    <Popover modal={false} open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        {trigger === "text" ? (
+          <button
+            type="button"
+            className="inline text-muted-foreground underline-offset-2 hover:underline hover:text-foreground"
+            aria-label={`About ${title}`}
+            data-testid={`button-funnel-persona-info-${personaId}`}
+            onClick={stopPersonaInfoEvent}
+            onPointerDown={stopPersonaInfoEvent}
+            onMouseDown={stopPersonaInfoEvent}
+          >
+            {title}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground hover:bg-foreground/10"
+            aria-label={`About ${title}`}
+            data-testid={`button-funnel-persona-info-${personaId}`}
+            onClick={stopPersonaInfoEvent}
+            onPointerDown={stopPersonaInfoEvent}
+            onMouseDown={stopPersonaInfoEvent}
+          >
+            <Info className="h-3 w-3" />
+          </button>
+        )}
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        // Portal to body (no container) so overflow-y on the fields modal cannot clip it.
+        className="w-72 space-y-2 p-3 text-xs z-[10050] pointer-events-auto"
+        onCloseAutoFocus={(e) => e.preventDefault()}
+        onPointerDown={(e) => e.stopPropagation()}
+        data-testid={`popover-funnel-persona-${personaId}`}
+      >
+        <PersonaReminderBody
+          personaId={personaId}
+          label={label || personaId}
+          detail={detail}
+          isLoading={isLoading}
+        />
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 type FunnelBinding = { product: string; persona?: string };
 
@@ -159,6 +320,24 @@ export function FunnelFieldsForm({
   const productBySlug = new Map(productOptions.map((p) => [p.content_slug, p]));
   const bindingKey = (b: FunnelBinding) => `${b.product}\0${b.persona ?? ""}`;
   const selectedKeys = new Set(selectedBindings.map(bindingKey));
+
+  const { data: pendingProductAudience, isLoading: pendingAudienceLoading } =
+    useQuery<ProductAudienceResponse>({
+      queryKey: [`/api/product/${pendingProduct}`, { content_type: "program" }],
+      enabled: Boolean(pendingProduct),
+      queryFn: async () => {
+        const res = await apiRequest(
+          "GET",
+          `/api/product/${pendingProduct}?content_type=program`,
+        );
+        return res.json();
+      },
+      staleTime: 60_000,
+    });
+
+  const pendingPersonaDetails = new Map(
+    personasFromAudienceResponse(pendingProductAudience).map((p) => [p.id, p]),
+  );
 
   const clearPendingPicker = () => {
     setPendingProduct(null);
@@ -494,26 +673,39 @@ export function FunnelFieldsForm({
                     const alreadyBound = selectedKeys.has(
                       bindingKey({ product: pendingProduct, persona: persona.id }),
                     );
+                    const selectDisabled = alreadyBound && !selected;
                     return (
-                      <Button
+                      <div
                         key={persona.id}
-                        type="button"
-                        size="sm"
-                        variant="secondary"
                         className={cn(
-                          "h-7 text-xs gap-1",
-                          selected &&
-                            "bg-primary/10 text-primary border border-primary/30 hover:bg-primary/15",
-                          alreadyBound && !selected && "opacity-50",
+                          "inline-flex h-7 items-center gap-0.5 rounded-md border border-secondary-border bg-secondary text-secondary-foreground pl-2.5 pr-1",
+                          selected && "bg-primary/10 text-primary border-primary/30",
+                          selectDisabled && "opacity-50",
                         )}
-                        disabled={alreadyBound && !selected}
-                        onClick={() => togglePendingPersona(persona.id)}
                         data-testid={`button-funnel-persona-${persona.id}`}
-                        aria-pressed={selected}
                       >
-                        {selected ? <Check className="h-3 w-3" /> : null}
-                        {persona.label || persona.id}
-                      </Button>
+                        <button
+                          type="button"
+                          className={cn(
+                            "inline-flex h-full items-center gap-1 text-xs font-medium",
+                            selectDisabled ? "cursor-not-allowed" : "hover:opacity-90",
+                          )}
+                          disabled={selectDisabled}
+                          onClick={() => togglePendingPersona(persona.id)}
+                          aria-pressed={selected}
+                          data-testid={`button-funnel-persona-select-${persona.id}`}
+                        >
+                          {selected ? <Check className="h-3 w-3" /> : null}
+                          {persona.label || persona.id}
+                        </button>
+                        <PersonaReminderPopover
+                          productSlug={pendingProduct}
+                          personaId={persona.id}
+                          label={persona.label || persona.id}
+                          detail={pendingPersonaDetails.get(persona.id)}
+                          isLoading={pendingAudienceLoading}
+                        />
+                      </div>
                     );
                   })}
                   {isProgram && contentSlug === pendingProduct && (
@@ -573,22 +765,40 @@ export function FunnelFieldsForm({
         <div className="space-y-2">
           <Label>Store product journeys</Label>
           <ul className="text-xs space-y-1">
-            {storeMembership.map((m) => (
-              <li key={`${m.productSlug}-${m.persona ?? ""}`}>
-                <Link
-                  href={`/private/store/product/${m.productSlug}`}
-                  className="text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  {m.productSlug}
-                  <ExternalLink className="h-3 w-3" />
-                </Link>
-                <span className="text-muted-foreground">
-                  {" "}
-                  · {STAGE_LABELS[m.stage] ?? m.stage}
-                  {m.persona ? ` · ${m.persona}` : ""}
-                </span>
-              </li>
-            ))}
+            {storeMembership.map((m) => {
+              const personaLabel =
+                (m.persona &&
+                  productBySlug
+                    .get(m.productSlug)
+                    ?.personas?.find((p) => p.id === m.persona)?.label) ||
+                m.persona;
+              return (
+                <li key={`${m.productSlug}-${m.persona ?? ""}`}>
+                  <Link
+                    href={`/private/store/product/${m.productSlug}`}
+                    className="text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    {m.productSlug}
+                    <ExternalLink className="h-3 w-3" />
+                  </Link>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {STAGE_LABELS[m.stage] ?? m.stage}
+                    {m.persona ? (
+                      <>
+                        {" · "}
+                        <PersonaReminderPopover
+                          productSlug={m.productSlug}
+                          personaId={m.persona}
+                          label={personaLabel}
+                          trigger="text"
+                        />
+                      </>
+                    ) : null}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

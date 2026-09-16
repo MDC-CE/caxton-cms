@@ -3423,6 +3423,7 @@ function OrganicTrafficStatCard({
   compareToClicks,
   canCatchUp = false,
   bqConfigured = false,
+  organicMarket = "worldwide",
 }: {
   window: { start: string; end: string } | null;
   daysInWindow: number;
@@ -3437,9 +3438,11 @@ function OrganicTrafficStatCard({
   canCatchUp?: boolean;
   /** Clusters catch-up: Search Console BigQuery configured. */
   bqConfigured?: boolean;
+  /** Selected organic market — used for market-empty catch-up eligibility. */
+  organicMarket?: string;
 }) {
   const { toast } = useToast();
-  const catchUp = useOrganicDaysCatchUp();
+  const catchUp = useOrganicDaysCatchUp(organicMarket);
   const empty = !window || daysInWindow === 0;
   const daysIncomplete = Boolean(window) && daysInWindow < daysExpected;
   const clicksLabel = empty ? "—" : fmtTrafficClicks(totals?.clicks ?? 0);
@@ -3495,7 +3498,7 @@ function OrganicTrafficStatCard({
     : "stat-card-organic-incomplete";
   const incompleteHelp = isSite
     ? `We asked BigQuery for the last ${daysExpected} complete days. It only returned traffic for ${daysInWindow} of them. Search Console’s website can still show a full month while the BigQuery export is catching up. The clicks and impressions above only include the days BigQuery returned.`
-    : `We look for the last ${daysExpected} complete days. Only ${daysInWindow} of those days have traffic data so far — empty day files do not count. The clicks and impressions above only include days with data. Use the refresh control to pull only days we do not have yet; progress shows as a percent. The badge can stay incomplete after catch-up if Search Console has not exported a full month.`;
+    : `We look for the last ${daysExpected} complete days. Only ${daysInWindow} of those days have traffic for the selected market so far. Refresh retries missing day files and days with no rows for this market when the last pull is older than 12 hours. The badge can stay incomplete if Search Console has not exported that day yet.`;
   const catchUpDisabledReason = !canCatchUp
     ? "Needs SEO settings access"
     : !bqConfigured
@@ -3521,7 +3524,7 @@ function OrganicTrafficStatCard({
     toast({
       title: "Caught up missing days",
       description:
-        "Window may still be incomplete if Search Console hasn’t exported a full month yet.",
+        "Retried missing files and market-empty days older than 12 hours. The window may still be incomplete if Search Console hasn’t exported rows yet.",
     });
   }
 
@@ -3682,9 +3685,9 @@ function OrganicTrafficStatCard({
                             <code className="font-mono text-[10px]">
                               .cache/{"{site}"}/gsc-organic-days
                             </code>
-                            . Catch-up only fills missing day files; empty stubs need Settings → Search
-                            Console → Reset cache. Does not change page content or whole-site BigQuery
-                            totals.
+                            . Catch-up fills missing/stale day files and re-pulls days with no rows for
+                            the selected market when last fetched more than 12 hours ago. Does not change
+                            page content or whole-site BigQuery totals.
                           </p>
                         </CollapsibleContent>
                       </Collapsible>
@@ -4720,6 +4723,7 @@ export function SeoTab({
               series={trafficMetrics?.organicTraffic?.series}
               canCatchUp={hasCapability("seo_settings")}
               bqConfigured={Boolean(trafficMetrics?.siteOrganicTraffic?.configured)}
+              organicMarket={organicMarket}
             />
             <OrganicTrafficStatCard
               scope="site"
@@ -4879,7 +4883,7 @@ export function SeoTab({
               </Collapsible>
             </div>
             <div
-              className="flex flex-wrap items-center justify-end gap-2 mb-2"
+              className="sticky top-0 z-10 -mx-1 mb-2 flex flex-wrap items-center justify-end gap-2 bg-card px-1 py-2"
               data-testid="cluster-sort-bar"
             >
               <SitemapLocaleFilter

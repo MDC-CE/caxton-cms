@@ -16,11 +16,19 @@ import {
   type GscDayRow,
 } from "./gsc-keep-filter";
 import { queryUrlImpressionsForDate } from "./gsc-bigquery-client";
+import {
+  DEFAULT_ORGANIC_MARKETS,
+  resolveMarket,
+  rowMatchesMarket,
+  type OrganicMarket,
+} from "./gsc-organic-markets";
 import { child } from "./logger";
 
 const log = child({ module: "gsc-organic-days" });
 
 export const ORGANIC_RETENTION_DAYS = 60;
+/** Empty (for market) day files older than this are eligible for catch-up again. */
+export const EMPTY_DAY_RETRY_MS = 12 * 60 * 60 * 1000;
 
 export type GscOrganicDayFile = {
   date: string;
@@ -144,6 +152,25 @@ export type IngestDayResult = {
   error?: string;
 };
 
+/**
+ * Whether catch-up (mode missing) should re-pull this day.
+ * Absent / stale keep-rules always qualify. Market-empty files qualify only when
+ * older than EMPTY_DAY_RETRY_MS (avoids infinite re-pull loops).
+ */
+export function organicDayNeedsCatchUp(
+  file: GscOrganicDayFile | null,
+  market: OrganicMarket,
+  now: Date | number = Date.now(),
+): boolean {
+  if (!file || file.keep_rules_version !== KEEP_RULES_VERSION) return true;
+  const hasMarketRows = file.rows.some((r) => rowMatchesMarket(r.country, market));
+  if (hasMarketRows) return false;
+  const fetched = Date.parse(file.fetched_at);
+  if (!Number.isFinite(fetched)) return true;
+  const nowMs = typeof now === "number" ? now : now.getTime();
+  return nowMs - fetched >= EMPTY_DAY_RETRY_MS;
+}
+
 export async function ingestOrganicDay(
   date: string,
   opts: { contentRoot?: string; contentFolder?: string; force?: boolean },
@@ -187,10 +214,17 @@ export async function ingestNextMissingDay(opts: {
   forceAll?: boolean;
   /** ISO timestamp: with forceAll, skip days fetched at or after this (one rebuild pass). */
   since?: string;
+  /** Market id for empty-day eligibility (mode missing only). Defaults to worldwide. */
+  market?: string | null;
 }): Promise<IngestDayResult & { remaining: number; days_present: number; days_expected: number; since?: string }> {
   const folder = opts.contentFolder || getDefaultContentFolder();
   const expected = completeDataDates();
   const since = opts.forceAll ? opts.since || new Date().toISOString() : undefined;
+  const markets =
+    opts.contentRoot != null
+      ? getSearchConsoleSettings(opts.contentRoot).organic_markets
+      : DEFAULT_ORGANIC_MARKETS.map((m) => ({ ...m, countries: [...m.countries] }));
+  const { market } = resolveMarket(markets, opts.market);
   const missing = expected.filter((d) => {
     const file = loadOrganicDay(d, folder);
     if (opts.forceAll) {
@@ -198,7 +232,7 @@ export async function ingestNextMissingDay(opts: {
       if (since && file.fetched_at >= since) return false;
       return true;
     }
-    return !file || file.keep_rules_version !== KEEP_RULES_VERSION;
+    return organicDayNeedsCatchUp(file, market);
   });
   if (missing.length === 0) {
     return {

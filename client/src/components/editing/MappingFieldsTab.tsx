@@ -487,14 +487,37 @@ function SeoFieldsEditor({
     parseMetricInput(kwMonthlyVolume) === null && parseMetricInput(kwDifficulty) === null;
   const openrushAutoMetrics = openrushConfigured && metricsFormEmpty && !metricsManualEditing;
   const showMetricsInputs = !openrushConfigured || metricsManualEditing;
+  const openrushCacheHit = resolvedKm?.source === "openrush_cache" && !!resolvedKm.fetched_at;
+  const openrushHasMetrics =
+    resolvedKm?.source === "openrush_cache" &&
+    (typeof resolvedKm.kw_monthly_volume === "number" ||
+      typeof resolvedKm.kw_difficulty === "number");
+  const openrushHasBothMetrics =
+    resolvedKm?.source === "openrush_cache" &&
+    typeof resolvedKm.kw_monthly_volume === "number" &&
+    typeof resolvedKm.kw_difficulty === "number";
+  /** Prefer manual YAML form values; otherwise OpenRush cache. */
+  const displayCardVolume = !metricsFormEmpty
+    ? parseMetricInput(kwMonthlyVolume)
+    : typeof resolvedKm?.kw_monthly_volume === "number"
+      ? resolvedKm.kw_monthly_volume
+      : null;
+  const displayCardDifficulty = !metricsFormEmpty
+    ? parseMetricInput(kwDifficulty)
+    : typeof resolvedKm?.kw_difficulty === "number"
+      ? resolvedKm.kw_difficulty
+      : null;
+  const metricsSourceKind: "manual" | "openrush" | "openrush_empty" | "none" = !metricsFormEmpty
+    ? "manual"
+    : openrushHasMetrics
+      ? "openrush"
+      : openrushCacheHit
+        ? "openrush_empty"
+        : "none";
   const researchIncompleteForDisplay =
     researchIncomplete &&
     !openrushAutoMetrics &&
-    !(
-      resolvedKm?.source === "openrush_cache" &&
-      typeof resolvedKm.kw_monthly_volume === "number" &&
-      typeof resolvedKm.kw_difficulty === "number"
-    );
+    !openrushHasBothMetrics;
   const showResearchIncompleteHint =
     researchIncomplete && !(openrushConfigured && metricsFormEmpty && !metricsManualEditing);
 
@@ -678,17 +701,50 @@ function SeoFieldsEditor({
           author: author || undefined,
         }),
       });
-      const body = await res.json().catch(() => ({}));
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        kw_monthly_volume?: number | null;
+        kw_difficulty?: number | null;
+        fetched_at?: string | null;
+        notes?: string | null;
+      };
       if (!res.ok) {
-        throw new Error((body as { error?: string }).error || "Keyword refresh failed");
+        throw new Error(body.error || "Keyword refresh failed");
       }
+      const volume =
+        typeof body.kw_monthly_volume === "number" ? body.kw_monthly_volume : null;
+      const difficulty =
+        typeof body.kw_difficulty === "number" ? body.kw_difficulty : null;
+      queryClient.setQueryData(
+        ["/api/seo/entry", contentType, slug, locale, "keyword-metrics-preview"],
+        (prev: typeof entryKeywordMetrics | undefined) => ({
+          ...(prev ?? {}),
+          keyword_metrics: {
+            openrush_configured: true,
+            source: "openrush_cache",
+            kw_monthly_volume: volume,
+            kw_difficulty: difficulty,
+            may_not_be_recent: false,
+            notes: body.notes ?? null,
+            fetched_at: body.fetched_at ?? new Date().toISOString(),
+            stale: false,
+          },
+        }),
+      );
       toast({
-        title: "Keyword metrics updated",
-        description: "Volume and difficulty were refreshed from OpenRush into the shared cache.",
+        title:
+          volume != null || difficulty != null
+            ? "Keyword metrics updated"
+            : "OpenRush finished — no metrics",
+        description:
+          volume != null || difficulty != null
+            ? "Volume and difficulty were refreshed from OpenRush into the shared cache."
+            : "OpenRush ran but returned no volume or difficulty for this keyword.",
       });
       await queryClient.invalidateQueries({
         queryKey: ["/api/seo/entry", contentType, slug, locale],
       });
+      void queryClient.invalidateQueries({ queryKey: ["/api/seo/cluster-metrics"] });
     } catch (err) {
       toast({
         title: "Could not refresh keyword",
@@ -790,10 +846,10 @@ function SeoFieldsEditor({
               <div>
                 <dt className="text-xs text-muted-foreground">Monthly search volume</dt>
                 <dd className="text-sm text-foreground" data-testid="text-seo-kw-monthly-volume-preview">
-                  {typeof resolvedKm?.kw_monthly_volume === "number" ? (
-                    resolvedKm.kw_monthly_volume.toLocaleString()
-                  ) : kwMonthlyVolume.trim() ? (
-                    Number(kwMonthlyVolume).toLocaleString()
+                  {typeof displayCardVolume === "number" ? (
+                    displayCardVolume.toLocaleString()
+                  ) : metricsSourceKind === "openrush_empty" ? (
+                    <span className="italic text-muted-foreground font-normal">No data from OpenRush</span>
                   ) : openrushConfigured && mainKeyword.trim() ? (
                     <span className="italic text-muted-foreground font-normal">
                       Download from OpenRush to fill
@@ -806,10 +862,10 @@ function SeoFieldsEditor({
               <div>
                 <dt className="text-xs text-muted-foreground">Keyword difficulty (0–100)</dt>
                 <dd className="text-sm text-foreground" data-testid="text-seo-kw-difficulty-preview">
-                  {typeof resolvedKm?.kw_difficulty === "number" ? (
-                    resolvedKm.kw_difficulty
-                  ) : kwDifficulty.trim() ? (
-                    kwDifficulty
+                  {typeof displayCardDifficulty === "number" ? (
+                    displayCardDifficulty
+                  ) : metricsSourceKind === "openrush_empty" ? (
+                    <span className="italic text-muted-foreground font-normal">No data from OpenRush</span>
                   ) : openrushConfigured && mainKeyword.trim() ? (
                     <span className="italic text-muted-foreground font-normal">
                       Download from OpenRush to fill
@@ -819,9 +875,17 @@ function SeoFieldsEditor({
                   )}
                 </dd>
               </div>
-              {resolvedKm?.source === "openrush_cache" ? (
-                <p className="text-xs text-muted-foreground" data-testid="hint-seo-openrush-source">
-                  Live numbers come from OpenRush when it is active. YAML below is the backup if OpenRush is off.
+              {metricsSourceKind === "manual" ? (
+                <p className="text-xs text-muted-foreground" data-testid="hint-seo-metrics-source">
+                  Source: manually set on this page.
+                </p>
+              ) : metricsSourceKind === "openrush" ? (
+                <p className="text-xs text-muted-foreground" data-testid="hint-seo-metrics-source">
+                  Source: OpenRush (shared cache — not page YAML).
+                </p>
+              ) : metricsSourceKind === "openrush_empty" ? (
+                <p className="text-xs text-muted-foreground" data-testid="hint-seo-metrics-source">
+                  OpenRush ran for this keyword but returned no volume or difficulty.
                 </p>
               ) : null}
               {resolvedKm?.may_not_be_recent ? (
@@ -1140,46 +1204,56 @@ function SeoFieldsEditor({
                     onConfirm={handleRefreshKeyword}
                   />
                 </div>
-                <p className="text-xs font-medium text-foreground">Volume &amp; difficulty</p>
-                {metricsFormEmpty &&
-                !(
-                  resolvedKm?.source === "openrush_cache" &&
-                  (typeof resolvedKm.kw_monthly_volume === "number" ||
-                    typeof resolvedKm.kw_difficulty === "number")
-                ) ? (
+                <div className="flex items-center gap-2 flex-wrap pr-2">
+                  <p className="text-xs font-medium text-foreground">Volume &amp; difficulty</p>
+                  {metricsSourceKind === "manual" ? (
+                    <Badge
+                      variant="secondary"
+                      className="h-5 px-1.5 text-[10px] font-normal"
+                      data-testid="badge-seo-metrics-source"
+                    >
+                      Manually set
+                    </Badge>
+                  ) : metricsSourceKind === "openrush" || metricsSourceKind === "openrush_empty" ? (
+                    <Badge
+                      variant="secondary"
+                      className="h-5 px-1.5 text-[10px] font-normal"
+                      data-testid="badge-seo-metrics-source"
+                    >
+                      From OpenRush
+                    </Badge>
+                  ) : null}
+                </div>
+                {metricsSourceKind === "none" ? (
                   <p className="text-xs text-muted-foreground" data-testid="text-seo-metrics-openrush-auto">
                     Download from OpenRush to fill volume and difficulty for this keyword (shared cache —
                     not page YAML until you set them manually).
                   </p>
                 ) : (
                   <>
-                  {metricsFormEmpty ? (
                     <p className="text-xs text-muted-foreground" data-testid="text-seo-metrics-openrush-auto">
-                      Showing shared OpenRush cache for this keyword (not saved to page YAML unless you set
-                      them manually).
+                      {metricsSourceKind === "manual"
+                        ? "Showing values saved on this page. OpenRush cache is not used while these are set — clear them or choose “Use OpenRush only” to switch."
+                        : metricsSourceKind === "openrush_empty"
+                          ? "OpenRush ran for this keyword but returned no volume or difficulty. Try refresh again, or set values manually."
+                          : "Showing shared OpenRush cache for this keyword (not saved to page YAML unless you set them manually)."}
                     </p>
-                  ) : null}
-                  <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-foreground">
-                    <div>
-                      <dt className="text-[11px] text-muted-foreground">Monthly search volume</dt>
-                      <dd data-testid="text-seo-metrics-card-volume">
-                        {kwMonthlyVolume.trim()
-                          ? Number(kwMonthlyVolume).toLocaleString()
-                          : typeof resolvedKm?.kw_monthly_volume === "number"
-                            ? resolvedKm.kw_monthly_volume.toLocaleString()
+                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-foreground">
+                      <div>
+                        <dt className="text-[11px] text-muted-foreground">Monthly search volume</dt>
+                        <dd data-testid="text-seo-metrics-card-volume">
+                          {typeof displayCardVolume === "number"
+                            ? displayCardVolume.toLocaleString()
                             : "—"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] text-muted-foreground">Keyword difficulty</dt>
-                      <dd data-testid="text-seo-metrics-card-difficulty">
-                        {kwDifficulty.trim() ||
-                          (typeof resolvedKm?.kw_difficulty === "number"
-                            ? resolvedKm.kw_difficulty
-                            : "—")}
-                      </dd>
-                    </div>
-                  </dl>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] text-muted-foreground">Keyword difficulty</dt>
+                        <dd data-testid="text-seo-metrics-card-difficulty">
+                          {typeof displayCardDifficulty === "number" ? displayCardDifficulty : "—"}
+                        </dd>
+                      </div>
+                    </dl>
                   </>
                 )}
               </div>
