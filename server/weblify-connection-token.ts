@@ -76,6 +76,9 @@ export function ensureWeblifyLocalOwner(): {
     userStore.assignRoles(username, merged);
   }
 
+  // Local weblify bootstrap identity is meant to configure and edit over MCP.
+  userStore.setMcpAccess(username, { mcpReadEnabled: true, mcpWriteEnabled: true });
+
   const staffId =
     userStore.getOrCreateStaffUserId(username) || username;
   return {

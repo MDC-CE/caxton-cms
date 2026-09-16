@@ -1,9 +1,10 @@
 import fs from "fs";
 import path from "path";
+import { getProjectRoot } from "../../shared/paths.js";
 
-/** Read top-level `bucket_name` from sites.yml (cwd symlink in production). */
+/** Read top-level `bucket_name` from sites.yml (project root under weblify). */
 export function readSitesYmlBucketName(): string | null {
-  const sitesPath = path.join(process.cwd(), "sites.yml");
+  const sitesPath = path.join(getProjectRoot(), "sites.yml");
   if (!fs.existsSync(sitesPath)) return null;
   try {
     const text = fs.readFileSync(sitesPath, "utf-8");

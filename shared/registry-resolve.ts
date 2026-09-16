@@ -105,7 +105,7 @@ export function findRegistryCollisions(
     inheritComponentsFrom,
     cwd,
   );
-  const sharedRoot = getSharedRegistryPath(cwd);
+  const sharedRoot = getSharedRegistryPath(getPackageRoot());
   const siteRoot = getSiteRegistryPath(effective, cwd);
   const sharedTypes = new Set(listTypesInRegistry(sharedRoot));
   const collisions: RegistryCollision[] = [];
@@ -184,7 +184,8 @@ export function resolveComponentPath(
     inheritComponentsFrom,
     cwd,
   );
-  const sharedRoot = getSharedRegistryPath(cwd);
+  // Shared registry always lives in the Weblify package; site registries in the project.
+  const sharedRoot = getSharedRegistryPath(getPackageRoot());
   const siteRoot = getSiteRegistryPath(effective, cwd);
   const sharedDir = path.join(sharedRoot, componentType);
   const siteDir = path.join(siteRoot, componentType);
@@ -234,7 +235,7 @@ export function listMergedComponentTypes(
     inheritComponentsFrom,
     cwd,
   );
-  const sharedRoot = getSharedRegistryPath(cwd);
+  const sharedRoot = getSharedRegistryPath(getPackageRoot());
   const siteRoot = getSiteRegistryPath(effective, cwd);
   const out: MergedComponentType[] = [];
 

@@ -1,5 +1,6 @@
 import path from "path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getProjectRoot } from "../../shared/paths.js";
 import {
   getDefaultContentPath,
   resolveSiteContext,
@@ -34,7 +35,7 @@ describe("resolveSiteContext", () => {
     if (!result.ok) return;
     expect(result.domain).toBe("business.4geeks.com");
     expect(result.contentFolder).toBe("site_business-4geeks");
-    expect(result.contentPath).toBe(path.join(process.cwd(), "site_business-4geeks"));
+    expect(result.contentPath).toBe(path.join(getProjectRoot(), "site_business-4geeks"));
   });
 
   it("unknown domain includes requested_site", () => {
@@ -88,7 +89,7 @@ describe("getDefaultContentPath", () => {
     setMcpSiteConfigsForTest([
       { domain: "only.example.com", contentFolder: "site_only" },
     ]);
-    expect(getDefaultContentPath()).toBe(path.join(process.cwd(), "site_only"));
+    expect(getDefaultContentPath()).toBe(path.join(getProjectRoot(), "site_only"));
   });
 
   it("throws when multiple sites are configured", () => {

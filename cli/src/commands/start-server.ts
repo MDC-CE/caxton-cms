@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { isWeblifyDebug } from "../../../shared/debug.js";
+import { shouldUseSiteSchemaStub } from "../../../shared/site-schema-stub-mode.js";
 import { error as logError, info, warn } from "../lib/log.js";
 import { WEBLIFY_DEFAULT_PORT, isAirplayConflictPort } from "../lib/local-url.js";
 import type { ResolvedConfig } from "../types.js";
@@ -127,11 +128,26 @@ export async function startServer(
     }
   } else {
     const serverEntry = path.join(packageRoot, "server", "index.ts");
+    // cwd stays projectRoot so dotenv/config and process.cwd()-based content
+    // paths resolve to the site project. tsx must still read the engine
+    // tsconfig or @shared/* / @/* aliases fail with ERR_MODULE_NOT_FOUND.
+    const tsconfig = path.join(packageRoot, "tsconfig.json");
     const tsxBin = path.join(packageRoot, "node_modules", ".bin", "tsx");
     const runner = fs.existsSync(tsxBin) ? tsxBin : "npx";
-    const args = fs.existsSync(tsxBin)
-      ? [serverEntry]
-      : ["tsx", serverEntry];
+    const tsxArgs = ["--tsconfig", tsconfig];
+    // Vite/esbuild already stub site Zod when site_4geeks-com is absent; tsx needs
+    // the same remap or it loads site-component-schemas.ts → missing site_* paths.
+    if (shouldUseSiteSchemaStub(projectRoot)) {
+      tsxArgs.push(
+        "--import",
+        path.join(packageRoot, "shared", "register-site-schema-stub.mjs"),
+      );
+      if (!env.WEBLIFY_SITE_SCHEMAS_STUB?.trim()) {
+        env.WEBLIFY_SITE_SCHEMAS_STUB = "1";
+      }
+    }
+    tsxArgs.push(serverEntry);
+    const args = fs.existsSync(tsxBin) ? tsxArgs : ["tsx", ...tsxArgs];
     child = spawn(runner, args, {
       cwd: projectRoot,
       env: {

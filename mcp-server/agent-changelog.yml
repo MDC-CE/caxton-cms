@@ -6,6 +6,18 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "Weblify split-root: MCP reads sites.yml from WEBLIFY_PROJECT_ROOT"
+    agent_impact:
+      - "list_sites / bootstrap_agent no longer fail with sites.yml not found when MCP cwd is the Weblify package and content lives in WEBLIFY_PROJECT_ROOT."
+      - "weblify-local bootstrap now turns on mcp_write_enabled. Restart Weblify + reconnect the connector."
+    tools_changed: false
+    paths:
+      - mcp-server/lib/content.ts
+      - mcp-server/lib/bucket-parity.ts
+      - mcp-server/tools/components.ts
+      - shared/registry-resolve.ts
+      - server/weblify-connection-token.ts
+  - date: "2026-09-16"
     summary: "Non-production plain /mcp allows freestyle mutates"
     agent_impact:
       - "Production: plain /mcp stays read-only; mutates need /mcp/role/… + agent_session. Non-production (local/tunnels): plain /mcp registers mutating tools without role or agent_session_id gate — caps and MCP write still apply."
