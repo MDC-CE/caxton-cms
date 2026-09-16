@@ -1,5 +1,23 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { appendQueryToReturnTo, sanitizeReturnTo } from "./staff-auth";
+
+vi.mock("../site-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../site-config")>();
+  return {
+    ...actual,
+    getSiteConfigs: () => [
+      {
+        domain: "4geeks.com",
+        contentFolder: "site_4geeks-com",
+        aliases: ["www.4geeks.com"],
+      },
+      {
+        domain: "fl.4geeksacademy.com",
+        contentFolder: "site_4geeks-florida",
+      },
+    ],
+  };
+});
 
 describe("appendQueryToReturnTo", () => {
   it("preserves MCP staff-return nonce when adding staff_session_code", () => {
@@ -47,6 +65,15 @@ describe("appendQueryToReturnTo", () => {
     });
     expect(out).toBe("/oauth/staff-return?nonce=n&staff_session_code=x");
   });
+
+  it("keeps absolute multi-site return origin when appending session code", () => {
+    const out = appendQueryToReturnTo("https://fl.4geeksacademy.com/private/settings", {
+      staff_session_code: "ex-1",
+    });
+    expect(out).toBe(
+      "https://fl.4geeksacademy.com/private/settings?staff_session_code=ex-1",
+    );
+  });
 });
 
 describe("sanitizeReturnTo", () => {
@@ -63,11 +90,37 @@ describe("sanitizeReturnTo", () => {
     expect(sanitizeReturnTo(raw)).toBe(raw);
   });
 
+  it("allows absolute return to another sites.yml domain (multi-site OAuth)", () => {
+    process.env.SITE_URL = "https://4geeks.com";
+    delete process.env.MCP_PUBLIC_URL;
+    const raw = "https://fl.4geeksacademy.com/private/settings";
+    expect(sanitizeReturnTo(raw)).toBe(raw);
+  });
+
+  it("allows sites.yml alias hostnames", () => {
+    process.env.SITE_URL = "https://4geeks.com";
+    const raw = "https://www.4geeks.com/";
+    expect(sanitizeReturnTo(raw)).toBe(raw);
+  });
+
+  it("allows http + non-default port when hostname is a configured site", () => {
+    process.env.SITE_URL = "https://4geeks.com";
+    const raw = "http://fl.4geeksacademy.com:5000/private";
+    expect(sanitizeReturnTo(raw)).toBe(raw);
+  });
+
   it("rejects disallowed absolute origins", () => {
     process.env.SITE_URL = "https://4geeks.com";
     delete process.env.MCP_PUBLIC_URL;
     expect(sanitizeReturnTo("https://evil.example/oauth/staff-return?nonce=1")).toBe(
       "/",
     );
+  });
+
+  it("rejects subdomain lookalikes of configured sites", () => {
+    process.env.SITE_URL = "https://4geeks.com";
+    expect(
+      sanitizeReturnTo("https://evil.fl.4geeksacademy.com/private"),
+    ).toBe("/");
   });
 });

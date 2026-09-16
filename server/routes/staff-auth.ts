@@ -17,9 +17,27 @@ import {
   mintStaffSessionCookie,
 } from "../staff-session-cookie";
 import { getStaffGitHubLoginStatus } from "../staff-github-login";
+import { getSiteConfigs } from "../site-config";
 import { getAllUsers } from "../user-store";
 
 const log = child({ module: "routes/staff-auth" });
+
+/** Exact hostname match against sites.yml domains + aliases (multi-site OAuth return). */
+export function isConfiguredSiteHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) return false;
+  try {
+    for (const config of getSiteConfigs()) {
+      if (config.domain.toLowerCase() === host) return true;
+      for (const alias of config.aliases ?? []) {
+        if (alias.toLowerCase() === host) return true;
+      }
+    }
+  } catch {
+    /* sites.yml missing / invalid — ignore; SITE_URL / MCP still apply */
+  }
+  return false;
+}
 
 export function sanitizeReturnTo(raw: unknown): string {
   if (typeof raw !== "string" || !raw.trim()) return "/";
@@ -48,7 +66,7 @@ export function sanitizeReturnTo(raw: unknown): string {
         /* ignore */
       }
     }
-    if (allowedOrigins.has(url.origin)) {
+    if (allowedOrigins.has(url.origin) || isConfiguredSiteHost(url.hostname)) {
       return url.toString();
     }
   } catch {

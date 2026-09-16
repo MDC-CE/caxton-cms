@@ -20,6 +20,15 @@ entries:
       - mcp-server/tools/explain.ts
       - mcp-server/lib/mcp-playbook.ts
       - mcp-server/agent-conventions.md
+    summary: "Staff GitHub login returns to the multi-site host you started from"
+    agent_impact:
+      - "OAuth callback still uses SITE_URL (e.g. 4geeks.com); return_to may be absolute to another sites.yml domain (e.g. fl.4geeksacademy.com) so the staff session is minted there."
+      - "No GitHub App callback change required for sibling sites. Reconnect not required (no MCP tool change)."
+    paths:
+      - server/routes/staff-auth.ts
+      - client/src/hooks/useDebugAuth.ts
+      - server/private-html-auth.ts
+    tools_changed: false
   - date: "2026-09-16"
     summary: "Non-production plain /mcp allows freestyle mutates"
     agent_impact:

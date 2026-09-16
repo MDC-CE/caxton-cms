@@ -18,8 +18,26 @@ function wantsJson(req: Request): boolean {
   return accept.includes("application/json") && !accept.includes("text/html");
 }
 
-function unauthorizedHtml(returnTo: string): string {
-  const safeReturn = returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/private";
+function requestPublicOrigin(req: Request): string | null {
+  const hostHeader =
+    (typeof req.headers["x-forwarded-host"] === "string"
+      ? req.headers["x-forwarded-host"].split(",")[0]?.trim()
+      : null) ||
+    (typeof req.headers.host === "string" ? req.headers.host : null);
+  if (!hostHeader) return null;
+  const protoHeader =
+    typeof req.headers["x-forwarded-proto"] === "string"
+      ? req.headers["x-forwarded-proto"].split(",")[0]?.trim()
+      : null;
+  const proto = protoHeader || req.protocol || "https";
+  return `${proto}://${hostHeader}`;
+}
+
+function unauthorizedHtml(returnTo: string, origin: string | null): string {
+  const path =
+    returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/private";
+  // Absolute return so GitHub OAuth (callback on SITE_URL) lands back on this host.
+  const safeReturn = origin ? `${origin}${path}` : path;
   const loginHref = `/api/staff/oauth/github/start?return_to=${encodeURIComponent(safeReturn)}`;
   return `<!DOCTYPE html>
 <html lang="en">
@@ -116,5 +134,5 @@ function sendUnauthorized(req: Request, res: Response, returnTo: string): void {
   res
     .status(401)
     .set({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })
-    .send(unauthorizedHtml(returnTo));
+    .send(unauthorizedHtml(returnTo, requestPublicOrigin(req)));
 }
