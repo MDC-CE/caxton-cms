@@ -24,7 +24,7 @@ Legacy explain topic name `ecommerce` still resolves here for one changelog wind
 | `list_products` | Inventory first (selling flag, audience status, persona ids). Paused included by default. |
 | `get_product` | Full sidecar for one slug (offer + personas/avatar). |
 | `update_product` | Patch offer/personas/name/description (`confirm: true`). **Not** sellable/store visibility. |
-| `get_product_funnel` / `get_product_funnel_analytics` | Journey pages / metrics |
+| `get_product_funnel` / `get_product_funnel_analytics` | Journey pages / metrics (GA4 BigQuery). Site-wide GA → `get_analytics_report` (topic `analytics`). |
 
 **Human-only:** making sellable (`purchasable`) or showing/hiding in the store (`actively_selling`). Agents use `propose_change` notes asking staff to act in Store / YAML. MCP refuses those fields on `update_product`.
 

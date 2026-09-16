@@ -2,14 +2,23 @@ import { describe, expect, it } from "vitest";
 import {
   clampOpportunitiesLimit,
   clampOpportunitiesOffset,
+  clampLeaderboardLimit,
+  clampLeaderboardOffset,
   dedupeStrings,
+  filterByPathPrefix,
   flattenOpportunityCards,
+  leaderboardRowFromStats,
   normalizePathBatch,
   paginateFlat,
+  parseLeaderboardSortBy,
+  pathMatchesLeaderboardPrefix,
   resolveAssembleWindow,
+  resolveLeaderboardPathPrefix,
   resolveSeriesInclusion,
   seriesIgnoredForQueriesWarning,
+  seriesIgnoredForModeWarning,
   siteVsPathsSourceWarning,
+  sortLeaderboardEntries,
   opportunitiesDatesRejectMessage,
   validateBatchSize,
   MAX_ORGANIC_PATHS,
@@ -17,8 +26,11 @@ import {
   SERIES_BATCH_MAX,
   OPPORTUNITIES_DEFAULT_LIMIT,
   OPPORTUNITIES_MAX_LIMIT,
+  LEADERBOARD_DEFAULT_LIMIT,
+  LEADERBOARD_MAX_LIMIT,
   ORGANIC_MAX_SPAN_DAYS,
 } from "./organic-traffic-mcp";
+import type { PathTrafficStats } from "../../server/gsc-organic-path-traffic";
 
 describe("resolveAssembleWindow", () => {
   it("rejects span over max with OpenRush hint", () => {
@@ -54,6 +66,7 @@ describe("resolveAssembleWindow", () => {
 describe("siteVsPathsSourceWarning", () => {
   it("names the source mismatch", () => {
     expect(siteVsPathsSourceWarning().code).toBe("organic_site_vs_paths_source");
+    expect(siteVsPathsSourceWarning().message).toMatch(/leaderboard/);
   });
 });
 
@@ -136,6 +149,12 @@ describe("resolveSeriesInclusion", () => {
         .include,
     ).toBe(true);
   });
+
+  it("never includes series for leaderboard", () => {
+    expect(
+      resolveSeriesInclusion({ mode: "leaderboard", include_series: true, batchSize: 1 }).include,
+    ).toBe(false);
+  });
 });
 
 describe("flattenOpportunityCards + paginateFlat", () => {
@@ -169,5 +188,105 @@ describe("clamp opportunities pagination", () => {
 describe("seriesIgnoredForQueriesWarning", () => {
   it("codes series_ignored_for_mode", () => {
     expect(seriesIgnoredForQueriesWarning().code).toBe("series_ignored_for_mode");
+    expect(seriesIgnoredForModeWarning("leaderboard").message).toMatch(/leaderboard/);
+  });
+});
+
+describe("leaderboard helpers", () => {
+  const stats = (clicks: number, impressions: number, position = 5): PathTrafficStats => ({
+    clicks,
+    impressions,
+    position,
+  });
+
+  it("parseLeaderboardSortBy defaults to clicks", () => {
+    expect(parseLeaderboardSortBy(undefined)).toBe("clicks");
+    expect(parseLeaderboardSortBy("clicks")).toBe("clicks");
+    expect(parseLeaderboardSortBy("impressions")).toBe("impressions");
+    expect(parseLeaderboardSortBy("other")).toBe("clicks");
+  });
+
+  it("resolveLeaderboardPathPrefix normalizes slash, URL, trailing slash", () => {
+    expect(resolveLeaderboardPathPrefix(undefined)).toEqual({ ok: true, prefix: null });
+    expect(resolveLeaderboardPathPrefix("  ")).toEqual({ ok: true, prefix: null });
+    expect(resolveLeaderboardPathPrefix("/en/blog/")).toEqual({ ok: true, prefix: "/en/blog" });
+    expect(resolveLeaderboardPathPrefix("/en/blog")).toEqual({ ok: true, prefix: "/en/blog" });
+    expect(resolveLeaderboardPathPrefix("https://example.com/en/blog/")).toEqual({
+      ok: true,
+      prefix: "/en/blog",
+    });
+  });
+
+  it("resolveLeaderboardPathPrefix hard-fails unnormalizable input", () => {
+    const r = resolveLeaderboardPathPrefix("not a path!!!");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toMatch(/path_prefix/);
+  });
+
+  it("pathMatchesLeaderboardPrefix is exact-or-descendant (not /en/blogging)", () => {
+    expect(pathMatchesLeaderboardPrefix("/en/blog", "/en/blog")).toBe(true);
+    expect(pathMatchesLeaderboardPrefix("/en/blog/post", "/en/blog")).toBe(true);
+    expect(pathMatchesLeaderboardPrefix("/en/blogging", "/en/blog")).toBe(false);
+    expect(pathMatchesLeaderboardPrefix("/en/other", "/en/blog")).toBe(false);
+  });
+
+  it("filterByPathPrefix + sort by clicks with path tie-break", () => {
+    const byPath: Record<string, PathTrafficStats> = {
+      "/en/blog/z": stats(10, 100),
+      "/en/blog/a": stats(10, 50),
+      "/en/blogging": stats(99, 9),
+      "/es/blog/x": stats(5, 200),
+    };
+    const filtered = filterByPathPrefix(byPath, "/en/blog");
+    expect(filtered.map((e) => e.path).sort()).toEqual(["/en/blog/a", "/en/blog/z"]);
+    const byClicks = sortLeaderboardEntries(filtered, "clicks");
+    expect(byClicks.map((e) => e.path)).toEqual(["/en/blog/a", "/en/blog/z"]);
+  });
+
+  it("sorts by impressions when requested", () => {
+    const entries = [
+      { path: "/b", stats: stats(1, 10) },
+      { path: "/a", stats: stats(5, 100) },
+      { path: "/c", stats: stats(9, 50) },
+    ];
+    expect(sortLeaderboardEntries(entries, "impressions").map((e) => e.path)).toEqual([
+      "/a",
+      "/c",
+      "/b",
+    ]);
+  });
+
+  it("leaderboardRowFromStats includes ctr and position", () => {
+    const row = leaderboardRowFromStats("/x", stats(2, 10, 3.5), {
+      content_type: "blog",
+      slug: "x",
+      locale: "en",
+    });
+    expect(row).toEqual({
+      path: "/x",
+      clicks: 2,
+      impressions: 10,
+      ctr: 0.2,
+      position: 3.5,
+      content_type: "blog",
+      slug: "x",
+      locale: "en",
+    });
+  });
+
+  it("clamps leaderboard pagination and soft-empty filter paginates", () => {
+    expect(clampLeaderboardLimit(undefined)).toBe(LEADERBOARD_DEFAULT_LIMIT);
+    expect(clampLeaderboardLimit(999)).toBe(LEADERBOARD_MAX_LIMIT);
+    expect(clampLeaderboardOffset(-1)).toBe(0);
+    const byPath: Record<string, PathTrafficStats> = {
+      "/en/home": stats(1, 1),
+    };
+    const filtered = filterByPathPrefix(byPath, "/en/blog");
+    expect(filtered).toEqual([]);
+    const page = paginateFlat(filtered, 0, 25);
+    expect(page.total).toBe(0);
+    expect(page.items).toEqual([]);
+    expect(page.next_offset).toBeNull();
   });
 });

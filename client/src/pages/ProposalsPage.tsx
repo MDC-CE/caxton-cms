@@ -92,6 +92,7 @@ import {
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
+import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { AskActivityGateCopy } from "@/components/DebugBubble/SolveWithAiAgentDropdown";
 import { ValidationIssueDetailModal } from "@/components/diagnostics/ValidationIssueDetailModal";
@@ -203,6 +204,18 @@ type Proposal = {
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
   review_context_snapshot?: Record<string, unknown> | null;
+  decision_debug?: {
+    captured_at?: number;
+    action?: string;
+    source?: string;
+    actor?: { username?: string; type?: string; role?: string };
+    review_context?: {
+      damage_class?: string;
+      active_checklists?: string[];
+      think_items?: Array<{ id: string; title: string; why: string; look_for: string[] }>;
+    };
+    discovery_path?: unknown;
+  } | null;
 };
 
 function headers(): Record<string, string> {
@@ -248,6 +261,74 @@ function reviewModeExplain(p: Proposal): { title: string; body: string; advanced
       "Apply is still four-eyes — the proposer cannot approve their own edits.",
     ],
   };
+}
+
+function DecisionDebugPanel({
+  debug,
+}: {
+  debug: NonNullable<Proposal["decision_debug"]>;
+}) {
+  const [advanced, setAdvanced] = useState(false);
+  const think = debug.review_context?.think_items ?? [];
+  return (
+    <div
+      className="rounded-md border border-card-border bg-muted/30 px-3 py-2.5 space-y-1.5"
+      data-testid="callout-proposal-decision-debug"
+    >
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        Decide debug
+      </p>
+      <p className="text-sm leading-5 text-foreground/90">
+        Debug snapshot of the review checklist at decide time — it does not change the site.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {debug.action ?? "—"}
+        {debug.source ? ` · ${debug.source}` : ""}
+        {debug.actor?.username ? ` · ${debug.actor.username}` : ""}
+        {debug.review_context?.damage_class
+          ? ` · ${debug.review_context.damage_class}`
+          : ""}
+      </p>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-auto px-0 text-xs text-primary"
+        data-testid="button-proposal-decision-debug-advanced"
+        onClick={() => setAdvanced((v) => !v)}
+      >
+        {advanced ? "Hide advanced" : "Read more (advanced)"}
+      </Button>
+      {advanced ? (
+        <div
+          className="space-y-2 border-t pt-2 text-xs text-muted-foreground"
+          data-testid="panel-proposal-decision-debug-advanced"
+        >
+          <p>
+            <span className="font-medium text-foreground">checklists:</span>{" "}
+            {(debug.review_context?.active_checklists ?? []).join(", ") || "—"}
+          </p>
+          {think.length ? (
+            <ul className="list-disc space-y-2 pl-4">
+              {think.map((t) => (
+                <li key={t.id}>
+                  <span className="font-medium text-foreground">{t.title}</span>
+                  <ul className="mt-1 list-disc pl-4">
+                    {t.look_for.map((l) => (
+                      <li key={l}>{l}</li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <pre className="max-h-56 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-4">
+            {JSON.stringify(debug, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function ReviewModeBadge({
@@ -1394,15 +1475,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       {p.open_blocker_count} needs changes
                     </Badge>
                   ) : null}
-                  {p.escalated ? (
-                    <Badge
-                      variant="outline"
-                      className="gap-1 font-normal border-status-busy/40 text-status-busy"
-                      data-testid="badge-proposal-escalated"
-                    >
-                      Escalated
-                    </Badge>
-                  ) : null}
+                  {p.escalated ? <EscalatedBadge /> : null}
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
                 {p.escalated ? (
@@ -1459,6 +1532,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     snapshot={p.review_context_snapshot}
                     kind={p.kind}
                   />
+                ) : null}
+                {isTerminal && p.decision_debug ? (
+                  <DecisionDebugPanel debug={p.decision_debug} />
                 ) : null}
                 <div
                   className="flex flex-wrap items-center gap-2"

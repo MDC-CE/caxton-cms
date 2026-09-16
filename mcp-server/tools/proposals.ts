@@ -18,6 +18,21 @@ import {
   resolveStrategyForContentType,
 } from "../lib/proposal-discovery-path.js";
 
+function stripDecisionDebugFromProposal(proposal: unknown): unknown {
+  if (!proposal || typeof proposal !== "object") return proposal;
+  const { decision_debug: _omit, ...rest } = proposal as Record<string, unknown>;
+  return rest;
+}
+
+function stripDecisionDebugFromPayload(data: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...data };
+  if (next.proposal) next.proposal = stripDecisionDebugFromProposal(next.proposal);
+  if (Array.isArray(next.proposals)) {
+    next.proposals = next.proposals.map(stripDecisionDebugFromProposal);
+  }
+  return next;
+}
+
 const MAIN_SERVER_PORT = process.env.PORT || "5000";
 
 /** Reviewer-only decide toolkit (no withdraw / attach / set_no_auto_retry). */
@@ -418,6 +433,11 @@ export function registerProposalTools(
         }
         const proposal = (data as { proposal?: { id?: string; review_mode?: string; promote_on_apply?: boolean; escalated_siblings?: Array<{ id: string; title: string }> } })
           .proposal;
+        const reviewCtx = (data as {
+          review_context?: {
+            agent_preview?: { warnings?: Array<{ code: string; message: string }> };
+          };
+        }).review_context;
         const warnings: Array<{ code: string; message: string }> = [
           {
             code: "not_applied",
@@ -430,6 +450,9 @@ export function registerProposalTools(
               "A different human+role with proposals_review (Proposal Reviewer or Publisher) must apply or reject edits. Notes close with a reason (not four-eyes) — close does not fix content.",
           },
         ];
+        if (reviewCtx?.agent_preview?.warnings?.length) {
+          warnings.push(...reviewCtx.agent_preview.warnings);
+        }
         if (proposal?.escalated_siblings?.length) {
           warnings.push({
             code: "escalated_sibling",
@@ -453,7 +476,7 @@ export function registerProposalTools(
           });
         }
         return ok({
-          ...data,
+          ...stripDecisionDebugFromPayload(data as Record<string, unknown>),
           warnings,
           next_actions: [
             {
@@ -709,6 +732,7 @@ export function registerProposalTools(
               locale: string;
               variant?: string | null;
               status?: string;
+              ops?: Array<{ field_path?: string } | null> | null;
             }>;
             open_blocker_count?: number;
             blockers?: unknown[];
@@ -753,7 +777,9 @@ export function registerProposalTools(
         return ok(
           {
             proposal_stats,
-            proposals,
+            proposals: Array.isArray(proposals)
+              ? proposals.map(stripDecisionDebugFromProposal)
+              : proposals,
             proposals_view,
             total,
             limit,
@@ -1247,7 +1273,7 @@ export function registerProposalTools(
         }
 
         return ok({
-          ...data,
+          ...stripDecisionDebugFromPayload(data as Record<string, unknown>),
           warnings,
           next_actions: next,
         });

@@ -227,6 +227,20 @@ export async function denyUnlessContentViewOrSeo(
   return null;
 }
 
+/** metrics_view only — GA BigQuery analytics reports. */
+export async function denyUnlessMetricsView(
+  mcpToken: string | undefined,
+  grants: CatalogGrant[] | undefined,
+) {
+  if (!mcpToken) return null;
+  if (grants) {
+    if (hasCapAnyScope(grants, "metrics_view")) return null;
+    return denyResponse("metrics_view");
+  }
+  if (await checkCap(mcpToken, "metrics_view")) return null;
+  return denyResponse("metrics_view");
+}
+
 /** metrics_view or seo_edit (any scope) — organic traffic / SEO metrics reads. */
 export async function denyUnlessMetricsViewOrSeo(
   mcpToken: string | undefined,

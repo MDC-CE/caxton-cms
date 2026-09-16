@@ -8,7 +8,7 @@ import path from "path";
 import { createHash } from "crypto";
 
 /** Bump when the technical playbook markdown below changes. */
-export const PLAYBOOK_VERSION = "5";
+export const PLAYBOOK_VERSION = "6";
 
 /**
  * Explicit conventions seed version. Bump when editing mcp-server/agent-conventions.md
@@ -59,6 +59,7 @@ Optional \`discovery_path\` (when present) is a research menu to deepen judgment
 - Vague “what is this site / brand about?” → \`list_products\` then \`get_product\` on relevant slugs (offer + personas).
 - Change audience (offer/personas) → \`update_product\` with \`confirm: true\` (needs content_edit_structure).
 - Make sellable or pause/resume store visibility → human only: \`propose_change\` notes asking staff to use the Store. Never set \`purchasable\` / \`actively_selling\` via MCP.
+- Journey membership → \`get_product_funnel\`; journey page KPIs → \`get_product_funnel_analytics\`. Site-wide GA4 → \`get_analytics_report\` (\`metrics_view\`; topic \`analytics\`). GSC → \`get_organic_traffic\`.
 
 ## Depth and stale tools
 

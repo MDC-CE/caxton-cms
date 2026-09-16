@@ -23,7 +23,7 @@ This is a content-driven marketing platform built with React (Vite/TypeScript) o
 
 ## Products and audience
 
-Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s `_product.yml`. For “what we sell / who for,” call **`list_products`** then **`get_product`** on a slug. Journey pages → topic `funnel` / `get_product_funnel`. Changing offer/personas → **`update_product`** (`confirm: true`, needs structure edit). Making sellable or pausing the store is **human-only** (staff Store / `propose_change` notes).
+Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s `_product.yml`. For “what we sell / who for,” call **`list_products`** then **`get_product`** on a slug. Journey pages → topic `funnel` / `get_product_funnel`; journey metrics → `get_product_funnel_analytics`. Site-wide GA4 → topic `analytics` / `get_analytics_report` (`metrics_view`). Changing offer/personas → **`update_product`** (`confirm: true`, needs structure edit). Making sellable or pausing the store is **human-only** (staff Store / `propose_change` notes).
 
 <!-- @dynamic:products -->
 <!-- /dynamic -->
@@ -50,7 +50,8 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `redirects` | CMS 301/302: two stores, first-match, `test_redirect` (`read_redirects`) + `update_redirect` (`edit_redirects`) |
 | `proposals` | Entry change proposals + issue handoff notes: 4 tools incl. `get_entry_activity`, four-eyes apply; `list_proposals` is stats-first |
 | `reading-proposals` | Live `review_context` axes, checklist IDs, create refuses, apply block when target missing |
+| `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 
-**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), and `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`.
+**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries / leaderboard), and `get_analytics_report` for GA4 behavioral reports (site summary / top pages / page detail / events / traffic sources). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
 
 **Before making any structural change to this codebase, call `explain_site` with the relevant topic.**

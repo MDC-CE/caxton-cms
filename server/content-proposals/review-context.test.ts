@@ -37,6 +37,10 @@ function baseProposal(
     review_mode: "soft",
     open_blocker_count: 0,
     no_auto_retry: false,
+    escalated: false,
+    escalated_at: null,
+    escalated_by: null,
+    escalated_note: null,
     close_reason: null,
     close_note: null,
     closed_by: null,
@@ -45,6 +49,7 @@ function baseProposal(
     entries: [],
     blockers: [],
     review_context_snapshot: null,
+    decision_debug: null,
     supersedes_proposal_id: null,
     replaced_by_proposal_id: null,
     ...overrides,
@@ -369,5 +374,182 @@ describe("classifyProposalReview", () => {
     });
     expect(ctx.damage_class).toBe("none");
     expect(ctx.active_checklists).toContain("idea_accept");
+  });
+
+  it("title/description only → title_description_ctr without verify_copy", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        category: "content.seo",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [
+              { field_path: "meta.page_title", value: "New" },
+              { field_path: "meta.description", value: "Desc" },
+            ],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.active_checklists).toContain("title_description_ctr");
+    expect(ctx.active_checklists).not.toContain("verify_copy");
+    expect(ctx.agent_preview.think_items.some((t) => t.id === "title_description_ctr")).toBe(true);
+    expect(ctx.staff_summary.situation_description).toMatch(/search title\/description/i);
+    const tpl = ctx.agent_preview.think_items.find((t) => t.id === "title_description_ctr");
+    expect(tpl?.why.toLowerCase()).not.toMatch(/punchier|invite the click/);
+  });
+
+  it("title/description mixed with body → both checklists + mixed_serp_and_body", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [
+              { field_path: "meta.page_title", value: "New" },
+              { field_path: "sections.0.data.title", value: "Body" },
+            ],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.active_checklists).toContain("title_description_ctr");
+    expect(ctx.active_checklists).toContain("verify_copy");
+    expect(ctx.agent_preview.warnings.some((w) => w.code === "mixed_serp_and_body")).toBe(true);
+  });
+
+  it("seo.main_keyword only → no title_description_ctr", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        category: "content.seo",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "seo.main_keyword", value: "x" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.active_checklists).not.toContain("title_description_ctr");
+    expect(ctx.active_checklists).toContain("verify_copy");
+  });
+
+  it("landing + title/desc → selling_page_figures and title_description_ctr", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "landing/ai",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "meta.description", value: "New desc" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "landing",
+            slug: "ai",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "landing", slug: "ai", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.damage_class).toBe("selling_page");
+    expect(ctx.active_checklists).toContain("selling_page_figures");
+    expect(ctx.active_checklists).toContain("title_description_ctr");
+  });
+
+  it("done title ops do not keep title_description_ctr when only body remains", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "done",
+            ops: [{ field_path: "meta.page_title", value: "Shipped" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: 1,
+            applied_by: "a",
+            contentType: "blog",
+            slug: "hello",
+          },
+          {
+            id: 2,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "es",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "sections.0.data.title", value: "Body" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [
+        { contentType: "blog", slug: "hello", locale: "es", existence: "exists" },
+      ],
+    });
+    expect(ctx.active_checklists).not.toContain("title_description_ctr");
+    expect(ctx.active_checklists).toContain("verify_copy");
   });
 });

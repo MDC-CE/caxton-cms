@@ -254,6 +254,7 @@ import { registerAiRoutes } from "./ai";
 import { registerValidationRoutes } from "./validation";
 import { registerProposalRoutes } from "./proposals";
 import { registerEcommerceRoutes } from "./ecommerce";
+import { registerAnalyticsRoutes } from "./analytics";
 import { registerFunnelRoutes } from "./funnel";
 import { registerProductRoutes } from "./product";
 import { registerWebhooksRoutes } from "./webhooks";
@@ -338,6 +339,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerValidationRoutes(app);
   registerProposalRoutes(app);
   registerEcommerceRoutes(app);
+  registerAnalyticsRoutes(app);
   registerFunnelRoutes(app);
   registerProductRoutes(app);
   registerWebhooksRoutes(app);

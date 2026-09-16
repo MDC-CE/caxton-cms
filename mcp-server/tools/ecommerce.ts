@@ -84,7 +84,15 @@ export function registerEcommerceTools(
                 message: "Enrollment programs[].id and CTA .tracking are unchanged by page funnel fields.",
               },
             ],
-            next_actions: [],
+            next_actions: [
+              {
+                tool: "get_product_funnel_analytics",
+                priority: "optional",
+                reason:
+                  "Optional: load GA4 page performance for this product journey (sessions/views/conversions). Skip if you only needed membership.",
+                args_hint: { slug, ...(site ? { site } : {}) },
+              },
+            ],
           },
         );
       } catch (e) {

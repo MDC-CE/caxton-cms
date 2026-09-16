@@ -34,6 +34,10 @@ import {
   type ReviewContext,
 } from "./review-context";
 import type { ExistenceState } from "./proposal-review-rules";
+import {
+  buildDecisionDebug,
+  type ProposalDecisionDebug,
+} from "./decision-debug";
 
 const log = child({ module: "content-proposals" });
 
@@ -193,6 +197,8 @@ export type ProposalRecord = {
   blockers: ProposalBlocker[];
   /** Snapshot JSON for list badges — persisted. */
   review_context_snapshot: Record<string, unknown> | null;
+  /** Staff-only freeze of checklist/menu at terminal decide — persisted. */
+  decision_debug: ProposalDecisionDebug | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
   /** Enriched on read — not persisted. */
@@ -347,6 +353,7 @@ type ProposalRow = {
   closed_at: number | null;
   related_entries_json: string | null;
   review_context_snapshot_json: string | null;
+  decision_debug_json?: string | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
 };
@@ -583,6 +590,7 @@ function mapProposal(
       string,
       unknown
     > | null),
+    decision_debug: parseJson(row.decision_debug_json ?? null, null as ProposalDecisionDebug | null),
     supersedes_proposal_id: row.supersedes_proposal_id ?? null,
     replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
     entries,
@@ -1106,6 +1114,50 @@ export function createProposalService(deps: ProposalServiceDeps) {
         `UPDATE content_proposals SET review_context_snapshot_json = ?, updated_at = ? WHERE id = ?`,
       )
       .run(JSON.stringify(snap), Date.now(), proposalId);
+  }
+
+  function persistDecisionDebug(proposalId: string, blob: ProposalDecisionDebug): void {
+    dbFor(site)
+      .prepare(`UPDATE content_proposals SET decision_debug_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(blob), Date.now(), proposalId);
+  }
+
+  function captureDecisionDebug(
+    proposal: ProposalRecord,
+    action: "apply" | "reject" | "accept" | "close" | "withdraw",
+    caller: ProposalUpdateCaller,
+    reviewContext: ReviewContext | null,
+  ): void {
+    const actorRole =
+      caller.actor && "role" in caller.actor && typeof caller.actor.role === "string"
+        ? caller.actor.role
+        : undefined;
+    const blob = buildDecisionDebug({
+      action,
+      proposal: {
+        id: proposal.id,
+        // discovery_path builder only emits for open|partial — freeze as of pre-terminal.
+        status: "open",
+        kind: proposal.kind,
+        title: proposal.title,
+        summary: proposal.summary,
+        escalated: proposal.escalated,
+        escalated_note: proposal.escalated_note,
+        entries: proposal.entries,
+        open_blocker_count: proposal.open_blocker_count,
+        blockers: proposal.blockers,
+      },
+      reviewContext,
+      caller: {
+        username: caller.username,
+        asStaff: Boolean(caller.asStaff || caller.actor?.type === "ui"),
+        agent_session_id: caller.agent_session_id ?? null,
+        actor: caller.actor
+          ? { type: caller.actor.type, ...(actorRole ? { role: actorRole } : {}) }
+          : null,
+      },
+    });
+    persistDecisionDebug(proposal.id, blob);
   }
 
   function classifyLive(
@@ -1906,12 +1958,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `withdraw note required (min ${MIN_CLOSE_NOTE} characters)`,
         };
       }
+      const reviewBeforeWithdraw = classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
              close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
          WHERE id = ?`,
       ).run(now, "withdrawn", withdrawNote, caller.username, now, id);
+      captureDecisionDebug(proposal, "withdraw", caller, reviewBeforeWithdraw);
       emitProposalEvent(site, "proposal_withdrawn", id, caller.username);
       return { ok: true, proposal: get(id)! };
     }
@@ -1963,12 +2017,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `reject note required (min ${MIN_REJECT_NOTE} characters): why this must not ship`,
         };
       }
+      const reviewBeforeReject = classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'rejected', claim_json = NULL, updated_at = ?,
              close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
          WHERE id = ?`,
       ).run(now, kindRaw, rejectNote, caller.username, now, id);
+      captureDecisionDebug(proposal, "reject", caller, reviewBeforeReject);
       emitProposalEvent(site, "proposal_rejected", id, caller.username, {
         reject_kind: kindRaw,
       });
@@ -2020,12 +2076,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `Accept requires a next-step note (min ${MIN_ACCEPT_NEXT_STEP} characters)`,
         };
       }
+      const reviewBeforeAccept = classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
              close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
          WHERE id = ?`,
       ).run(now, "accepted", nextStep, caller.username, now, id);
+      captureDecisionDebug(proposal, "accept", caller, reviewBeforeAccept);
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: "accepted",
         close_note: nextStep,
@@ -2076,12 +2134,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (!validated.ok) {
         return { ok: false, code: validated.code, error: validated.error };
       }
+      const reviewBeforeClose = classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
              close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
          WHERE id = ?`,
       ).run(now, validated.reason, validated.note, caller.username, now, id);
+      captureDecisionDebug(proposal, "close", caller, reviewBeforeClose);
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: validated.reason,
         close_note: validated.note,
@@ -2851,6 +2911,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         total: fresh.entries.length,
       });
       if (next === "finished") {
+        captureDecisionDebug(proposal, "apply", caller, reviewForApply);
         emitProposalEvent(site, "proposal_finished", id, caller.username);
       }
       return { ok: true, proposal: fresh };
@@ -2906,8 +2967,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       created_agent_session_id, promote_on_apply, no_auto_retry,
       close_reason, close_note, closed_by, closed_at, related_entries_json,
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-      escalated, escalated_at, escalated_by, escalated_note
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      escalated, escalated_at, escalated_by, escalated_note, decision_debug_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -2968,6 +3029,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.escalated_at ?? null,
         p.escalated_by ?? null,
         p.escalated_note ?? null,
+        p.decision_debug ? JSON.stringify(p.decision_debug) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

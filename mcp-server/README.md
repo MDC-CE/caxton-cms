@@ -63,6 +63,8 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `reindex_database` | Vector reindex after item writes or vector_search definition patches (`databases_manage`) |
 | `list_products` / `get_product` / `update_product` | Product inventory, sidecar read, audience/metadata patch (confirm). Store visibility human-only. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Product conversion journey (read-only; `update_product_funnel` retired) |
+| `get_analytics_report` | Named GA4 BigQuery reports (`metrics_view`): site_summary / top_pages / page_detail / events_by_name / traffic_sources |
+| `get_organic_traffic` | GSC organic clicks/impressions (`metrics_view` or `seo_edit`) |
 | `test_redirect` | Inspect one URL: first-match winner + conflicts (`read_redirects`) |
 | `update_redirect` | Add / delete / move one CMS redirect (`edit_redirects`; call `test_redirect` first) |
 

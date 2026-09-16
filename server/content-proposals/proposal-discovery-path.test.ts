@@ -4,9 +4,16 @@ import {
   buildProposalDiscoveryPath,
   proposalDiscoveryToolNames,
 } from "./proposal-discovery-path.js";
-import { assertCatalogToolNames } from "./respond.js";
 
 const catalog = new Set(Object.keys(TOOL_GATES));
+
+function assertCatalogToolNames(
+  toolNames: string[],
+  catalogNames: ReadonlySet<string>,
+): { ok: true } | { ok: false; unknown: string[] } {
+  const unknown = [...new Set(toolNames.filter((t) => !catalogNames.has(t)))];
+  return unknown.length === 0 ? { ok: true } : { ok: false, unknown };
+}
 
 const baseEdits = {
   id: "p1",
@@ -83,6 +90,7 @@ describe("buildProposalDiscoveryPath", () => {
     const tools = items.filter((i) => i.kind === "tool");
     expect(thinks.length).toBeGreaterThan(0);
     expect(thinks.length).toBeLessThanOrEqual(6);
+    // core 4 + organic + funnel analytics (selling_page) = 6; not the full catalog union
     expect(tools.length).toBe(6);
     const toolIds = tools.map((t) => (t.kind === "tool" ? t.id : ""));
     expect(toolIds).toContain("traffic_risk");
@@ -210,6 +218,52 @@ describe("buildProposalDiscoveryPath", () => {
 
   it("edits discovery tools are all catalog members", () => {
     expect(assertCatalogToolNames(proposalDiscoveryToolNames(), catalog)).toEqual({ ok: true });
+  });
+
+  it("caps traffic tools: existing_content gets organic + site GA, not funnel analytics", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: baseEdits,
+      allowedTools: catalog,
+      reviewContext: { damage_class: "existing_content" },
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const ids = tools.map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(ids).toContain("traffic_risk");
+    expect(ids).toContain("site_ga");
+    expect(ids).not.toContain("journey_metrics");
+    const siteGa = tools.find((t) => t.kind === "tool" && t.id === "site_ga");
+    expect(siteGa?.kind).toBe("tool");
+    if (siteGa?.kind === "tool") {
+      expect(siteGa.args_hint).toMatchObject({
+        report: "page_detail",
+        content_type: "landing",
+        slug: "ai-course",
+      });
+    }
+  });
+
+  it("funnel field ops prefer journey metrics over site GA", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "landing",
+            slug: "ai-course",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "funnel.stage" }],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: { damage_class: "existing_content" },
+    });
+    const ids = discovery_path!.items
+      .filter((i) => i.kind === "tool")
+      .map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(ids).toContain("journey_metrics");
+    expect(ids).not.toContain("site_ga");
   });
 });
 

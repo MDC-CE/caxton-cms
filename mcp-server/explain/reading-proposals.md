@@ -1,8 +1,12 @@
 # Reading proposals (review context)
 
-When you open a single open/partial proposal via `list_proposals(proposal_id)`, the response includes live **`review_context`** (situation classification) and often a **`discovery_path`** built from `agent_preview.think_items`. Terminal proposals (`finished` / `rejected` / `withdrawn`) have no review context.
+When you open a single open/partial proposal via `list_proposals(proposal_id)`, the response includes live **`review_context`** (situation classification) and often a **`discovery_path`** built from `agent_preview.think_items`. Terminal proposals (`finished` / `rejected` / `withdrawn`) have no live review context.
 
 List rows may include a **`review_context_snapshot`** (filed-at-create or last shape-change hint). Prefer live `review_context` for decisions.
+
+**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
+
+**Role split:** proposers optimize opportunity (CTR / query fit) via create skills; reviewers use checklists to stop **harm** (invented claims, query drops, false scope) — not to rewrite for punchier copy.
 
 ## Two axes
 
@@ -25,11 +29,16 @@ Selling content types (`landing` / `landings` / `program` / `programs`) always c
 | `idea_accept` | Always on ideas |
 | `notes_close` | Notes kind |
 | `review_mode_inert` | Notes/idea (apply does not write YAML) |
-| `verify_copy` | Baseline edits — proposed value vs live / summary claims |
+| `title_description_ctr` | Any remaining op on `meta.page_title` and/or `meta.description` — SERP harm scorecard (Query/Specifics/Claims). Stacks with other checklists; meta-only omits `verify_copy` |
+| `verify_copy` | Edits with non–title/desc fields (or no SERP ops) — proposed vs live; summary **why/scope** (not value paste-match) |
 | `adjacent_findings` | Edits on existing live pages (`existing_metadata` / `existing_content` / `selling_page`) when apply is not blocked |
-| `disposition` | Baseline edits — apply / reject / blocker / adjacent notes park |
+| `disposition` | Baseline edits — apply / reject / blocker / adjacent notes park; leave-live on SERP → revise_entries then apply |
 | `existence_unknown` | Lookup could not confirm existence |
 | `target_missing` | Open edits whose live target no longer exists — **apply is blocked** |
+
+## Soft mix nudge
+
+When title/description ops are mixed with other field updates, warning `mixed_serp_and_body` on create and on open: prefer separate proposals next time; create still succeeds. No hard split while competing-entry edits remain one-open-per-page.
 
 ## Create-time refuses
 
@@ -53,13 +62,14 @@ If live classify reports `target_missing` (page deleted after filing), `update_p
 
 | Lane | Use | Blocks apply? |
 |---|---|---|
-| **`add_blocker`** | Proposed field is wrong, invents a claim, or summary overclaims (e.g. “content refresh” with meta-only ops) | Yes |
+| **`add_blocker`** | Proposed field is wrong, invents a claim, or summary **why/scope** is false (e.g. “content refresh” with meta-only ops) | Yes |
 | **`adjacent_findings` → notes** | Live page is broken in ways the ops do not touch (same entry), or you noticed defects on another entry | No |
 | **`reject`** | The change itself must not ship | Closes the proposal |
 
 ### Adjacent findings routing
 
-- **`verify_copy`:** proposed `value` vs live for fields this proposal writes; summary vs ops.
+- **`verify_copy`:** proposed `value` vs live for fields this proposal writes; summary why/scope vs ops (do not require summary to paste values).
+- **`title_description_ctr`:** SERP fields only — ignore Titulo/Meta blurb; leave live ≠ reject; revise to drop SERP ops if body should still ship.
 - **`adjacent_findings`:** live body/SEO vs approved facts when research tools were used.
 - Same entry, ops do not touch → **notes** naming this page (content type / slug / locale). Prefer `related_entries`. Link `related_issue_ids` **only if** an issue already exists — do not invent tickets. Do **not** block apply.
 - Other entry → **notes** naming that page — never a blocker on this proposal.
@@ -75,6 +85,7 @@ If live classify reports `target_missing` (page deleted after filing), `update_p
 - `shared_issue_id` — related open proposals on the same issue
 - `existence_unknown` — verify before inventing damage
 - `target_missing` — apply blocked
+- `mixed_serp_and_body` — title/description mixed with other field updates; prefer split next time
 
 ## Ideas
 
@@ -82,4 +93,4 @@ After mixed-risk refuse, a surviving idea has one class: worst of related target
 
 ## Partial proposals
 
-On `partial`, only pending/failed entries count toward the situation; already-applied entries are history.
+On `partial`, only pending/failed entries count toward the situation; already-applied entries are history. `title_description_ctr` drops once no remaining title/description ops.

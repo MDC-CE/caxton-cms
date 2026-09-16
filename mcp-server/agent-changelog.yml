@@ -6,6 +6,41 @@ window_days: 6
 
 entries:
   - date: "2026-09-15"
+    summary: "get_analytics_report — named GA4 BigQuery reports + discovery nudges"
+    agent_impact:
+      - "New read tool get_analytics_report(report, days?, …) — site_summary | top_pages | page_detail | events_by_name | traffic_sources. Cap metrics_view. page_detail accepts path or content_type+slug (not bare slug). Soft not_configured vs empty ok. Reconnect MCP."
+      - "explain_site topic analytics; get_product_funnel success suggests optional get_product_funnel_analytics. Proposal discovery_path: max 2 traffic tools (organic + funnel analytics or site GA)."
+      - "Not GSC (get_organic_traffic) and not a substitute for product journey KPIs (get_product_funnel_analytics)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/analytics.ts
+      - mcp-server/explain/analytics.md
+      - server/analytics/reports.ts
+      - server/content-proposals/proposal-discovery-path.ts
+  - date: "2026-09-15"
+    summary: "get_organic_traffic mode=leaderboard — top pages by traffic"
+    agent_impact:
+      - "New exclusive mode leaderboard: top day-cache paths by sort_by clicks|impressions (default clicks); optional path_prefix; limit 25/max 50 + offset. Soft-resolves content_type/slug/locale. Prefer over batching paths for top pages."
+      - "Top-only (no order/asc). Not full CMS inventory / not zero-traffic finder (leaderboard_day_cache_universe). Unnormalizable path_prefix hard-fails; valid empty filter soft-ok + path_prefix_no_matches."
+      - "Reconnect MCP so tools/list refreshes get_organic_traffic schema (new mode + params)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/organic-traffic.ts
+      - mcp-server/lib/organic-traffic-mcp.ts
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/overview.md
+  - date: "2026-09-15"
+    summary: "Title/description harm checklist + multi-situation review"
+    agent_impact:
+      - "Any remaining meta.page_title / meta.description op attaches think item title_description_ctr (Query/Specifics/Claims harm scorecard). Stacks with verify_copy when other fields are also pending; meta-only omits verify_copy."
+      - "mixed_serp_and_body warning on create/open — prefer split next time; not a create refuse. verify_copy judges why/scope, not summary value dumps. decision_debug is staff-only (stripped from MCP)."
+      - "Re-bootstrap_agent / explain reading-proposals for checklist table."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-context.ts
+      - mcp-server/explain/reading-proposals.md
+  - date: "2026-09-15"
     summary: "MCP write-off is propose-only; write defaults off"
     agent_impact:
       - "mcp_write_enabled false (default when unset) keeps view caps + proposals_create only — propose_change and author update_proposal; no direct draft/live tools; no proposals_review apply/reject over MCP."

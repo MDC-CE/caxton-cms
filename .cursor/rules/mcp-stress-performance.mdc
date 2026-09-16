@@ -1,0 +1,71 @@
+---
+description: When changing MCP tools, decide stress harness coverage (add / covered / skip)
+alwaysApply: true
+---
+
+# MCP tool stress / performance
+
+When creating or updating a plan (Plan mode / CreatePlan), or when implementing under `mcp-server/` or `scripts/stress/`, that **adds, removes, renames, or meaningfully changes** an MCP tool (handler, args, payload shape, hot path) or the stress harness — include a **Stress / performance** section.
+
+If the change is unrelated (typo, pure CSS, dependency bump, changelog-only, explain copy with no size/I/O change), mark the section **N/A** with a one-line reason. Do not invent fake stress work; do not omit the section when MCP tools *are* in scope.
+
+Harness: `npm run test:stress` → [`scripts/stress/scenarios.ts`](scripts/stress/scenarios.ts) (+ optional [`scripts/stress/budgets.ts`](scripts/stress/budgets.ts) `byId`) → `artifacts/stress-report.{json,md,html}`.
+
+Not every tool needs a new scenario. Decide explicitly: **add**, **covered**, or **skip**.
+
+## Required decision (do not skip when in scope)
+
+For each manipulated tool, record briefly:
+
+1. **Frequency** — How often agents call this (bootstrap / every session, common read, rare mutate, docs-only)
+2. **Impact** — Latency, payload/token size, disk/DB/network, concurrency risk under burst
+3. **Decision** — one of:
+   - **Add / extend scenario** — new or updated row in `SCENARIOS` (and plain-English `about` for the HTML report)
+   - **Covered already** — name the existing scenario `id`(s); no harness change
+   - **Skip** — one-line reason (rare, mutate-only, tiny control, covered by sibling tool)
+
+Stress stays in plan + implement wrap-up (+ `scenarios.ts` when adding). Do **not** require stress decisions in `agent-changelog.yml`.
+
+## When to add or extend a scenario
+
+Prefer adding (or tightening args / `phase: "both"` / heavy variant) when **any** of:
+
+- New **high-frequency read** (list/get used in normal agent loops)
+- Payload can grow large (full pages, catalogs, `include_*` flags, docs/skills)
+- New mode/arg that changes cost (pagination, wide date windows, `limit`, search-engines, skill content)
+- Hot path shares locks/caches with other tools (risk under concurrent burst)
+- Existing scenario no longer matches the tool contract (rename, required args, default size)
+
+## When skip is OK
+
+- Mutating tools the harness intentionally does **not** call (stress is read-only)
+- Ultra-rare admin/debug tools with tiny fixed payloads
+- Pure response-envelope / `warnings` / `next_actions` changes with no I/O or size change
+- Thin wrappers already represented by a heavier sibling scenario
+
+## How to add a scenario (when decision = add)
+
+1. Append a row to `SCENARIOS` in [`scripts/stress/scenarios.ts`](scripts/stress/scenarios.ts) (`id`, `tool`, plain-English `about`, `buildArgs` / `args`, `skipIf` if needed).
+2. Use `phase: "both"` only for tools that should also appear in the concurrent burst.
+3. Use `class: "docs"` for large bootstrap/explain-style payloads.
+4. Override `budgets.byId[id]` only when the default band is wrong — keep bands loose until you have a baseline.
+5. Re-run `npm run test:stress` (or `--skip-pull` if content is fresh) and confirm the new row appears in the HTML report with sane p95 / tokens.
+
+## Anti-patterns
+
+| Anti-pattern | Do instead |
+|---|---|
+| Ship a new list/get tool with no stress thought | Decide add / covered / skip explicitly |
+| Duplicate scenarios for every arg combo | One representative + optional heavy/light contrast |
+| Skip “because stress is hard” on hot reads | Prefer a small sequential scenario over nothing |
+| Add mutate/write scenarios to the harness | Keep stress read-only; document skip |
+| Change tool args but leave stale `buildArgs` | Update or retire the scenario in the same change |
+| Invent stress work on typo/CSS plans | Mark Stress / performance **N/A** |
+
+## Plan section shape
+
+In the plan’s **Stress / performance** section:
+
+- **Tools touched:** …
+- **Per tool:** frequency · impact · decision (`add` | `covered:<id>` | `skip:reason`)
+- **Harness edits:** none | `scenarios.ts` (± `budgets.ts`)

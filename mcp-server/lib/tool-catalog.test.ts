@@ -70,11 +70,12 @@ describe("allowedToolNames", () => {
     expect(admin.has("update_proposal")).toBe(false);
   });
 
-  it("Metrics Viewer sees identity tools plus get_validation_issues and get_organic_traffic", () => {
+  it("Metrics Viewer sees identity tools plus get_validation_issues, get_organic_traffic, and get_analytics_report", () => {
     const names = new Set(allowedToolNames(metricsViewer));
     expect(names.has("get_current_user")).toBe(true);
     expect(names.has("get_validation_issues")).toBe(true);
     expect(names.has("get_organic_traffic")).toBe(true);
+    expect(names.has("get_analytics_report")).toBe(true);
     expect(names.has("list_media")).toBe(false);
     expect(names.has("list_entries")).toBe(false);
     expect(names.has("run_entry_diagnostics")).toBe(false);
@@ -104,6 +105,7 @@ describe("allowedToolNames", () => {
     expect(names.has("get_or_set_media_to_gallery")).toBe(true);
     expect(names.has("list_media")).toBe(true);
     expect(names.has("get_organic_traffic")).toBe(false);
+    expect(names.has("get_analytics_report")).toBe(false);
     expect(names.has("update_fields")).toBe(false);
     expect(names.has("create_entry")).toBe(false);
     expect(names.has("test_redirect")).toBe(false);

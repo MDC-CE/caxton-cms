@@ -35,22 +35,24 @@ Fact-staleness class for **substantive** content refreshes — **not** GSC traff
 - `refresh_keyword_metrics` — OpenRush inspect_keyword → keyword cache only (no YAML `kw_*`)
 - `list_seo_clusters`, `list_seo_cluster_entries`, `get_seo_cluster`
 - `get_organic_traffic` — GSC clicks/impressions (day cache / site BigQuery); not inspection, not planning volume
+- `get_analytics_report` — GA4 behavioral reports (BigQuery export); requires `metrics_view` — see topic `analytics`
 - `run_entry_diagnostics` with `categories: ["seo"]`
 
 ### Organic traffic (`get_organic_traffic`)
 
-- **One mode per call:** `site` | `paths` | `clusters` | `opportunities` | `queries`. Requires `metrics_view` or `seo_edit`.
-- **Date window (`start` / `end`):** For `site` | `paths` | `clusters` | `queries` — both YYYY-MM-DD or neither; omit → last 28 complete GSC days; clamp `end` to latest complete day; max span **90**. Longer → hard fail (use OpenRush `get_search_performance` or another specialized Search Console / SEO API). Entirely after latest complete day → hard fail (retry with an earlier `end`). Missing day-cache files inside a valid window → soft `incomplete` (do not treat zeros as definitive without checking flags). Response returns `window`, `days_in_window`, `incomplete`.
+- **One mode per call:** `site` | `paths` | `clusters` | `opportunities` | `queries` | `leaderboard`. Requires `metrics_view` or `seo_edit`.
+- **Date window (`start` / `end`):** For `site` | `paths` | `clusters` | `queries` | `leaderboard` — both YYYY-MM-DD or neither; omit → last 28 complete GSC days; clamp `end` to latest complete day; max span **90**. Longer → hard fail (use OpenRush `get_search_performance` or another specialized Search Console / SEO API). Entirely after latest complete day → hard fail (retry with an earlier `end`). Missing day-cache files inside a valid window → soft `incomplete` (do not treat zeros as definitive without checking flags). Response returns `window`, `days_in_window`, `incomplete`.
 - **`opportunities` + dates:** Hard fail if `start` or `end` is set — omit dates; use `decay_window` (7|28) instead.
-- **site:** Whole-site KPI from BigQuery site totals (cached ~1h). `market` ignored (`market_ignored_for_mode`). Same calendar window can disagree with paths/clusters (day cache) — not a bug (`organic_site_vs_paths_source` when custom dates).
+- **site:** Whole-site KPI from BigQuery site totals (cached ~1h). `market` ignored (`market_ignored_for_mode`). Same calendar window can disagree with paths/clusters/leaderboard (day cache) — not a bug (`organic_site_vs_paths_source` when custom dates).
 - **paths:** 1–50 public paths or absolute URLs after dedupe (not slugs). Soft partial: `traffic: null` + `missing_paths`; empty array fails. Resolve live URLs via `get_entry_seo.urls` then retry.
 - **clusters:** 1–25 hub ids / pillar paths. Per-hub traffic + `selection_totals` over **unique paths** (`selection_not_site` — not site-wide). Unknown hubs → `unknown_hubs` + `partial_batch`.
 - **opportunities:** Flattened Diagnostics cards into `items[]` with `kind` (`page2` | `low_ctr` | `link_gaps` | `decay` | `cannibalization` | `missing_serp`), paginated (`opportunities_limit` / `opportunities_offset`). Read-only (`pullLatest: false`); no day backfill / SERP refresh.
 - **queries:** GSC-style query-text search. Required `query_contains` (min 2 chars). Optional `match` (`contains` default | `equals` | `starts_with`), `start`/`end` (same window rules as above), `market`, `limit`/`offset`, `pages_per_query` (default 5, max 15). BigQuery first; day-cache fallback (`organic_from_day_cache` — may miss keep-filtered long-tail). Rows grouped by query with nested landing `pages[]`. `selection_totals` = **all matches in window** (not just the page). Empty match → soft ok + `queries_no_matches`. `include_series` ignored (`series_ignored_for_mode`).
-- **Series:** `include_series` default false. Allowed for `site`, or paths/clusters when batch ≤ 5; else `series_skipped_batch_too_large`. Ignored for `queries`.
+- **leaderboard:** Top day-cache paths (highest first; no bottom/`order` in v1). `sort_by` `clicks` (default) | `impressions`; optional `path_prefix` (normalize via path key, then exact-or-descendant — e.g. `/en/blog`); `limit` default 25 max 50 + `offset`/`next_offset`/`total`. Soft-resolve `content_type`/`slug`/`locale` when known. `selection_totals` = filtered universe (not the page). Prefer over batching `paths` for “top pages by traffic.” Warning `leaderboard_day_cache_universe` — not full CMS inventory / not zero-traffic finder. Valid prefix with no matches → soft ok + `path_prefix_no_matches`; unnormalizable prefix → hard fail. `include_series` ignored.
+- **Series:** `include_series` default false. Allowed for `site`, or paths/clusters when batch ≤ 5; else `series_skipped_batch_too_large`. Ignored for `queries` / `leaderboard`.
 - **Unconfigured:** Soft ok with `configured: false` + `organic_not_configured` (not a fake zero without the flag).
 - **Non-effects:** Not URL Inspection (`include_search_engines`); not `keyword_metrics` / `kw_monthly_volume`.
-- **market:** Honored for `paths` / `clusters` / `queries`. Ignored for `site` / `opportunities`.
+- **market:** Honored for `paths` / `clusters` / `queries` / `leaderboard`. Ignored for `site` / `opportunities`.
 ### SEO clustering (per-entry + hub inventory)
 
 - **Write layer:** Cluster `seo:` may be written only on live `{locale}.yml`, or on `draft.{locale}.yml` when the entry has **no** live locales yet. A/B experiment variants are forbidden (`seo_variant_forbidden`). Draft-while-live is forbidden (`seo_draft_while_live_forbidden`). Do not set SEO on a variant then promote — promote over live **keeps live `seo:`** (`seo_not_promoted_from_variant`). First `publish_draft` / go-live with no live file still brings draft SEO onto live.

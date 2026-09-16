@@ -19,7 +19,7 @@ Purchase completes off-site. This site never fires `purchase`.
 ## Journey tools (per product SKU)
 
 - `get_product_funnel` — locked product page + pages whose `funnel.products` includes this SKU (or `all`), grouped by `funnel.stage`
-- `get_product_funnel_analytics` — page performance for that journey (GA4 BigQuery)
+- `get_product_funnel_analytics` — page performance for that journey (GA4 BigQuery). Site-wide GA → `get_analytics_report` (topic `analytics`).
 - **`update_product_funnel` is retired** — edit membership via `update_fields` (`funnel.stage` / `funnel.products`) or Funnel tab / PUT, not `_ecommerce.yml` funnel.steps
 - Bulk safe attrs (meta + funnel): `update_entry_attributes` (**BREAKING:** `update_meta_fields` removed)
 - Do **not** look for `funnel` on a hero section — it is top-level on `_common.yml`

@@ -24,11 +24,24 @@ export type ChecklistId =
   | "idea_accept"
   | "notes_close"
   | "review_mode_inert"
+  | "title_description_ctr"
   | "verify_copy"
   | "adjacent_findings"
   | "disposition"
   | "existence_unknown"
   | "target_missing";
+
+/** SERP title/description field paths that attach the title_description_ctr checklist. */
+export const TITLE_DESCRIPTION_FIELD_PATHS = new Set([
+  "meta.page_title",
+  "meta.description",
+]);
+
+export const MIXED_SERP_AND_BODY = "mixed_serp_and_body";
+
+/** Staff always-visible line when title_description_ctr is active (no "CTR" wording). */
+export const TITLE_DESCRIPTION_STAFF_NOTE =
+  "Also check search title/description — honest and not worse than live.";
 
 /** v1 stopgap — extend until strategy.selling (or similar) exists. */
 export const SELLING_CONTENT_TYPES = new Set([
@@ -103,6 +116,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "proposed number vs approved source",
       "locale of the figure",
       "reject or block if the source is missing",
+      "optional: get_product_funnel_analytics for conversion context — not required to apply",
     ],
     priority: 10,
   },
@@ -177,13 +191,33 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     look_for: ["do not reason about soft vs draft for this proposal kind"],
     priority: 40,
   },
+  title_description_ctr: {
+    id: "title_description_ctr",
+    title: "Block bad or weaker search title/description",
+    why: "Stop invented claims and query drops on SERP fields — not a CTR rewrite brief.",
+    look_for: [
+      "score Query/Specifics/Claims then Ship: up|same|down / ok|bad / yes|no",
+      "Claims bad (invented salary/year/employer/superlative vs live body) → block or reject — never apply",
+      "Query same/down and Specifics down → block",
+      "same/same with no real grammar/accents/year/casing win → leave live (leave live ≠ reject)",
+      "leave live on SERP but body should ship → revise_entries to drop or fix title/description ops, then apply (apply is atomic)",
+      "Query up may offset Specifics down when Claims ok → apply",
+      "ops vs live only — ignore staff summary / Titulo/Meta blurb; never block because blurb ≠ ops",
+      "empty or reset title/description vs live — usually block",
+      "judge only meta.page_title / meta.description — body breakage is verify_copy / disposition",
+      "non-goal: do not coach punchier copy or CTR tactics",
+      "optional: get_organic_traffic mode=paths for the live URL before applying SERP changes",
+    ],
+    priority: 25,
+  },
   verify_copy: {
     id: "verify_copy",
-    title: "Check the proposed change against live",
-    why: "Confirm the proposed values match the summary and do not invent claims.",
+    title: "Check proposed fields against live",
+    why: "Catch breakage and invented claims on the fields this proposal writes — not a rewrite coach.",
     look_for: [
       "proposed value vs live for fields this proposal writes",
-      "summary claims match the ops (meta-only is not a content refresh)",
+      "summary why/scope justified by ops (e.g. content refresh with meta-only → add_blocker)",
+      "do not require the summary to paste proposed values",
       "no invented stats in the proposed text",
     ],
     priority: 30,
@@ -211,7 +245,8 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     title: "Choose a disposition",
     why: "After optional research, decide apply, reject, add_blocker, or park adjacent notes.",
     look_for: [
-      "apply only when you would ship this yourself",
+      "apply only when every in-scope gate is clean and you would ship this yourself",
+      "title/description leave-live or block while other ops are fine → revise_entries to drop/fix SERP ops, then apply (no partial-field apply)",
       "add_blocker when the proposed change is wrong or invents claims (then author revise_entries)",
       "out-of-scope live defects → adjacent_findings notes park (same or other page); do not default every finding to add_blocker",
       "reject only for bad/impossible/illegal/harmful/duplicate/target missing — confirm_reject + reject_kind + note",
@@ -267,4 +302,41 @@ export const DAMAGE_CLASS_RANK: Record<DamageClass, number> = {
 
 export function worseDamageClass(a: DamageClass, b: DamageClass): DamageClass {
   return DAMAGE_CLASS_RANK[a] >= DAMAGE_CLASS_RANK[b] ? a : b;
+}
+
+export function isTitleDescriptionFieldPath(fieldPath: string): boolean {
+  return TITLE_DESCRIPTION_FIELD_PATHS.has(fieldPath.trim());
+}
+
+/** Remaining work entries with at least one title/description op. */
+export function hasTitleDescriptionOps(
+  entries: Array<{ status?: string | null; ops?: Array<{ field_path?: string }> | null }>,
+): boolean {
+  for (const e of entries) {
+    if (e.status && e.status !== "pending" && e.status !== "failed") continue;
+    for (const op of e.ops ?? []) {
+      if (typeof op.field_path === "string" && isTitleDescriptionFieldPath(op.field_path)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Every remaining op is page_title and/or description (non-empty). */
+export function isTitleDescriptionOnlyOps(
+  entries: Array<{ status?: string | null; ops?: Array<{ field_path?: string }> | null }>,
+): boolean {
+  let any = false;
+  for (const e of entries) {
+    if (e.status && e.status !== "pending" && e.status !== "failed") continue;
+    const ops = e.ops ?? [];
+    if (!ops.length) return false;
+    for (const op of ops) {
+      if (typeof op.field_path !== "string" || !op.field_path.trim()) return false;
+      if (!isTitleDescriptionFieldPath(op.field_path)) return false;
+      any = true;
+    }
+  }
+  return any;
 }

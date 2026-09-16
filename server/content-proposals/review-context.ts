@@ -8,9 +8,13 @@ import {
   DAMAGE_CLASS_META,
   THINK_TEMPLATES,
   UNDO_COPY,
+  MIXED_SERP_AND_BODY,
+  TITLE_DESCRIPTION_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
+  hasTitleDescriptionOps,
+  isTitleDescriptionOnlyOps,
   type ChecklistId,
   type DamageClass,
   type ExistenceState,
@@ -233,7 +237,24 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
     if (damage_class === "selling_page") checklists.add("selling_page_figures");
     if (damage_class === "new_public_content") checklists.add("new_content_brand");
-    checklists.add("verify_copy");
+
+    const workForOps = toClassify;
+    const hasSerp = hasTitleDescriptionOps(workForOps);
+    const serpOnly = isTitleDescriptionOnlyOps(workForOps);
+    if (hasSerp) {
+      checklists.add("title_description_ctr");
+      if (!serpOnly) {
+        checklists.add("verify_copy");
+        warnings.push({
+          code: MIXED_SERP_AND_BODY,
+          message:
+            "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and verify_copy. Create still succeeds.",
+        });
+      }
+    } else {
+      checklists.add("verify_copy");
+    }
+
     if (
       !block_apply &&
       (damage_class === "existing_metadata" ||
@@ -342,6 +363,17 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   if (situation_changed_since_filed) {
     summaryParts.push(`Changed since filed (was ${snapshot!.damage_class}).`);
   }
+  const hasTitleDescChecklist = orderedIds.some((t) => t.id === "title_description_ctr");
+  if (hasTitleDescChecklist && !block_apply) {
+    summaryParts.push(TITLE_DESCRIPTION_STAFF_NOTE);
+  }
+
+  let staffSituation = block_apply
+    ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
+    : meta.situation_description;
+  if (hasTitleDescChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
+  }
 
   return {
     undo_cost,
@@ -353,9 +385,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     summary: summaryParts.join(" "),
     staff_summary: {
       badge_label: block_apply ? "Target missing" : meta.badge_label,
-      situation_description: block_apply
-        ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
-        : meta.situation_description,
+      situation_description: staffSituation,
       risk: block_apply ? "Apply blocked — target gone." : meta.risk,
       undo: UNDO_COPY[undo_cost],
       ...(relatedStaff ? { related: relatedStaff } : {}),

@@ -11,6 +11,7 @@ import { resolveSiteContext } from "../lib/content.js";
 import { SITE_PARAM_DESC, MULTI_SITE_TOOL_BLURB } from "../lib/entry-helpers.js";
 import {
   assembleClustersMode,
+  assembleLeaderboardMode,
   assembleOpportunitiesMode,
   assemblePathsMode,
   assembleQueriesMode,
@@ -18,6 +19,8 @@ import {
   opportunitiesDatesRejectMessage,
   MAX_ORGANIC_HUBS,
   MAX_ORGANIC_PATHS,
+  LEADERBOARD_DEFAULT_LIMIT,
+  LEADERBOARD_MAX_LIMIT,
   OPPORTUNITIES_DEFAULT_LIMIT,
   OPPORTUNITIES_MAX_LIMIT,
   ORGANIC_MAX_SPAN_DAYS,
@@ -36,20 +39,22 @@ export function registerOrganicTrafficTools(
   mcp.tool(
     "get_organic_traffic",
     "Read Google Search Console organic traffic (clicks/impressions) from the day cache / site BigQuery. " +
-      "Exclusive mode per call: site | paths | clusters | opportunities | queries. " +
+      "Exclusive mode per call: site | paths | clusters | opportunities | queries | leaderboard. " +
       `paths: 1–${MAX_ORGANIC_PATHS} public paths or absolute URLs (not slugs; deduped). ` +
       `clusters: 1–${MAX_ORGANIC_HUBS} hub ids or pillar paths (deduped; selection_totals = unique paths, not site). ` +
       "opportunities: flattened work queue with kind (page2|low_ctr|link_gaps|decay|cannibalization|missing_serp), paginated — do not pass start/end (use decay_window). " +
       `queries: GSC-style query text search (query_contains min ${QUERIES_MIN_CONTAINS_LEN} chars); match contains|equals|starts_with; BigQuery first, day-cache fallback; nested landing pages; selection_totals = all matches in window. ` +
-      `start/end (YYYY-MM-DD, both or neither) for site|paths|clusters|queries; omit for last 28 complete days; max span ${ORGANIC_MAX_SPAN_DAYS}; longer → use OpenRush get_search_performance or specialized SEO APIs. ` +
-      "Soft partial for unknown paths/hubs; empty batch fails. market for paths/clusters/queries. " +
-      "include_series default false; series for site when requested, or paths/clusters when batch ≤ 5; ignored for queries. " +
+      `leaderboard: top day-cache paths by sort_by clicks|impressions (default clicks); optional path_prefix (normalized startsWith / exact-or-descendant); limit default ${LEADERBOARD_DEFAULT_LIMIT} max ${LEADERBOARD_MAX_LIMIT}; use offset to page down — prefer over batching paths for "top pages by traffic"; not a zero-traffic / full-CMS inventory. ` +
+      `start/end (YYYY-MM-DD, both or neither) for site|paths|clusters|queries|leaderboard; omit for last 28 complete days; max span ${ORGANIC_MAX_SPAN_DAYS}; longer → use OpenRush get_search_performance or specialized SEO APIs. ` +
+      "Soft partial for unknown paths/hubs; empty paths/hubs batch fails. market for paths/clusters/queries/leaderboard. " +
+      "include_series default false; series for site when requested, or paths/clusters when batch ≤ 5; ignored for queries|leaderboard. " +
+      "Unused sibling params for the chosen mode are ignored (no hard reject). " +
       "Read-only — does not backfill days, refresh SERP, or call URL Inspection. " +
       "Not keyword_metrics / kw_monthly_volume. Requires metrics_view or seo_edit. " +
       MULTI_SITE_TOOL_BLURB,
     {
       mode: z
-        .enum(["site", "paths", "clusters", "opportunities", "queries"])
+        .enum(["site", "paths", "clusters", "opportunities", "queries", "leaderboard"])
         .describe("Exclusive mode for this call"),
       paths: z
         .array(z.string())
@@ -69,26 +74,38 @@ export function registerOrganicTrafficTools(
         .enum(["contains", "equals", "starts_with"])
         .optional()
         .describe("queries mode only. Default contains."),
+      sort_by: z
+        .enum(["clicks", "impressions"])
+        .optional()
+        .describe("leaderboard mode only. Default clicks. Top-only (highest first); use offset to page down."),
+      path_prefix: z
+        .string()
+        .optional()
+        .describe(
+          "leaderboard mode only. Optional public path or URL; normalized then exact-or-descendant match (e.g. /en/blog). Empty ignored; unnormalizable → hard fail.",
+        ),
       start: z
         .string()
         .optional()
         .describe(
-          `site|paths|clusters|queries: YYYY-MM-DD. Both start and end required together; omit both for last 28 complete days. Rejected for opportunities. Max span ${ORGANIC_MAX_SPAN_DAYS}.`,
+          `site|paths|clusters|queries|leaderboard: YYYY-MM-DD. Both start and end required together; omit both for last 28 complete days. Rejected for opportunities. Max span ${ORGANIC_MAX_SPAN_DAYS}.`,
         ),
       end: z
         .string()
         .optional()
         .describe(
-          `site|paths|clusters|queries: YYYY-MM-DD with start. Max span ${ORGANIC_MAX_SPAN_DAYS}; longer → OpenRush/specialized APIs. Rejected for opportunities.`,
+          `site|paths|clusters|queries|leaderboard: YYYY-MM-DD with start. Max span ${ORGANIC_MAX_SPAN_DAYS}; longer → OpenRush/specialized APIs. Rejected for opportunities.`,
         ),
       include_series: z
         .boolean()
         .optional()
-        .describe("Default false. Daily series for site, or paths/clusters when batch size ≤ 5. Ignored for queries."),
+        .describe(
+          "Default false. Daily series for site, or paths/clusters when batch size ≤ 5. Ignored for queries|leaderboard.",
+        ),
       market: z
         .string()
         .optional()
-        .describe("Organic market id (default worldwide). Honored for paths/clusters/queries."),
+        .describe("Organic market id (default worldwide). Honored for paths/clusters/queries/leaderboard."),
       decay_window: z
         .union([z.literal(7), z.literal(28)])
         .optional()
@@ -110,15 +127,17 @@ export function registerOrganicTrafficTools(
         .number()
         .int()
         .min(1)
-        .max(QUERIES_MAX_LIMIT)
+        .max(Math.max(QUERIES_MAX_LIMIT, LEADERBOARD_MAX_LIMIT))
         .optional()
-        .describe(`queries mode: page size for queries (default ${QUERIES_DEFAULT_LIMIT}, max ${QUERIES_MAX_LIMIT}).`),
+        .describe(
+          `queries|leaderboard: page size (queries default ${QUERIES_DEFAULT_LIMIT} max ${QUERIES_MAX_LIMIT}; leaderboard default ${LEADERBOARD_DEFAULT_LIMIT} max ${LEADERBOARD_MAX_LIMIT}).`,
+        ),
       offset: z
         .number()
         .int()
         .min(0)
         .optional()
-        .describe("queries mode: pagination offset (default 0)."),
+        .describe("queries|leaderboard: pagination offset (default 0)."),
       pages_per_query: z
         .number()
         .int()
@@ -136,6 +155,8 @@ export function registerOrganicTrafficTools(
       hub_ids,
       query_contains,
       match,
+      sort_by,
+      path_prefix,
       start,
       end,
       include_series,
@@ -257,6 +278,27 @@ export function registerOrganicTrafficTools(
           if ("error" in result) return fail(result.error);
           return ok(
             { message: "Organic query search", ...result.payload },
+            { warnings: result.warnings, side_effects: [], next_actions: result.next_actions },
+          );
+        }
+
+        if (mode === "leaderboard") {
+          const result = assembleLeaderboardMode({
+            contentRoot: contentPath,
+            contentFolder,
+            sort_by,
+            path_prefix,
+            market: marketProvided ? market!.trim() : undefined,
+            include_series,
+            start,
+            end,
+            limit,
+            offset,
+            site: siteDomain,
+          });
+          if ("error" in result) return fail(result.error);
+          return ok(
+            { message: "Organic traffic leaderboard", ...result.payload },
             { warnings: result.warnings, side_effects: [], next_actions: result.next_actions },
           );
         }

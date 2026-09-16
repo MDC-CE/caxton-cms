@@ -45,6 +45,8 @@ export const MAX_ORGANIC_HUBS = 25;
 export const SERIES_BATCH_MAX = 5;
 export const OPPORTUNITIES_DEFAULT_LIMIT = 25;
 export const OPPORTUNITIES_MAX_LIMIT = 50;
+export const LEADERBOARD_DEFAULT_LIMIT = 25;
+export const LEADERBOARD_MAX_LIMIT = 50;
 export {
   QUERIES_DEFAULT_LIMIT,
   QUERIES_MAX_LIMIT,
@@ -54,7 +56,26 @@ export {
 };
 export { ORGANIC_MAX_SPAN_DAYS };
 
-export type OrganicTrafficMode = "site" | "paths" | "clusters" | "opportunities" | "queries";
+export type OrganicTrafficMode =
+  | "site"
+  | "paths"
+  | "clusters"
+  | "opportunities"
+  | "queries"
+  | "leaderboard";
+
+export type LeaderboardSortBy = "clicks" | "impressions";
+
+export type LeaderboardRow = {
+  path: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+  content_type: string | null;
+  slug: string | null;
+  locale: string | null;
+};
 
 export const OPPORTUNITY_KINDS = [
   "page2",
@@ -152,6 +173,105 @@ export function clampOpportunitiesLimit(raw: number | undefined): number {
 export function clampOpportunitiesOffset(raw: number | undefined): number {
   if (raw == null || !Number.isFinite(raw)) return 0;
   return Math.max(0, Math.floor(raw));
+}
+
+export function clampLeaderboardLimit(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw)) return LEADERBOARD_DEFAULT_LIMIT;
+  return Math.min(LEADERBOARD_MAX_LIMIT, Math.max(1, Math.floor(raw)));
+}
+
+export function clampLeaderboardOffset(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw)) return 0;
+  return Math.max(0, Math.floor(raw));
+}
+
+export function parseLeaderboardSortBy(raw?: string | null): LeaderboardSortBy {
+  return raw === "impressions" ? "impressions" : "clicks";
+}
+
+/** Empty/whitespace → no filter. Non-empty must normalize to a path key. */
+export function resolveLeaderboardPathPrefix(
+  raw?: string | null,
+): { ok: true; prefix: string | null } | { ok: false; error: string } {
+  if (raw == null) return { ok: true, prefix: null };
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (!trimmed) return { ok: true, prefix: null };
+  const key = pathKeyFromUrlOrPath(trimmed);
+  if (!key) {
+    return {
+      ok: false,
+      error: `path_prefix could not be normalized to a path: "${trimmed}". Pass a public path (e.g. /en/blog) or absolute URL.`,
+    };
+  }
+  return { ok: true, prefix: key };
+}
+
+/** Exact path or descendant (`/en/blog` matches `/en/blog/x`, not `/en/blogging`). */
+export function pathMatchesLeaderboardPrefix(path: string, prefix: string): boolean {
+  if (path === prefix) return true;
+  if (prefix === "/") return path.startsWith("/");
+  return path.startsWith(`${prefix}/`);
+}
+
+export function filterByPathPrefix(
+  byPath: Record<string, PathTrafficStats>,
+  prefix: string | null,
+): Array<{ path: string; stats: PathTrafficStats }> {
+  const entries = Object.entries(byPath);
+  const filtered =
+    prefix == null
+      ? entries
+      : entries.filter(([path]) => pathMatchesLeaderboardPrefix(path, prefix));
+  return filtered.map(([path, stats]) => ({ path, stats }));
+}
+
+export function sortLeaderboardEntries(
+  entries: Array<{ path: string; stats: PathTrafficStats }>,
+  sortBy: LeaderboardSortBy,
+): Array<{ path: string; stats: PathTrafficStats }> {
+  return [...entries].sort((a, b) => {
+    const av = sortBy === "impressions" ? a.stats.impressions : a.stats.clicks;
+    const bv = sortBy === "impressions" ? b.stats.impressions : b.stats.clicks;
+    if (bv !== av) return bv - av;
+    return a.path.localeCompare(b.path);
+  });
+}
+
+export function leaderboardRowFromStats(
+  path: string,
+  stats: PathTrafficStats,
+  identity?: { content_type: string | null; slug: string | null; locale: string | null },
+): LeaderboardRow {
+  const clicks = stats.clicks;
+  const impressions = stats.impressions;
+  return {
+    path,
+    clicks,
+    impressions,
+    ctr: impressions > 0 ? clicks / impressions : 0,
+    position: stats.position,
+    content_type: identity?.content_type ?? null,
+    slug: identity?.slug ?? null,
+    locale: identity?.locale ?? null,
+  };
+}
+
+export function softResolveLeaderboardIdentity(path: string): {
+  content_type: string | null;
+  slug: string | null;
+  locale: string | null;
+} {
+  try {
+    const r = contentIndex.resolveUrl(path);
+    if (!r) return { content_type: null, slug: null, locale: null };
+    return {
+      content_type: r.contentType ?? null,
+      slug: r.slug ?? null,
+      locale: r.patternLocale ?? null,
+    };
+  } catch {
+    return { content_type: null, slug: null, locale: null };
+  }
 }
 
 /** Flatten Diagnostics organic cards into one ranked work queue (stable kind order). */
@@ -254,25 +374,29 @@ export function identityNonEffectWarnings(): McpWarning[] {
 export function marketIgnoredWarning(mode: OrganicTrafficMode): McpWarning {
   return warn(
     "market_ignored_for_mode",
-    `market applies only to paths/clusters/queries modes. Ignored for mode=${mode}.`,
+    `market applies only to paths/clusters/queries/leaderboard modes. Ignored for mode=${mode}.`,
+  );
+}
+
+export function seriesIgnoredForModeWarning(mode: OrganicTrafficMode): McpWarning {
+  return warn(
+    "series_ignored_for_mode",
+    `include_series is not applied for mode=${mode}. Daily series is omitted.`,
   );
 }
 
 export function seriesIgnoredForQueriesWarning(): McpWarning {
-  return warn(
-    "series_ignored_for_mode",
-    "include_series is not applied for mode=queries. Daily series is omitted.",
-  );
+  return seriesIgnoredForModeWarning("queries");
 }
 
 export function siteVsPathsSourceWarning(): McpWarning {
   return warn(
     "organic_site_vs_paths_source",
-    "Site totals come from BigQuery (all Search Console URLs). paths/clusters use the keep-filtered day cache — the same calendar window can disagree. Not a bug.",
+    "Site totals come from BigQuery (all Search Console URLs). paths/clusters/leaderboard use the keep-filtered day cache — the same calendar window can disagree. Not a bug.",
   );
 }
 
-/** Resolve start/end for site/paths/clusters/queries; omit both for default 28 complete days. */
+/** Resolve start/end for site/paths/clusters/queries/leaderboard; omit both for default 28 complete days. */
 export function resolveAssembleWindow(opts: {
   start?: string;
   end?: string;
@@ -969,5 +1093,100 @@ export async function assembleQueriesMode(opts: {
     },
     warnings,
     next_actions,
+  };
+}
+
+export function assembleLeaderboardMode(opts: {
+  contentRoot: string;
+  contentFolder: string;
+  sort_by?: string | null;
+  path_prefix?: string | null;
+  market?: string;
+  include_series?: boolean;
+  start?: string;
+  end?: string;
+  limit?: number;
+  offset?: number;
+  site?: string;
+}): OrganicAssembleResult | { error: string } {
+  const window = resolveAssembleWindow({ start: opts.start, end: opts.end });
+  if ("error" in window) return { error: window.error };
+
+  const prefixResult = resolveLeaderboardPathPrefix(opts.path_prefix);
+  if (!prefixResult.ok) return { error: prefixResult.error };
+
+  const sortBy = parseLeaderboardSortBy(opts.sort_by);
+  const limit = clampLeaderboardLimit(opts.limit);
+  const offset = clampLeaderboardOffset(opts.offset);
+
+  const datesProvided =
+    (typeof opts.start === "string" && opts.start.trim() !== "") ||
+    (typeof opts.end === "string" && opts.end.trim() !== "");
+
+  const organic = buildOrganicPathTraffic({
+    contentFolder: opts.contentFolder,
+    contentRoot: opts.contentRoot,
+    market: opts.market,
+    start: window.start,
+    end: window.end,
+  });
+
+  const filtered = filterByPathPrefix(organic.byPath, prefixResult.prefix);
+  const sorted = sortLeaderboardEntries(filtered, sortBy);
+  const selection_totals = sumTrafficForPathSet(
+    organic.byPath,
+    new Set(sorted.map((e) => e.path)),
+  );
+  const page = paginateFlat(sorted, offset, limit);
+  const items: LeaderboardRow[] = page.items.map(({ path, stats }) =>
+    leaderboardRowFromStats(path, stats, softResolveLeaderboardIdentity(path)),
+  );
+
+  const warnings: McpWarning[] = [
+    ...identityNonEffectWarnings(),
+    ...baseDayCacheWarnings(organic),
+  ];
+  if (datesProvided) warnings.push(siteVsPathsSourceWarning());
+  if (opts.include_series === true) warnings.push(seriesIgnoredForModeWarning("leaderboard"));
+  warnings.push(
+    warn(
+      "leaderboard_day_cache_universe",
+      "Leaderboard ranks top paths present in the keep-filtered organic day cache for this window only — not every CMS page, and not a zero-traffic finder. Use offset to page further down.",
+    ),
+  );
+  if (prefixResult.prefix != null && sorted.length === 0 && pathDayCacheConfigured(organic)) {
+    warnings.push(
+      warn(
+        "path_prefix_no_matches",
+        `No day-cache paths matched path_prefix "${prefixResult.prefix}" in the window.`,
+      ),
+    );
+  }
+
+  const configured = pathDayCacheConfigured(organic);
+
+  return {
+    payload: {
+      mode: "leaderboard",
+      configured,
+      source: configured ? "day_cache" : "none",
+      window: organic.window,
+      days_in_window: organic.days_in_window,
+      days_expected: organic.days_expected,
+      incomplete: organic.incomplete,
+      market: organic.market,
+      markets: organic.markets,
+      ...(organic.market_warning ? { market_warning: organic.market_warning } : {}),
+      sort_by: sortBy,
+      path_prefix: prefixResult.prefix,
+      items,
+      selection_totals,
+      total: page.total,
+      offset: page.offset,
+      next_offset: page.next_offset,
+      limit,
+    },
+    warnings,
+    next_actions: configured ? [] : unconfiguredNextActions(opts.site),
   };
 }

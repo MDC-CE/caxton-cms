@@ -68,7 +68,7 @@ Optional AND funnel filters (**entry mode**):
 | View | Tool | Behavior |
 |------|------|----------|
 | Site / SEO inventory | `list_entries` + `contentType` + money/stage filters | Overlay `_common.yml` tags only — untagged program pages are not money pages |
-| Per-SKU journey | `get_product_funnel` / `get_product_funnel_analytics` | Always **pins the product’s own page** as the decision step even if `_common.yml` has no stage |
+| Per-SKU journey | `get_product_funnel` / `get_product_funnel_analytics` | Always **pins the product’s own page** as the decision step even if `_common.yml` has no stage. Site-wide GA → `get_analytics_report` (topic `analytics`). |
 
 Do not treat those two answers as the same list. Tag programs as `decision` so inventory and journey align. Journey tools and audience → topic `product`.
 
