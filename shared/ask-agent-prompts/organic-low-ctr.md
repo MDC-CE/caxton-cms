@@ -1,20 +1,23 @@
 ---
 id: organic-low-ctr
-version: 1
+version: 2
 title: High impressions, low CTR
 used_when: >
   Staff clicks Ask Agent on a row in Diagnostics → SEO → Opportunities →
   "High impressions, low CTR".
 intention: >
-  Raise click-through at the current page-1 rank by improving SERP title and
-  description fit for the query — not by rewriting the whole page.
+  Raise click-through at the current page-1 rank by shipping a denser SERP
+  title/description than live for the same query — not by rewriting the body.
 success_looks_like: >
-  Entry resolved; meta.page_title and/or meta.description updated (or propose_change);
-  short summary of the new listing copy for that query.
+  Entry resolved; meta.page_title and/or meta.description updated via
+  propose_change with review_situations: ["serp_title_description"] (or
+  direct edit when allowed); short note of tokens kept vs the one token added.
 failure_modes:
   - Rewrites the full page body when meta alone would fix CTR
+  - Mixes content and SERP fields in one proposal
   - Changes unrelated locales or pages
-  - Invents keywords unrelated to the query
+  - Invents figures, years, or employers not already on live
+  - Catchier hook that drops live year/place/band/source
   - Runs diagnostics with confirm:true
 required:
   - query
@@ -34,7 +37,7 @@ sections:
   - Don’t
 ---
 
-Goal: Raise CTR for this page-1 listing without tanking relevance.
+Goal: Denser SERP snippet than live for this query — keep every true token, add one the body already supports.
 
 Target:
 - query: {{query}}
@@ -45,10 +48,10 @@ Target:
 
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP. If you cannot resolve it, stop and say so.
-2. Read SEO via get_entry_seo; rewrite meta.page_title and/or meta.description so the listing matches the query and invites the click.
-3. Keep body changes minimal unless the title cannot be honest without a small on-page fix.
-4. Summarize the new title/description in plain text.
+2. Read get_entry_seo + get_entry_content; name the live gap in one sentence. If live already has year + place + figure and you only want a catchier hook, stop.
+3. File propose_change with review_situations: ["serp_title_description"] — meta.page_title and/or meta.description only. Claims must already appear on live.
+4. Summarize tokens kept and the one token added (ops own the values).
 
-Tools: list_entries, get_entry_seo, update_fields, update_entry_attributes, propose_change (if you cannot edit).
+Tools: list_entries, get_entry_seo, get_entry_content, get_entry_activity, propose_change, explain_site topic serp-title-description-proposals.
 
-Don’t: rewrite the whole page; run diagnostics with confirm:true; locale fan-out unless a tool next_action says so.
+Don’t: rewrite the body; mix content into the SERP packet; invent unsourced claims; locale fan-out unless a tool next_action says so; run diagnostics with confirm:true.

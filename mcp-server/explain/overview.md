@@ -50,6 +50,9 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `redirects` | CMS 301/302: two stores, first-match, `test_redirect` (`read_redirects`) + `update_redirect` (`edit_redirects`) |
 | `proposals` | Entry change proposals + issue handoff notes: 4 tools incl. `get_entry_activity`, four-eyes apply; `list_proposals` is stats-first |
 | `reading-proposals` | Live `review_context` axes, checklist IDs, create refuses, apply block when target missing |
+| `review-situations` | Catalog of `review_situations` ids; infer-when-empty; per-situation ship |
+| `internal-links-proposals` | Hub/internal link author + reviewer playbook |
+| `serp-title-description-proposals` | SERP title/description author + reviewer playbook |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 
 **Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries / leaderboard), and `get_analytics_report` for GA4 behavioral reports (site summary / top pages / page detail / events / traffic sources). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
