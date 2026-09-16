@@ -1479,11 +1479,6 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         resolveConditionValue,
         singleEntry as Record<string, unknown> | undefined,
       );
-
-      const resolveTemplatedUrl = (raw: string | undefined): string | undefined => {
-        if (!raw) return undefined;
-        return resolveTemplateValue(raw);
-      };
       
       // When marketing consent is enabled, derive both email and whatsapp from consent_email checkbox
       const effectiveEmailConsent = consent_email || false;
@@ -1527,6 +1522,9 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         conversion_name: effective.conversion_name,
         token: turnstileToken,
       };
+
+      // Token written during this submit (signup) — cookie may lag React state; prefer this.
+      let submitAuthToken: string | null = null;
 
       // Signup mode: guests are registered first via the site auth endpoint;
       // logged-in users skip this and go straight to the lead/conversion flow.
@@ -1594,7 +1592,10 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             data?: { access_token?: string; token?: string };
           };
           const newToken = signupJson?.data?.access_token || signupJson?.data?.token;
-          if (newToken) setConsumerToken(newToken);
+          if (newToken) {
+            setConsumerToken(newToken);
+            submitAuthToken = newToken;
+          }
           trackConversion(authConversionCfg.signup_event_name, {
             email: typeof values.email === "string" ? values.email : undefined,
             first_name: typeof values.first_name === "string" ? values.first_name : undefined,
@@ -1611,6 +1612,25 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         }
       }
 
+      // Resolve templates with a fresh visitor bag (post-signup token), not the render-time closure.
+      const resolveTemplatedUrl = (raw: string | undefined): string | undefined => {
+        if (!raw) return undefined;
+        const token = submitAuthToken || getConsumerToken();
+        const visitor: Record<string, unknown> = {
+          ...(visitorBag ?? {}),
+          ...(token ? { token } : {}),
+        };
+        return resolveTemplateString(
+          raw,
+          variableDefinitions ?? {},
+          variableContext,
+          {
+            singleEntry: (singleEntry as Record<string, unknown> | undefined) ?? undefined,
+            visitor: Object.keys(visitor).length > 0 ? visitor : undefined,
+          },
+        ).text;
+      };
+
       // Webhook priority: per-form (YAML) → per-event → global.
       const formWebhook = effective.formWebhook;
       const eventWebhook = effective.eventWebhook;
@@ -1625,11 +1645,26 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       let response: Response;
       if (deliveryOverride?.url) {
         const resolvedUrl = resolveTemplatedUrl(deliveryOverride.url) || deliveryOverride.url;
+        if (/\{\{/.test(resolvedUrl)) {
+          throw new Error(
+            locale === "es"
+              ? "No se pudo preparar la sesión para el registro. Intenta de nuevo."
+              : "Could not prepare your session for registration. Please try again.",
+          );
+        }
         const resolvedHeaders: Record<string, string> = {};
         if (deliveryOverride.headers) {
           for (const [hk, hv] of Object.entries(deliveryOverride.headers)) {
             if (typeof hv !== "string") continue;
-            resolvedHeaders[hk] = resolveTemplatedUrl(hv) || hv;
+            const resolved = resolveTemplatedUrl(hv) || hv;
+            if (/\{\{/.test(resolved)) {
+              throw new Error(
+                locale === "es"
+                  ? "No se pudo preparar la sesión para el registro. Intenta de nuevo."
+                  : "Could not prepare your session for registration. Please try again.",
+              );
+            }
+            resolvedHeaders[hk] = resolved;
           }
         }
         const body: Record<string, unknown> = {
