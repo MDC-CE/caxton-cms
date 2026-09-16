@@ -1736,10 +1736,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             ),
             ...Object.fromEntries(
               Object.entries(fields).filter(
-                ([key, value]) =>
-                  !LEAD_FORM_UI_FIELD_KEYS.has(key) &&
-                  typeof value === "string" &&
-                  value.trim() !== "",
+                ([, value]) => typeof value === "string" && value.trim() !== "",
               ),
             ),
           }
