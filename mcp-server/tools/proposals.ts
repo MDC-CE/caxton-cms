@@ -522,13 +522,14 @@ export function registerProposalTools(
 
   mcp.tool(
     "list_proposals",
-    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only (incl. by_attention). " +
+    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only (incl. by_attention, by_kind_status). " +
       "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, or attention for paginated summary rows " +
       "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, slim stubs — no ops/values/baselines). " +
       "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted. " +
       "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
+      "Opt-in kpi_history attaches end-of-day stock series through yesterday (open includes partial; withdrawn omitted). " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
@@ -596,6 +597,24 @@ export function registerProposalTools(
         .describe(
           "Scoped only: asc | desc (default desc). Ignored when sort is attention (rank is fixed; within-bucket newest first).",
         ),
+      kpi_history: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, attach kpi_history (end-of-day stock through yesterday). Default false keeps payloads small.",
+        ),
+      kpi_granularity: z
+        .enum(["day", "week"])
+        .optional()
+        .describe("Only when kpi_history is true. Default day."),
+      kpi_from: z
+        .string()
+        .optional()
+        .describe("Only when kpi_history is true. YYYY-MM-DD (UTC), within 90-day retention."),
+      kpi_to: z
+        .string()
+        .optional()
+        .describe("Only when kpi_history is true. YYYY-MM-DD (UTC), capped at yesterday."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -707,10 +726,34 @@ export function registerProposalTools(
         if (!res.ok) return fail(String(data.error ?? "list_proposals failed"));
 
         const proposal_stats = data.stats ?? null;
+
+        let kpi_history: unknown = undefined;
+        if (args.kpi_history === true) {
+          const kQs = new URLSearchParams();
+          kQs.set("granularity", args.kpi_granularity === "week" ? "week" : "day");
+          if (args.kind) kQs.set("kind", args.kind);
+          if (args.kpi_from) kQs.set("from", args.kpi_from);
+          if (args.kpi_to) kQs.set("to", args.kpi_to);
+          const kUrl = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/admin/proposals/kpis${siteQuery(siteResult.domain, kQs.toString())}`;
+          const kRes = await fetch(kUrl, { headers: buildLoopbackHeaders(mcpToken) });
+          const kData = (await kRes.json()) as { error?: string; series?: unknown };
+          if (!kRes.ok) {
+            return fail(String(kData.error ?? "kpi_history failed"), { code: "kpi_history_failed" });
+          }
+          kpi_history = kData;
+          warnings.push({
+            code: "kpi_history_stock",
+            message:
+              "kpi_history is end-of-day stock through yesterday (not throughput). " +
+              "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows.",
+          });
+        }
+
         if (!scoped) {
           return ok(
             {
               proposal_stats,
+              ...(kpi_history !== undefined ? { kpi_history } : {}),
               next_actions: [],
             },
             { warnings },
@@ -839,6 +882,7 @@ export function registerProposalTools(
         return ok(
           {
             proposal_stats,
+            ...(kpi_history !== undefined ? { kpi_history } : {}),
             proposals: Array.isArray(proposals)
               ? proposals.map(stripDecisionDebugFromProposal)
               : proposals,

@@ -6,6 +6,20 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "proposal_stats.by_kind_status + opt-in kpi_history stock series"
+    agent_impact:
+      - "proposal_stats now includes by_kind_status (live open/finished/rejected per kind; open includes partial; withdrawn omitted)."
+      - "list_proposals kpi_history=true attaches end-of-day stock through yesterday (kpi_granularity day|week, kpi_from/kpi_to). Warning kpi_history_stock explains stock vs flow."
+      - "Reconnect MCP so list_proposals schema refreshes. History is back-calculated from create/close dates (closed_at with updated_at fallback)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/kpi-history.ts
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
     summary: "funnel_classification review situation — persona → product → stage"
     agent_impact:
       - "New review_situations id funnel_classification (checklist funnel_persona_product_stage). Pure funnel.* ops infer this pack instead of body_copy_edit. Prefer declare on propose_change; explain_site topic funnel-classification-proposals."

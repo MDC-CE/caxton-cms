@@ -141,6 +141,16 @@ describe("replaceProposalsFromSnapshot", () => {
     expect(dumped[0]!.entries[0]!.id).toBe(42);
     expect(dumped[0]!.blockers[0]!.id).toBe(7);
     expect(dumped[0]!.open_blocker_count).toBe(1);
+
+    const { getSiteSqlite } = await import("../db");
+    const db = getSiteSqlite(SITE);
+    const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const kpi = db
+      .prepare(
+        `SELECT count FROM proposal_kpi_daily WHERE site = ? AND day = ? AND kind = 'edits' AND status = 'open'`,
+      )
+      .get(SITE, y) as { count: number } | undefined;
+    expect(kpi?.count).toBe(1);
   });
 });
 

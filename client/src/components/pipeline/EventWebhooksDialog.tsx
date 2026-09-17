@@ -923,23 +923,40 @@ export function EventWebhooksKpiButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "w-full rounded-md border border-border bg-card p-3 text-left hover-elevate transition-colors",
+        "flex h-full min-h-[7.5rem] w-full flex-col gap-2 rounded-card border border-card-border bg-card p-4 text-left shadow-card hover-elevate transition-colors",
         className,
       )}
       data-testid="kpi-event-webhooks"
     >
-      <div className="flex items-center gap-2">
-        <IconWebhook className="h-4 w-4 text-muted-foreground shrink-0" />
-        <span className="text-sm font-medium">Webhooks</span>
-        <Badge variant={on ? "default" : "secondary"} className="ml-auto">
-          {on ? "On" : "Off"}
-        </Badge>
+      <div className="flex items-start justify-between gap-2 w-full">
+        <div className="min-w-0">
+          <p
+            className={cn(
+              "text-2xl font-bold tabular-nums",
+              on ? "text-status-online" : "text-muted-foreground",
+            )}
+          >
+            {on ? "On" : "Off"}
+          </p>
+          <p className="text-xs text-muted-foreground mt-0.5">Webhooks</p>
+        </div>
+        <div className="flex flex-col items-end gap-1.5 shrink-0">
+          <IconWebhook className="h-4 w-4 text-muted-foreground" aria-hidden />
+          <Badge variant={on ? "default" : "secondary"} className="text-[10px]">
+            {on ? "Live" : "Setup"}
+          </Badge>
+          {last ? (
+            <p className="text-[10px] text-muted-foreground text-right leading-snug max-w-[7rem]">
+              last {last.status}
+              {last.source === "test" ? " (test)" : ""}
+            </p>
+          ) : null}
+        </div>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">
+      <p className="text-[11px] text-muted-foreground leading-snug w-full">
         {on
-          ? `${data?.enabled_hook_count} hook${data?.enabled_hook_count === 1 ? "" : "s"}`
-          : "Configure notify URLs"}
-        {last ? ` · last ${last.status}${last.source === "test" ? " (test)" : ""}` : ""}
+          ? `${data?.enabled_hook_count} hook${data?.enabled_hook_count === 1 ? "" : "s"} · real-time swarm notify`
+          : "Enable notify URLs for agentic swarms"}
       </p>
     </button>
   );

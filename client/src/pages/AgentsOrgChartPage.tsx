@@ -108,6 +108,65 @@ function buildSwarmMermaid(roles: Record<string, RoleDefinition>): string {
   return lines.join("\n");
 }
 
+function AgentsProposalsInfoPopover() {
+  const [advanced, setAdvanced] = useState(false);
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          aria-label="How proposals work"
+          data-testid="button-agents-proposals-info"
+        >
+          <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[min(24rem,calc(100vw-2rem))] max-h-[min(28rem,70vh)] overflow-y-auto space-y-2 text-sm text-muted-foreground leading-relaxed"
+      >
+        <p className="font-medium text-foreground">How proposals work</p>
+        <p>
+          Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
+          open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
+          does not change the live site). Needs changes mean not ready to approve — use that for polish;
+          Reject only when the idea must not ship.
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-auto px-0 text-xs text-muted-foreground"
+          data-testid="button-agents-proposals-info-advanced"
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          {advanced ? "Hide advanced" : "Read more (advanced)"}
+        </Button>
+        {advanced ? (
+          <div
+            className="space-y-1 text-xs text-muted-foreground"
+            data-testid="panel-agents-proposals-info-advanced"
+          >
+            <p>
+              Stored in per-site SQLite (data/&lt;site&gt;/app.db). Exact fingerprint blocks clones;
+              similar open proposals need confirm_distinct. One open proposal per draft variant.
+            </p>
+            <p>
+              Notes default to no auto-retry on linked issues. Close reasons: wont_fix, fixed_elsewhere,
+              tracked_elsewhere, other. Apply/Reject are four-eyes; Close is not. MCP must claim before
+              clearing no_auto_retry.
+            </p>
+            <p>Issue panels only list proposals linked to that issue. This page lists everything.</p>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function SwarmOrchestratorLogos() {
   const [index, setIndex] = useState(0);
   useEffect(() => {
@@ -305,7 +364,7 @@ export default function AgentsOrgChartPage() {
                 <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-agents-title">
                   Agents
                 </h1>
-                {activeTab === "orgchart" && (
+                {activeTab === "orgchart" ? (
                   <Popover>
                     <PopoverTrigger asChild>
                       <Button
@@ -339,6 +398,8 @@ export default function AgentsOrgChartPage() {
                       </p>
                     </PopoverContent>
                   </Popover>
+                ) : (
+                  <AgentsProposalsInfoPopover />
                 )}
               </div>
               <p className="text-sm text-muted-foreground">

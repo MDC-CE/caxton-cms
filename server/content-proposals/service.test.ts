@@ -425,6 +425,9 @@ describe("content proposals", () => {
     expect(s.by_kind.edits).toBe(3);
     expect(s.by_kind.notes).toBe(1);
     expect(s.by_status.open).toBe(4);
+    expect(s.by_kind_status.edits.open).toBe(3);
+    expect(s.by_kind_status.notes.open).toBe(1);
+    expect(s.by_kind_status.idea.open).toBe(0);
 
     const page = svc.list({ kind: "edits", limit: 2, offset: 0 });
     expect(page.total).toBe(3);
@@ -903,6 +906,8 @@ describe("content proposals", () => {
     expect(applied.ok).toBe(true);
     if (applied.ok) {
       expect(applied.proposal.status).toBe("finished");
+      expect(applied.proposal.closed_at).toBeTypeOf("number");
+      expect(applied.proposal.closed_by).toBe("bob");
       expect(live["call_to_action.title"]).toBe("New");
     }
     void resolveNoClaim;

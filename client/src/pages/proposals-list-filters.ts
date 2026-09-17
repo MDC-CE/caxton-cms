@@ -340,7 +340,46 @@ export type ProposalListStats = {
   by_kind: Record<string, number>;
   escalated_count?: number;
   by_attention?: Record<string, number>;
+  by_kind_status?: Record<
+    string,
+    { open?: number; finished?: number; rejected?: number }
+  >;
 };
+
+export const PROPOSAL_KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;
+export type ProposalKpiCardStatus = (typeof PROPOSAL_KPI_CARD_STATUSES)[number];
+
+export const PROPOSAL_KPI_CARD_KINDS = ["idea", "edits", "notes"] as const;
+export type ProposalKpiCardKind = (typeof PROPOSAL_KPI_CARD_KINDS)[number];
+
+export type ProposalKpiCardSpec = {
+  kind: ProposalKpiCardKind;
+  label: string;
+};
+
+const KIND_LABEL: Record<ProposalKpiCardKind, string> = {
+  idea: "Ideas",
+  edits: "Edits",
+  notes: "Notes",
+};
+
+/** Which kind KPI cards to show given the list kind filter (one card per kind). */
+export function proposalKpiCardsForKindFilter(kind: ProposalListKind): ProposalKpiCardSpec[] {
+  const kinds: ProposalKpiCardKind[] =
+    kind === "idea" || kind === "edits" || kind === "notes"
+      ? [kind]
+      : [...PROPOSAL_KPI_CARD_KINDS];
+  return kinds.map((k) => ({ kind: k, label: KIND_LABEL[k] }));
+}
+
+export function proposalKpiLiveCount(
+  stats: ProposalListStats | null | undefined,
+  kind: ProposalKpiCardKind,
+  status: ProposalKpiCardStatus,
+): number {
+  return Number(stats?.by_kind_status?.[kind]?.[status] ?? 0) || 0;
+}
+
 
 export const PROPOSAL_STATUS_OPTIONS: Array<{ value: ProposalListStatus; label: string }> = [
   { value: "all", label: "All" },

@@ -5,6 +5,7 @@ import {
   clearProposalListFilters,
   countActiveProposalFilters,
   parseProposalListSearch,
+  proposalKpiCardsForKindFilter,
   proposalListApiSearchParams,
   serializeProposalListSearch,
   toProposalListApiQuery,
@@ -286,5 +287,19 @@ describe("toProposalListApiQuery", () => {
     expect(params.get("proposer_actor_type")).toBe("ui");
     expect(params.get("proposer_actor_role")).toBeNull();
     expect(params.get("escalated")).toBe("1");
+  });
+});
+
+describe("proposalKpiCardsForKindFilter", () => {
+  it("returns three kind cards when kind is all", () => {
+    const cards = proposalKpiCardsForKindFilter("all");
+    expect(cards).toHaveLength(3);
+    expect(cards.map((c) => c.kind)).toEqual(["idea", "edits", "notes"]);
+  });
+
+  it("returns one card when kind is focused", () => {
+    const cards = proposalKpiCardsForKindFilter("idea");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toEqual({ kind: "idea", label: "Ideas" });
   });
 });

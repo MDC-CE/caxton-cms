@@ -552,6 +552,72 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds proposal_kpi_daily when upgrading from v18-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v18-kpi-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        site TEXT NOT NULL,
+        resource_json TEXT NOT NULL DEFAULT '{}',
+        cause TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        triggered_by_event_id INTEGER,
+        triggered_by_event_ids_json TEXT,
+        attribution_json TEXT NOT NULL DEFAULT '[]',
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        agent_session_id TEXT
+      );
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 18);
+      CREATE TABLE pipeline_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+      CREATE TABLE leases (
+        resource TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        token INTEGER NOT NULL DEFAULT 1,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE event_webhook_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        hook_id TEXT NOT NULL,
+        event_ids_json TEXT NOT NULL DEFAULT '[]',
+        url_host TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        http_status INTEGER,
+        error TEXT,
+        duration_ms INTEGER,
+        batch_size INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'live',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_triggered_by ON events(triggered_by_event_id);
+      CREATE INDEX IF NOT EXISTS idx_events_agent_session
+        ON events(site, agent_session_id, created_at);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposal_kpi_daily'").get(),
+    ).toEqual({ name: "proposal_kpi_daily" });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('proposal_kpi_daily') WHERE name = 'count'").get(),
+    ).toBeDefined();
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

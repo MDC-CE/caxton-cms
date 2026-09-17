@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 18;
+export const PIPELINE_SCHEMA_VERSION = 19;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -389,6 +389,25 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
           ON event_webhook_deliveries (site, created_at DESC);
         CREATE INDEX idx_event_webhook_deliveries_site_type_hook
           ON event_webhook_deliveries (site, event_type, hook_id, created_at DESC);
+      `);
+    },
+  },
+  {
+    version: 19,
+    name: "proposal_kpi_daily",
+    up(db) {
+      if (tableExists(db, "proposal_kpi_daily")) return;
+      db.exec(`
+        CREATE TABLE proposal_kpi_daily (
+          site TEXT NOT NULL,
+          day TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          count INTEGER NOT NULL,
+          PRIMARY KEY (site, day, kind, status)
+        );
+        CREATE INDEX idx_proposal_kpi_daily_site_day
+          ON proposal_kpi_daily(site, day);
       `);
     },
   },

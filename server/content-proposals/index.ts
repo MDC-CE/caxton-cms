@@ -34,6 +34,18 @@ export {
   type ProposalAttention,
 } from "./service";
 export {
+  KPI_RETENTION_DAYS,
+  KPI_CARD_STATUSES,
+  KPI_CARD_KINDS,
+  stockForDay,
+  toCardBuckets,
+  emptyKindStatusCounts,
+  type KindStatusCardCounts,
+  type KpiCardKind,
+  type KpiCardStatus,
+  type KpiHistoryResult,
+} from "./kpi-history";
+export {
   deriveProposalAttention,
   compareByAttention,
   parseProposalAttention,

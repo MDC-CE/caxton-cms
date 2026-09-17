@@ -51,6 +51,15 @@ import {
   type AttentionPerspective,
   type ProposalAttention,
 } from "./attention";
+import {
+  ensureKpiCatchUp,
+  getKpiHistory,
+  liveByKindStatus,
+  wipeAndBackfillKpiHistory,
+  type KindStatusCardCounts,
+  type KpiCardKind,
+  type KpiHistoryResult,
+} from "./kpi-history";
 
 const log = child({ module: "content-proposals" });
 
@@ -669,14 +678,29 @@ function loadProposal(db: Database.Database, id: string): ProposalRecord | null 
   return mapProposal(row, loadEntries(db, id), loadBlockers(db, id));
 }
 
-function persistRollup(db: Database.Database, proposal: ProposalRecord): ProposalStatus {
+function persistRollup(
+  db: Database.Database,
+  proposal: ProposalRecord,
+  opts?: { closedBy?: string },
+): ProposalStatus {
   if (proposal.kind === "notes" || proposal.kind === "idea") return proposal.status;
   const next = rollupStatus(proposal.kind, proposal.entries);
-  db.prepare(`UPDATE content_proposals SET status = ?, updated_at = ? WHERE id = ?`).run(
-    next,
-    Date.now(),
-    proposal.id,
-  );
+  const now = Date.now();
+  if (next === "finished" && proposal.status !== "finished") {
+    db.prepare(
+      `UPDATE content_proposals
+       SET status = ?, updated_at = ?,
+           closed_at = COALESCE(closed_at, ?),
+           closed_by = COALESCE(closed_by, ?)
+       WHERE id = ?`,
+    ).run(next, now, now, opts?.closedBy ?? null, proposal.id);
+  } else {
+    db.prepare(`UPDATE content_proposals SET status = ?, updated_at = ? WHERE id = ?`).run(
+      next,
+      now,
+      proposal.id,
+    );
+  }
   return next;
 }
 
@@ -828,6 +852,8 @@ export type ProposalStats = {
   escalated_count: number;
   /** Open|partial rows by derived attention (escalated label wins when flagged). */
   by_attention: Record<ProposalAttention, number>;
+  /** Live stock for KPI cards: open includes partial; withdrawn omitted. */
+  by_kind_status: KindStatusCardCounts;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -1290,6 +1316,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   function stats(): ProposalStats {
     const db = dbFor(site);
+    ensureKpiCatchUp(db, site);
     const by_status = { ...EMPTY_STATUS_COUNTS };
     const by_kind = { ...EMPTY_KIND_COUNTS };
     const by_attention = emptyAttentionCounts();
@@ -1351,7 +1378,17 @@ export function createProposalService(deps: ProposalServiceDeps) {
       by_kind,
       escalated_count: Number(escalatedRow?.n) || 0,
       by_attention,
+      by_kind_status: liveByKindStatus(db, site),
     };
+  }
+
+  function kpiHistory(opts?: {
+    kind?: KpiCardKind | null;
+    granularity?: "day" | "week";
+    from?: string;
+    to?: string;
+  }): KpiHistoryResult {
+    return getKpiHistory(dbFor(site), site, opts);
   }
 
   /** Distinct proposers with a proposal touched in the last `days` (by updated_at). */
@@ -3189,7 +3226,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         ).run(Date.now(), caller.username, entry.id);
       }
       const updated = get(id)!;
-      const next = persistRollup(db, updated);
+      const next = persistRollup(db, updated, { closedBy: caller.username });
       const fresh = get(id)!;
       emitProposalEvent(site, "proposal_applied_progress", id, caller.username, {
         status: next,
@@ -3206,7 +3243,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
-  return { get, list, stats, listRecentProposers, exportAll, create, update, classifyLive };
+  return { get, list, stats, kpiHistory, listRecentProposers, exportAll, create, update, classifyLive };
 }
 
 /** Full site dump for production → local pull (includes entries + blockers). */
@@ -3357,7 +3394,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
     return rows.length;
   });
 
-  return run(proposals);
+  const n = run(proposals);
+  wipeAndBackfillKpiHistory(db, site);
+  return n;
 }
 
 function inferCategory(entries: ProposalEntryInput[]): ProposalCategory {

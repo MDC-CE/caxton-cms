@@ -293,6 +293,23 @@ export function registerProposalRoutes(app: Express): void {
     res.json({ proposers, days: Math.min(Math.max(days, 1), 365) });
   });
 
+  api.get(app, "/api/admin/proposals/kpis", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireProposalRead(req, res);
+    if (!auth) return;
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const kindRaw = typeof req.query.kind === "string" ? req.query.kind : undefined;
+    const granularityRaw =
+      typeof req.query.granularity === "string" ? req.query.granularity : undefined;
+    const from = typeof req.query.from === "string" ? req.query.from : undefined;
+    const to = typeof req.query.to === "string" ? req.query.to : undefined;
+    const kind =
+      kindRaw === "idea" || kindRaw === "edits" || kindRaw === "notes" ? kindRaw : null;
+    const granularity = granularityRaw === "week" ? "week" : "day";
+    const history = svc.kpiHistory({ kind, granularity, from, to });
+    res.json(history);
+  });
+
   api.get(app, "/api/admin/proposals/:id", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireProposalRead(req, res);
     if (!auth) return;
