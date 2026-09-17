@@ -2866,7 +2866,6 @@ export function SectionEditorPanel({
       );
       if (!confirmed) return;
     }
-    setTableEditorMode(null);
     if (onPreviewChange) {
       onPreviewChange(null);
     }
