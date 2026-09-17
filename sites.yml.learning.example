@@ -1,0 +1,16 @@
+# sites.yml for learning.mdc.edu lab (domain root)
+#
+# Copy to /opt/caxton/persistent/sites.yml on the droplet (not committed).
+# Point github_repo_url at your content repo; content_folder must match the
+# site_* directory name inside that repo.
+
+# bucket_name: optional-gcs-bucket
+
+learning.mdc.edu:
+  content_folder: site_learning-mdc-edu
+  github_repo_url: https://github.com/YOUR_ORG/YOUR_CONTENT_REPO
+
+# Bootstrap without a content repo yet:
+#   cp -R fixtures/ci/content-4geeks-com /opt/caxton/current/site_learning-mdc-edu
+#   (or into the release tree before content:pull), then point github_repo_url
+#   when ready so content:pull can sync.

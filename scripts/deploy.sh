@@ -9,7 +9,7 @@
 #
 # site_* ownership: website-deployer:website-runtime with setgid + group write so the
 # app (website-runtime) can write site_*/.cache and deploy can still rm -rf old
-# releases. Host: usermod -aG website-runtime website-deployer; website.service
+# releases. Host: usermod -aG website-runtime website-deployer; caxton.service
 # (and sidequest) should set UMask=0002.
 #
 # Deploy lock lives in this script (not the Actions SSH observer) so cancel-in-progress
@@ -18,15 +18,19 @@
 #
 # Never rm -rf the live release (current); same-SHA redeploy → releases/<sha>.rebuild-<pid>.
 # Required env: DEPLOY_SHA (full git commit).
-# Optional: WEBSITE_RUNTIME_B64 (packed _WEBSITE_ secrets; empty → reuse prior .env).
+# Optional: WEBSITE_RUNTIME_B64 (packed _CAXTON_ / _WEBSITE_ secrets; empty → reuse prior .env).
+# Optional: APP_ROOT (default /opt/caxton), SERVICE_NAME (default caxton),
+#           SIDEQUEST_SERVICE_NAME (default caxton-sidequest), HEALTH_PORT (default PORT or 5000).
 set -euo pipefail
 
-APP_ROOT=/opt/website-v3
+APP_ROOT="${APP_ROOT:-/opt/caxton}"
+SERVICE_NAME="${SERVICE_NAME:-caxton}"
+SIDEQUEST_SERVICE_NAME="${SIDEQUEST_SERVICE_NAME:-caxton-sidequest}"
 KEEP_RELEASES=5
 HEALTH_TRIES=60
 HEALTH_SLEEP=2
 STATE_DIR="$APP_ROOT/.deploy-state"
-LOCK_DIR="/tmp/website-v3-deploy.lock"
+LOCK_DIR="/tmp/$(basename "$APP_ROOT")-deploy.lock"
 LOCK_WAIT_SECONDS=10
 LOCK_TIMEOUT_SECONDS=900
 LOCK_STALE_SECONDS=1800
@@ -474,6 +478,7 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+HEALTH_PORT="${HEALTH_PORT:-${PORT:-5000}}"
 if [[ -z "${TURNSTILE_SITE_KEY:-}" || -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
   echo "ERROR: TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY are required." >&2
   exit 1
@@ -504,15 +509,15 @@ echo "[deploy] pointing current -> releases/$RELEASE_NAME"
 ln -sfn "releases/$RELEASE_NAME" "$CURRENT_LINK"
 
 restart_website() {
-  if systemctl cat website.service >/dev/null 2>/dev/null; then
-    sudo systemctl restart website
+  if systemctl cat "${SERVICE_NAME}.service" >/dev/null 2>/dev/null; then
+    sudo systemctl restart "$SERVICE_NAME"
   else
-    echo "[deploy] website.service not installed — skip restart"
+    echo "[deploy] ${SERVICE_NAME}.service not installed — skip restart"
   fi
-  if systemctl cat website-sidequest.service >/dev/null 2>/dev/null; then
-    sudo systemctl restart website-sidequest
+  if systemctl cat "${SIDEQUEST_SERVICE_NAME}.service" >/dev/null 2>/dev/null; then
+    sudo systemctl restart "$SIDEQUEST_SERVICE_NAME"
   else
-    echo "[deploy] website-sidequest.service not installed — skip Sidequest restart (jobs will not run until enabled)"
+    echo "[deploy] ${SIDEQUEST_SERVICE_NAME}.service not installed — skip Sidequest restart (jobs will not run until enabled)"
   fi
 }
 
@@ -537,11 +542,11 @@ rollback() {
   fi
 }
 
-echo "[deploy] waiting for health"
+echo "[deploy] waiting for health on :${HEALTH_PORT}"
 ok=0
 for _ in $(seq 1 "$HEALTH_TRIES"); do
-  if curl -fsS http://127.0.0.1:5000/health >/dev/null; then
-    curl -fsS http://127.0.0.1:5000/health || true
+  if curl -fsS "http://127.0.0.1:${HEALTH_PORT}/health" >/dev/null; then
+    curl -fsS "http://127.0.0.1:${HEALTH_PORT}/health" || true
     echo
     ok=1
     break
@@ -582,9 +587,9 @@ echo "[deploy] pruning .deploy-state older than 7 days"
 find "$STATE_DIR" -maxdepth 1 \( -name '*.log' -o -name '*.done' -o -name '*.abort' \) \
   -mtime +7 -type f -delete 2>/dev/null || true
 
-WD="$(systemctl show -p WorkingDirectory --value website.service 2>/dev/null || true)"
+WD="$(systemctl show -p WorkingDirectory --value "${SERVICE_NAME}.service" 2>/dev/null || true)"
 if [[ -n "$WD" && "$WD" != "$CURRENT_LINK" && "$WD" != "$CURRENT_LINK/" ]]; then
-  echo "[deploy] WARNING: website.service WorkingDirectory is '$WD'" >&2
+  echo "[deploy] WARNING: ${SERVICE_NAME}.service WorkingDirectory is '$WD'" >&2
   echo "[deploy] WARNING: set it to $CURRENT_LINK (and EnvironmentFile=$CURRENT_LINK/.env) so restarts use this release." >&2
 fi
 

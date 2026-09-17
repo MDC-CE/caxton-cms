@@ -1,13 +1,34 @@
-name: Deploy to VPS
+name: Deploy Caxton to learning.mdc.edu
+
+# Sole deploy target for this repo: /opt/caxton on the MDC droplet (learning.mdc.edu at domain root).
+# Secrets: LEARNING_DEPLOY_HOST, LEARNING_DEPLOY_USER, LEARNING_DEPLOY_SSH_KEY,
+#          LEARNING_DEPLOY_SSH_KNOWN_HOSTS
+# Runtime: pack keys prefixed _CAXTON_ → WEBSITE_RUNTIME_B64 (consumed by scripts/deploy.sh).
+# Required packed keys include: DATABASE_URL, SESSION_SECRET, SITE_URL, PORT,
+# TURNSTILE_SITE_KEY, TURNSTILE_SECRET_KEY, GITHUB_TOKEN, …
+# Domain root: do NOT set APP_BASE (or leave empty). SITE_URL=http(s)://learning.mdc.edu
+# (Subpath /caxton is retired for this host.)
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
+    paths:
+      - "client/**"
+      - "server/**"
+      - "shared/**"
+      - "mcp-server/**"
+      - "scripts/deploy.sh"
+      - "scripts/start-production.sh"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.ts"
+      - ".github/workflows/deploy-caxton-learning.yml"
+      - "docs/learning-mdc-caxton.md"
 
 concurrency:
-  group: deploy-vps
+  group: deploy-caxton-learning
   # Cancels the Actions observer only. deploy.sh runs detached on the VPS and keeps
   # going (abort soft pre-flip via .deploy-state/<sha>.abort if cancelled()).
   cancel-in-progress: true
@@ -18,7 +39,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Pack _WEBSITE_ runtime env
+      - name: Pack _CAXTON_ runtime env
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
           VARS_JSON: ${{ toJSON(vars) }}
@@ -28,7 +49,7 @@ jobs:
           import json
           import os
 
-          prefix = "_WEBSITE_"
+          prefix = "_CAXTON_"
           secrets = json.loads(os.environ.get("SECRETS_JSON") or "{}")
           variables = json.loads(os.environ.get("VARS_JSON") or "{}")
           if not isinstance(secrets, dict):
@@ -54,10 +75,6 @@ jobs:
           print("[runtime-env] packed", len(out), "keys:", ", ".join(sorted(out)) or "(none)")
           PY
 
-      # WEBSITE_RUNTIME_B64 stays in the job env for later steps. Do not add
-      # third-party/notification steps after this that dump the environment.
-      # Never enable bash set -x in the SSH step (would expand the blob).
-
       - name: Skip if not latest commit
         id: latest
         env:
@@ -81,11 +98,19 @@ jobs:
       - name: Setup SSH key
         if: steps.latest.outputs.skip != 'true'
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.LEARNING_DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.LEARNING_DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           umask 077
+          if [[ -z "${DEPLOY_SSH_KEY:-}" ]]; then
+            echo "ERROR: secret LEARNING_DEPLOY_SSH_KEY is missing or empty." >&2
+            exit 1
+          fi
+          if [[ -z "${DEPLOY_SSH_KNOWN_HOSTS:-}" ]]; then
+            echo "ERROR: secret LEARNING_DEPLOY_SSH_KNOWN_HOSTS is missing or empty." >&2
+            exit 1
+          fi
           KEY="$RUNNER_TEMP/gha_deploy"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
           chmod 600 "$KEY"
@@ -93,25 +118,49 @@ jobs:
           chmod 700 "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
+          echo "[deploy] SSH key and known_hosts written"
 
       - name: Deploy via SSH
         id: deploy
         if: steps.latest.outputs.skip != 'true'
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.LEARNING_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.LEARNING_DEPLOY_USER }}
           WEBSITE_RUNTIME_B64: ${{ env.WEBSITE_RUNTIME_B64 }}
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           KEY="$RUNNER_TEMP/gha_deploy"
 
+          # Empty secrets make ssh print "usage:" with destination "@" — fail clearly.
+          if [[ -z "${DEPLOY_HOST:-}" ]]; then
+            echo "ERROR: secret LEARNING_DEPLOY_HOST is missing or empty (repo Settings → Secrets)." >&2
+            exit 1
+          fi
+          if [[ -z "${DEPLOY_USER:-}" ]]; then
+            echo "ERROR: secret LEARNING_DEPLOY_USER is missing or empty." >&2
+            exit 1
+          fi
+          if [[ ! -s "$KEY" ]]; then
+            echo "ERROR: LEARNING_DEPLOY_SSH_KEY missing/empty — Setup SSH key wrote an empty file." >&2
+            exit 1
+          fi
+          if [[ ! -s "$HOME/.ssh/known_hosts" ]]; then
+            echo "ERROR: LEARNING_DEPLOY_SSH_KNOWN_HOSTS missing/empty." >&2
+            exit 1
+          fi
+          echo "[deploy] SSH target ${DEPLOY_USER}@${DEPLOY_HOST}"
+
           {
             printf 'export WEBSITE_RUNTIME_B64=%q\n' "$WEBSITE_RUNTIME_B64"
             printf 'export DEPLOY_SHA=%q\n' "$DEPLOY_SHA"
+            printf 'export APP_ROOT=%q\n' "/opt/caxton"
+            printf 'export SERVICE_NAME=%q\n' "caxton"
+            printf 'export SIDEQUEST_SERVICE_NAME=%q\n' "caxton-sidequest"
+            printf 'export HEALTH_PORT=%q\n' "5001"
             cat <<'REMOTE'
           set -euo pipefail
-          APP_ROOT=/opt/website-v3
+          APP_ROOT="${APP_ROOT:-/opt/caxton}"
           STATE_DIR="$APP_ROOT/.deploy-state"
           : "${DEPLOY_SHA:?DEPLOY_SHA is required}"
 
@@ -120,16 +169,14 @@ jobs:
           DONE_MARK="$STATE_DIR/${DEPLOY_SHA}.done"
           rm -f "$DONE_MARK"
 
-          # Always run deploy.sh from the commit being deployed (root tree may be stale).
           git -C "$APP_ROOT" fetch --prune origin "$DEPLOY_SHA"
-          SCRIPT="/tmp/website-deploy-${DEPLOY_SHA}.sh"
+          SCRIPT="/tmp/caxton-deploy-${DEPLOY_SHA}.sh"
           git -C "$APP_ROOT" show "${DEPLOY_SHA}:scripts/deploy.sh" > "$SCRIPT"
           chmod +x "$SCRIPT"
 
-          # Detached from this SSH session: cancel-in-progress only kills the observer.
-          # Lock + abort live inside deploy.sh.
           setsid nohup bash -c '
             set +e
+            export APP_ROOT SERVICE_NAME SIDEQUEST_SERVICE_NAME HEALTH_PORT
             "'"$SCRIPT"'"
             ec=$?
             echo "$ec" > "'"$DONE_MARK"'"
@@ -170,22 +217,19 @@ jobs:
       - name: Signal abort on cancel
         if: cancelled() && steps.latest.outputs.skip != 'true'
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.LEARNING_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.LEARNING_DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.LEARNING_DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.LEARNING_DEPLOY_SSH_KNOWN_HOSTS }}
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           set +e
+          KEY="$RUNNER_TEMP/gha_deploy_abort"
           umask 077
-          KEY="$RUNNER_TEMP/gha_deploy"
-          if [[ ! -f "$KEY" ]]; then
-            printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
-            chmod 600 "$KEY"
-          fi
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
+          chmod 600 "$KEY"
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
           ssh -i "$KEY" \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
@@ -193,15 +237,15 @@ jobs:
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o ConnectTimeout=15 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "mkdir -p /opt/website-v3/.deploy-state && touch /opt/website-v3/.deploy-state/${DEPLOY_SHA}.abort && echo abort-signaled"
+            "mkdir -p /opt/caxton/.deploy-state && touch /opt/caxton/.deploy-state/${DEPLOY_SHA}.abort && echo abort-signaled"
 
       - name: Report actual deploy outcome
         if: always() && steps.latest.outputs.skip != 'true'
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.LEARNING_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.LEARNING_DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.LEARNING_DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.LEARNING_DEPLOY_SSH_KNOWN_HOSTS }}
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           set +e
@@ -226,7 +270,7 @@ jobs:
               -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
               -o ConnectTimeout=15 \
               "${DEPLOY_USER}@${DEPLOY_HOST}" \
-              "set -e; D=/opt/website-v3/.deploy-state/${DEPLOY_SHA}; if [[ -f \"\$D.abort\" ]]; then echo ABORT=yes; else echo ABORT=no; fi; if [[ -f \"\$D.done\" ]]; then echo DONE=\$(cat \"\$D.done\"); else echo DONE=NOT_FOUND; fi" 2>/dev/null)"
+              "set -e; D=/opt/caxton/.deploy-state/${DEPLOY_SHA}; if [[ -f \"\$D.abort\" ]]; then echo ABORT=yes; else echo ABORT=no; fi; if [[ -f \"\$D.done\" ]]; then echo DONE=\$(cat \"\$D.done\"); else echo DONE=NOT_FOUND; fi" 2>/dev/null)"
             ABORT="$(echo "$OUT" | sed -n 's/^ABORT=//p' | tail -1)"
             RESULT="$(echo "$OUT" | sed -n 's/^DONE=//p' | tail -1)"
             if [[ -n "$RESULT" && "$RESULT" != "NOT_FOUND" ]]; then
@@ -242,9 +286,9 @@ jobs:
             if [[ "$RESULT" == "0" ]]; then
               echo "- ✅ **Deploy completado** (\`current\` apunta a este SHA). Si el job de Actions figura Cancelled, solo se cortó la observación — el proceso en el servidor terminó bien."
             elif [[ "$RESULT" == "NOT_FOUND" && "$ABORT" == "yes" ]]; then
-              echo "- ⏹ Abort solicitado y aún sin \`.done\` tras ~10m. Puede seguir en \`npm ci\`/build (opción 2) o en \`handle_abort\`. Revisá el log o el próximo job para el estado final."
+              echo "- ⏹ Abort solicitado y aún sin \`.done\` tras ~10m. Puede seguir en \`npm ci\`/build o en \`handle_abort\`. Revisá el log o el próximo job para el estado final."
             elif [[ "$RESULT" == "NOT_FOUND" ]]; then
-              echo "- ⏳ Sin \`.done\` aún tras ~10m — el deploy puede seguir en el VPS. Revisá \`/opt/website-v3/.deploy-state/${DEPLOY_SHA}.log\` o el próximo job."
+              echo "- ⏳ Sin \`.done\` aún tras ~10m — el deploy puede seguir en el VPS. Revisá \`/opt/caxton/.deploy-state/${DEPLOY_SHA}.log\` o el próximo job."
             else
               echo "- ❌ Deploy terminó con código \`$RESULT\` (falló; rollback de \`current\` si correspondía)."
             fi
