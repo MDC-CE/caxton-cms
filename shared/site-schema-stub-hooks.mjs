@@ -65,23 +65,26 @@ function urlIsReal(url) {
   }
 }
 
+/**
+ * Remap to the stub via nextResolve (tsx), never shortCircuit a bare .ts URL.
+ * shortCircuit skips tsx's resolve metadata; on Node 20 that yields
+ * ERR_UNKNOWN_FILE_EXTENSION when the ESM worker loads the stub.
+ */
+async function resolveStub(context, nextResolve) {
+  if (!fs.existsSync(stubSchemas)) {
+    throw new Error(`site-component-schemas stub missing: ${stubSchemas}`);
+  }
+  return nextResolve(pathToFileURL(stubSchemas).href, context);
+}
+
 export async function resolve(specifier, context, nextResolve) {
   if (shouldUseStub() && resolvesToReal(specifier, context.parentURL)) {
-    if (!fs.existsSync(stubSchemas)) {
-      throw new Error(`site-component-schemas stub missing: ${stubSchemas}`);
-    }
-    return {
-      shortCircuit: true,
-      url: pathToFileURL(stubSchemas).href,
-    };
+    return resolveStub(context, nextResolve);
   }
 
   const resolved = await nextResolve(specifier, context);
   if (shouldUseStub() && urlIsReal(resolved.url)) {
-    return {
-      shortCircuit: true,
-      url: pathToFileURL(stubSchemas).href,
-    };
+    return resolveStub(context, nextResolve);
   }
   return resolved;
 }
