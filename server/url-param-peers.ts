@@ -5,12 +5,19 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 import {
-  type ContentTypeEntry,
   getRawUrlParamValue,
   listExtraUrlPatternParams,
 } from "./content-types";
 
-type ContentTypeConfig = ContentTypeEntry;
+/**
+ * Minimal shape for peer observe/validate. Accepts both server `ContentTypeEntry`
+ * (required directory) and MCP `ContentTypeConfig` (optional directory).
+ */
+export type UrlParamPeerConfig = {
+  directory?: string;
+  url_pattern?: Record<string, string>;
+  field_mapping?: Record<string, unknown>;
+};
 
 function safeLoad(raw: string): Record<string, unknown> | null {
   try {
@@ -24,11 +31,11 @@ function safeLoad(raw: string): Record<string, unknown> | null {
 }
 
 /** Extra `:param` names from a content type config (excludes :slug / :locale). */
-export function urlPatternParams(config: ContentTypeConfig): string[] {
+export function urlPatternParams(config: UrlParamPeerConfig): string[] {
   return listExtraUrlPatternParams(config.url_pattern);
 }
 
-export function isUrlPatternParam(config: ContentTypeConfig, param: string): boolean {
+export function isUrlPatternParam(config: UrlParamPeerConfig, param: string): boolean {
   return urlPatternParams(config).includes(param);
 }
 
@@ -48,7 +55,7 @@ export function localeYamlCandidatesForObserve(locale: string): string[] {
 export function observeParamValues(
   contentPath: string,
   contentType: string,
-  config: ContentTypeConfig,
+  config: UrlParamPeerConfig,
   param: string,
   locale?: string,
 ): string[] {
@@ -88,7 +95,7 @@ export function observeParamValues(
 export function observeParamValuesByLocale(
   contentPath: string,
   contentType: string,
-  config: ContentTypeConfig,
+  config: UrlParamPeerConfig,
   param: string,
   locales: string[] = ["en", "es"],
 ): Record<string, string[]> {
@@ -109,7 +116,7 @@ export type UrlParamPeerGateFailure = {
 export function validateUrlParamPeerValues(
   contentPath: string,
   contentType: string,
-  config: ContentTypeConfig,
+  config: UrlParamPeerConfig,
   proposedByLocale: Record<string, Record<string, string>>,
   confirmNewValues?: boolean,
 ): UrlParamPeerGateFailure | null {
