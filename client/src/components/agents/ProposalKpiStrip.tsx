@@ -278,19 +278,24 @@ function StatusBadgeButton({
 export function ProposalKpiStrip({
   kindFilter,
   statusFilter,
+  stalledOnly = false,
   stats,
   headers,
   onKindClick,
   onStatusClick,
+  onStalledClick,
   trailing,
 }: {
   kindFilter: ProposalListKind;
   /** List status from the query string — drives spark focus when open|finished|rejected. */
   statusFilter: ProposalListStatus;
+  stalledOnly?: boolean;
   stats?: ProposalListStats | null;
   headers: () => Record<string, string>;
   onKindClick: (kind: ProposalKpiCardKind) => void;
   onStatusClick: (status: ProposalListStatus) => void;
+  /** Toggle stalled accepted ideas filter (Ideas card badge). */
+  onStalledClick?: () => void;
   /** Extra KPI cell (e.g. webhooks) — shares the same row on large screens. */
   trailing?: ReactNode;
 }) {
@@ -464,9 +469,28 @@ export function ProposalKpiStrip({
                     </div>
                   </div>
                 </div>
-                <p className="text-[11px] text-muted-foreground leading-snug w-full">
-                  Live stock by status
-                </p>
+                <div className="flex items-center justify-between gap-2 w-full">
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    Live stock by status
+                  </p>
+                  {card.kind === "idea" && onStalledClick ? (
+                    <button
+                      type="button"
+                      className={cn(
+                        "text-[11px] tabular-nums rounded-sm px-1.5 py-0.5 shrink-0",
+                        "outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                        stalledOnly
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                      onClick={onStalledClick}
+                      title="Accepted ideas with a locked page and no successful follow-up edits yet. Rejected attempts show here again."
+                      data-testid="button-proposal-kpi-stalled-ideas"
+                    >
+                      {Number(stats?.stalled_ideas ?? 0)} stalled
+                    </button>
+                  ) : null}
+                </div>
               </CardContent>
             </Card>
           );

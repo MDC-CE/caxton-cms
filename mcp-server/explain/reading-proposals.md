@@ -51,6 +51,9 @@ When title/description ops are mixed with other field updates, warning `mixed_se
 | `entry_not_found` | Edits target missing: live gone **and** (no variant, or named draft missing) | Create/draft first, or file `kind:"idea"` |
 | `mixed_risk_bundle` | Edits entries **or** idea `related_entries` resolve to more than one risk bucket (selling / new-public / other) | Split into separate proposals |
 | `competing_entry_edits` | Another open/partial **edits** proposal already targets the same type + slug + locale | Join that proposal, or reject the weaker one |
+| `implements_required` | An accepted idea already reserved this type + slug + locale | Pass `implements_proposal_id` to that idea |
+| `idea_already_in_progress` | Another open/partial edits already implements that idea | Join that edits proposal |
+| `implements_entry_mismatch` | `implements_proposal_id` set but entries do not match the idea’s locked page | Target the locked contentType/slug/locale |
 
 **Allowed:** live missing but the named draft **exists** — new-page-via-draft; classifies `new_public_content`.
 

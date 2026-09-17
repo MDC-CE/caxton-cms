@@ -176,9 +176,11 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
   idea_accept: {
     id: "idea_accept",
     title: "Accept greenlights a brief only",
-    why: "Accept does not create pages or write YAML. The build is a later step.",
+    why: "Accept does not create pages or write YAML. The build is a later edits proposal.",
     look_for: [
+      "accepted_entry required (contentType, slug, locale) — locks that page+locale",
       "next_step is concrete (min 20 characters)",
+      "follow-up edits use implements_proposal_id matching this idea",
       "do not report the page as live after accept",
       "close/park means no — not yes",
     ],

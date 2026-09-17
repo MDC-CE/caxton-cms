@@ -11,6 +11,8 @@ import {
   clampProposalLimit,
   clampProposalOffset,
   isProposalsScoped,
+  normalizeProposalStatsByKindStatus,
+  PROPOSAL_STATS_SITE_WIDE_WARNING,
   proposalNextOffset,
   resolveListProposalsSort,
   shouldWarnAuthorAttentionScope,
@@ -171,11 +173,12 @@ export function registerProposalTools(
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
       "Do not use notes for new-spoke pitches — use kind idea. " +
       "Optional related_entries for idea context (slug need not exist yet). " +
+      "Edits: optional implements_proposal_id to link an accepted idea; required when that idea reserved the same type+slug+locale. " +
       "Edits: optional review_situations[] (catalog ids — see explain_site topic review-situations). Empty → reviewer infers from ops. " +
       "Hub/internal links → prefer review_situations:[\"internal_links\"] and explain topic internal-links-proposals. " +
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] and explain topic serp-title-description-proposals. " +
       "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] and explain topic funnel-classification-proposals (persona → product → stage). " +
-      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale). " +
+      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale), implements_required / idea_already_in_progress. " +
       "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
       "Four-eyes apply/reject/accept compare human+role (not username alone). Apply/reject need proposals_review (Proposal Reviewer or Publisher).",
@@ -247,6 +250,12 @@ export function registerProposalTools(
         .describe(
           "Optional: id of a rejected/withdrawn proposal this replaces (links learning; never required).",
         ),
+      implements_proposal_id: z
+        .string()
+        .optional()
+        .describe(
+          "Edits only: accepted idea this work implements. Required when that idea reserved the same type+slug+locale. At most one open implements per idea.",
+        ),
       entries: z
         .array(
           z.object({
@@ -295,6 +304,7 @@ export function registerProposalTools(
             agent_session_id: args.agent_session_id,
             promote_on_apply: args.promote_on_apply,
             supersedes_proposal_id: args.supersedes_proposal_id,
+            implements_proposal_id: args.implements_proposal_id,
           }),
         });
         const data = (await res.json()) as Record<string, unknown>;
@@ -456,6 +466,44 @@ export function registerProposalTools(
               ],
             });
           }
+          if (
+            data.code === "implements_required" ||
+            data.code === "idea_already_in_progress" ||
+            data.code === "implements_entry_mismatch" ||
+            data.code === "implements_not_found" ||
+            data.code === "implements_idea_incomplete"
+          ) {
+            const existing = data.existing_proposal as { id?: string } | undefined;
+            const ideaId = String(existing?.id ?? data.duplicate_of ?? args.implements_proposal_id ?? "");
+            return fail(String(data.error ?? data.code), {
+              code: String(data.code),
+              next_actions: [
+                {
+                  tool: data.code === "idea_already_in_progress" ? "list_proposals" : "propose_change",
+                  reason:
+                    data.code === "idea_already_in_progress"
+                      ? "Join the open edits that already implement this idea."
+                      : data.code === "implements_required"
+                        ? "Retry propose_change with implements_proposal_id set to the accepted idea that reserved this page."
+                        : "Fix implements_proposal_id / entry to match the accepted idea, then retry.",
+                  priority: "required",
+                  args_hint:
+                    data.code === "idea_already_in_progress"
+                      ? { proposal_id: ideaId }
+                      : {
+                          ...args,
+                          implements_proposal_id: ideaId || args.implements_proposal_id,
+                        },
+                },
+                {
+                  tool: "list_proposals",
+                  reason: "List stalled accepted ideas (stalled: true) or open the idea for accepted_entry.",
+                  priority: "recommended",
+                  args_hint: { stalled: true, kind: "idea", status: "finished" },
+                },
+              ],
+            });
+          }
           return fail(String(data.error ?? "propose_change failed"), { code: data.code });
         }
         const proposal = (data as { proposal?: { id?: string; review_mode?: string; promote_on_apply?: boolean; escalated_siblings?: Array<{ id: string; title: string }> } })
@@ -522,10 +570,14 @@ export function registerProposalTools(
 
   mcp.tool(
     "list_proposals",
-    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only (incl. by_attention, by_kind_status). " +
-      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, or attention for paginated summary rows " +
+    "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only " +
+      "(by_attention, by_kind_status = live KPI strip Ideas/Edits/Notes × Open/Done/Rej with zeros filled, stalled_ideas). " +
+      "kpi_history is opt-in only (never default). Event Webhooks are not included. " +
+      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, attention, or stalled for paginated summary rows " +
       "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, slim stubs — no ops/values/baselines). " +
-      "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted. " +
+      "Filtered calls still return site-wide by_kind_status (warning proposal_stats_site_wide) — not counts for this page. " +
+      "stalled:true → accepted ideas with a locked page and no open/partial/finished implements follow-up (legacy accepts without a lock are excluded). " +
+      "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted (unless stalled). " +
       "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
@@ -583,6 +635,12 @@ export function registerProposalTools(
           "Triage bucket filter. awaiting_rereview = blockers fixed, needs re-check; no_feedback = never had blockers; " +
             "blocked = open needs-changes; escalated = steward hold.",
         ),
+      stalled: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, only accepted ideas with a locked page and no successful implements follow-up (open/partial/finished). Use to pick up greenlit work.",
+        ),
       limit: z.number().optional().describe("Page size when scoped (default 20, max 200)"),
       offset: z.number().optional().describe("Offset when scoped"),
       sort: z
@@ -634,8 +692,9 @@ export function registerProposalTools(
         warnings.push({
           code: "proposals_need_filter",
           message:
-            "Unscoped list_proposals returns proposal_stats only. Pass status, kind, query, issue_id, proposal_id, " +
-            "proposer_username, proposer_actor, agent_session_id, escalated, or attention to load proposals[].",
+            "Unscoped list_proposals returns proposal_stats only (by_kind_status = live KPI strip counts; " +
+            "kpi_history not included unless requested). Pass status, kind, query, issue_id, proposal_id, " +
+            "proposer_username, proposer_actor, agent_session_id, escalated, attention, or stalled to load proposals[].",
         });
         if (args.limit != null || args.offset != null) {
           warnings.push({
@@ -669,6 +728,7 @@ export function registerProposalTools(
               "Pass proposer_username or agent_session_id to focus on your own queue.",
           });
         }
+        warnings.push({ ...PROPOSAL_STATS_SITE_WIDE_WARNING });
       }
 
       const qs = new URLSearchParams();
@@ -687,6 +747,8 @@ export function registerProposalTools(
         if (args.escalated === true) qs.set("escalated", "1");
         if (args.escalated === false) qs.set("escalated", "0");
         if (args.attention) qs.set("attention", args.attention);
+        if (args.stalled === true) qs.set("stalled", "1");
+        if (args.stalled === false) qs.set("stalled", "0");
         qs.set("limit", String(limit));
         qs.set("offset", String(offset));
         qs.set("sort", sort);
@@ -725,7 +787,7 @@ export function registerProposalTools(
         };
         if (!res.ok) return fail(String(data.error ?? "list_proposals failed"));
 
-        const proposal_stats = data.stats ?? null;
+        const proposal_stats = normalizeProposalStatsByKindStatus(data.stats);
 
         let kpi_history: unknown = undefined;
         if (args.kpi_history === true) {
@@ -915,7 +977,7 @@ export function registerProposalTools(
       "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations — cannot apply/reject/accept. " +
       "Both (Publisher): full set. " +
       "Reject is rare (bad/impossible/illegal/harmful/duplicate/target missing): confirm_reject + reject_kind + close_note (min 80). Prefer add_blocker for polish; then revise_entries (proposer; idle or self-claim). " +
-      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; no YAML. " +
+      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page); no YAML. " +
       "close notes/ideas: close_reason + close_note. Withdraw: close_note min 20. Open blockers block apply/accept only (revise does not clear them). Four-eyes = username+role. " +
       "Multi-situation: review each pack independently; drop failing ops via revise_entries then apply (atomic). " +
       "Before apply, list_proposals(proposal_id) for live review_context.",
@@ -969,6 +1031,16 @@ export function registerProposalTools(
         .string()
         .optional()
         .describe("For accept: free-text next step after greenlight (min 20)"),
+      accepted_entry: z
+        .object({
+          contentType: z.string(),
+          slug: z.string(),
+          locale: z.string(),
+        })
+        .optional()
+        .describe(
+          "For accept: required locked page (contentType, slug, locale). Follow-up edits must implement this idea and match this entry.",
+        ),
       no_auto_retry: z
         .boolean()
         .optional()
@@ -1064,6 +1136,7 @@ export function registerProposalTools(
             close_reason: args.close_reason,
             close_note: args.close_note,
             next_step: args.next_step,
+            accepted_entry: args.accepted_entry,
             no_auto_retry: args.no_auto_retry,
             confirm_reject: args.confirm_reject,
             reject_kind: args.reject_kind,
@@ -1226,6 +1299,32 @@ export function registerProposalTools(
                   reason: "Read open blockers, then claim and fix before apply.",
                   priority: "required",
                   args_hint: { proposal_id: args.proposal_id },
+                },
+              ],
+            });
+          }
+          if (data.code === "accepted_entry_required" || data.code === "accepted_entry_taken") {
+            return fail(String(data.error ?? data.code), {
+              code: String(data.code),
+              next_actions: [
+                {
+                  tool: "update_proposal",
+                  reason:
+                    data.code === "accepted_entry_taken"
+                      ? "Pick a different contentType/slug/locale — another accepted idea already locked that page."
+                      : "Retry accept with accepted_entry { contentType, slug, locale } plus next_step.",
+                  priority: "required",
+                  args_hint: {
+                    proposal_id: args.proposal_id,
+                    action: "accept",
+                    next_step: args.next_step,
+                    accepted_entry: args.accepted_entry ?? {
+                      contentType: "blog",
+                      slug: "example-slug",
+                      locale: "en",
+                    },
+                    site: args.site,
+                  },
                 },
               ],
             });

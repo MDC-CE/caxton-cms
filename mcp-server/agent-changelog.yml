@@ -6,6 +6,47 @@ window_days: 6
 
 entries:
   - date: "2026-09-16"
+    summary: "Idea follow-through agent visibility — conventions, explain blurbs, idea_accept"
+    agent_impact:
+      - "agent-conventions v24: accept needs accepted_entry; implements_proposal_id follow-up; list_proposals stalled / stalled_ideas."
+      - "explain_site proposals + reading-proposals catalog blurbs mention follow-through and implements_* refuses; idea_accept checklist/discovery think items require accepted_entry."
+      - "Reconnect MCP so explain_site tool description refreshes; re-bootstrap_agent for conventions + changelog."
+    tools_changed: true
+    paths:
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/tools/explain.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+
+  - date: "2026-09-16"
+    summary: "list_proposals KPI strip contract — site-wide by_kind_status, history opt-in"
+    agent_impact:
+      - "Unscoped list_proposals by_kind_status = staff KPI strip live counts (full nine buckets, zeros filled). kpi_history stays opt-in; Event Webhooks never on this tool."
+      - "Scoped/filtered list_proposals still returns site-wide by_kind_status with warning proposal_stats_site_wide — not the filtered page size."
+      - "Reconnect MCP so the updated list_proposals description is visible."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-16"
+    summary: "Idea follow-through — accepted_entry, implements_proposal_id, stalled_ideas"
+    agent_impact:
+      - "accept on ideas requires accepted_entry {contentType,slug,locale} (locks that page+locale) plus next_step. No YAML on accept."
+      - "Edits may pass implements_proposal_id; required when an accepted idea reserved that entry. One open implements per idea (idea_already_in_progress). Rejected follow-ups resurface stalled."
+      - "list_proposals stalled:true + proposal_stats.stalled_ideas for accepted ideas with no successful implements child. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
     summary: "proposal_stats.by_kind_status + opt-in kpi_history stock series"
     agent_impact:
       - "proposal_stats now includes by_kind_status (live open/finished/rejected per kind; open includes partial; withdrawn omitted)."

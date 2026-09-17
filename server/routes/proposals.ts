@@ -195,6 +195,19 @@ export function registerProposalRoutes(app: Express): void {
       res.status(400).json({ error: parsedAttention.error });
       return;
     }
+    const stalledRaw = typeof req.query.stalled === "string" ? req.query.stalled : undefined;
+    const stalled =
+      stalledRaw === "1" || stalledRaw === "true"
+        ? true
+        : stalledRaw === "0" || stalledRaw === "false"
+          ? false
+          : stalledRaw != null && stalledRaw !== ""
+            ? null
+            : undefined;
+    if (stalled === null) {
+      res.status(400).json({ error: "stalled must be 1/true or 0/false when set" });
+      return;
+    }
     const perspectiveRaw =
       typeof req.query.attention_perspective === "string"
         ? req.query.attention_perspective
@@ -241,6 +254,7 @@ export function registerProposalRoutes(app: Express): void {
       agent_session_id: agentSessionId,
       escalated: parsedEscalated.escalated,
       attention: parsedAttention.attention,
+      stalled: stalled === true ? true : undefined,
       limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
       offset: Number.isFinite(offsetRaw) ? offsetRaw : undefined,
       sort: parsedSort.sort,
@@ -356,7 +370,11 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "competing_entry_edits" ||
         result.code === "mixed_risk_bundle" ||
         result.code === "supersedes_already_replaced" ||
-        result.code === "supersedes_not_closed"
+        result.code === "supersedes_not_closed" ||
+        result.code === "implements_required" ||
+        result.code === "idea_already_in_progress" ||
+        result.code === "implements_entry_mismatch" ||
+        result.code === "implements_not_found"
           ? 409
           : 400;
       res.status(status).json(result);
@@ -483,6 +501,10 @@ export function registerProposalRoutes(app: Express): void {
       close_reason: typeof req.body?.close_reason === "string" ? req.body.close_reason : undefined,
       close_note: typeof req.body?.close_note === "string" ? req.body.close_note : undefined,
       next_step: typeof req.body?.next_step === "string" ? req.body.next_step : undefined,
+      accepted_entry:
+        req.body?.accepted_entry && typeof req.body.accepted_entry === "object"
+          ? req.body.accepted_entry
+          : undefined,
       no_auto_retry:
         typeof req.body?.no_auto_retry === "boolean" ? req.body.no_auto_retry : undefined,
       confirm_reject: req.body?.confirm_reject === true,

@@ -18,6 +18,9 @@ export {
   PROPOSER_ACTOR_TYPES,
   isProposalRejectKind,
   toProposalSummary,
+  parseAcceptedEntry,
+  acceptedEntryKey,
+  entriesMatchAccepted,
   type ProposalRecord,
   type ProposalSummary,
   type ProposalEntrySummary,
@@ -32,6 +35,7 @@ export {
   type ReviewMode,
   type AttentionPerspective,
   type ProposalAttention,
+  type AcceptedEntry,
 } from "./service";
 export {
   KPI_RETENTION_DAYS,

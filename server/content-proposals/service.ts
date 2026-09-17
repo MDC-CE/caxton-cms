@@ -127,6 +127,40 @@ export type RelatedEntryRef = {
   locale?: string;
 };
 
+/** Locked page target set on idea accept (required for follow-through). */
+export type AcceptedEntry = {
+  contentType: string;
+  slug: string;
+  locale: string;
+};
+
+export function parseAcceptedEntry(raw: unknown): AcceptedEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const contentType = typeof o.contentType === "string" ? o.contentType.trim() : "";
+  const slug = typeof o.slug === "string" ? o.slug.trim() : "";
+  const locale = typeof o.locale === "string" ? o.locale.trim() : "";
+  if (!contentType || !slug || !locale) return null;
+  return { contentType, slug, locale };
+}
+
+export function acceptedEntryKey(entry: AcceptedEntry): string {
+  return `${entry.contentType}/${entry.slug}/${entry.locale}`;
+}
+
+export function entriesMatchAccepted(
+  entries: Array<{ contentType: string; slug: string; locale: string }>,
+  accepted: AcceptedEntry,
+): boolean {
+  if (entries.length === 0) return false;
+  return entries.every(
+    (e) =>
+      e.contentType === accepted.contentType &&
+      e.slug === accepted.slug &&
+      e.locale === accepted.locale,
+  );
+}
+
 export function isProposalCloseReason(raw: string): raw is ProposalCloseReason {
   return (PROPOSAL_CLOSE_REASONS as string[]).includes(raw);
 }
@@ -227,6 +261,10 @@ export type ProposalRecord = {
   decision_debug: ProposalDecisionDebug | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  /** Set on idea accept — reserved type/slug/locale for follow-up edits. */
+  accepted_entry: AcceptedEntry | null;
+  /** Edits that implement an accepted idea (optional unless slug is reserved). */
+  implements_proposal_id: string | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
@@ -286,6 +324,8 @@ export type ProposalSummary = {
   review_context_snapshot: Record<string, unknown> | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  accepted_entry: AcceptedEntry | null;
+  implements_proposal_id: string | null;
   entry_count: number;
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
@@ -346,6 +386,8 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     review_context_snapshot: record.review_context_snapshot,
     supersedes_proposal_id: record.supersedes_proposal_id,
     replaced_by_proposal_id: record.replaced_by_proposal_id,
+    accepted_entry: record.accepted_entry,
+    implements_proposal_id: record.implements_proposal_id,
     entry_count: record.entries.length,
     field_paths,
     entries: record.entries.map((e) => ({
@@ -398,6 +440,8 @@ type ProposalRow = {
   decision_debug_json?: string | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  accepted_entry_json?: string | null;
+  implements_proposal_id?: string | null;
 };
 
 type EntryDbRow = {
@@ -449,6 +493,8 @@ export type CreateProposalInput = {
   related_entries?: RelatedEntryRef[];
   /** Optional: link a replacement to a rejected/withdrawn predecessor. */
   supersedes_proposal_id?: string;
+  /** Edits: link to an accepted idea this work implements. */
+  implements_proposal_id?: string;
   /**
    * Optional author-declared review situations (edits only).
    * Empty/omit → classifier infers from pending ops. Unknown ids fail create.
@@ -500,6 +546,8 @@ export type ProposalUpdateCaller = {
   no_auto_retry?: boolean;
   /** Accept idea: free-text next step (min MIN_ACCEPT_NEXT_STEP). */
   next_step?: string;
+  /** Accept idea: required locked page target. */
+  accepted_entry?: AcceptedEntry | { contentType?: string; slug?: string; locale?: string };
   /** Reject: must be true for MCP; staff UI sends true after dialog. */
   confirm_reject?: boolean;
   reject_kind?: string;
@@ -644,6 +692,8 @@ function mapProposal(
     decision_debug: parseJson(row.decision_debug_json ?? null, null as ProposalDecisionDebug | null),
     supersedes_proposal_id: row.supersedes_proposal_id ?? null,
     replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
+    accepted_entry: parseAcceptedEntry(parseJson(row.accepted_entry_json ?? null, null)),
+    implements_proposal_id: row.implements_proposal_id ?? null,
     entries,
     blockers,
   };
@@ -854,6 +904,8 @@ export type ProposalStats = {
   by_attention: Record<ProposalAttention, number>;
   /** Live stock for KPI cards: open includes partial; withdrawn omitted. */
   by_kind_status: KindStatusCardCounts;
+  /** Accepted ideas with locked entry and no open/partial/finished implements child. */
+  stalled_ideas: number;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -1018,6 +1070,82 @@ function findOpenEditsForEntry(
        LIMIT 5`,
     )
     .all(site, entryKey, locale) as Array<{ id: string }>;
+  for (const row of rows) {
+    if (excludeProposalId && row.id === excludeProposalId) continue;
+    return loadProposal(db, row.id);
+  }
+  return null;
+}
+
+const STALLED_IMPLEMENTS_STATUSES = "('open','partial','finished')";
+
+/** SQL predicate for stalled accepted ideas. Pass table alias (e.g. `p`) or `""` for unqualified columns. */
+function stalledIdeaSqlPredicate(alias: string): string {
+  const col = (name: string) => (alias ? `${alias}.${name}` : name);
+  return (
+    `${col("kind")} = 'idea' AND ${col("status")} = 'finished' AND ${col("close_reason")} = 'accepted' ` +
+    `AND ${col("accepted_entry_json")} IS NOT NULL AND TRIM(${col("accepted_entry_json")}) != '' ` +
+    `AND ${col("accepted_entry_json")} != 'null' AND NOT EXISTS (` +
+    `SELECT 1 FROM content_proposals c WHERE c.site = ${col("site")} ` +
+    `AND c.implements_proposal_id = ${col("id")} AND c.kind = 'edits' ` +
+    `AND c.status IN ${STALLED_IMPLEMENTS_STATUSES})`
+  );
+}
+
+function countStalledIdeas(db: Database.Database, site: string): number {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM content_proposals p WHERE p.site = ? AND ${stalledIdeaSqlPredicate("p")}`,
+      )
+      .get(site) as { n: number };
+    return Number(row?.n) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function findAcceptedIdeaOwningEntry(
+  db: Database.Database,
+  site: string,
+  contentType: string,
+  slug: string,
+  locale: string,
+  excludeIdeaId?: string,
+): ProposalRecord | null {
+  const key = acceptedEntryKey({ contentType, slug, locale });
+  const rows = db
+    .prepare(
+      `SELECT id, accepted_entry_json FROM content_proposals
+       WHERE site = ? AND kind = 'idea' AND status = 'finished' AND close_reason = 'accepted'
+         AND accepted_entry_json IS NOT NULL`,
+    )
+    .all(site) as Array<{ id: string; accepted_entry_json: string }>;
+  for (const row of rows) {
+    if (excludeIdeaId && row.id === excludeIdeaId) continue;
+    const entry = parseAcceptedEntry(parseJson(row.accepted_entry_json, null));
+    if (!entry) continue;
+    if (acceptedEntryKey(entry) === key) {
+      return loadProposal(db, row.id);
+    }
+  }
+  return null;
+}
+
+function findOpenImplementsForIdea(
+  db: Database.Database,
+  site: string,
+  ideaId: string,
+  excludeProposalId?: string,
+): ProposalRecord | null {
+  const rows = db
+    .prepare(
+      `SELECT id FROM content_proposals
+       WHERE site = ? AND kind = 'edits' AND status IN ('open','partial')
+         AND implements_proposal_id = ?
+       LIMIT 5`,
+    )
+    .all(site, ideaId) as Array<{ id: string }>;
   for (const row of rows) {
     if (excludeProposalId && row.id === excludeProposalId) continue;
     return loadProposal(db, row.id);
@@ -1379,6 +1507,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       escalated_count: Number(escalatedRow?.n) || 0,
       by_attention,
       by_kind_status: liveByKindStatus(db, site),
+      stalled_ideas: countStalledIdeas(db, site),
     };
   }
 
@@ -1429,6 +1558,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
     agent_session_id?: string;
     escalated?: boolean;
     attention?: ProposalAttention;
+    /** Accepted ideas with no successful implements follow-up. */
+    stalled?: boolean;
     limit?: number;
     offset?: number;
     sort?: ProposalSortField;
@@ -1458,51 +1589,57 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const sortDir: ProposalSortDir = opts.sortDir ?? "desc";
     const perspective: AttentionPerspective = opts.attention_perspective ?? "reviewer";
     const useAttentionPath = sort === "attention" || opts.attention != null;
-    const statusBiasApplied = useAttentionPath && opts.status == null;
+    const statusBiasApplied = useAttentionPath && opts.status == null && opts.stalled !== true;
+    const tableAlias = opts.stalled === true ? "p" : "";
+    const fromSql = tableAlias ? `content_proposals ${tableAlias}` : `content_proposals`;
+    const col = (name: string) => (tableAlias ? `${tableAlias}.${name}` : name);
 
-    let where = `WHERE site = ?`;
+    let where = `WHERE ${col("site")} = ?`;
     const params: unknown[] = [site];
+    if (opts.stalled === true) {
+      where += ` AND ${stalledIdeaSqlPredicate(tableAlias || "p")}`;
+    }
     if (opts.status) {
-      where += ` AND status = ?`;
+      where += ` AND ${col("status")} = ?`;
       params.push(opts.status);
     } else if (statusBiasApplied) {
-      where += ` AND status IN ('open', 'partial')`;
+      where += ` AND ${col("status")} IN ('open', 'partial')`;
     }
     if (opts.kind) {
-      where += ` AND kind = ?`;
+      where += ` AND ${col("kind")} = ?`;
       params.push(opts.kind);
     }
     if (opts.issue_id) {
-      where += ` AND related_issue_ids_json LIKE ?`;
+      where += ` AND ${col("related_issue_ids_json")} LIKE ?`;
       params.push(`%${opts.issue_id}%`);
     }
     if (opts.query?.trim()) {
-      where += ` AND search_text LIKE ?`;
+      where += ` AND ${col("search_text")} LIKE ?`;
       params.push(`%${opts.query.trim().toLowerCase()}%`);
     }
     const proposerUsername = opts.proposer_username?.trim();
     if (proposerUsername) {
-      where += ` AND LOWER(proposer_username) = LOWER(?)`;
+      where += ` AND LOWER(${col("proposer_username")}) = LOWER(?)`;
       params.push(proposerUsername);
     }
     if (opts.proposer_actor_type) {
-      where += ` AND json_extract(proposer_actor_json, '$.type') = ?`;
+      where += ` AND json_extract(${col("proposer_actor_json")}, '$.type') = ?`;
       params.push(opts.proposer_actor_type);
     }
     const proposerActorRole = opts.proposer_actor_role?.trim();
     if (proposerActorRole) {
-      where += ` AND json_extract(proposer_actor_json, '$.role') = ?`;
+      where += ` AND json_extract(${col("proposer_actor_json")}, '$.role') = ?`;
       params.push(proposerActorRole);
     }
     const agentSessionId = opts.agent_session_id?.trim();
     if (agentSessionId) {
-      where += ` AND created_agent_session_id = ?`;
+      where += ` AND ${col("created_agent_session_id")} = ?`;
       params.push(agentSessionId);
     }
     if (opts.escalated === true) {
-      where += ` AND escalated = 1`;
+      where += ` AND ${col("escalated")} = 1`;
     } else if (opts.escalated === false) {
-      where += ` AND escalated = 0`;
+      where += ` AND ${col("escalated")} = 0`;
     }
 
     const mapRow = (r: ProposalRow) =>
@@ -1522,10 +1659,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
     if (useAttentionPath || opts.issue_id) {
       const orderSql =
         sort === "attention"
-          ? `ORDER BY updated_at DESC, id ASC`
-          : `ORDER BY ${sort === "created_at" ? "created_at" : "updated_at"} ${sortDir.toUpperCase()}, id ASC`;
+          ? `ORDER BY ${col("updated_at")} DESC, ${col("id")} ASC`
+          : `ORDER BY ${col(sort === "created_at" ? "created_at" : "updated_at")} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
       const rows = db
-        .prepare(`SELECT * FROM content_proposals ${where} ${orderSql}`)
+        .prepare(`SELECT ${tableAlias ? `${tableAlias}.*` : "*"} FROM ${fromSql} ${where} ${orderSql}`)
         .all(...params) as ProposalRow[];
       let records = rows.map(mapRow);
       if (opts.issue_id) {
@@ -1573,14 +1710,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
       };
     }
 
-    const orderSql = `ORDER BY ${sort} ${sortDir.toUpperCase()}, id ASC`;
+    const orderSql = `ORDER BY ${col(sort)} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
     const totalRow = db
-      .prepare(`SELECT COUNT(*) AS n FROM content_proposals ${where}`)
+      .prepare(`SELECT COUNT(*) AS n FROM ${fromSql} ${where}`)
       .get(...params) as { n: number };
     const total = Number(totalRow?.n) || 0;
     const rows = db
       .prepare(
-        `SELECT * FROM content_proposals ${where} ${orderSql} LIMIT ? OFFSET ?`,
+        `SELECT ${tableAlias ? `${tableAlias}.*` : "*"} FROM ${fromSql} ${where} ${orderSql} LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as ProposalRow[];
     const proposals = rows.map((r) =>
@@ -1852,6 +1989,78 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     if (kind === "edits") {
+      const implementsRaw = input.implements_proposal_id?.trim() || "";
+      let implementsIdea: ProposalRecord | null = null;
+      if (implementsRaw) {
+        implementsIdea = loadProposal(db, implementsRaw);
+        if (
+          !implementsIdea ||
+          implementsIdea.site !== site ||
+          implementsIdea.kind !== "idea" ||
+          implementsIdea.close_reason !== "accepted" ||
+          implementsIdea.status !== "finished"
+        ) {
+          return {
+            ok: false,
+            code: "implements_not_found",
+            error:
+              "implements_proposal_id must reference an accepted idea on this site (finished with close_reason accepted).",
+          };
+        }
+        if (!implementsIdea.accepted_entry) {
+          return {
+            ok: false,
+            code: "implements_idea_incomplete",
+            error:
+              "That accepted idea has no locked page entry. Staff must re-accept with a content type, slug, and locale (legacy ideas).",
+            existing_proposal: implementsIdea,
+          };
+        }
+        if (!entriesMatchAccepted(entriesIn, implementsIdea.accepted_entry)) {
+          const ae = implementsIdea.accepted_entry;
+          return {
+            ok: false,
+            code: "implements_entry_mismatch",
+            error: `Edits must target ${ae.contentType}/${ae.slug} (${ae.locale}) to implement this idea.`,
+            existing_proposal: implementsIdea,
+          };
+        }
+        const openImpl = findOpenImplementsForIdea(db, site, implementsIdea.id);
+        if (openImpl) {
+          return {
+            ok: false,
+            code: "idea_already_in_progress",
+            error: `An open edits proposal already implements this idea (${openImpl.id}). Join it instead of creating another.`,
+            duplicate_of: openImpl.id,
+            existing_proposal: openImpl,
+          };
+        }
+      }
+
+      for (const e of entriesIn) {
+        const owner = findAcceptedIdeaOwningEntry(db, site, e.contentType, e.slug, e.locale);
+        if (owner) {
+          if (!implementsRaw) {
+            return {
+              ok: false,
+              code: "implements_required",
+              error: `An accepted idea (${owner.id}) already reserved ${e.contentType}/${e.slug} (${e.locale}). Pass implements_proposal_id: "${owner.id}".`,
+              duplicate_of: owner.id,
+              existing_proposal: owner,
+            };
+          }
+          if (implementsRaw !== owner.id) {
+            return {
+              ok: false,
+              code: "implements_required",
+              error: `That page is reserved by accepted idea ${owner.id}. Pass implements_proposal_id: "${owner.id}".`,
+              duplicate_of: owner.id,
+              existing_proposal: owner,
+            };
+          }
+        }
+      }
+
       for (const e of entriesIn) {
         const competing = findOpenEditsForEntry(db, site, e.contentType, e.slug, e.locale);
         if (competing) {
@@ -1865,6 +2074,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
         }
       }
     }
+
+    const implementsIdForInsert =
+      kind === "edits" ? input.implements_proposal_id?.trim() || null : null;
 
     const searchBlob = [
       title,
@@ -2010,8 +2222,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
         review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-        review_situations_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_situations_json, implements_proposal_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -2039,6 +2251,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       supersedesId,
       null,
       JSON.stringify(filedReviewSituations),
+      implementsIdForInsert,
     );
 
     if (supersedesId) {
@@ -2340,17 +2553,44 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `Accept requires a next-step note (min ${MIN_ACCEPT_NEXT_STEP} characters)`,
         };
       }
+      const acceptedEntry = parseAcceptedEntry(caller.accepted_entry);
+      if (!acceptedEntry) {
+        return {
+          ok: false,
+          code: "accepted_entry_required",
+          error:
+            "Accept requires accepted_entry with contentType, slug, and locale (the page this idea locks for follow-up work).",
+        };
+      }
+      const taken = findAcceptedIdeaOwningEntry(
+        db,
+        site,
+        acceptedEntry.contentType,
+        acceptedEntry.slug,
+        acceptedEntry.locale,
+        id,
+      );
+      if (taken) {
+        return {
+          ok: false,
+          code: "accepted_entry_taken",
+          error: `Another accepted idea (${taken.id}) already reserved ${acceptedEntryKey(acceptedEntry)}.`,
+          existing_proposal: taken,
+        };
+      }
       const reviewBeforeAccept = classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
-             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
+             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?,
+             accepted_entry_json = ?
          WHERE id = ?`,
-      ).run(now, "accepted", nextStep, caller.username, now, id);
+      ).run(now, "accepted", nextStep, caller.username, now, JSON.stringify(acceptedEntry), id);
       captureDecisionDebug(proposal, "accept", caller, reviewBeforeAccept);
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: "accepted",
         close_note: nextStep,
+        accepted_entry: acceptedEntry,
       });
       return { ok: true, proposal: get(id)! };
     }
@@ -3291,8 +3531,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       close_reason, close_note, closed_by, closed_at, related_entries_json,
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
       escalated, escalated_at, escalated_by, escalated_note, decision_debug_json,
-      review_situations_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      review_situations_json, accepted_entry_json, implements_proposal_id
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -3355,6 +3595,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.escalated_note ?? null,
         p.decision_debug ? JSON.stringify(p.decision_debug) : null,
         JSON.stringify(p.review_situations ?? []),
+        p.accepted_entry ? JSON.stringify(p.accepted_entry) : null,
+        p.implements_proposal_id ?? null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

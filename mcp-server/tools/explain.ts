@@ -69,9 +69,9 @@ const TOPIC_DESC: Record<string, string> = {
   redirects:
     "CMS 301/302: two stores, first-match, test_redirect (read_redirects) + update_redirect (edit_redirects), before_from custom-only",
   proposals:
-    "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first; optional review_situations",
+    "Entry change proposals and issue handoff notes; four MCP tools incl. get_entry_activity; four-eyes apply; list_proposals is stats-first; idea accept locks accepted_entry; implements_proposal_id follow-up; stalled / stalled_ideas; optional review_situations",
   "reading-proposals":
-    "review_context damage/undo axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses, target_missing apply block, discovery_path",
+    "review_context damage/undo axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses (incl. implements_*), target_missing apply block, discovery_path",
   "review-situations":
     "Catalog of review_situations ids for edits proposals; infer-when-empty; per-situation ship; links to author guides",
   "internal-links-proposals":
@@ -451,8 +451,8 @@ export function registerExplainTools(
       "'relation-fields' (relation editor, authors CT, listing vs hydrate, delete_entries reassign), " +
       "'lead-forms' (catalog source.content_type/database/related_field, required value_path/label_path, required query on ecommerce catalogs, purchasable vs actively_selling), " +
       "'redirects' (CMS 301/302, two stores, test_redirect / read_redirects, update_redirect / edit_redirects, first-match), " +
-      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity; optional review_situations), " +
-      "'reading-proposals' (review_context axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses, target_missing apply block), " +
+      "'proposals' (entry proposals + issue notes; propose_change, list_proposals, update_proposal, get_entry_activity; idea accepted_entry + implements follow-up; stalled / stalled_ideas; optional review_situations), " +
+      "'reading-proposals' (review_context axes, checklist IDs incl. adjacent_findings and internal_links, three disposition lanes, create refuses incl. implements_*, target_missing apply block), " +
       "'review-situations' (catalog of review_situations ids; infer-when-empty; per-situation ship), " +
       "'internal-links-proposals' (hub/internal link author + reviewer playbook), " +
       "'serp-title-description-proposals' (SERP title/description author + reviewer playbook), " +

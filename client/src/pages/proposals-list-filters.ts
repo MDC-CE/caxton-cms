@@ -11,6 +11,7 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   agentSessionId: "agent_session_id",
   escalatedOnly: "escalated",
   attention: "attention",
+  stalledOnly: "stalled",
 } as const;
 
 export type ProposalListStatus =
@@ -52,6 +53,8 @@ export type ProposalListFilters = {
   escalatedOnly: boolean;
   /** Attention triage bucket; `all` = no filter. */
   attention: ProposalListAttention;
+  /** Accepted ideas with no successful implements follow-up. */
+  stalledOnly: boolean;
 };
 
 export type ProposalListViewState = {
@@ -70,6 +73,7 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   agentSessionId: "",
   escalatedOnly: false,
   attention: "all",
+  stalledOnly: false,
 };
 
 export const DEFAULT_PROPOSAL_LIST_VIEW: ProposalListViewState = {
@@ -135,6 +139,12 @@ function parseEscalatedOnly(raw: string | null): boolean {
   return v === "1" || v === "true";
 }
 
+function parseStalledOnly(raw: string | null): boolean {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
 function parseAttention(raw: string | null): ProposalListAttention {
   if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.attention;
   return ATTENTION_VALUES.has(raw as ProposalListAttention)
@@ -156,6 +166,7 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       agentSessionId: params.get(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId) ?? "",
       escalatedOnly: parseEscalatedOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly)),
       attention: parseAttention(params.get(PROPOSAL_LIST_SEARCH_KEYS.attention)),
+      stalledOnly: parseStalledOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly)),
     },
     q: params.get(PROPOSAL_LIST_SEARCH_KEYS.q) ?? "",
   };
@@ -236,6 +247,12 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.attention, filters.attention);
   }
 
+  if (!filters.stalledOnly) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly, "1");
+  }
+
   const trimmedQ = q.trim();
   if (!trimmedQ) {
     params.delete(PROPOSAL_LIST_SEARCH_KEYS.q);
@@ -258,6 +275,7 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   if (filters.agentSessionId.trim()) n += 1;
   if (filters.escalatedOnly) n += 1;
   if (filters.attention !== d.attention) n += 1;
+  if (filters.stalledOnly) n += 1;
   return n;
 }
 
@@ -273,6 +291,7 @@ export function clearProposalListFilters(filters: ProposalListFilters): Proposal
     agentSessionId: DEFAULT_PROPOSAL_LIST_FILTERS.agentSessionId,
     escalatedOnly: DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly,
     attention: DEFAULT_PROPOSAL_LIST_FILTERS.attention,
+    stalledOnly: DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly,
   };
 }
 
@@ -289,6 +308,7 @@ export type ProposalListApiQuery = {
   escalated?: string;
   attention?: string;
   attention_perspective?: string;
+  stalled?: string;
 };
 
 /** Map UI filters to API query params. status/kind/actor type `all` → omit. */
@@ -313,6 +333,7 @@ export function toProposalListApiQuery(
   if (session) out.agent_session_id = session;
   if (filters.escalatedOnly) out.escalated = "1";
   if (filters.attention !== "all") out.attention = filters.attention;
+  if (filters.stalledOnly) out.stalled = "1";
   if (filters.sort === "attention") out.attention_perspective = "reviewer";
   return out;
 }
@@ -331,6 +352,7 @@ export function proposalListApiSearchParams(query: ProposalListApiQuery): string
   if (query.escalated) params.set("escalated", query.escalated);
   if (query.attention) params.set("attention", query.attention);
   if (query.attention_perspective) params.set("attention_perspective", query.attention_perspective);
+  if (query.stalled) params.set("stalled", query.stalled);
   return params.toString();
 }
 
@@ -344,6 +366,7 @@ export type ProposalListStats = {
     string,
     { open?: number; finished?: number; rejected?: number }
   >;
+  stalled_ideas?: number;
 };
 
 export const PROPOSAL_KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;

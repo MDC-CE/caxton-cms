@@ -37,6 +37,7 @@ describe("parseProposalListSearch", () => {
         agentSessionId: "",
         escalatedOnly: false,
         attention: "all",
+        stalledOnly: false,
       },
       q: "hero",
     });
@@ -61,6 +62,12 @@ describe("parseProposalListSearch", () => {
     expect(parseProposalListSearch("escalated=1").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("escalated=true").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("").filters.escalatedOnly).toBe(false);
+  });
+
+  it("parses stalled=1 as stalledOnly", () => {
+    expect(parseProposalListSearch("stalled=1").filters.stalledOnly).toBe(true);
+    expect(parseProposalListSearch("stalled=true").filters.stalledOnly).toBe(true);
+    expect(parseProposalListSearch("").filters.stalledOnly).toBe(false);
   });
 
   it("coerces invalid values per field without wiping siblings", () => {
@@ -109,6 +116,7 @@ describe("serializeProposalListSearch", () => {
         agentSessionId: "sess-9",
         escalatedOnly: true,
         attention: "blocked" as const,
+        stalledOnly: false,
       },
       q: "pricing",
     };
@@ -183,6 +191,7 @@ describe("clearProposalListFilters", () => {
       agentSessionId: "",
       escalatedOnly: false,
       attention: "all",
+      stalledOnly: false,
     });
   });
 });

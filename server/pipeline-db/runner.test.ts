@@ -618,6 +618,105 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds idea follow-through columns when upgrading from v19-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v19-followthrough-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        site TEXT NOT NULL,
+        resource_json TEXT NOT NULL DEFAULT '{}',
+        cause TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        triggered_by_event_id INTEGER,
+        triggered_by_event_ids_json TEXT,
+        attribution_json TEXT NOT NULL DEFAULT '[]',
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        agent_session_id TEXT
+      );
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 19);
+      CREATE TABLE pipeline_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+      CREATE TABLE leases (
+        resource TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        token INTEGER NOT NULL DEFAULT 1,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        category TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        rationale TEXT,
+        documentation_json TEXT NOT NULL DEFAULT '{}',
+        related_issue_ids_json TEXT NOT NULL DEFAULT '[]',
+        proposer_username TEXT NOT NULL,
+        proposer_actor_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        claim_json TEXT,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        search_text TEXT NOT NULL DEFAULT '',
+        created_agent_session_id TEXT,
+        promote_on_apply INTEGER NOT NULL DEFAULT 0,
+        no_auto_retry INTEGER NOT NULL DEFAULT 0,
+        close_reason TEXT,
+        close_note TEXT,
+        closed_by TEXT,
+        closed_at INTEGER,
+        related_entries_json TEXT NOT NULL DEFAULT '[]',
+        review_context_snapshot_json TEXT,
+        supersedes_proposal_id TEXT,
+        replaced_by_proposal_id TEXT,
+        escalated INTEGER NOT NULL DEFAULT 0,
+        escalated_at INTEGER,
+        escalated_by TEXT,
+        escalated_note TEXT,
+        decision_debug_json TEXT,
+        review_situations_json TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE proposal_kpi_daily (
+        site TEXT NOT NULL,
+        day TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (site, day, kind, status)
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_triggered_by ON events(triggered_by_event_id);
+      CREATE INDEX IF NOT EXISTS idx_events_agent_session
+        ON events(site, agent_session_id, created_at);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'accepted_entry_json'").get(),
+    ).toBeDefined();
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'implements_proposal_id'").get(),
+    ).toBeDefined();
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_content_proposals_implements'").get(),
+    ).toEqual({ name: "idx_content_proposals_implements" });
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

@@ -396,6 +396,16 @@ describe("content proposals", () => {
     expect(staffOk.proposal.no_auto_retry).toBe(true);
   });
 
+  it("stats by_kind_status is a full zero matrix on an empty site", () => {
+    const s = makeService().stats();
+    expect(s.total).toBe(0);
+    expect(s.by_kind_status).toEqual({
+      idea: { open: 0, finished: 0, rejected: 0 },
+      edits: { open: 0, finished: 0, rejected: 0 },
+      notes: { open: 0, finished: 0, rejected: 0 },
+    });
+  });
+
   it("stats counts by status and kind; list supports offset", async () => {
     const svc = makeService();
     const summary =
@@ -428,6 +438,11 @@ describe("content proposals", () => {
     expect(s.by_kind_status.edits.open).toBe(3);
     expect(s.by_kind_status.notes.open).toBe(1);
     expect(s.by_kind_status.idea.open).toBe(0);
+    expect(s.by_kind_status.idea).toEqual({ open: 0, finished: 0, rejected: 0 });
+    expect(s.by_kind_status.edits.finished).toBe(0);
+    expect(s.by_kind_status.edits.rejected).toBe(0);
+    expect(s.by_kind_status.notes.finished).toBe(0);
+    expect(s.by_kind_status.notes.rejected).toBe(0);
 
     const page = svc.list({ kind: "edits", limit: 2, offset: 0 });
     expect(page.total).toBe(3);
@@ -1150,12 +1165,23 @@ describe("content proposals", () => {
     const accepted = await svc.update(created.proposal.id, "accept", {
       ...mcpBob,
       next_step: "Open an edits proposal for landing/miami-ai-bootcamp-new after research.",
+      accepted_entry: {
+        contentType: "landing",
+        slug: "miami-ai-bootcamp-new",
+        locale: "en",
+      },
     });
     expect(accepted.ok).toBe(true);
     if (!accepted.ok) return;
     expect(accepted.proposal.status).toBe("finished");
     expect(accepted.proposal.close_reason).toBe("accepted");
     expect(accepted.proposal.close_note).toContain("edits proposal");
+    expect(accepted.proposal.accepted_entry).toEqual({
+      contentType: "landing",
+      slug: "miami-ai-bootcamp-new",
+      locale: "en",
+    });
+    expect(svc.stats().stalled_ideas).toBe(1);
 
     const park = await svc.create(
       {
@@ -1561,5 +1587,149 @@ describe("content proposals", () => {
     expect(withHistory.proposals.some((p) => p.id === created.proposal.id && p.escalated_note === note)).toBe(
       true,
     );
+  });
+
+  it("idea follow-through: accept locks entry, implements gates, stalled resurfaces after reject", async () => {
+    const svc = makeService({
+      liveValues: { "meta.title": "Old" },
+    });
+    const summary =
+      "Brief for a new Grok explainer blog post covering product basics for beginners. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "What is Grok",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+
+    const missingEntry = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+    });
+    expect(missingEntry.ok).toBe(false);
+    if (!missingEntry.ok) expect(missingEntry.code).toBe("accepted_entry_required");
+
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(svc.stats().stalled_ideas).toBe(1);
+    expect(svc.list({ stalled: true }).total).toBe(1);
+
+    const withoutLink = await svc.create(
+      {
+        title: "Grok draft edits",
+        summary: "Implement the accepted Grok brief with a clearer title and intro for EN. ".repeat(2),
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok?" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(withoutLink.ok).toBe(false);
+    if (!withoutLink.ok) expect(withoutLink.code).toBe("implements_required");
+
+    const edits = await svc.create(
+      {
+        title: "Grok draft edits",
+        summary: "Implement the accepted Grok brief with a clearer title and intro for EN. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok?" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(edits.ok).toBe(true);
+    if (!edits.ok) return;
+    expect(edits.proposal.implements_proposal_id).toBe(idea.proposal.id);
+    expect(svc.stats().stalled_ideas).toBe(0);
+
+    const second = await svc.create(
+      {
+        title: "Grok draft edits 2",
+        summary: "Second attempt should join the open implements proposal instead of duplicating. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        confirm_distinct: true,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "Other" }],
+          }),
+        ],
+      },
+      bob,
+    );
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe("idea_already_in_progress");
+
+    const rejected = await svc.update(edits.proposal.id, "reject", {
+      ...bob,
+      confirm_reject: true,
+      reject_kind: "bad_idea",
+      close_note:
+        "This draft invents product claims we do not make and should not ship as written for this brief.",
+    });
+    expect(rejected.ok).toBe(true);
+    expect(svc.stats().stalled_ideas).toBe(1);
+
+    const retry = await svc.create(
+      {
+        title: "Grok draft edits retry",
+        summary: "Retry after reject with a faithful title that matches approved facts only. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        confirm_distinct: true,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+
+    const applied = await svc.update(retry.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    expect(svc.stats().stalled_ideas).toBe(0);
+    expect(svc.list({ stalled: true }).total).toBe(0);
   });
 });

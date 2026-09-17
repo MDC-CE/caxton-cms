@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 19;
+export const PIPELINE_SCHEMA_VERSION = 20;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -409,6 +409,25 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
         CREATE INDEX idx_proposal_kpi_daily_site_day
           ON proposal_kpi_daily(site, day);
       `);
+    },
+  },
+  {
+    version: 20,
+    name: "content_proposals_idea_followthrough",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "accepted_entry_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN accepted_entry_json TEXT");
+      }
+      if (!tableHasColumn(db, "content_proposals", "implements_proposal_id")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN implements_proposal_id TEXT");
+      }
+      if (!indexExists(db, "idx_content_proposals_implements")) {
+        db.exec(
+          `CREATE INDEX idx_content_proposals_implements
+           ON content_proposals(site, implements_proposal_id)`,
+        );
+      }
     },
   },
 ];

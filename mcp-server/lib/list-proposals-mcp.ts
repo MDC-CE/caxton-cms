@@ -14,6 +14,12 @@ import {
   type AttentionPerspective,
   type ProposalAttention,
 } from "../../server/content-proposals/attention.js";
+import {
+  emptyKindStatusCounts,
+  KPI_CARD_KINDS,
+  KPI_CARD_STATUSES,
+  type KindStatusCardCounts,
+} from "../../server/content-proposals/kpi-history.js";
 import type { CatalogGrant } from "./tool-catalog.js";
 import { hasCapAnyScope } from "./tool-catalog.js";
 
@@ -32,6 +38,8 @@ export type ListProposalsArgs = {
   /** When true, only escalated proposals. */
   escalated?: boolean;
   attention?: ProposalAttention;
+  /** Accepted ideas with no successful implements follow-up. */
+  stalled?: boolean;
   limit?: number;
   offset?: number;
   sort?: string;
@@ -51,7 +59,9 @@ export function isProposalsScoped(args: ListProposalsArgs): boolean {
       args.agent_session_id?.trim() ||
       args.escalated === true ||
       args.escalated === false ||
-      args.attention,
+      args.attention ||
+      args.stalled === true ||
+      args.stalled === false,
   );
 }
 
@@ -115,6 +125,39 @@ export function proposalNextOffset(
 ): number | null {
   const next = offset + pageLen;
   return next < total ? next : null;
+}
+
+/** Warning when scoped list still carries site-wide live KPI counts. */
+export const PROPOSAL_STATS_SITE_WIDE_WARNING = {
+  code: "proposal_stats_site_wide",
+  message:
+    "proposal_stats.by_kind_status is whole-site live stock (same as the staff KPI strip), not counts for this filter/page.",
+} as const;
+
+/**
+ * Ensure by_kind_status always has idea|edits|notes × open|finished|rejected (zeros allowed).
+ * Leaves other proposal_stats fields untouched.
+ */
+export function normalizeProposalStatsByKindStatus(
+  stats: unknown,
+): Record<string, unknown> | null {
+  if (stats == null || typeof stats !== "object" || Array.isArray(stats)) return null;
+  const base = { ...(stats as Record<string, unknown>) };
+  const raw = base.by_kind_status;
+  const out = emptyKindStatusCounts();
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const src = raw as Record<string, Record<string, unknown>>;
+    for (const kind of KPI_CARD_KINDS) {
+      const bucket = src[kind];
+      if (!bucket || typeof bucket !== "object") continue;
+      for (const status of KPI_CARD_STATUSES) {
+        const n = Number(bucket[status]);
+        out[kind][status] = Number.isFinite(n) ? n : 0;
+      }
+    }
+  }
+  base.by_kind_status = out as KindStatusCardCounts;
+  return base;
 }
 
 export {

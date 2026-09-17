@@ -200,6 +200,8 @@ type Proposal = {
   closed_at?: number | null;
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
+  accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  implements_proposal_id?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
   related_issue_ids: string[];
@@ -623,6 +625,7 @@ export function ProposalListPanel() {
       <ProposalKpiStrip
         kindFilter={view.filters.kind}
         statusFilter={view.filters.status}
+        stalledOnly={view.filters.stalledOnly}
         stats={data?.stats}
         headers={headers}
         onKindClick={(kind) =>
@@ -634,6 +637,18 @@ export function ProposalListPanel() {
         onStatusClick={(status) =>
           writeView({
             filters: { ...view.filters, status },
+            q: view.q,
+          })
+        }
+        onStalledClick={() =>
+          writeView({
+            filters: {
+              ...view.filters,
+              stalledOnly: !view.filters.stalledOnly,
+              kind: "idea",
+              status: "finished",
+              attention: "all",
+            },
             q: view.q,
           })
         }
@@ -884,6 +899,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [closeNote, setCloseNote] = useState("");
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [acceptNextStep, setAcceptNextStep] = useState("");
+  const [acceptContentType, setAcceptContentType] = useState("");
+  const [acceptSlug, setAcceptSlug] = useState("");
+  const [acceptLocale, setAcceptLocale] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectPending, setRejectPending] = useState(false);
   const [rejectKind, setRejectKind] = useState<ProposalRejectKindValue>("bad_idea");
@@ -1090,6 +1108,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     ? minLengthHint(closeNote, CLOSE_NOTE_MIN)
     : null;
   const acceptNextStepOk = acceptNextStep.trim().length >= ACCEPT_NEXT_STEP_MIN;
+  const acceptEntryOk =
+    acceptContentType.trim().length > 0 &&
+    acceptSlug.trim().length > 0 &&
+    acceptLocale.trim().length > 0;
   const acceptNextStepHint =
     acceptNextStep.trim().length > 0 ? minLengthHint(acceptNextStep, ACCEPT_NEXT_STEP_MIN) : null;
   const blockerHint =
@@ -1395,6 +1417,37 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     ))}
                   </div>
                 ) : null}
+                {p.kind === "idea" && p.accepted_entry ? (
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    data-testid="proposal-idea-accepted-entry"
+                  >
+                    <span className="text-xs text-muted-foreground">Locked page</span>
+                    <Badge
+                      variant="secondary"
+                      className="gap-1 font-mono font-normal max-w-full truncate"
+                      data-testid="badge-idea-accepted-entry"
+                    >
+                      {p.accepted_entry.contentType}/{p.accepted_entry.slug}
+                      <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
+                    </Badge>
+                  </div>
+                ) : null}
+                {p.kind === "edits" && p.implements_proposal_id ? (
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    data-testid="proposal-implements-idea"
+                  >
+                    <span className="text-xs text-muted-foreground">Implements idea</span>
+                    <Badge
+                      variant="outline"
+                      className="font-mono font-normal"
+                      data-testid="badge-implements-proposal"
+                    >
+                      {p.implements_proposal_id.slice(0, 8)}…
+                    </Badge>
+                  </div>
+                ) : null}
                 <ProposalMetaRow items={detailMeta} className="text-xs" />
               </div>
             </div>
@@ -1415,7 +1468,14 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 ) : null}
                 {showPrimaryIdeas ? (
                   <Button
-                    onClick={() => setAcceptOpen(true)}
+                    onClick={() => {
+                      const rel = p?.related_entries?.[0];
+                      setAcceptContentType(rel?.contentType ?? "");
+                      setAcceptSlug(rel?.slug ?? "");
+                      setAcceptLocale(rel?.locale ?? "");
+                      setAcceptNextStep("");
+                      setAcceptOpen(true);
+                    }}
                     disabled={mut.isPending || rejectPending || blockersOpen}
                     data-testid="button-accept-idea"
                   >
@@ -2567,7 +2627,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             open={acceptOpen}
             onOpenChange={(open) => {
               setAcceptOpen(open);
-              if (!open) setAcceptNextStep("");
+              if (!open) {
+                setAcceptNextStep("");
+                setAcceptContentType("");
+                setAcceptSlug("");
+                setAcceptLocale("");
+              }
             }}
           >
             <DialogContent data-testid="dialog-accept-idea">
@@ -2576,13 +2641,45 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 <DialogDescription asChild>
                   <div className="space-y-2 text-sm text-muted-foreground">
                     <p>
-                      Accepting greenlights the brief and finishes this proposal. It does not publish
-                      or write YAML — record what should happen next.
+                      You’re greenlighting this brief and locking the page (and locale) this work
+                      will use. Accepting finishes the idea — it does not publish or write YAML.
                     </p>
                     <p>Open needs-change notes must be cleared first.</p>
                   </div>
                 </DialogDescription>
               </DialogHeader>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-accept-content-type">Content type</Label>
+                  <Input
+                    id="proposal-accept-content-type"
+                    value={acceptContentType}
+                    onChange={(e) => setAcceptContentType(e.target.value)}
+                    placeholder="blog"
+                    data-testid="input-accept-content-type"
+                  />
+                </div>
+                <div className="space-y-1 sm:col-span-1">
+                  <Label htmlFor="proposal-accept-slug">Slug</Label>
+                  <Input
+                    id="proposal-accept-slug"
+                    value={acceptSlug}
+                    onChange={(e) => setAcceptSlug(e.target.value)}
+                    placeholder="what-is-grok"
+                    data-testid="input-accept-slug"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-accept-locale">Locale</Label>
+                  <Input
+                    id="proposal-accept-locale"
+                    value={acceptLocale}
+                    onChange={(e) => setAcceptLocale(e.target.value)}
+                    placeholder="en"
+                    data-testid="input-accept-locale"
+                  />
+                </div>
+              </div>
               <div className="space-y-1">
                 <Label htmlFor="proposal-accept-next-step">Next step</Label>
                 <Textarea
@@ -2604,17 +2701,27 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 </Button>
                 <Button
                   type="button"
-                  disabled={mut.isPending || blockersOpen || !acceptNextStepOk}
+                  disabled={mut.isPending || blockersOpen || !acceptNextStepOk || !acceptEntryOk}
                   onClick={() => {
                     mut.mutate(
                       {
                         action: "accept",
-                        body: { next_step: acceptNextStep.trim() },
+                        body: {
+                          next_step: acceptNextStep.trim(),
+                          accepted_entry: {
+                            contentType: acceptContentType.trim(),
+                            slug: acceptSlug.trim(),
+                            locale: acceptLocale.trim(),
+                          },
+                        },
                       },
                       {
                         onSuccess: () => {
                           setAcceptOpen(false);
                           setAcceptNextStep("");
+                          setAcceptContentType("");
+                          setAcceptSlug("");
+                          setAcceptLocale("");
                         },
                       },
                     );

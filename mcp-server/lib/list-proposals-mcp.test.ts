@@ -4,7 +4,9 @@ import {
   clampProposalLimit,
   clampProposalOffset,
   isProposalsScoped,
+  normalizeProposalStatsByKindStatus,
   parseProposalSort,
+  PROPOSAL_STATS_SITE_WIDE_WARNING,
   proposalNextOffset,
   resolveListProposalsSort,
   shouldWarnAuthorAttentionScope,
@@ -23,6 +25,8 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ escalated: true })).toBe(true);
     expect(isProposalsScoped({ escalated: false })).toBe(true);
     expect(isProposalsScoped({ attention: "blocked" })).toBe(true);
+    expect(isProposalsScoped({ stalled: true })).toBe(true);
+    expect(isProposalsScoped({ stalled: false })).toBe(true);
   });
 
   it("treats proposer filters as scoped", () => {
@@ -93,5 +97,36 @@ describe("list-proposals-mcp", () => {
     expect(shouldWarnAuthorAttentionScope("author", { proposer_username: "a" })).toBe(false);
     expect(shouldWarnAuthorAttentionScope("author", { agent_session_id: "s" })).toBe(false);
     expect(shouldWarnAuthorAttentionScope("reviewer", {})).toBe(false);
+  });
+
+  it("normalizeProposalStatsByKindStatus fills all nine buckets including zeros", () => {
+    expect(normalizeProposalStatsByKindStatus(null)).toBe(null);
+    expect(normalizeProposalStatsByKindStatus(undefined)).toBe(null);
+
+    const empty = normalizeProposalStatsByKindStatus({ total: 0 });
+    expect(empty).toMatchObject({
+      total: 0,
+      by_kind_status: {
+        idea: { open: 0, finished: 0, rejected: 0 },
+        edits: { open: 0, finished: 0, rejected: 0 },
+        notes: { open: 0, finished: 0, rejected: 0 },
+      },
+    });
+
+    const partial = normalizeProposalStatsByKindStatus({
+      total: 3,
+      by_kind_status: { edits: { open: 2 } },
+    });
+    expect(partial?.by_kind_status).toEqual({
+      idea: { open: 0, finished: 0, rejected: 0 },
+      edits: { open: 2, finished: 0, rejected: 0 },
+      notes: { open: 0, finished: 0, rejected: 0 },
+    });
+  });
+
+  it("PROPOSAL_STATS_SITE_WIDE_WARNING documents site-wide live stock", () => {
+    expect(PROPOSAL_STATS_SITE_WIDE_WARNING.code).toBe("proposal_stats_site_wide");
+    expect(PROPOSAL_STATS_SITE_WIDE_WARNING.message).toMatch(/site-wide|whole-site/i);
+    expect(PROPOSAL_STATS_SITE_WIDE_WARNING.message).toMatch(/by_kind_status/);
   });
 });

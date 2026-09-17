@@ -13,7 +13,9 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 | Tool | Caps | Job |
 |---|---|---|
 | `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
-| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first** (`by_attention`, **`by_kind_status`** live KPI buckets: open includes partial). Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` / `agent_session_id` / `escalated` / `attention` → **summary** rows (`entry_count`, `field_paths`, `attention`, blocker counts; no ops/values). Scoped default **`sort=attention`** (role-aware) + open\|partial when status omitted; pass `sort: updated_at` for chronology. Opt-in **`kpi_history`** (+ `kpi_granularity` / `kpi_from` / `kpi_to`) → end-of-day stock series through yesterday. `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
+| `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first** (`by_attention`, **`by_kind_status`**, `stalled_ideas`). Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` / `agent_session_id` / `escalated` / `attention` / `stalled` → **summary** rows (`entry_count`, `field_paths`, `attention`, blocker counts; no ops/values). Scoped default **`sort=attention`** (role-aware) + open\|partial when status omitted (unless stalled); pass `sort: updated_at` for chronology. Opt-in **`kpi_history`** (+ `kpi_granularity` / `kpi_from` / `kpi_to`) → end-of-day stock series through yesterday. `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
+
+**KPI strip ↔ `list_proposals`:** Unscoped calls return **live** Ideas/Edits/Notes × Open/Done/Rej via `proposal_stats.by_kind_status` (same as the staff strip big numbers; open includes partial; withdrawn omitted; empty site → all nine buckets as `0`). Sparkline history is **opt-in only** (`kpi_history: true`) — never attached by default. Event Webhooks are **not** proposal stats and never appear on this tool. Filtered (scoped) calls still return **site-wide** `by_kind_status` (warning `proposal_stats_site_wide`); do not treat those counts as the size of the filtered page.
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
@@ -48,7 +50,7 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 |---|---|---|
 | `edits` | `entries[]` or `promote_on_apply` | Four-eyes **apply** / **reject** |
 | `notes` | No entries, default | **close** with reason (wall handoff) |
-| `idea` | `kind:"idea"`, no entries | **accept** (next_step) or **close** park |
+| `idea` | `kind:"idea"`, no entries | **accept** (`next_step` + `accepted_entry`) or **close** park |
 
 Do **not** use notes for new-spoke / config pitches — use `kind:"idea"`.
 
@@ -66,9 +68,11 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 
 ## Ideas
 
-- **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; → `finished` + `accepted`. **No YAML.**
+- **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; **`accepted_entry`** `{ contentType, slug, locale }` required (locks that page+locale); → `finished` + `accepted`. **No YAML.** Refuse if another accepted idea already holds that entry (`accepted_entry_taken`).
 - **close** park: `wont_fix` \| `tracked_elsewhere` \| `other` (not four-eyes). Do not use close for “yes.”
-- Optional `related_entries`: context only; targets may not exist yet.
+- Optional `related_entries`: context only; targets may not exist yet (prefills accept UI when present).
+- **Follow-up edits:** pass `implements_proposal_id` to the accepted idea. Required when creating edits for a reserved entry. At most one **open/partial** implements child (`idea_already_in_progress`). Entry must match `accepted_entry`.
+- **Stalled:** accepted idea with a locked entry and **no** implements child in `open`/`partial`/`finished`. Rejected/withdrawn children resurface stalled. List with `stalled: true`; stats include `stalled_ideas`. Legacy accepts without `accepted_entry` are not stalled.
 
 ## Recent activity gate
 
@@ -113,7 +117,7 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 
 ## Create refuses + review context
 
-- **Refuse create:** `entry_not_found` (missing write target), `mixed_risk_bundle` (mixed selling/new-public/other in one edits or idea related set), `competing_entry_edits` (second open edits on same type+slug+locale).
+- **Refuse create:** `entry_not_found` (missing write target), `mixed_risk_bundle` (mixed selling/new-public/other in one edits or idea related set), `competing_entry_edits` (second open edits on same type+slug+locale), `implements_required` / `idea_already_in_progress` / `implements_entry_mismatch` (accepted-idea follow-through).
 - **Allowed shape:** live missing but named draft exists → `new_public_content` (promote later).
 - **Apply block:** `target_missing` when the page was deleted after filing — reject/withdraw/close still work.
 - Live `review_context` on `list_proposals(proposal_id)` for open|partial; snapshot on list rows is a filed hint only.

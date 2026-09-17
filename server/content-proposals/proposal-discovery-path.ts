@@ -482,12 +482,14 @@ function fallbackIdeaThink(proposal: ProposalDiscoveryInput): DiscoveryPathItem[
       kind: "think",
       id: "idea_accept",
       title: "Accept greenlights a brief only",
-      why: "Accept does not create pages or write YAML.",
+      why: "Accept does not create pages or write YAML. Lock accepted_entry; follow-up is a later edits proposal with implements_proposal_id.",
       look_for: [
         proposal.summary
           ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}`
           : "brief intent",
+        "accepted_entry required (contentType, slug, locale)",
         "next_step is concrete (min 20 characters)",
+        "follow-up edits use implements_proposal_id",
         "close/park means no — not yes",
       ],
     },
