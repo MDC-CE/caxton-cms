@@ -294,8 +294,8 @@ export function resolveDynamicTags(content: string, contentPath: string): string
   );
 }
 
+
 import { buildBootstrapPayload } from "../lib/agent-changelog.js";
-import { ok } from "../lib/respond.js";
 
 // ─── Tool registration ────────────────────────────────────────────────────────
 
