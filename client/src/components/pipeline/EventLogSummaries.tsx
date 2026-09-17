@@ -93,6 +93,7 @@ const TYPED_DETAIL_TYPES = new Set([
   "site_bulk_synced",
   "content_bulk_synced",
   "binding_propagation_done",
+  "cluster_hub_path_rewrite_done",
   "validation_issue_claimed",
   "validation_issue_completed",
   "validation_issue_reopened",
@@ -733,6 +734,26 @@ export function EventSummary({ event }: { event: PipelineContentEvent }) {
       );
     case "binding_propagation_done":
       return <EventBindingDoneSummary resource={event.resource} payload={event.payload} />;
+    case "cluster_hub_path_rewrite_started":
+    case "cluster_hub_path_rewrite_done": {
+      const oldUrl = typeof event.payload?.oldUrl === "string" ? event.payload.oldUrl : null;
+      const newUrl = typeof event.payload?.newUrl === "string" ? event.payload.newUrl : null;
+      const updated = Array.isArray(event.payload?.updatedPaths)
+        ? event.payload.updatedPaths.length
+        : null;
+      return (
+        <div className="text-xs text-muted-foreground mt-0.5 space-y-0.5">
+          {oldUrl && newUrl ? (
+            <p className="truncate font-mono">
+              {oldUrl} → {newUrl}
+            </p>
+          ) : null}
+          {event.type === "cluster_hub_path_rewrite_done" && updated != null ? (
+            <p>{updated} file{updated === 1 ? "" : "s"} updated</p>
+          ) : null}
+        </div>
+      );
+    }
     case "job_failed":
       return <EventJobFailedSummary resource={event.resource} payload={event.payload} />;
     case "ai_image_gc_completed": {

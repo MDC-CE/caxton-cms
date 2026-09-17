@@ -4302,16 +4302,38 @@ let renameResult: Record<string, unknown> | null = null;
         warnings.push({
           code: "slug_rename_non_effects",
           message:
-            "Slug rename updates locale URL routing only. It does not rename the entry folder and does not create a 301 redirect.",
+            "Slug rename updates locale URL routing only. It does not rename the entry folder. Body/HTML links are not rewritten.",
         });
-        warnings.push({
-          code: "slug_rename_redirect_hint",
-          message: "Use update_redirect if you need the previous URL to 301 to the new URL.",
-        });
+        if (!create_redirect) {
+          warnings.push({
+            code: "slug_rename_redirect_hint",
+            message:
+              "Pass create_redirect: true (or use update_redirect) if the previous URL should 301 to the new URL.",
+          });
+        }
         side_effects.push({
           kind: "locale_yaml",
           summary: `Renamed live slug in ${pathInfo.relativeHint}.`,
         });
+        if (renameResult?.clusterRewireQueued) {
+          side_effects.push({
+            kind: "pipeline_event",
+            summary:
+              "Queued cluster_hub_path_rewrite — spokes whose seo.pillar_path still equals the old URL will be updated asynchronously.",
+          });
+          next_actions.push({
+            tool: "list_seo_cluster_entries",
+            priority: "optional",
+            reason: "After a short wait, confirm spokes rejoined the hub under the new URL.",
+            args_hint: { bucket: "clustered", q: slug, ...(site ? { site } : {}) },
+          });
+        } else {
+          warnings.push({
+            code: "slug_rename_no_cluster_rewire",
+            message:
+              "No cluster path rewrite was queued (no seo-index entries still pointed at the old URL).",
+          });
+        }
       }
 
       if (renameResult && renameResult.routed === false) {

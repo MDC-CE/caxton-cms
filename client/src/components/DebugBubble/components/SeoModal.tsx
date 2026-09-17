@@ -30,6 +30,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
+import {
   Tabs,
   TabsContent,
 } from "@/components/ui/tabs";
@@ -79,6 +84,35 @@ function formatCanonicalBadgeLabel(url: string): string {
   } catch {
     return trimmed.length > 48 ? `${trimmed.slice(0, 45)}…` : trimmed;
   }
+}
+
+/** Truncated path chip; hover or click shows the full path in a popover. */
+function TruncatedPathReveal({
+  path,
+  testId,
+}: {
+  path: string;
+  testId?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <HoverCard open={open} onOpenChange={setOpen} openDelay={150} closeDelay={100}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid={testId}
+          aria-label={`Full path: ${path}`}
+          onClick={() => setOpen(true)}
+        >
+          <code className="bg-muted px-1.5 py-0.5 rounded truncate block w-full">{path}</code>
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent align="start" side="top" className="w-auto max-w-md p-3 z-[10001]">
+        <code className="text-xs font-mono break-all whitespace-pre-wrap leading-relaxed">{path}</code>
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 type SchemaOrgPreviewDoc = {
@@ -644,17 +678,23 @@ export function SeoModal({
                 </div>
               )}
               {slugRedirectPrompt && (
-                <div className="space-y-3 rounded-md border p-3 text-foreground">
-                  <p className="text-sm font-medium">Create a redirect?</p>
+                <div
+                  className="space-y-3 rounded-md border border-primary/30 bg-primary/5 p-3 text-foreground"
+                  data-testid="panel-slug-redirect-confirm"
+                >
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <ArrowLeftRight className="h-4 w-4 text-primary shrink-0" aria-hidden />
+                    Create a redirect?
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     Do you want to create a redirect from the old URLs to the new ones? This ensures existing links and
                     bookmarks still work.
                   </p>
                   <div className="space-y-1.5">
-                    <div className="flex items-center gap-2 text-xs font-mono">
-                      <code className="bg-muted px-1.5 py-0.5 rounded truncate">{slugOldUrl}</code>
+                    <div className="flex items-center gap-2 text-xs font-mono min-w-0">
+                      <TruncatedPathReveal path={slugOldUrl} testId="text-slug-redirect-old-url" />
                       <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                      <code className="bg-muted px-1.5 py-0.5 rounded truncate">{slugNewUrl}</code>
+                      <TruncatedPathReveal path={slugNewUrl} testId="text-slug-redirect-new-url" />
                     </div>
                   </div>
                   <div className="flex gap-2 flex-wrap">

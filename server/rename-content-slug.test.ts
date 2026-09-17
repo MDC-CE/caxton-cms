@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renameContentSlug } from "./content-editor";
 import { contentIndex } from "./content-index";
 import { getFolder } from "./content-types";
+import * as seoIndexMod from "./seo-index";
+import * as contentEvents from "./content-events";
 
 const tmpDirs: string[] = [];
 
@@ -77,6 +79,7 @@ describe("renameContentSlug ownership and routing checks", () => {
       };
     });
     vi.spyOn(contentIndex, "refresh").mockImplementation(() => {});
+    vi.spyOn(seoIndexMod, "clusterHasPillarPathPointers").mockReturnValue(false);
 
     const result = await renameContentSlug({
       contentType: "page",
@@ -90,5 +93,45 @@ describe("renameContentSlug ownership and routing checks", () => {
     if (!result.success) return;
     expect(result.data.routed).toBe(true);
     expect(result.data.newUrl).toBe("/es/tutoriales-interactivos");
+    expect(result.data.clusterRewireQueued).toBe(false);
+  });
+
+  it("emits cluster rewire when seo-index still points at old URL", async () => {
+    const { root, folderSlug } = makeEntryRoot();
+    stubIndex(folderSlug, root);
+    vi.spyOn(contentIndex, "resolveUrl").mockImplementation((url) => {
+      if (url !== "/es/tutoriales-interactivos") return null;
+      return {
+        contentType: "pages",
+        slug: folderSlug,
+        entry: { slug: folderSlug, contentType: "page", directory: "", files: [], locales: [] },
+      };
+    });
+    vi.spyOn(contentIndex, "refresh").mockImplementation(() => {});
+    vi.spyOn(seoIndexMod, "clusterHasPillarPathPointers").mockReturnValue(true);
+    const emitSpy = vi.spyOn(contentEvents, "emitClusterHubPathRewriteStarted").mockReturnValue({
+      id: 99,
+    } as never);
+
+    const result = await renameContentSlug({
+      contentType: "page",
+      folderSlug,
+      locale: "es",
+      newSlug: "tutoriales-interactivos",
+      contentRootName: path.relative(process.cwd(), root),
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.clusterRewireQueued).toBe(true);
+    expect(emitSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        oldUrl: "/es/interactive-exercises",
+        newUrl: "/es/tutoriales-interactivos",
+        contentType: "page",
+        slug: folderSlug,
+        locale: "es",
+      }),
+    );
   });
 });

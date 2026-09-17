@@ -317,10 +317,13 @@ export function registerProposalRoutes(app: Express): void {
       typeof req.query.granularity === "string" ? req.query.granularity : undefined;
     const from = typeof req.query.from === "string" ? req.query.from : undefined;
     const to = typeof req.query.to === "string" ? req.query.to : undefined;
+    const freshRaw = typeof req.query.fresh === "string" ? req.query.fresh : undefined;
     const kind =
       kindRaw === "idea" || kindRaw === "edits" || kindRaw === "notes" ? kindRaw : null;
-    const granularity = granularityRaw === "week" ? "week" : "day";
-    const history = svc.kpiHistory({ kind, granularity, from, to });
+    const granularity =
+      granularityRaw === "today" ? "today" : granularityRaw === "week" ? "week" : "day";
+    const fresh = freshRaw === "1" || freshRaw === "true";
+    const history = svc.kpiHistory({ kind, granularity, from, to, fresh });
     res.json(history);
   });
 

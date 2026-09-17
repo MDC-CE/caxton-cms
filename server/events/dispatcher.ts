@@ -200,6 +200,30 @@ async function dispatchEvent(event: ContentEvent): Promise<void> {
       );
       break;
     }
+    case "cluster_hub_path_rewrite_started": {
+      const p = event.payload;
+      const contentType = (event.resource.contentType || p.contentType) as string;
+      const slug = (event.resource.slug || p.slug) as string;
+      const locale = (event.resource.locale || p.locale) as string;
+      // Stable args per hub folder so rapid renames coalesce; job reads latest started event.
+      await enqueueJob(
+        "cluster_hub_path_rewrite",
+        {
+          site: event.site,
+          contentRoot: ctx.contentRoot,
+          contentType,
+          slug,
+          locale,
+          startedEventId: 0,
+        },
+        {
+          uniqueKey: `cluster-hub-path:${event.site}:${contentType}/${slug}/${locale}`,
+          uniqueWithArgs: true,
+          delayMs: 1000,
+        },
+      );
+      break;
+    }
     default:
       break;
   }

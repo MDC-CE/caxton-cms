@@ -52,7 +52,7 @@ function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
 import type { EditOperation } from "@shared/schema";
 import { normalizeLocale, getSupportedLocales, getDefaultLocale } from "./settings";
 import { markFileAsModified } from "./sync-state";
-import { emitEntryDeleted } from "./content-events";
+import { emitClusterHubPathRewriteStarted, emitEntryDeleted } from "./content-events";
 import { getContentWriteContext } from "./write-context";
 import { buildEntryKey } from "../scripts/validation/shared/entryKey";
 import { contentIndex, ContentIndex } from "./content-index";
@@ -75,7 +75,7 @@ import {
   isAllowlistedSectionFieldPath,
 } from "./shared-layout-sync";
 import { extractSeoUpdatesFromOps } from "./seo-fields";
-import { writeSeoFields } from "./seo-index";
+import { writeSeoFields, clusterHasPillarPathPointers } from "./seo-index";
 import {
   validateTouchedJsonFieldsInDocument,
 } from "./json-field-validate";
@@ -2706,10 +2706,12 @@ export async function renameContentSlug(
 ): Promise<ContentLifecycleResult<{
   success: boolean; folderSlug: string; oldSlug: string; newSlug: string;
   oldUrl: string; newUrl: string; locale: string; redirectCreated: boolean; routed: boolean;
+  clusterRewireQueued: boolean;
 }>> {
   const { contentType, folderSlug, locale, newSlug, createRedirect = false, enforceRedirectPolicy = false, author } = input;
   const ci = input.ci ?? contentIndex;
   const rootName = input.contentRootName ?? ci.contentRootName ?? getDefaultContentRootName();
+  let clusterRewireQueued = false;
 
   if (!contentType || !folderSlug || !locale || !newSlug) {
     return { success: false, statusCode: 400, error: "Missing required fields: contentType, folderSlug, locale, newSlug" };
@@ -2819,11 +2821,34 @@ export async function renameContentSlug(
   clearRedirectCache();
   invalidateContentCaches(contentType);
 
+  if (
+    oldUrl !== newUrl &&
+    clusterHasPillarPathPointers({
+      contentRoot: rootName,
+      oldPath: oldUrl,
+      hubContentType: contentType,
+      hubSlug: resolvedFolderSlug,
+      hubLocale: effectiveLocale,
+    })
+  ) {
+    emitClusterHubPathRewriteStarted({
+      site: rootName,
+      contentType,
+      slug: resolvedFolderSlug,
+      locale: effectiveLocale,
+      oldUrl,
+      newUrl,
+      author,
+    });
+    clusterRewireQueued = true;
+  }
+
   return {
     success: true,
     data: {
       success: true, folderSlug: resolvedFolderSlug, oldSlug: currentSlug,
       newSlug, oldUrl, newUrl, locale: effectiveLocale, redirectCreated: !!createRedirect, routed,
+      clusterRewireQueued,
     },
   };
 }

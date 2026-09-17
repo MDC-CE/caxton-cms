@@ -584,7 +584,8 @@ export function registerProposalTools(
       "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
-      "Opt-in kpi_history attaches end-of-day stock series through yesterday (open includes partial; withdrawn omitted). " +
+      "Opt-in kpi_history attaches stock series: granularity today = hourly UTC for today (computed, not stored); " +
+      "day ≈ last 28 completed days; week = last 7 completed UTC days (not ISO week). Open includes partial; withdrawn omitted. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
@@ -662,20 +663,29 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe(
-          "When true, attach kpi_history (end-of-day stock through yesterday). Default false keeps payloads small.",
+          "When true, attach kpi_history stock series. Default false keeps payloads small. " +
+            "today = hourly UTC for the current day; day/week = completed days through yesterday.",
         ),
       kpi_granularity: z
-        .enum(["day", "week"])
+        .enum(["today", "day", "week"])
         .optional()
-        .describe("Only when kpi_history is true. Default day."),
+        .describe(
+          "Only when kpi_history is true. Default day. " +
+            "today = hourly computed stock for today (UTC); day ≈ 28 completed days; " +
+            "week = last 7 completed UTC days (not ISO week).",
+        ),
       kpi_from: z
         .string()
         .optional()
-        .describe("Only when kpi_history is true. YYYY-MM-DD (UTC), within 90-day retention."),
+        .describe(
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), within 90-day retention.",
+        ),
       kpi_to: z
         .string()
         .optional()
-        .describe("Only when kpi_history is true. YYYY-MM-DD (UTC), capped at yesterday."),
+        .describe(
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), capped at yesterday.",
+        ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -795,7 +805,11 @@ export function registerProposalTools(
         let kpi_history: unknown = undefined;
         if (args.kpi_history === true) {
           const kQs = new URLSearchParams();
-          kQs.set("granularity", args.kpi_granularity === "week" ? "week" : "day");
+          const g = args.kpi_granularity;
+          kQs.set(
+            "granularity",
+            g === "today" ? "today" : g === "week" ? "week" : "day",
+          );
           if (args.kind) kQs.set("kind", args.kind);
           if (args.kpi_from) kQs.set("from", args.kpi_from);
           if (args.kpi_to) kQs.set("to", args.kpi_to);
@@ -809,8 +823,14 @@ export function registerProposalTools(
           warnings.push({
             code: "kpi_history_stock",
             message:
-              "kpi_history is end-of-day stock through yesterday (not throughput). " +
-              "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows.",
+              g === "today"
+                ? "kpi_history today is hourly UTC stock for the current day (computed; not written to daily history). " +
+                  "Open includes partial; withdrawn is omitted. Last point is as-of-now."
+                : g === "week"
+                  ? "kpi_history week is last 7 completed UTC days through yesterday (day keys, not ISO week). " +
+                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows."
+                  : "kpi_history is end-of-day stock through yesterday (not throughput). " +
+                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows.",
           });
         }
 

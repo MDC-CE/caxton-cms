@@ -134,6 +134,8 @@ const TECHNICAL_LABELS: Record<string, string> = {
   validation_issue_released: "Validation Issue Released",
   binding_propagation_started: "Shared Section Sync Started",
   binding_propagation_done: "Shared Section Sync Done",
+  cluster_hub_path_rewrite_started: "Cluster Path Rewrite Started",
+  cluster_hub_path_rewrite_done: "Cluster Path Rewrite Done",
   job_failed: "Job Failed",
   ai_image_gc_completed: "AI Image Cleanup",
   agent_session_started: "Agent Session Started",
@@ -314,6 +316,26 @@ function sentenceParts(
       return entry
         ? { ...withActor(systemActor, " finished syncing"), entry, muted: false }
         : { ...withActor(systemActor, " finished syncing a shared section"), muted: false };
+    }
+    case "cluster_hub_path_rewrite_started":
+      return entry
+        ? { ...withActor(actor, " started updating cluster membership for"), entry, muted: false }
+        : { ...withActor(actor, " started a cluster path rewrite"), muted: false };
+    case "cluster_hub_path_rewrite_done": {
+      const updated = Array.isArray(event.payload.updatedPaths)
+        ? event.payload.updatedPaths.length
+        : undefined;
+      if (entry && updated != null && updated > 0) {
+        return {
+          ...withActor(systemActor, " updated cluster membership on"),
+          entry,
+          suffix: `${updated} page${updated === 1 ? "" : "s"}`,
+          muted: false,
+        };
+      }
+      return entry
+        ? { ...withActor(systemActor, " finished cluster path rewrite for"), entry, muted: false }
+        : { ...withActor(systemActor, " finished a cluster path rewrite"), muted: false };
     }
     case "agent_session_started":
       return { ...withActor(actor, " started an agent session"), muted: false };

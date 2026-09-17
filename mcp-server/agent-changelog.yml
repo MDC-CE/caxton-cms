@@ -6,6 +6,33 @@ window_days: 6
 
 entries:
   - date: "2026-09-17"
+    summary: "Slug rename queues async cluster pillar_path rewire for spokes"
+    agent_impact:
+      - "After live slug rename, if seo-index still has entries with seo.pillar_path equal to the old URL, a background cluster_hub_path_rewrite job updates those fields to the new hub URL (exact match only; body links unchanged)."
+      - "update_fields slug rename warnings/side_effects report clusterRewireQueued; STALE_PILLAR_PATH diagnostics flag leftover old URLs that only reach the hub via redirect."
+      - "Reconnect MCP for updated slug-rename envelope."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/content-editor.ts
+      - server/seo-index.ts
+      - server/jobs/definitions/cluster-hub-path-rewrite.ts
+      - scripts/validation/validators/seo-cluster.ts
+
+  - date: "2026-09-17"
+    summary: "list_proposals kpi_granularity today + week = last 7 days"
+    agent_impact:
+      - "kpi_granularity accepts today | day | week. today = hourly UTC stock for the current day (computed, cached ≤15m, not written to proposal_kpi_daily)."
+      - "week is last 7 completed UTC days through yesterday (day keys) — not ISO week rollup. day remains ≈28 completed days."
+      - "by_kind_status on proposal_stats stays live site-wide stock. Reconnect MCP for updated enum."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - server/content-proposals/kpi-history.ts
+      - server/routes/proposals.ts
+      - client/src/components/agents/ProposalKpiStrip.tsx
+
+  - date: "2026-09-17"
     summary: "locale_translation review situation + proposals explain hub/subtopic"
     agent_impact:
       - "New review_situations id locale_translation (checklist locale_translation). Prefer declare on propose_change with variant + promote_on_apply. Soft-only polish without promote is not this pack."

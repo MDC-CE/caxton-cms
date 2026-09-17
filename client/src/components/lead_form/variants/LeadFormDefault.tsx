@@ -1356,12 +1356,24 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     if (singleLandingLocation) {
       form.setValue("location", singleLandingLocation);
     } else if (sessionLocation && !form.getValues("location")) {
-      form.setValue("location", sessionLocation.slug);
+      // Only autofill when the session campus is among listed form options
+      // (Florida etc. hide most campuses — a foreign slug blanks the Select).
+      const listed = formOptions?.locations;
+      const sessionSlugOk =
+        !listed || listed.some((loc) => loc.slug === sessionLocation.slug);
+      if (sessionSlugOk) {
+        form.setValue("location", sessionLocation.slug);
+      }
     }
     if (singleLandingRegion) {
       form.setValue("region", singleLandingRegion);
     } else if (sessionLocation?.region && !form.getValues("region")) {
-      form.setValue("region", sessionLocation.region);
+      const listedRegions = formOptions?.locations?.map((loc) => loc.region) ?? [];
+      const sessionRegionOk =
+        listedRegions.length === 0 || listedRegions.includes(sessionLocation.region);
+      if (sessionRegionOk) {
+        form.setValue("region", sessionLocation.region);
+      }
     }
     if (utm.coupon && !form.getValues("coupon")) {
       form.setValue("coupon", utm.coupon);
@@ -1373,7 +1385,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     if (programContext && !form.getValues("program")) {
       form.setValue("program", programContext);
     }
-  }, [sessionLocation, utm, programContext, form, singleLandingLocation, singleLandingRegion]);
+  }, [sessionLocation, utm, programContext, form, singleLandingLocation, singleLandingRegion, formOptions?.locations]);
 
   useEffect(() => {
     if (programSource?.related_field || programCatalogKey) {
@@ -1989,12 +2001,19 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     getFieldConfig("plan").options,
   );
 
+  // Only offer regions that have at least one listed campus (e.g. Florida site
+  // → usa-canada only from Miami/Orlando/Tampa). Landing-location constraints
+  // can narrow further.
+  const regionsWithListedLocations = new Set(
+    (formOptions?.locations ?? []).map((loc) => loc.region).filter(Boolean),
+  );
+
   const regionPool = (
     singleLandingRegion
       ? formOptions?.regions.filter((r) => r.slug === singleLandingRegion)
       : multipleLandingRegions
         ? formOptions?.regions.filter((r) => multipleLandingRegions.includes(r.slug))
-        : formOptions?.regions
+        : formOptions?.regions?.filter((r) => regionsWithListedLocations.has(r.slug))
   ) ?? [];
 
   const regionChoiceOptions = mergeLeadFormOptions(
@@ -2015,6 +2034,24 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     }),
     getFieldConfig("location").options,
   );
+
+  // Drop campus (and region) values that are not in the current choice lists so
+  // Select shows the placeholder instead of a blank trigger.
+  useEffect(() => {
+    if (!formOptions?.locations) return;
+    const locationValue = form.getValues("location");
+    if (locationValue && !locationChoiceOptions.some((o) => o.value === locationValue)) {
+      form.setValue("location", "");
+    }
+    const regionValue = form.getValues("region");
+    if (
+      regionValue &&
+      getFieldConfig("region").visible &&
+      !regionChoiceOptions.some((o) => o.value === regionValue)
+    ) {
+      form.setValue("region", "");
+    }
+  }, [formOptions?.locations, locationChoiceOptions, regionChoiceOptions, form]);
 
   // Watch form values to determine if required visible fields are filled
   const watchedValues = form.watch();

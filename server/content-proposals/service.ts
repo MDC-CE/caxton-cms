@@ -54,10 +54,12 @@ import {
 import {
   ensureKpiCatchUp,
   getKpiHistory,
+  invalidateTodayKpiCache,
   liveByKindStatus,
   wipeAndBackfillKpiHistory,
   type KindStatusCardCounts,
   type KpiCardKind,
+  type KpiGranularity,
   type KpiHistoryResult,
 } from "./kpi-history";
 
@@ -836,6 +838,16 @@ function emitProposalEvent(
   payload: Record<string, unknown> = {},
   actor?: EventActor,
 ): void {
+  if (
+    type === "proposal_created" ||
+    type === "proposal_finished" ||
+    type === "proposal_closed" ||
+    type === "proposal_rejected" ||
+    type === "proposal_withdrawn" ||
+    type === "proposal_applied_progress"
+  ) {
+    invalidateTodayKpiCache(site);
+  }
   emitEvent({
     site,
     type,
@@ -1514,9 +1526,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   function kpiHistory(opts?: {
     kind?: KpiCardKind | null;
-    granularity?: "day" | "week";
+    granularity?: KpiGranularity;
     from?: string;
     to?: string;
+    fresh?: boolean;
   }): KpiHistoryResult {
     return getKpiHistory(dbFor(site), site, opts);
   }

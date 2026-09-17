@@ -1,18 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   addUtcDays,
+  clearAllTodayKpiCache,
   effectiveCloseAt,
   emptyKindStatusCounts,
   ensureKpiCatchUp,
   getKpiHistory,
+  invalidateTodayKpiCache,
+  stockAsOf,
   stockForDay,
   toCardBuckets,
   utcDayString,
+  utcHourKey,
   wipeAndBackfillKpiHistory,
   yesterdayUtc,
   type ProposalKpiSourceRow,
 } from "./kpi-history";
 import Database from "better-sqlite3";
+
+afterEach(() => {
+  clearAllTodayKpiCache();
+});
 
 function row(
   partial: Partial<ProposalKpiSourceRow> & Pick<ProposalKpiSourceRow, "kind" | "status" | "created_at">,
@@ -265,5 +273,109 @@ describe("ensureKpiCatchUp / getKpiHistory", () => {
       .prepare(`SELECT day FROM proposal_kpi_daily WHERE site=? AND day=?`)
       .get("site_a", old);
     expect(left).toBeUndefined();
+  });
+
+  it("week is last 7 completed days as day keys (not ISO week)", () => {
+    const db = setupDb();
+    const now = Date.parse("2026-09-16T15:00:00.000Z");
+    db.prepare(
+      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("p1", "site_a", "idea", "open", Date.parse("2026-09-01T00:00:00.000Z"), 0, null);
+
+    const hist = getKpiHistory(db, "site_a", {
+      kind: "idea",
+      granularity: "week",
+      now,
+    });
+    expect(hist.granularity).toBe("week");
+    expect(hist.to).toBe("2026-09-15");
+    expect(hist.from).toBe("2026-09-09");
+    const openSeries = hist.series.find((s) => s.kind === "idea" && s.status === "open");
+    expect(openSeries?.points).toHaveLength(7);
+    expect(openSeries?.points.map((p) => p.day)).toEqual([
+      "2026-09-09",
+      "2026-09-10",
+      "2026-09-11",
+      "2026-09-12",
+      "2026-09-13",
+      "2026-09-14",
+      "2026-09-15",
+    ]);
+    expect(openSeries?.points.every((p) => !p.day.includes("W"))).toBe(true);
+  });
+
+  it("today returns hourly points through now and caches for 15m", () => {
+    const db = setupDb();
+    const now = Date.parse("2026-09-16T15:30:00.000Z");
+    db.prepare(
+      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "p1",
+      "site_a",
+      "idea",
+      "open",
+      Date.parse("2026-09-16T10:00:00.000Z"),
+      Date.parse("2026-09-16T10:00:00.000Z"),
+      null,
+    );
+
+    const first = getKpiHistory(db, "site_a", {
+      kind: "idea",
+      granularity: "today",
+      now,
+    });
+    expect(first.granularity).toBe("today");
+    expect(first.from).toBe("2026-09-16");
+    expect(first.computed_at).toBe(now);
+    const openSeries = first.series.find((s) => s.kind === "idea" && s.status === "open");
+    // hours 0..14 + now at 15 → 16 points
+    expect(openSeries?.points.length).toBe(16);
+    expect(openSeries?.points[openSeries.points.length - 1]?.day).toBe(utcHourKey(now));
+    expect(openSeries?.points[openSeries.points.length - 1]?.count).toBe(1);
+    // before create hour, open is 0
+    expect(openSeries?.points[0]?.count).toBe(0);
+
+    const later = now + 60_000;
+    const cached = getKpiHistory(db, "site_a", {
+      kind: "idea",
+      granularity: "today",
+      now: later,
+    });
+    expect(cached.computed_at).toBe(now);
+
+    const forced = getKpiHistory(db, "site_a", {
+      kind: "idea",
+      granularity: "today",
+      now: later,
+      fresh: true,
+    });
+    expect(forced.computed_at).toBe(later);
+
+    invalidateTodayKpiCache("site_a");
+    const afterBust = getKpiHistory(db, "site_a", {
+      kind: "idea",
+      granularity: "today",
+      now: later + 1,
+    });
+    expect(afterBust.computed_at).toBe(later + 1);
+  });
+});
+
+describe("stockAsOf", () => {
+  it("matches stockForDay at end of day", () => {
+    const day = "2026-09-10";
+    const midDay = Date.parse("2026-09-10T12:00:00.000Z");
+    const rows = [
+      row({
+        kind: "idea",
+        status: "finished",
+        created_at: Date.parse("2026-09-09T12:00:00.000Z"),
+        closed_at: midDay,
+        updated_at: midDay,
+      }),
+    ];
+    expect(stockAsOf(rows, Date.parse("2026-09-10T23:59:59.999Z"))).toEqual(stockForDay(rows, day));
   });
 });

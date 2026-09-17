@@ -1,6 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconInfoCircle } from "@tabler/icons-react";
+import { IconInfoCircle, IconRefresh } from "@tabler/icons-react";
+import { AnimatedEllipsis } from "@/components/DebugBubble/components/PipelineCounts";
 import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,6 @@ import {
 } from "@/components/ui/toggle-button-bar";
 import {
   proposalKpiCardsForKindFilter,
-  proposalKpiLiveCount,
   PROPOSAL_KPI_CARD_STATUSES,
   type ProposalKpiCardKind,
   type ProposalKpiCardStatus,
@@ -21,6 +21,7 @@ import {
   type ProposalListStatus,
 } from "@/pages/proposals-list-filters";
 
+type KpiGranularity = "today" | "day" | "week";
 type KpiPoint = { day: string; count: number };
 type KpiSeries = {
   kind: ProposalKpiCardKind;
@@ -28,10 +29,11 @@ type KpiSeries = {
   points: KpiPoint[];
 };
 type KpiHistoryResponse = {
-  granularity: "day" | "week";
+  granularity: KpiGranularity;
   from: string;
   to: string;
   series: KpiSeries[];
+  computed_at?: number;
 };
 
 /** open = yellow/away, finished = green/online, rejected = red/destructive */
@@ -45,6 +47,12 @@ const STATUS_TEXT: Record<ProposalKpiCardStatus, string> = {
   open: "text-status-away",
   finished: "text-status-online",
   rejected: "text-destructive",
+};
+
+const WINDOW_CAPTION: Record<KpiGranularity, string> = {
+  today: "Today · by hour · UTC",
+  day: "Last ~28 days · through yesterday · UTC",
+  week: "Last 7 days · through yesterday · UTC",
 };
 
 function pathForSeries(
@@ -194,11 +202,11 @@ function MultiStatusLineChart({
 
 function StatusCountPill({
   status,
-  count,
+  display,
   testId,
 }: {
   status: ProposalKpiCardStatus;
-  count: number;
+  display: ReactNode;
   testId: string;
 }) {
   return (
@@ -213,7 +221,7 @@ function StatusCountPill({
       )}
       data-testid={testId}
     >
-      {count}
+      {display}
     </span>
   );
 }
@@ -226,14 +234,16 @@ const STATUS_SHORT_LABEL: Record<ProposalKpiCardStatus, string> = {
 
 function StatusBadgeButton({
   status,
-  count,
+  countDisplay,
+  countForAria,
   active,
   testId,
   onHoverChange,
   onClick,
 }: {
   status: ProposalKpiCardStatus;
-  count: number;
+  countDisplay: ReactNode;
+  countForAria: number | null;
   active: boolean;
   testId: string;
   onHoverChange: (hovering: boolean) => void;
@@ -245,6 +255,7 @@ function StatusBadgeButton({
       : status === "finished"
         ? "text-status-online"
         : "text-destructive";
+  const hot = countForAria != null && countForAria > 0;
 
   return (
     <button
@@ -259,20 +270,58 @@ function StatusBadgeButton({
       onBlur={() => onHoverChange(false)}
       onClick={onClick}
       aria-pressed={active}
-      aria-label={`${count} ${status}`}
+      aria-label={
+        countForAria != null ? `${countForAria} ${status}` : `${status} loading`
+      }
       data-testid={testId}
     >
       <span
         className={cn(
           "text-[10px] font-semibold leading-none",
-          count > 0 ? labelHot : "text-muted-foreground",
+          hot ? labelHot : "text-muted-foreground",
         )}
       >
         {STATUS_SHORT_LABEL[status]}
       </span>
-      <StatusCountPill status={status} count={count} testId={`${testId}-count`} />
+      <StatusCountPill status={status} display={countDisplay} testId={`${testId}-count`} />
     </button>
   );
+}
+
+function latestCount(
+  history: KpiHistoryResponse | undefined,
+  kind: ProposalKpiCardKind,
+  status: ProposalKpiCardStatus,
+): number | null {
+  const points = history?.series.find((s) => s.kind === kind && s.status === status)?.points;
+  if (!points || points.length === 0) return null;
+  return Number(points[points.length - 1]?.count ?? 0) || 0;
+}
+
+function KpiNumberDisplay({
+  value,
+  loading,
+  testId,
+}: {
+  value: number | null;
+  loading: boolean;
+  testId?: string;
+}) {
+  if (loading && value == null) {
+    return (
+      <span className="inline-block min-w-[1.5em]" data-testid={testId}>
+        <AnimatedEllipsis className="inline-block w-[1.5em] text-left" />
+      </span>
+    );
+  }
+  if (value == null) {
+    return (
+      <span data-testid={testId} aria-hidden>
+        —
+      </span>
+    );
+  }
+  return <span data-testid={testId}>{value}</span>;
 }
 
 export function ProposalKpiStrip({
@@ -299,7 +348,7 @@ export function ProposalKpiStrip({
   /** Extra KPI cell (e.g. webhooks) — shares the same row on large screens. */
   trailing?: ReactNode;
 }) {
-  const [granularity, setGranularity] = useState<"day" | "week">("day");
+  const [granularity, setGranularity] = useState<KpiGranularity>("today");
   /** Hover preview applies only to that card’s spark. */
   const [hoverFocus, setHoverFocus] = useState<{
     kind: ProposalKpiCardKind;
@@ -325,14 +374,33 @@ export function ProposalKpiStrip({
     return p.toString();
   }, [granularity, focusedKind]);
 
-  const { data: history } = useQuery({
+  const forceFreshRef = useRef(false);
+
+  const {
+    data: history,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+  } = useQuery({
     queryKey: ["/api/admin/proposals/kpis", qs],
     queryFn: async () => {
-      const res = await apiFetch(`/api/admin/proposals/kpis?${qs}`, { headers: headers() });
+      const p = new URLSearchParams(qs);
+      if (forceFreshRef.current) {
+        p.set("fresh", "1");
+        forceFreshRef.current = false;
+      }
+      const res = await apiFetch(`/api/admin/proposals/kpis?${p.toString()}`, {
+        headers: headers(),
+      });
       if (!res.ok) throw new Error("Failed to load proposal KPIs");
       return res.json() as Promise<KpiHistoryResponse>;
     },
+    staleTime: granularity === "today" ? 15 * 60 * 1000 : 60_000,
   });
+
+  const awaitingFirst = isLoading && !history;
+  const showDash = isError && !history;
 
   const seriesForKind = (kind: ProposalKpiCardKind): Record<ProposalKpiCardStatus, KpiPoint[]> => {
     const pick = (status: ProposalKpiCardStatus) =>
@@ -364,6 +432,13 @@ export function ProposalKpiStrip({
   const chartFocus =
     (focusedKind && hoverFocus?.kind === focusedKind ? hoverFocus.status : null) ?? urlStatusFocus;
 
+  const chartCaption =
+    granularity === "today"
+      ? "by hour · UTC"
+      : granularity === "week"
+        ? "last 7 days · through yesterday · UTC"
+        : "through yesterday · UTC";
+
   return (
     <div className="space-y-3" data-testid="proposal-kpi-strip">
       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -371,10 +446,13 @@ export function ProposalKpiStrip({
           className="shrink-0"
           value={granularity}
           onValueChange={(v) => {
-            if (v === "day" || v === "week") setGranularity(v);
+            if (v === "today" || v === "day" || v === "week") setGranularity(v);
           }}
           listClassName="flex"
         >
+          <ToggleButtonBarTrigger value="today" data-testid="toggle-proposal-kpi-today">
+            Today
+          </ToggleButtonBarTrigger>
           <ToggleButtonBarTrigger value="day" data-testid="toggle-proposal-kpi-day">
             Daily
           </ToggleButtonBarTrigger>
@@ -382,6 +460,24 @@ export function ProposalKpiStrip({
             Weekly
           </ToggleButtonBarTrigger>
         </ToggleButtonBar>
+        {granularity === "today" ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            aria-label="Refresh today’s counts"
+            title="Refresh today’s counts"
+            disabled={isFetching}
+            data-testid="button-proposal-kpi-today-refresh"
+            onClick={() => {
+              forceFreshRef.current = true;
+              void refetch();
+            }}
+          >
+            <IconRefresh className={cn("h-4 w-4 text-muted-foreground", isFetching && "animate-spin")} />
+          </Button>
+        ) : null}
         <Popover>
           <PopoverTrigger asChild>
             <Button
@@ -400,9 +496,11 @@ export function ProposalKpiStrip({
           >
             <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
             <p>
-              Card numbers are live. Sparks are end-of-day stock through yesterday (open includes
-              in-progress). Days use UTC; history is rebuilt from create/close times. Withdrawn is
-              left out. Retention is 90 days.
+              Card numbers follow the selected window (latest sample). Today is near-live stock by
+              hour (UTC), cached up to 15 minutes and cleared when proposals change — use refresh to
+              force a recompute. Daily is ~28 days through yesterday; Weekly is the last 7 completed
+              days (not an ISO week). Open includes in-progress. Withdrawn is left out. Retention is
+              90 days. Stalled stays live.
             </p>
             <p>
               Hover a status chip to preview that line on that card. The list status filter isolates
@@ -420,11 +518,15 @@ export function ProposalKpiStrip({
       >
         {cards.map((card) => {
           const counts = {
-            open: proposalKpiLiveCount(stats, card.kind, "open"),
-            finished: proposalKpiLiveCount(stats, card.kind, "finished"),
-            rejected: proposalKpiLiveCount(stats, card.kind, "rejected"),
+            open: showDash ? null : latestCount(history, card.kind, "open"),
+            finished: showDash ? null : latestCount(history, card.kind, "finished"),
+            rejected: showDash ? null : latestCount(history, card.kind, "rejected"),
           };
-          const total = counts.open + counts.finished + counts.rejected;
+          const total =
+            counts.open != null && counts.finished != null && counts.rejected != null
+              ? counts.open + counts.finished + counts.rejected
+              : null;
+          const loadingNums = awaitingFirst;
           return (
             <Card
               key={card.kind}
@@ -440,7 +542,9 @@ export function ProposalKpiStrip({
                       onClick={() => onKindClick(card.kind)}
                       data-testid={`button-proposal-kpi-kind-${card.kind}`}
                     >
-                      <p className="text-2xl font-bold text-foreground tabular-nums">{total}</p>
+                      <p className="text-2xl font-bold text-foreground tabular-nums">
+                        <KpiNumberDisplay value={total} loading={loadingNums} />
+                      </p>
                       <p className="text-xs text-muted-foreground mt-0.5">{card.label}</p>
                     </button>
                   </div>
@@ -455,7 +559,13 @@ export function ProposalKpiStrip({
                         <StatusBadgeButton
                           key={status}
                           status={status}
-                          count={counts[status]}
+                          countDisplay={
+                            <KpiNumberDisplay
+                              value={counts[status]}
+                              loading={loadingNums}
+                            />
+                          }
+                          countForAria={counts[status]}
                           active={urlStatusFocus === status}
                           testId={`button-proposal-kpi-${card.kind}-${status}`}
                           onHoverChange={(hovering) =>
@@ -471,7 +581,7 @@ export function ProposalKpiStrip({
                 </div>
                 <div className="flex items-center justify-between gap-2 w-full">
                   <p className="text-[11px] text-muted-foreground leading-snug">
-                    Live stock by status
+                    {WINDOW_CAPTION[granularity]}
                   </p>
                   {card.kind === "idea" && onStalledClick ? (
                     <button
@@ -502,8 +612,8 @@ export function ProposalKpiStrip({
         <Card data-testid="card-proposal-kpi-comparison">
           <CardContent className="pt-4 pb-3 space-y-2">
             <p className="text-xs text-muted-foreground">
-              {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} · stock
-              through yesterday
+              {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} · stock{" "}
+              {chartCaption}
             </p>
             <MultiStatusLineChart
               seriesByStatus={chartByStatus}
