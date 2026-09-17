@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar } from "@/components/ui/avatar";
 import UniversalImage from "@/components/UniversalImage";
+import { UniversalVideo } from "@/components/UniversalVideo";
 import { RichTextContent } from "@/components/ui/rich-text-content";
 import type { HeroSingleColumn } from "@shared/schema";
 import { createElement } from "react";
@@ -49,10 +50,39 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
     setFallbackSrc(data.image?.fallback ?? BLOG_IMAGE_FALLBACK);
   };
 
+  const video = data.video;
+  const videoUrl = typeof video?.url === "string" ? video.url.trim() : "";
+  const hasVideo = videoUrl.length > 0;
+  const hasMedia = hasVideo || Boolean(imgSrc);
+  const ctaBelowMedia = data.cta_below_media === true;
+  const hasCtas = Boolean(data.cta_buttons && data.cta_buttons.length > 0);
+
   // Badge values can arrive as plain strings or as objects (e.g. a category
   // entry like { slug: "..." } from static YAML content) — coerce to a
   // renderable string so React never receives a raw object child.
   const badgeText = coerceToText(data.badge);
+
+  const renderCtaButtons = (className: string) => {
+    if (!hasCtas || !data.cta_buttons) return null;
+    return (
+      <div className={className}>
+        {data.cta_buttons.map((button, index) => (
+          <Button
+            key={index}
+            variant={button.variant === "primary" ? "default" : button.variant}
+            size="lg"
+            asChild
+            data-testid={`button-hero-cta-${index}`}
+          >
+            <a href={button.url} onClick={handleLinkClick} className="flex items-center gap-2">
+              {button.icon && (() => { const Ic = getIcon(button.icon); return Ic ? createElement(Ic, { className: "h-4 w-4" }) : null; })()}
+              {button.text}
+            </a>
+          </Button>
+        ))}
+      </div>
+    );
+  };
 
   return (
     <section 
@@ -127,51 +157,62 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
           </div>
         )}
         
-        {data.cta_buttons && data.cta_buttons.length > 0 && (
-          <div className="flex flex-wrap justify-center gap-4 mb-12">
-            {data.cta_buttons.map((button, index) => (
-              <Button
-                key={index}
-                variant={button.variant === "primary" ? "default" : button.variant}
-                size="lg"
-                asChild
-                data-testid={`button-hero-cta-${index}`}
-              >
-                <a href={button.url} onClick={handleLinkClick} className="flex items-center gap-2">
-                  {button.icon && (() => { const Ic = getIcon(button.icon); return Ic ? createElement(Ic, { className: "h-4 w-4" }) : null; })()}
-                  {button.text}
-                </a>
-              </Button>
-            ))}
-          </div>
-        )}
-
+        {!ctaBelowMedia &&
+          renderCtaButtons("flex flex-wrap justify-center gap-4 mb-12")}
       </div>
-      {imgSrc && (
+      {(hasVideo || imgSrc) && (
         <div className={data.image_full_width ? "w-full mt-8" : "max-w-3xl mx-auto px-4 mt-8 flex justify-center"}>
-          <UniversalImage
-            key={imgSrc}
-            id={imgSrc}
-            alt={data.image?.alt || ""}
-            preset="hero-wide"
-            className={`w-full rounded-none ${data.image_full_width ? "max-h-[250px]" : ""}`}
-            style={{
-              width: data.image_width || '100%',
-              ...(data.image_full_width ? {} : { borderRadius: '0.8rem' }),
-            }}
-            onError={handleHeroError}
-            loading="eager"
-            data-testid="img-hero-single-column"
-            fieldContext={
-              (data as any).image_id
-                ? { fieldPath: "image_id", templateKey: imageTemplateKey }
-                : data.image?.src
-                  ? { fieldPath: "image.src", templateKey: imageTemplateKey }
-                  : undefined
-            }
-          />
+          {hasVideo ? (
+            <div
+              className="w-full"
+              style={{ width: video?.width || data.image_width || "100%" }}
+              data-testid="video-hero-single-column"
+            >
+              <UniversalVideo
+                url={videoUrl}
+                ratio={video?.ratio || "16:9"}
+                mobileRatio={video?.mobile_ratio || "16:11"}
+                muted={video?.muted}
+                autoplay={video?.autoplay}
+                loop={video?.loop}
+                preview_image_url={video?.preview_image_url}
+                withShadowBorder={video?.with_shadow_border}
+                open_modal_on_click={video?.open_modal_on_click}
+                overlay_on_muted={video?.overlay_on_muted}
+                className="w-full"
+              />
+            </div>
+          ) : (
+            <UniversalImage
+              key={imgSrc}
+              id={imgSrc}
+              alt={data.image?.alt || ""}
+              preset="hero-wide"
+              className={`w-full rounded-none ${data.image_full_width ? "max-h-[250px]" : ""}`}
+              style={{
+                width: data.image_width || "100%",
+                ...(data.image_full_width ? {} : { borderRadius: "0.8rem" }),
+              }}
+              onError={handleHeroError}
+              loading="eager"
+              data-testid="img-hero-single-column"
+              fieldContext={
+                (data as any).image_id
+                  ? { fieldPath: "image_id", templateKey: imageTemplateKey }
+                  : data.image?.src
+                    ? { fieldPath: "image.src", templateKey: imageTemplateKey }
+                    : undefined
+              }
+            />
+          )}
         </div>
       )}
+      {ctaBelowMedia &&
+        renderCtaButtons(
+          hasMedia
+            ? "flex flex-wrap justify-center gap-4 mt-8 max-w-6xl mx-auto px-4"
+            : "flex flex-wrap justify-center gap-4 mt-8 mb-4 max-w-6xl mx-auto px-4",
+        )}
     </section>
   );
 }

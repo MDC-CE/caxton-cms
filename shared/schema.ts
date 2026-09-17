@@ -56,6 +56,7 @@ export type ErrorLogRow = typeof errorLog.$inferSelect;
 export {
   ctaButtonSchema,
   videoConfigSchema,
+  videoOverlayOnMutedSchema,
   imageSchema,
   leadFormFieldConfigSchema,
   leadFormDataSchema,
@@ -65,6 +66,7 @@ export {
   logoItemSchema,
   type CtaButton,
   type VideoConfig,
+  type VideoOverlayOnMuted,
   type ImageDef,
   type LeadFormData,
   type WebhookConfig,

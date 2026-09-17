@@ -254,6 +254,8 @@ export function MoleculeRenderer({ molecule }: MoleculeRendererProps) {
           loop={molecule.props.loop}
           preview_image_url={molecule.props.preview_image_url}
           withShadowBorder={molecule.props.with_shadow_border}
+          open_modal_on_click={molecule.props.open_modal_on_click}
+          overlay_on_muted={molecule.props.overlay_on_muted}
         />
       );
     case "UniversalImage":

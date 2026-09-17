@@ -1909,7 +1909,7 @@ export function SectionEditorPanel({
       arrayPath: string,
       index: number,
       field: string,
-      value: string | number | boolean | undefined,
+      value: string | number | boolean | Record<string, unknown> | undefined,
     ) => {
       try {
         const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
@@ -2019,6 +2019,72 @@ export function SectionEditorPanel({
       } catch (error) {
         console.error("Error updating array item fields:", error);
       }
+  };
+
+  /** Like updateArrayItemField, but applies several nested paths in one YAML write. */
+  const updateArrayItemFieldsRaw = (
+    arrayPath: string,
+    index: number,
+    updates: Record<string, string | number | boolean | Record<string, unknown> | undefined>,
+  ) => {
+    try {
+      const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object") return;
+
+      pushUndoState(yamlContent);
+
+      const pathParts = arrayPath.split(".");
+      let current: Record<string, unknown> = parsed;
+
+      for (let i = 0; i < pathParts.length - 1; i++) {
+        const part = pathParts[i];
+        if (!current[part] || typeof current[part] !== "object") return;
+        current = current[part] as Record<string, unknown>;
+      }
+
+      const arrayField = pathParts[pathParts.length - 1];
+      const array = current[arrayField] as Record<string, unknown>[] | undefined;
+      if (!Array.isArray(array) || !array[index]) return;
+
+      for (const [field, value] of Object.entries(updates)) {
+        const fieldParts = field.split(".");
+        if (fieldParts.length > 1) {
+          let target: Record<string, unknown> = array[index];
+          for (let i = 0; i < fieldParts.length - 1; i++) {
+            if (!target[fieldParts[i]] || typeof target[fieldParts[i]] !== "object") {
+              target[fieldParts[i]] = {};
+            }
+            target = target[fieldParts[i]] as Record<string, unknown>;
+          }
+          const leaf = fieldParts[fieldParts.length - 1];
+          if (value === undefined) {
+            delete target[leaf];
+          } else {
+            target[leaf] = value;
+          }
+        } else if (value === undefined) {
+          delete array[index][field];
+        } else {
+          array[index][field] = value;
+        }
+      }
+
+      const newYaml = safeYamlDump(parsed, {
+        lineWidth: -1,
+        noRefs: true,
+        quotingType: '"',
+      });
+
+      setYamlContent(newYaml);
+      setHasChanges(true);
+      setParseError(null);
+
+      if (onPreviewChange) {
+        onPreviewChange(parsed as Section);
+      }
+    } catch (error) {
+      console.error("Error updating array item fields (raw):", error);
+    }
   };
 
   // Add a new item to an array field
@@ -4066,6 +4132,18 @@ export function SectionEditorPanel({
                 const currentAutoplay = getVideoSiblingValue("autoplay");
                 const currentLoop = getVideoSiblingValue("loop");
                 const currentPreviewImage = (getVideoSiblingValue("preview_image_url") as string) || "";
+                const currentOpenModalOnClick = getVideoSiblingValue("open_modal_on_click");
+                const openModalChecked = currentOpenModalOnClick !== false;
+                const currentOverlayOnMuted = getVideoSiblingValue("overlay_on_muted");
+                const overlayEnabled =
+                  currentOverlayOnMuted != null && typeof currentOverlayOnMuted === "object";
+                const overlayObj = overlayEnabled
+                  ? (currentOverlayOnMuted as Record<string, unknown>)
+                  : null;
+                const overlayTitle = (overlayObj?.title as string) || "";
+                const overlaySubtitle = (overlayObj?.subtitle as string) || "";
+                const overlayIcon = (overlayObj?.icon as string) || "";
+                const overlayRestart = overlayObj?.restart_video_on_click === true;
 
                 const parentLabel = getFieldLabel(
                   parentPrefix ? parentPrefix.replace(/\.$/, "") : "video"
@@ -4240,16 +4318,6 @@ export function SectionEditorPanel({
                               />
                             </div>
                             <div className="flex items-center justify-between gap-2">
-                              <Label className="text-sm">Autoplay</Label>
-                              <Switch
-                                checked={currentAutoplay === true}
-                                onCheckedChange={(checked) =>
-                                  updatePropertyWithValue(parentPrefix + "autoplay", checked)
-                                }
-                                data-testid={`props-video-${fieldLabel}-autoplay`}
-                              />
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
                               <Label className="text-sm">Loop</Label>
                               <Switch
                                 checked={currentLoop !== false}
@@ -4258,6 +4326,183 @@ export function SectionEditorPanel({
                                 }
                                 data-testid={`props-video-${fieldLabel}-loop`}
                               />
+                            </div>
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <Label className="text-sm">Open in modal on click</Label>
+                                <Switch
+                                  checked={openModalChecked}
+                                  onCheckedChange={(checked) =>
+                                    updatePropertyWithValue(
+                                      parentPrefix + "open_modal_on_click",
+                                      checked ? true : false,
+                                    )
+                                  }
+                                  data-testid={`props-video-${fieldLabel}-open-modal`}
+                                />
+                              </div>
+                              <p className="text-xs text-muted-foreground pr-12">
+                                On desktop, open the video in a dialog when the visitor clicks play
+                                (or the muted overlay). Off keeps playback inline. Mobile always
+                                plays inline.
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <Label className="text-sm">Autoplay</Label>
+                                <Switch
+                                  checked={currentAutoplay === true}
+                                  onCheckedChange={(checked) => {
+                                    if (checked) {
+                                      updatePropertyWithValue(parentPrefix + "autoplay", true);
+                                    } else {
+                                      updatePropertiesWithValues({
+                                        [parentPrefix + "autoplay"]: undefined,
+                                        [parentPrefix + "overlay_on_muted"]: undefined,
+                                      });
+                                    }
+                                  }}
+                                  data-testid={`props-video-${fieldLabel}-autoplay`}
+                                />
+                              </div>
+                              {currentAutoplay === true && (
+                                <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0 space-y-0.5">
+                                      <Label className="text-sm">Muted overlay</Label>
+                                      <p className="text-xs text-muted-foreground">
+                                        Muted overlay shows a card while the clip autoplays without
+                                        sound. A click turns sound on.
+                                      </p>
+                                    </div>
+                                    <Switch
+                                      checked={overlayEnabled}
+                                      onCheckedChange={(checked) => {
+                                        if (checked) {
+                                          updatePropertyWithValue(
+                                            parentPrefix + "overlay_on_muted",
+                                            overlayObj ?? {
+                                              title: "Tu video ya ha comenzado",
+                                              subtitle: "Haga clic para escuchar",
+                                              icon: "volume-x",
+                                            },
+                                          );
+                                        } else {
+                                          updatePropertyWithValue(
+                                            parentPrefix + "overlay_on_muted",
+                                            undefined,
+                                          );
+                                        }
+                                      }}
+                                      data-testid={`props-video-${fieldLabel}-overlay`}
+                                    />
+                                  </div>
+                                  {overlayEnabled && (
+                                    <div className="space-y-3">
+                                      <div
+                                        className="mx-auto flex w-full max-w-sm flex-col items-center gap-3 rounded-xl bg-primary px-4 py-5 text-center text-primary-foreground shadow-lg border border-primary-foreground/20"
+                                        data-testid={`props-video-${fieldLabel}-overlay-card`}
+                                      >
+                                        <div className="relative w-full">
+                                          <Input
+                                            value={overlayTitle}
+                                            onChange={(e) =>
+                                              updatePropertyWithValue(
+                                                parentPrefix + "overlay_on_muted.title",
+                                                e.target.value || undefined,
+                                              )
+                                            }
+                                            placeholder="Tu video ya ha comenzado"
+                                            className="h-8 border-primary-foreground/30 bg-transparent text-center text-sm font-semibold text-primary-foreground placeholder:text-primary-foreground/50 focus-visible:ring-primary-foreground/40 pr-8"
+                                            data-testid={`props-video-${fieldLabel}-overlay-title`}
+                                          />
+                                          <Pencil
+                                            className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-primary-foreground/60"
+                                            aria-hidden
+                                          />
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setIconPickerTarget({
+                                              arrayField: "",
+                                              index: 0,
+                                              field: "",
+                                              label: "Overlay icon",
+                                              currentIcon: overlayIcon || "volume-x",
+                                              simpleFieldPath: parentPrefix + "overlay_on_muted.icon",
+                                            });
+                                            setIconPickerOpen(true);
+                                          }}
+                                          className="flex h-14 w-14 items-center justify-center rounded-lg border border-primary-foreground/25 bg-primary-foreground/10 hover:bg-primary-foreground/20 transition-colors [&_svg]:h-10 [&_svg]:w-10"
+                                          data-testid={`props-video-${fieldLabel}-overlay-icon`}
+                                          title={overlayIcon || "Pick icon"}
+                                        >
+                                          {renderIconByName(overlayIcon || "volume-x")}
+                                        </button>
+                                        <div className="relative w-full">
+                                          <Input
+                                            value={overlaySubtitle}
+                                            onChange={(e) =>
+                                              updatePropertyWithValue(
+                                                parentPrefix + "overlay_on_muted.subtitle",
+                                                e.target.value || undefined,
+                                              )
+                                            }
+                                            placeholder="Haga clic para escuchar"
+                                            className="h-8 border-primary-foreground/30 bg-transparent text-center text-xs text-primary-foreground placeholder:text-primary-foreground/50 focus-visible:ring-primary-foreground/40 pr-8 md:text-sm"
+                                            data-testid={`props-video-${fieldLabel}-overlay-subtitle`}
+                                          />
+                                          <Pencil
+                                            className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-primary-foreground/60"
+                                            aria-hidden
+                                          />
+                                        </div>
+                                      </div>
+                                      <div className="space-y-1">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <Label className="text-sm">Restart video on click</Label>
+                                          <Switch
+                                            checked={overlayRestart}
+                                            onCheckedChange={(checked) =>
+                                              updatePropertyWithValue(
+                                                parentPrefix + "overlay_on_muted.restart_video_on_click",
+                                                checked ? true : undefined,
+                                              )
+                                            }
+                                            data-testid={`props-video-${fieldLabel}-overlay-restart`}
+                                          />
+                                        </div>
+                                        <p className="text-xs text-muted-foreground pr-12">
+                                          Only applies to uploaded local files (e.g. mp4): when off,
+                                          playback continues from the current time; when on, it
+                                          restarts from the beginning. YouTube always restarts.
+                                        </p>
+                                      </div>
+                                    </div>
+                                  )}
+                                  <Collapsible>
+                                    <CollapsibleTrigger asChild>
+                                      <button
+                                        type="button"
+                                        className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                        data-testid={`props-video-${fieldLabel}-overlay-advanced`}
+                                      >
+                                        Read more (advanced)
+                                      </button>
+                                    </CollapsibleTrigger>
+                                    <CollapsibleContent>
+                                      <p className="mt-1 text-xs text-muted-foreground">
+                                        YAML keys: <code className="bg-muted px-1 rounded">overlay_on_muted</code>,{" "}
+                                        <code className="bg-muted px-1 rounded">open_modal_on_click</code>,{" "}
+                                        <code className="bg-muted px-1 rounded">restart_video_on_click</code>.
+                                        Overlay applies to local files (.mp4, .webm, …) and YouTube with autoplay on.
+                                        YouTube starts muted; click remounts the embed with sound.
+                                      </p>
+                                    </CollapsibleContent>
+                                  </Collapsible>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -4366,6 +4611,10 @@ export function SectionEditorPanel({
                   "media.ratio",
                   "ratio",
                   "logo_height",
+                  "overlay_on_muted",
+                  "open_modal_on_click",
+                  "media.overlay_on_muted",
+                  "media.open_modal_on_click",
                 ]);
                 if (fields.some((f) => f.fieldName === "button_variant")) {
                   hiddenFields.add("variant");
@@ -7568,6 +7817,25 @@ export function SectionEditorPanel({
                           const currentAutoplay = resolveNestedValue(item, parentPrefix + "autoplay");
                           const currentLoop = resolveNestedValue(item, parentPrefix + "loop");
                           const currentPreviewImage = (resolveNestedValue(item, parentPrefix + "preview_image_url") as string) || "";
+                          const currentOpenModalOnClick = resolveNestedValue(
+                            item,
+                            parentPrefix + "open_modal_on_click",
+                          );
+                          const openModalChecked = currentOpenModalOnClick !== false;
+                          const currentOverlayOnMuted = resolveNestedValue(
+                            item,
+                            parentPrefix + "overlay_on_muted",
+                          );
+                          const overlayEnabled =
+                            currentOverlayOnMuted != null &&
+                            typeof currentOverlayOnMuted === "object";
+                          const overlayObj = overlayEnabled
+                            ? (currentOverlayOnMuted as Record<string, unknown>)
+                            : null;
+                          const overlayTitle = (overlayObj?.title as string) || "";
+                          const overlaySubtitle = (overlayObj?.subtitle as string) || "";
+                          const overlayIcon = (overlayObj?.icon as string) || "";
+                          const overlayRestart = overlayObj?.restart_video_on_click === true;
                           const itemLabel =
                             (item.title as string) ||
                             (item.name as string) ||
@@ -7746,16 +8014,6 @@ export function SectionEditorPanel({
                                         />
                                       </div>
                                       <div className="flex items-center justify-between gap-2">
-                                        <Label className="text-sm">Autoplay</Label>
-                                        <Switch
-                                          checked={currentAutoplay === true}
-                                          onCheckedChange={(checked) =>
-                                            updateArrayItemField(arrayPath, index, parentPrefix + "autoplay", checked)
-                                          }
-                                          data-testid={`props-video-${arrayFieldLabel}-${index}-autoplay`}
-                                        />
-                                      </div>
-                                      <div className="flex items-center justify-between gap-2">
                                         <Label className="text-sm">Loop</Label>
                                         <Switch
                                           checked={currentLoop !== false}
@@ -7764,6 +8022,180 @@ export function SectionEditorPanel({
                                           }
                                           data-testid={`props-video-${arrayFieldLabel}-${index}-loop`}
                                         />
+                                      </div>
+                                      <div className="space-y-1">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <Label className="text-sm">Open in modal on click</Label>
+                                          <Switch
+                                            checked={openModalChecked}
+                                            onCheckedChange={(checked) =>
+                                              updateArrayItemField(
+                                                arrayPath,
+                                                index,
+                                                parentPrefix + "open_modal_on_click",
+                                                checked ? true : false,
+                                              )
+                                            }
+                                            data-testid={`props-video-${arrayFieldLabel}-${index}-open-modal`}
+                                          />
+                                        </div>
+                                        <p className="text-xs text-muted-foreground pr-12">
+                                          On desktop, open the video in a dialog when the visitor clicks
+                                          play (or the muted overlay). Off keeps playback inline. Mobile
+                                          always plays inline.
+                                        </p>
+                                      </div>
+                                      <div className="space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <Label className="text-sm">Autoplay</Label>
+                                          <Switch
+                                            checked={currentAutoplay === true}
+                                            onCheckedChange={(checked) => {
+                                              if (checked) {
+                                                updateArrayItemField(
+                                                  arrayPath,
+                                                  index,
+                                                  parentPrefix + "autoplay",
+                                                  true,
+                                                );
+                                              } else {
+                                                updateArrayItemFieldsRaw(arrayPath, index, {
+                                                  [parentPrefix + "autoplay"]: undefined,
+                                                  [parentPrefix + "overlay_on_muted"]: undefined,
+                                                });
+                                              }
+                                            }}
+                                            data-testid={`props-video-${arrayFieldLabel}-${index}-autoplay`}
+                                          />
+                                        </div>
+                                        {currentAutoplay === true && (
+                                          <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="min-w-0 space-y-0.5">
+                                                <Label className="text-sm">Muted overlay</Label>
+                                                <p className="text-xs text-muted-foreground">
+                                                  Muted overlay shows a card while the clip autoplays
+                                                  without sound. A click turns sound on.
+                                                </p>
+                                              </div>
+                                              <Switch
+                                                checked={overlayEnabled}
+                                                onCheckedChange={(checked) => {
+                                                  if (checked) {
+                                                    updateArrayItemField(
+                                                      arrayPath,
+                                                      index,
+                                                      parentPrefix + "overlay_on_muted",
+                                                      overlayObj ?? {
+                                                        title: "Tu video ya ha comenzado",
+                                                        subtitle: "Haga clic para escuchar",
+                                                        icon: "volume-x",
+                                                      },
+                                                    );
+                                                  } else {
+                                                    updateArrayItemField(
+                                                      arrayPath,
+                                                      index,
+                                                      parentPrefix + "overlay_on_muted",
+                                                      undefined,
+                                                    );
+                                                  }
+                                                }}
+                                                data-testid={`props-video-${arrayFieldLabel}-${index}-overlay`}
+                                              />
+                                            </div>
+                                            {overlayEnabled && (
+                                              <div className="space-y-3">
+                                                <div
+                                                  className="mx-auto flex w-full max-w-sm flex-col items-center gap-3 rounded-xl bg-primary px-4 py-5 text-center text-primary-foreground shadow-lg border border-primary-foreground/20"
+                                                  data-testid={`props-video-${arrayFieldLabel}-${index}-overlay-card`}
+                                                >
+                                                  <div className="relative w-full">
+                                                    <Input
+                                                      value={overlayTitle}
+                                                      onChange={(e) =>
+                                                        updateArrayItemField(
+                                                          arrayPath,
+                                                          index,
+                                                          parentPrefix + "overlay_on_muted.title",
+                                                          e.target.value || undefined,
+                                                        )
+                                                      }
+                                                      placeholder="Tu video ya ha comenzado"
+                                                      className="h-8 border-primary-foreground/30 bg-transparent text-center text-sm font-semibold text-primary-foreground placeholder:text-primary-foreground/50 focus-visible:ring-primary-foreground/40 pr-8"
+                                                      data-testid={`props-video-${arrayFieldLabel}-${index}-overlay-title`}
+                                                    />
+                                                    <Pencil
+                                                      className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-primary-foreground/60"
+                                                      aria-hidden
+                                                    />
+                                                  </div>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setIconPickerTarget({
+                                                        arrayField: arrayPath,
+                                                        index,
+                                                        field: parentPrefix + "overlay_on_muted.icon",
+                                                        label: "Overlay icon",
+                                                        currentIcon: overlayIcon || "volume-x",
+                                                      });
+                                                      setIconPickerOpen(true);
+                                                    }}
+                                                    className="flex h-14 w-14 items-center justify-center rounded-lg border border-primary-foreground/25 bg-primary-foreground/10 hover:bg-primary-foreground/20 transition-colors [&_svg]:h-10 [&_svg]:w-10"
+                                                    data-testid={`props-video-${arrayFieldLabel}-${index}-overlay-icon`}
+                                                    title={overlayIcon || "Pick icon"}
+                                                  >
+                                                    {renderIconByName(overlayIcon || "volume-x")}
+                                                  </button>
+                                                  <div className="relative w-full">
+                                                    <Input
+                                                      value={overlaySubtitle}
+                                                      onChange={(e) =>
+                                                        updateArrayItemField(
+                                                          arrayPath,
+                                                          index,
+                                                          parentPrefix + "overlay_on_muted.subtitle",
+                                                          e.target.value || undefined,
+                                                        )
+                                                      }
+                                                      placeholder="Haga clic para escuchar"
+                                                      className="h-8 border-primary-foreground/30 bg-transparent text-center text-xs text-primary-foreground placeholder:text-primary-foreground/50 focus-visible:ring-primary-foreground/40 pr-8 md:text-sm"
+                                                      data-testid={`props-video-${arrayFieldLabel}-${index}-overlay-subtitle`}
+                                                    />
+                                                    <Pencil
+                                                      className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-primary-foreground/60"
+                                                      aria-hidden
+                                                    />
+                                                  </div>
+                                                </div>
+                                                <div className="space-y-1">
+                                                  <div className="flex items-center justify-between gap-2">
+                                                    <Label className="text-sm">Restart video on click</Label>
+                                                    <Switch
+                                                      checked={overlayRestart}
+                                                      onCheckedChange={(checked) =>
+                                                        updateArrayItemField(
+                                                          arrayPath,
+                                                          index,
+                                                          parentPrefix + "overlay_on_muted.restart_video_on_click",
+                                                          checked ? true : undefined,
+                                                        )
+                                                      }
+                                                      data-testid={`props-video-${arrayFieldLabel}-${index}-overlay-restart`}
+                                                    />
+                                                  </div>
+                                                  <p className="text-xs text-muted-foreground pr-12">
+                                                    Only applies to uploaded local files (e.g. mp4): when
+                                                    off, playback continues from the current time; when
+                                                    on, it restarts from the beginning. YouTube always
+                                                    restarts.
+                                                  </p>
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
                                   </div>

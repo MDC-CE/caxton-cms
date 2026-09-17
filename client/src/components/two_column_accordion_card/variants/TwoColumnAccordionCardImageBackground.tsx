@@ -194,6 +194,8 @@ export default function TwoColumnAccordionCardImageBackground({ data }: TwoColum
                             loop={video!.loop ?? true}
                             muted={video!.muted ?? true}
                             preview_image_url={image}
+                            open_modal_on_click={video!.open_modal_on_click}
+                            overlay_on_muted={video!.overlay_on_muted}
                             className="w-full"
                           />
                         </div>

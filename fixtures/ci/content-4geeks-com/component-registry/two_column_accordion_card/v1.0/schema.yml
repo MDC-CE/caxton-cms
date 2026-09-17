@@ -87,6 +87,25 @@ props:
       with_shadow_border:
         type: boolean
         required: false
+      open_modal_on_click:
+        type: boolean
+        required: false
+      overlay_on_muted:
+        type: object
+        required: false
+        properties:
+          title:
+            type: string
+            required: false
+          subtitle:
+            type: string
+            required: false
+          icon:
+            type: string
+            required: false
+          restart_video_on_click:
+            type: boolean
+            required: false
   reverse:
     type: boolean
     required: false
