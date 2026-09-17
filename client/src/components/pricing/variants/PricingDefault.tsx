@@ -4,7 +4,10 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { RichTextContent } from "@/components/ui/rich-text-content";
-import type { PricingSection as PricingSectionType } from "@shared/schema";
+import type {
+  PricingPlan,
+  PricingSection as PricingSectionType,
+} from "@shared/schema";
 import Matplotlib from "@/components/custom-icons/Matplotlib";
 import { CSSMarquee } from "@/components/ui/CSSMarquee";
 import { getIcon } from "@/lib/icons";
@@ -14,6 +17,11 @@ import { useInternalNav } from "@/hooks/useInternalNav";
 interface PricingSectionProps {
   data: PricingSectionType;
 }
+
+type PricingSubscriptionSection = Extract<
+  PricingSectionType,
+  { monthly: PricingPlan; yearly: PricingPlan }
+>;
 
 function resolveTechIcon(iconName: string) {
   const lower = iconName.toLowerCase();
@@ -29,7 +37,12 @@ export function PricingSection({ data }: PricingSectionProps) {
   
   const isProductVariant = data.variant === "product";
   
-  if (!isProductVariant && (!data.monthly || !data.yearly)) {
+  const subscriptionData: PricingSubscriptionSection | null =
+    !isProductVariant && "monthly" in data && "yearly" in data
+      ? (data as PricingSubscriptionSection)
+      : null;
+
+  if (!isProductVariant && (!subscriptionData?.monthly || !subscriptionData?.yearly)) {
     return (
       <section className="bg-muted/30" data-testid="section-pricing">
         <div className="max-w-6xl mx-auto px-4 text-center text-muted-foreground">
@@ -39,7 +52,11 @@ export function PricingSection({ data }: PricingSectionProps) {
     );
   }
   
-  const currentPlan = isProductVariant ? null : (isYearly ? data.yearly : data.monthly);
+  const currentPlan = subscriptionData
+    ? isYearly
+      ? subscriptionData.yearly
+      : subscriptionData.monthly
+    : null;
   
   const yearlyLabel = isSpanish ? "Anual" : "Annual";
   const monthlyLabel = isSpanish ? "Mensual" : "Monthly";
@@ -247,6 +264,8 @@ export function PricingSection({ data }: PricingSectionProps) {
     );
   }
 
+  const plan = subscriptionData!;
+
   return (
     <section
       className="bg-gradient-to-r from-[#e8f4fc] to-white dark:from-muted/30 dark:to-background"
@@ -258,7 +277,7 @@ export function PricingSection({ data }: PricingSectionProps) {
             className="text-h2 text-primary"
             data-testid="text-pricing-title"
           >
-            {data.title}
+            {plan.title}
           </h2>
           <div
             className="inline-flex rounded-full border border-primary/20 p-1 bg-background"
@@ -288,12 +307,12 @@ export function PricingSection({ data }: PricingSectionProps) {
             </button>
           </div>
         </div>
-        {data.subtitle && (
+        {plan.subtitle && (
           <p
             className="text-foreground font-medium mb-6"
             data-testid="text-pricing-subtitle"
           >
-            {data.subtitle}
+            {plan.subtitle}
           </p>
         )}
 
@@ -367,29 +386,29 @@ export function PricingSection({ data }: PricingSectionProps) {
                 className="w-full bg-white text-[#061258] border-0 hover:bg-white/90 font-bold h-10 text-[17px] tracking-wide rounded"
                 data-testid="button-get-plan"
               >
-                <a href={data.cta?.url} onClick={handleLinkClick} className="flex items-center justify-center gap-2">
+                <a href={plan.cta?.url} onClick={handleLinkClick} className="flex items-center justify-center gap-2">
                   <School size={24} className="text-[#061258]" />
-                  {data.cta?.text}
+                  {plan.cta?.text}
                 </a>
               </Button>
             </div>
           </div>
 
           <div className="min-w-0 bg-background border border-t-0 lg:border-t lg:border-l-0 border-border rounded-b-2xl lg:rounded-b-none lg:rounded-r-2xl p-4 space-y-4 lg:col-span-8 overflow-hidden">
-            {data.features_title && (
+            {plan.features_title && (
               <p
                 className="text-[#3A3A3A] font-normal text-lg"
                 data-testid="text-features-title"
               >
-                {data.features_title}
+                {plan.features_title}
               </p>
             )}
 
-            {data.tech_icons && data.tech_icons.length > 0 && (
+            {plan.tech_icons && plan.tech_icons.length > 0 && (
               <div className="w-full max-w-full overflow-hidden" data-testid="tech-icons">
-                {data.static_icons ? (
+                {plan.static_icons ? (
                   <div className="flex flex-wrap gap-2">
-                    {data.tech_icons.map((iconName, index) => {
+                    {plan.tech_icons.map((iconName: string, index: number) => {
                       const IconComponent = resolveTechIcon(iconName);
                       return IconComponent ? (
                         <div
@@ -404,7 +423,7 @@ export function PricingSection({ data }: PricingSectionProps) {
                   </div>
                 ) : (
                   <CSSMarquee speed={20} gradient={true} gradientWidth={50} pauseOnHover={true}>
-                    {data.tech_icons.map((iconName, index) => {
+                    {plan.tech_icons.map((iconName: string, index: number) => {
                       const IconComponent = resolveTechIcon(iconName);
                       return IconComponent ? (
                         <div
@@ -424,7 +443,7 @@ export function PricingSection({ data }: PricingSectionProps) {
             <div className="border-t border-border" />
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {data.features.map((feature, index) => {
+              {plan.features.map((feature, index) => {
                 const IconComponent = feature.icon ? getIcon(feature.icon) : null;
                 
                 return (

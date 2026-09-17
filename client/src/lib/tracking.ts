@@ -403,8 +403,8 @@ export function resolveWebhook(
 
   if (settings) {
     const eventEntry = settings.conversion_events.find((e) => e.name === conversionName);
-    if (eventEntry?.webhook?.url) return eventEntry.webhook;
-    if (settings.webhook?.url) return settings.webhook;
+    if (eventEntry?.webhook?.url) return eventEntry.webhook as unknown as WebhookConfig;
+    if (settings.webhook?.url) return settings.webhook as unknown as WebhookConfig;
   }
 
   return null;

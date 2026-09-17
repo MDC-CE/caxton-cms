@@ -1,4 +1,4 @@
-import { TestimonialsSection } from '../TestimonialsSection';
+import { TestimonialsSection } from "@/components/testimonials/variants/TestimonialsDefault";
 
 export default function TestimonialsSectionExample() {
   const testimonials = [

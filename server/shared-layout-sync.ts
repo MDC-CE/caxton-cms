@@ -335,7 +335,7 @@ export function stripSectionFromEntryOverlay(
   entryData.sections = (entryData.sections as Record<string, unknown>[]).filter(
     (s) => !sectionMatchesId(s, sectionId),
   );
-  return entryData.sections.length !== before;
+  return (entryData.sections as unknown[]).length !== before;
 }
 
 export interface FanOutResult {

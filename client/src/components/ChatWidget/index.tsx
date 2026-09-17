@@ -57,7 +57,15 @@ export function ChatWidget() {
     fetch("/api/chat/config")
       .then(r => r.json())
       .then(setConfig)
-      .catch(() => setConfig({ enabled: false, page_patterns: [], content_types: [] }));
+      .catch(() =>
+        setConfig({
+          enabled: false,
+          page_patterns: [],
+          content_types: [],
+          agent_name: null,
+          agent_icon: null,
+        }),
+      );
   }, []);
 
   const shouldShow = () => {

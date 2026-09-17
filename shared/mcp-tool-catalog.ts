@@ -167,7 +167,7 @@ export function visibleContentTypes(
   const seoScope = scopeFromGrant(grants.find((g) => g.name === "seo_edit"));
   if (viewScope === null || seoScope === null) return null;
   if (viewScope === "none" && seoScope === "none") return new Set();
-  if (viewScope === "none") return seoScope;
+  if (viewScope === "none") return seoScope === "none" ? new Set() : seoScope;
   if (seoScope === "none") return viewScope;
   return new Set([...viewScope, ...seoScope]);
 }

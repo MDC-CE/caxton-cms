@@ -47,7 +47,11 @@ export function validateDocIdentity(
   return validateDocumentSectionsIdentity(doc, {
     fieldEditorsByType: allFieldEditors,
     hasEcommerceBehavior: (sectionType) =>
-      Boolean(getComponentInfo(sectionType)?.behaviors?.includes("ecommerce")),
+      Boolean(
+        (getComponentInfo(sectionType) as { behaviors?: string[] } | undefined)?.behaviors?.includes(
+          "ecommerce",
+        ),
+      ),
     contentType: opts.contentType,
     contentSlug: opts.contentSlug,
     funnel,

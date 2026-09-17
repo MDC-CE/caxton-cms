@@ -327,7 +327,7 @@ export async function startJobQueue(): Promise<void> {
       // Must pass dashboard here — Sidequest.start spreads config?.dashboard into Dashboard.start.
       // A bare Sidequest.start() after configure() boots the UI at "/" with no auth/basePath.
       const dashboard = buildSidequestDashboardConfig();
-      await Sidequest.start({ dashboard });
+      await Sidequest.start({ dashboard } as Parameters<typeof Sidequest.start>[0]);
       restartAttempts = 0;
       log.info(
         {
@@ -408,7 +408,7 @@ export async function enqueueJob(
     builder = builder.availableAt(new Date(Date.now() + opts.delayMs));
   }
   try {
-    await builder.enqueue(payload);
+    await (builder.enqueue as (payload: Record<string, unknown>) => Promise<unknown>)(payload);
     return { queued: true };
   } catch (err) {
     if (opts?.uniqueKey && err instanceof DuplicatedJobError) {

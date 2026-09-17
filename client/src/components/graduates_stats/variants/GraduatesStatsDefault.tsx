@@ -11,7 +11,8 @@ interface GraduatesStatsDefaultProps {
   data: GraduatesStatsSection;
 }
 
-export default function GraduatesStatsDefault({ data }: GraduatesStatsDefaultProps) {
+export default function GraduatesStatsDefault({ data: raw }: GraduatesStatsDefaultProps) {
+  const data = raw as GraduatesStatsSection & Record<string, any>;
   const { heading, subheading, stats, collage_images, background } = data;
   const [activeMobileImageIndex, setActiveMobileImageIndex] = useState(0);
   const mobileViewportRef = useRef<HTMLDivElement | null>(null);
@@ -94,7 +95,7 @@ export default function GraduatesStatsDefault({ data }: GraduatesStatsDefaultPro
       className="relative grid grid-cols-12 auto-rows-[60px] lg:auto-rows-[70px] gap-2 lg:gap-3"
       data-testid="graduates-stats-collage"
     >
-      {collage_images && collage_images.map((img, index) => {
+      {collage_images && collage_images.map((img: Record<string, unknown>, index: number) => {
         const colSpan = img.col_span || 6;
         const rowSpan = img.row_span || 2;
         
@@ -108,15 +109,15 @@ export default function GraduatesStatsDefault({ data }: GraduatesStatsDefaultPro
             }}
           >
             <UniversalImage
-              id={img.image_id}
+              id={String(img.image_id ?? "")}
               preset="card"
               className="w-full h-full object-cover shadow-sm"
               alt={`Graduate photo ${index + 1}`}
               loading={index < 2 ? "eager" : "lazy"}
               style={{
-                objectPosition: img.object_position ?? "center center",
-                transform: `scale(${img.object_scale ?? 1})`,
-                transformOrigin: img.transform_origin ?? "50% 50%",
+                objectPosition: (img.object_position as string | undefined) ?? "center center",
+                transform: `scale(${Number(img.object_scale ?? 1)})`,
+                transformOrigin: (img.transform_origin as string | undefined) ?? "50% 50%",
               }}
               fieldContext={{ arrayPath: "collage_images", index, srcField: "image_id" }}
             />
@@ -145,19 +146,19 @@ export default function GraduatesStatsDefault({ data }: GraduatesStatsDefaultPro
             className="flex items-stretch transition-transform duration-300 ease-out"
             style={{ transform: `translateX(-${activeMobileImageIndex * 100}%)` }}
           >
-            {collage_images.map((img, index) => (
+            {collage_images.map((img: Record<string, unknown>, index: number) => (
               <div key={index} className="flex w-full shrink-0">
                 <div className="mx-auto flex w-[93%]">
                   <div className="relative w-full overflow-hidden rounded-[0.8rem] ">
                     <UniversalImage
-                      id={img.image_id}
+                      id={String(img.image_id ?? "")}
                       className="w-full h-full object-cover shadow-sm"
                       alt={`Graduate photo ${index + 1}`}
                       loading={index === 0 ? "eager" : "lazy"}
                       style={{
-                        objectPosition: img.object_position ?? "center center",
-                        transform: `scale(${img.object_scale ?? 1})`,
-                        transformOrigin: img.transform_origin ?? "50% 50%",
+                        objectPosition: (img.object_position as string | undefined) ?? "center center",
+                        transform: `scale(${Number(img.object_scale ?? 1)})`,
+                        transformOrigin: (img.transform_origin as string | undefined) ?? "50% 50%",
                       }}
                       fieldContext={{ arrayPath: "collage_images", index, srcField: "image_id" }}
                     />

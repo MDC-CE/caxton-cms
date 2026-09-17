@@ -146,7 +146,7 @@ async function runOneJob(job: InternalJob): Promise<void> {
     throw new Error("preview_not_configured");
   }
 
-  const configErr = cloudflareBrowserConfigError(site.contentRoot);
+  const configErr = cloudflareBrowserConfigError();
   if (configErr) throw new Error(configErr);
 
   const manager = site.entryPreviewManager;
@@ -483,7 +483,7 @@ export async function enqueueEntryPreviewsForType(
     throw err;
   }
 
-  const configErr = cloudflareBrowserConfigError(site.contentRoot);
+  const configErr = cloudflareBrowserConfigError();
   if (configErr) {
     const err = new Error(configErr);
     (err as Error & { code?: string }).code = "capture_misconfigured";
@@ -612,7 +612,7 @@ export async function maybeEnqueueAfterEntrySave(
   if (!isPreviewCaptureReady(preview)) {
     return { enqueued: false, reason: "preview_not_configured" };
   }
-  if (cloudflareBrowserConfigError(site.contentRoot)) {
+  if (cloudflareBrowserConfigError()) {
     return { enqueued: false, reason: "capture_misconfigured" };
   }
 

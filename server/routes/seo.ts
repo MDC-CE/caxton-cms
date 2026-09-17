@@ -1682,10 +1682,7 @@ export function registerSeoRoutes(app: Express): void {
             strippedVariants.push(variantFile);
           }
         } catch (e) {
-          log.warn(
-            `[Update Locations] Could not process variant ${variantFile}:`,
-            e,
-          );
+          log.warn({ err: e, variantFile }, `[Update Locations] Could not process variant ${variantFile}`);
         }
       }
       if (strippedVariants.length > 0) {
@@ -2011,7 +2008,10 @@ export function registerSeoRoutes(app: Express): void {
           if (!slug) return null;
           return { slug, locale };
         })
-        .filter((x): x is { slug: string; locale: string } => !!x);
+        .filter(
+          (x: { slug: string; locale: string } | null): x is { slug: string; locale: string } =>
+            !!x,
+        );
 
       if (items.length === 0) {
         return res.status(400).json({ error: "items must include at least one slug+locale" });

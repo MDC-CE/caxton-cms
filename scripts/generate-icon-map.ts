@@ -165,12 +165,12 @@ function main(): void {
     "export type LucideIconLoader = () => Promise<{ default: LucideIconComponent }>;",
     "",
     "/** Kebab-case Lucide slug → per-icon dynamic import (Vite code-splits each). */",
-    "export const curatedLucideImports: Record<string, LucideIconLoader> = {",
+    "export const curatedLucideImports = {",
     ...sorted.map(
       (slug) =>
         `  "${slug}": () => import("lucide-react/dist/esm/icons/${slug}.js"),`,
     ),
-    "};",
+    "} as Record<string, LucideIconLoader>;",
     "",
   ];
 

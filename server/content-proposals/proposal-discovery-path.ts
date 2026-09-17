@@ -291,7 +291,7 @@ function toToolItem(
     id: string;
     tool: string;
     why: string;
-    look_for: string[];
+    look_for: readonly string[];
   },
   allowed: Set<string> | null,
   args_hint?: Record<string, unknown>,
@@ -558,7 +558,9 @@ export function buildProposalDiscoveryPath(
   let tools: DiscoveryPathToolItem[] = [];
   if (kind === "edits" && !reviewContext?.block_apply) {
     const pendingFieldPaths = collectPendingFieldPaths(proposal);
-    const hasSerp = hasTitleDescriptionOps(proposal.entries ?? []);
+    const hasSerp = hasTitleDescriptionOps(
+      (proposal.entries ?? []) as Parameters<typeof hasTitleDescriptionOps>[0],
+    );
     const situations = (reviewContext?.review_situations ?? []) as ReviewSituationId[];
     const contentLookFor = discoveryContentLookForForSituations(situations);
     const pending = pendingEntries(proposal);

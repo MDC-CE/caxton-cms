@@ -8,7 +8,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import type { DynamicTableConfig } from "./TableBuilderWizard";
+import type { DynamicTableConfig } from "@/components/TableBuilderWizard";
 import { useSession } from "@/contexts/SessionContext";
 import type { DynamicTableSection } from "@shared/schema";
 import { decodeUtf8Base64 } from "@shared/functionEncoding";

@@ -1,4 +1,4 @@
-import type { MenuView } from "../types";
+import type { MenuView, ComponentItem } from "../types";
 import { ArrowLeft, Blocks, ExternalLink, RefreshCw, Search, X } from "lucide-react";
 import {
   DropdownMenu,
@@ -7,15 +7,22 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+/** Registry list row (API) — distinct from catalog ComponentItem (label + icon). */
+export type RegistryComponentRow = {
+  type: string;
+  name: string;
+  description: string;
+};
+
 interface ComponentsViewProps {
   componentSearch: string;
   setComponentSearch: (v: string) => void;
   showComponentSearch: boolean;
   setShowComponentSearch: (v: boolean) => void;
   setMenuView: (v: MenuView) => void;
-  filteredComponents: Array<{ type: string; name: string; description: string }>;
-  componentRegistryData: any;
-  componentIconMap: Record<string, any>;
+  filteredComponents: RegistryComponentRow[];
+  componentRegistryData: unknown;
+  componentIconMap: Record<string, ComponentItem["icon"] | undefined>;
 }
 
 export function ComponentsView({

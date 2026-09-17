@@ -8,6 +8,7 @@ import {
   EntryPreviewConfigDialog,
   type ContentTypePreviewConfig,
   type EntryPreviewFailure,
+  type EntryPreviewFieldMapping,
 } from "@/components/EntryPreviewAdmin";
 import { ContentUpdateTimeline } from "@/components/content/ContentUpdateTimeline";
 import { buildContentUpdateTimelineItems } from "@/components/content/buildContentUpdateTimelineItems";
@@ -3141,7 +3142,7 @@ const SEO_DB_MAPPING_ROWS = [
   { mappingKey: "seo_is_pillar", displayPath: "seo.is_pillar", label: "Is pillar", template: "{{ seo.is_pillar }}" },
   { mappingKey: "seo_pillar_path", displayPath: "seo.pillar_path", label: "Pillar path", template: "{{ seo.pillar_path }}" },
 ] as const;
-const SEO_DB_MAPPING_KEYS = new Set(SEO_DB_MAPPING_ROWS.map((r) => r.mappingKey));
+const SEO_DB_MAPPING_KEYS: Set<string> = new Set(SEO_DB_MAPPING_ROWS.map((r) => r.mappingKey));
 /** Must match server RESERVED_IMAGE_FIELD — preview/OG system special. */
 const RESERVED_IMAGE_FIELD = "_image";
 const FORBIDDEN_SCHEMA_FIELD = "image";
@@ -3961,11 +3962,12 @@ function FieldMappingDialog({
         }
       }
 
-      const safeIndexes = stripLocaleIndexFields(
-        indexedFields.filter(
-          (f) => f !== FORBIDDEN_SCHEMA_FIELD && f !== RESERVED_IMAGE_FIELD && !f.startsWith("_"),
-        ),
-      );
+      const safeIndexes =
+        stripLocaleIndexFields(
+          indexedFields.filter(
+            (f) => f !== FORBIDDEN_SCHEMA_FIELD && f !== RESERVED_IMAGE_FIELD && !f.startsWith("_"),
+          ),
+        ) ?? [];
       const safeUnique = uniqueFields.filter(
         (f) => f !== FORBIDDEN_SCHEMA_FIELD && f !== RESERVED_IMAGE_FIELD && !f.startsWith("_"),
       );
@@ -7920,7 +7922,7 @@ export default function ContentTypeManagePage() {
           <EntryPreviewCard
             contentType={contentType}
             preview={typeConfig?.preview}
-            fieldMapping={typeConfig?.field_mapping}
+            fieldMapping={typeConfig?.field_mapping as EntryPreviewFieldMapping}
             queueBusyCount={entryPreviewQueueBusyCount}
             generateAllCounts={entryPreviewGenCounts}
             forceRegenerateCount={entryPreviewGenCounts.force}
@@ -8690,13 +8692,15 @@ export default function ContentTypeManagePage() {
                         const rowKey = `${slug}-${locale}`;
                         const previewKey = `${slug}:${locale}`;
                         const previewRow = entryPreviewsData?.index?.[previewKey];
-                        const captureSt = previewRow?.meta?.failedAt
-                          ? "error"
-                          : previewRow?.needsCapture && entryPreviewQueueBusyCount > 0
-                            ? "capturing"
-                            : previewRow?.cacheBustedUrl
-                              ? "done"
-                              : undefined;
+                        const captureSt = (
+                          previewRow?.meta?.failedAt
+                            ? "failed"
+                            : previewRow?.needsCapture && entryPreviewQueueBusyCount > 0
+                              ? "capturing"
+                              : previewRow?.cacheBustedUrl
+                                ? "done"
+                                : undefined
+                        ) as "done" | "capturing" | "queued" | "failed" | undefined;
                         const isUsableOg = isUsableOgImageUrl(ogImage);
                         const thumbSrc =
                           (isUsableOg ? ogImage : "") || previewRow?.cacheBustedUrl || "";
@@ -9749,13 +9753,15 @@ export default function ContentTypeManagePage() {
                         const itemUrl = pattern ? buildItemUrl(pattern, item, itemLocale) : "";
                         const previewKey = `${item.slug}:${itemLocale}`;
                         const previewRow = entryPreviewsData?.index?.[previewKey];
-                        const captureSt = previewRow?.meta?.failedAt
-                          ? "error"
-                          : previewRow?.needsCapture && entryPreviewQueueBusyCount > 0
-                            ? "capturing"
-                            : previewRow?.cacheBustedUrl
-                              ? "done"
-                              : undefined;
+                        const captureSt = (
+                          previewRow?.meta?.failedAt
+                            ? "failed"
+                            : previewRow?.needsCapture && entryPreviewQueueBusyCount > 0
+                              ? "capturing"
+                              : previewRow?.cacheBustedUrl
+                                ? "done"
+                                : undefined
+                        ) as "done" | "capturing" | "queued" | "failed" | undefined;
                         const thumbSrc =
                           (typeof item.image === "string" && item.image.trim()) ||
                           (typeof item.preview === "string" && item.preview.trim()) ||

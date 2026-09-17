@@ -43,6 +43,7 @@ import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
 import { collectSystemAlerts, recheckDatabaseHealth } from "../system-alerts";
+import { runScan as runComponentInsightsScan, readInsightsFile } from "../component-insights";
 import { listEvents, listEventAuthors, clearAllEvents, listAgentSessions, getAgentSessionDetail, emitEvent, getLatestWriteGeneration, getOldestUnpublishedAgeMs, getUnpublishedCount, getUnpublishedEvents, findOpenAgentSession, resolveUsableAgentSession } from "../events/event-store";
 import { singleAttribution, EVENT_TYPES, type EventType } from "../events/types";
 import { isExactAgentModel, normalizeMcpClientName, sessionConflictPayload } from "../../shared/agent-identity";
@@ -141,7 +142,7 @@ import { mediaGallery } from "../media-gallery";
 import { media } from "../media";
 import multer from "multer";
 import { contentIndex, type ContentType } from "../content-index";
-import { readInsightsFile, suggestNext as suggestNextComponent, getComponentUsageData, getInsightsStatus, requestInsightsRebuild, getUsageSummary } from "../component-insights";
+import { suggestNext as suggestNextComponent, getComponentUsageData, getInsightsStatus, requestInsightsRebuild, getUsageSummary } from "../component-insights";
 import { validateFieldSource, validateFieldMapping, extractByDotPath } from "../../scripts/validation/shared/fieldMappingValidator";
 import {
   getFolder,
@@ -862,10 +863,10 @@ export function registerAdminRoutes(app: Express): void {
         const frozenModel = open.model;
         if (!frozenModel || !isExactAgentModel(frozenModel)) {
           return res.status(409).json({
+            ...sessionConflictPayload(open),
             error: "Open session has no exact model — use force_new with a report",
             code: "session_conflict",
             action_required: "session_conflict",
-            ...sessionConflictPayload(open),
           });
         }
         return res.json({
@@ -2595,11 +2596,14 @@ export function registerAdminRoutes(app: Express): void {
       if (!auth.authorized) return;
 
       const { TOOL_DEFINITIONS } = await import("../ai/tools/index");
-      const definitions = TOOL_DEFINITIONS.map(t => ({
-        name: t.function.name,
-        description: t.function.description,
-        parameters: t.function.parameters,
-      }));
+      const definitions = TOOL_DEFINITIONS.map((t) => {
+        const fn = (t as import("openai").OpenAI.Chat.ChatCompletionFunctionTool).function;
+        return {
+          name: fn.name,
+          description: fn.description,
+          parameters: fn.parameters,
+        };
+      });
       res.json({ tools: definitions });
     } catch (err) {
       log.error({ err: err }, "[AI Tool Definitions] Error:");
@@ -3079,7 +3083,7 @@ export function registerAdminRoutes(app: Express): void {
       const llmConfig = loadSiteLLMConfig(res);
 
       const modelDefault = typeof llmConfig.model === "object" ? (llmConfig.model as Record<string, string>)?.default || "" : (llmConfig.model as string) || "";
-      const modelChat = typeof llmConfig.model === "object" ? llmConfig.model?.chat || "" : "";
+      const modelChat = typeof llmConfig.model === "object" ? (llmConfig.model as Record<string, string>)?.chat || "" : "";
 
       res.json({
         system_prompt: knowledge.system_prompt || null,
@@ -3279,7 +3283,7 @@ export function registerAdminRoutes(app: Express): void {
       const tags = llmConfig.question_tags || [];
 
       const agent = getAgentService();
-      const clusters = await agent.clusterQuestions(recentMessages, tags);
+      const clusters = await agent.clusterQuestions(recentMessages, tags as string[]);
 
       res.json({ clusters, total_questions: recentMessages.length });
     } catch (err) {
@@ -3460,7 +3464,7 @@ export function registerAdminRoutes(app: Express): void {
         const data = readInsightsFile() ?? runComponentInsightsScan();
         const configs = getAllConfigs();
         const availableContentTypes = Object.entries(configs)
-          .filter(([, cfg]) => !(cfg as Record<string, unknown>).database)
+          .filter(([, cfg]) => !(cfg as unknown as Record<string, unknown>).database)
           .map(([ct]) => ct);
         return res.status(400).json({
           error: "Either 'intent' or 'contentType' query param is required for scoped results.",
@@ -3543,7 +3547,7 @@ export function registerAdminRoutes(app: Express): void {
           }
         }
       } catch (err) {
-        log.error("[SSR-DB] Error generating schema for", url, err);
+        log.error({ err, url }, "[SSR-DB] Error generating schema for");
       }
     } else if (isListingRoute && listingResolved) {
       schemaHtml = generateListingSsrHtml(
@@ -3579,7 +3583,7 @@ export function registerAdminRoutes(app: Express): void {
           }
         }
       } catch (err) {
-        log.error("[SSR-Blog] Error generating schema for", url, err);
+        log.error({ err, url }, "[SSR-Blog] Error generating schema for");
       }
     } else {
       schemaHtml = await generateSsrSchemaHtml(url, getCI(res), getContentRoot(res));

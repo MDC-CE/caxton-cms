@@ -59,7 +59,7 @@ export function mergeImageRegistries(
   const fallbackTags = asRecord(fallback.tagDefinitions);
   const primaryTags = asRecord(primary.tagDefinitions);
   if (Object.keys(fallbackTags).length > 0 || Object.keys(primaryTags).length > 0) {
-    merged.tagDefinitions = { ...fallbackTags, ...primaryTags };
+    merged.tagDefinitions = { ...fallbackTags, ...primaryTags } as typeof merged.tagDefinitions;
   }
 
   return merged;

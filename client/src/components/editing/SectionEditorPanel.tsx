@@ -2425,7 +2425,15 @@ export function SectionEditorPanel({
         automations: event.automations,
         tags: event.tags,
         consent: event.consent,
-        webhook: event.webhook,
+        webhook:
+          event.webhook?.url != null && event.webhook.url !== ""
+            ? {
+                url: event.webhook.url,
+                method: event.webhook.method,
+                headers: event.webhook.headers,
+                fail_silently: event.webhook.fail_silently,
+              }
+            : undefined,
         success: event.success,
       },
       formSettingsPath
@@ -3209,6 +3217,7 @@ export function SectionEditorPanel({
               onChange={(value) => updateProperty("showOn", value)}
             />
 
+            {(
             <div
               className="rounded-md border border-input bg-background"
               data-testid="props-hide-until-opened-card"
@@ -3281,6 +3290,7 @@ export function SectionEditorPanel({
                 </details>
               </div>
             </div>
+            ) as any}
 
             {/* CTA Banner variant picker */}
             {sectionType === "cta_banner" && (
@@ -3509,7 +3519,9 @@ export function SectionEditorPanel({
                 ]}
               />
             )}
-            {sectionType === "dynamic_table" && parsedSection?.endpoint && (
+            {sectionType === "dynamic_table" &&
+              typeof parsedSection?.endpoint === "string" &&
+              parsedSection.endpoint.length > 0 && (
               <>
                 <div className="space-y-2">
                   <Label className="text-xs font-medium">Max Rows</Label>
@@ -8768,7 +8780,7 @@ export function SectionEditorPanel({
                         }
                       } else if (field === "failSilently") {
                         if (value === true) {
-                          updateProperty(formProp("webhook.fail_silently"), true);
+                          updatePropertyWithValue(formProp("webhook.fail_silently"), true);
                         } else {
                           updatePropertyWithValue(
                             formProp("webhook.fail_silently"),

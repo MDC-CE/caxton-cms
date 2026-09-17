@@ -111,7 +111,7 @@ export async function renderHubHtml(opts: {
 
   const variantKey = opts.variantKey && opts.variantKey !== "default" ? opts.variantKey : "live";
   const siteId =
-    opts.site.contentRootName || opts.site.contentRoot || opts.site.domain || "default";
+    opts.site.contentRootName || opts.site.contentRoot || opts.site.config.domain || "default";
   const cacheKey = buildHtmlCacheKey(siteId, clean, variantKey);
 
   const cached = getCachedHtml(cacheKey);
@@ -138,7 +138,7 @@ export async function renderHubHtml(opts: {
       typeof (initialDataPayload as { httpStatus?: number }).httpStatus === "number"
         ? (initialDataPayload as { httpStatus: number }).httpStatus
         : undefined,
-    contentIndex: opts.site.contentIndex as { isKnownUrl?(u: string): boolean },
+    contentIndex: opts.site.contentIndex as unknown as import("./public-html-status").KnownUrlIndex,
   });
 
   if (status !== 200) {

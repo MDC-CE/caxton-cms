@@ -181,13 +181,13 @@ export type KnownSeoField = (typeof SEO_FIELD_DEFS)[number]["key"];
 
 export const KNOWN_SEO_FIELDS = SEO_FIELD_DEFS.map((d) => d.key) as unknown as readonly KnownSeoField[];
 
-export const SEO_RESEARCH_METRIC_FIELDS = SEO_FIELD_DEFS.filter((d) => d.researchMetric).map(
+export const SEO_RESEARCH_METRIC_FIELDS = SEO_FIELD_DEFS.filter((d) => (d as SeoFieldDef).researchMetric).map(
   (d) => d.key,
 ) as unknown as readonly ("kw_monthly_volume" | "kw_difficulty")[];
 
 export type SeoResearchMetricField = (typeof SEO_RESEARCH_METRIC_FIELDS)[number];
 
-export const SEO_RESEARCH_WRITE_FIELDS = SEO_FIELD_DEFS.filter((d) => d.researchWrite).map(
+export const SEO_RESEARCH_WRITE_FIELDS = SEO_FIELD_DEFS.filter((d) => (d as SeoFieldDef).researchWrite).map(
   (d) => d.key,
 ) as unknown as readonly KnownSeoField[];
 

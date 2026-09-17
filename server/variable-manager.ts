@@ -61,7 +61,7 @@ export interface VariableMapEntry {
   defaultValue: string;
 }
 
-class VariableManager {
+export class VariableManager {
   private readonly contentRoot: string;
   private readonly contentFolderName: string;
   private readonly variablesPath: string;

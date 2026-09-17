@@ -46,7 +46,7 @@ export function buildSiblingTocGroupOps(
   ops: Array<{ action: "update_field"; path: string; value: unknown }>;
   newShowToc: boolean;
 } {
-  const ops = articles.flatMap((a) => [
+  const ops: Array<{ action: "update_field"; path: string; value: unknown }> = articles.flatMap((a) => [
     {
       action: "update_field" as const,
       path: `sections.${a.index}.toc_group`,
@@ -82,7 +82,7 @@ export function buildSiblingShareOpsForActivation(
   currentIndex: number,
   groupId: string,
 ): Array<{ action: "update_field"; path: string; value: unknown }> {
-  const ops = articles
+  const ops: Array<{ action: "update_field"; path: string; value: unknown }> = articles
     .filter((a) => a.index !== currentIndex)
     .flatMap((a) => [
       {

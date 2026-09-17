@@ -988,17 +988,17 @@ export function initialDataMiddleware(
             const newLength = Buffer.byteLength(injected, "utf-8");
             res.setHeader("content-length", newLength);
 
-            originalEnd.call(this, injected, ...args);
+            (originalEnd as (...a: unknown[]) => unknown).call(this, injected, ...args);
           } catch {
-            originalEnd.call(this, chunk, ...args);
+            (originalEnd as (...a: unknown[]) => unknown).call(this, chunk, ...args);
           }
         })
         .catch(() => {
-          originalEnd.call(this, chunk, ...args);
+          (originalEnd as (...a: unknown[]) => unknown).call(this, chunk, ...args);
         });
       return this;
     }
-    return originalEnd.call(this, chunk, ...args);
+    return (originalEnd as (...a: unknown[]) => unknown).call(this, chunk, ...args);
   } as any;
 
   next();

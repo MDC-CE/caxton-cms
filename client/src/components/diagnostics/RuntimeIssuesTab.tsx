@@ -195,7 +195,7 @@ function CmsLinksCell({
         { credentials: "include" },
       );
       if (!res.ok) throw new Error("Failed to load internal link referrers");
-      return res.json() as {
+      return (await res.json()) as unknown as {
         count: number;
         entryKeys: string[];
         referrers: Array<{ entryKey: string }>;
@@ -416,6 +416,10 @@ function RuntimeIssueProbeControl({
     );
   }
 
+  if (!probe) {
+    return null;
+  }
+
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -432,7 +436,7 @@ function RuntimeIssueProbeControl({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 space-y-2 text-sm" data-testid={`popover-runtime-issue-resolved-${issue.fingerprint}`}>
         <p className="font-medium text-foreground">This URL no longer 404s.</p>
-        <p className="text-muted-foreground">{probeSourceLabel(probe)}</p>
+        <p className="text-muted-foreground">{probeSourceLabel(probe as RuntimeIssueProbe)}</p>
         {destination ? (
           <p className="font-mono text-xs break-all">
             {destHref ? (

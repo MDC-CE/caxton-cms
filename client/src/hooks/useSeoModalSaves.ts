@@ -72,7 +72,8 @@ export function useSeoModalSaves(opts: UseSeoModalSavesOpts) {
       const next = { ...opts.seoMeta };
       opts.baselineMetaRef.current = { ...opts.baselineMetaRef.current, ...next };
       for (const k of savedKeys) {
-        opts.baselineMetaRef.current[k] = next[k];
+        (opts.baselineMetaRef.current as unknown as Record<string, string | string[] | undefined>)[k] =
+          next[k];
       }
       opts.setDirtyKeys(computeDirtyMetaKeys(next, opts.baselineMetaRef.current));
     },

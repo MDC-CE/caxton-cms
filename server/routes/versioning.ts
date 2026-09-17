@@ -465,7 +465,9 @@ export function registerVersioningRoutes(app: Express): void {
 
         const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
         const prevVariants = existing[locale]?.variants ?? [];
-        const prevBySlug = new Map(prevVariants.map((v) => [v.slug, v.allocation]));
+        const prevBySlug = new Map(
+          prevVariants.map((v: { slug: string; allocation: number }) => [v.slug, v.allocation]),
+        );
         const newVariants = parseResult.data.variants;
         const newSlugSet = new Set(newVariants.map((v) => v.slug));
 
@@ -900,7 +902,9 @@ export function registerVersioningRoutes(app: Express): void {
         const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
         const localeData = existing[locale];
         if (localeData) {
-          const updatedVariants = (localeData.variants || []).filter((v) => v.slug !== variantSlug);
+          const updatedVariants = (localeData.variants || []).filter(
+            (v: { slug: string }) => v.slug !== variantSlug,
+          );
           versioningManager.updateVersioning(contentType, resolved.slug, {
             ...existing,
             [locale]: { variants: updatedVariants },

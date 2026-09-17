@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { IconChevronDown, IconChevronRight, IconExternalLink } from "@tabler/icons-react";
 import { FileText } from "lucide-react";
-import { DataSet, Timeline } from "vis-timeline/standalone";
+import { DataSet } from "vis-data";
+import { Timeline } from "vis-timeline/standalone";
 import type { DataItem, TimelineOptions } from "vis-timeline/standalone";
 import "vis-timeline/styles/vis-timeline-graph2d.min.css";
 import "@/components/pipeline/EventTimeline.css";
@@ -315,7 +316,7 @@ export function ContentUpdateTimeline({
 
     const next = layoutContentUpdateItems(items);
     const nextIds = new Set(next.map((i) => i.id));
-    const removeIds = dataItems.getIds().filter((id) => !nextIds.has(String(id)));
+    const removeIds = dataItems.getIds().filter((id: string | number) => !nextIds.has(String(id)));
     if (removeIds.length > 0) dataItems.remove(removeIds);
     dataItems.update(next);
     sanitizeTimelineChrome(containerRef.current);

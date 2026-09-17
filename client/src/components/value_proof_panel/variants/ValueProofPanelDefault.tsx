@@ -119,7 +119,11 @@ function MediaFrame({
         />
       ) : (
       <UniversalImage
-        id={media.image_id || media.src || ""}
+        id={
+          ("image_id" in media && typeof media.image_id === "string" && media.image_id) ||
+          media.src ||
+          ""
+        }
         alt={media.alt || ""}
         className="w-full h-full object-cover"
         fieldContext={{ fieldPath: "media.image_id" }}

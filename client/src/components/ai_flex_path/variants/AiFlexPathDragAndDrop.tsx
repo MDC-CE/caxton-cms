@@ -687,7 +687,7 @@ export default function AiFlexPathDragAndDrop({ data }: { data: AiFlexPathDragAn
     setActiveDeltaY(event.delta.y);
   }
 
-  function handleDragOver(event: { over?: { id: string } | null }) {
+  function handleDragOver(event: import("@dnd-kit/core").DragOverEvent) {
     const overId = event.over?.id as string | undefined;
     if (overId?.startsWith("path-slot-")) {
       const slot = parseInt(overId.replace("path-slot-", ""));
@@ -768,7 +768,7 @@ export default function AiFlexPathDragAndDrop({ data }: { data: AiFlexPathDragAn
           <div className="w-28 flex-shrink-0 flex items-start justify-center pt-[2px]">
             <div className="mb-1">
               {data.image_id ? (
-                <UniversalImage id={data.image_id} width={55} height={55} style={{ objectFit: "contain", width: "50px", height: "50px" }} />
+                <UniversalImage id={data.image_id} style={{ objectFit: "contain", width: "50px", height: "50px" }} />
               ) : SectionIcon ? (
                 <SectionIcon width="55" height="55" style={{ color: "hsl(var(--foreground))" }} />
               ) : null}

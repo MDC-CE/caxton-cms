@@ -170,7 +170,7 @@ export const leadFormOverrideConditionSchema = z
     /** Default equals. contains = substring on strings; membership on arrays of scalars. */
     match_method: z.enum(["equals", "contains"]).optional(),
     /** Compared value; {{ visitor.* }} / templates via resolveDeep may keep numbers. */
-    value: z.unknown(),
+    value: z.unknown().optional(),
   })
   .passthrough();
 

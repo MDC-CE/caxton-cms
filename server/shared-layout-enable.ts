@@ -330,7 +330,7 @@ export function assessTemplateEntrySource(input: {
     }
     if (!sectionIsEntryBagExpressionsOnly(sec)) {
       invalidSections!.push({
-        sectionId: canonicalSectionId(sec),
+        sectionId: canonicalSectionId(sec) ?? null,
         index,
         reason:
           "Content props must be exact {{ entry.* }} (or legacy {{ single.* }}) expressions, or empty",

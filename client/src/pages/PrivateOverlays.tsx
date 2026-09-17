@@ -1486,7 +1486,6 @@ export default function PrivateOverlays() {
                       searchPlaceholder="Search regions..."
                       testIdPrefix="overlay-regions"
                       emptyMessage="No regions found"
-                      allowFreeText
                       portalContainer={sheetContainer}
                     />
                   </div>

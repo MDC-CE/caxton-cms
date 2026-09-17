@@ -29,12 +29,18 @@ function safeLoad(raw: string): Record<string, unknown> | null {
   }
 }
 
-function readParamFromFile(filePath: string, param: string, mapping: Record<string, string | null> | undefined): string | null {
+function readParamFromFile(
+  filePath: string,
+  param: string,
+  mapping: Record<string, string> | null | undefined,
+): string | null {
   if (!fs.existsSync(filePath)) return null;
   try {
     const data = safeLoad(fs.readFileSync(filePath, "utf-8"));
     if (!data) return null;
-    return extractParamSlug(getRawUrlParamValue(data, param, mapping));
+    return extractParamSlug(
+      getRawUrlParamValue(data, param, mapping as Record<string, string | null> | undefined),
+    );
   } catch {
     return null;
   }
@@ -72,7 +78,13 @@ export const urlParamLocaleValidator: Validator = {
         for (const param of params) {
           const fromFields =
             file.entryFields &&
-            extractParamSlug(getRawUrlParamValue(file.entryFields, param, mapping));
+            extractParamSlug(
+              getRawUrlParamValue(
+                file.entryFields,
+                param,
+                mapping as Record<string, string | null> | undefined,
+              ),
+            );
           const slug = fromFields ?? readParamFromFile(file.filePath, param, mapping);
           if (slug) {
             errors.push({
@@ -94,7 +106,11 @@ export const urlParamLocaleValidator: Validator = {
 
       for (const param of params) {
         const raw = file.entryFields
-          ? getRawUrlParamValue(file.entryFields, param, mapping)
+          ? getRawUrlParamValue(
+              file.entryFields,
+              param,
+              mapping as Record<string, string | null> | undefined,
+            )
           : undefined;
         const slug = extractParamSlug(raw);
         if (!slug) continue;

@@ -80,7 +80,7 @@ describe("TestimonialsItemsPicker", () => {
 
   it("shows explicit error UI when preview fails", () => {
     previewMock.isError = true;
-    previewMock.error = new Error("500: boom");
+    previewMock.error = new Error("500: boom") as unknown as typeof previewMock.error;
     previewMock.data = undefined as never;
     const { html } = renderPicker();
     expect(html).toContain("Couldn’t load preview");

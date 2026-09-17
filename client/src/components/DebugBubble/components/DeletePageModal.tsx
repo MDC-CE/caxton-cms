@@ -109,7 +109,7 @@ export function DeletePageModal(props: DeletePageModalProps) {
       if (previewLocales?.length) params.set("locales", previewLocales.join(","));
       const res = await apiFetch(`/api/content/delete-preview?${params}`);
       if (!res.ok) return null;
-      return res.json() as {
+      return (await res.json()) as unknown as {
         referrers: Array<{ entryKey: string }>;
         indexUpdatedAt: string | null;
         suggestions: string[];

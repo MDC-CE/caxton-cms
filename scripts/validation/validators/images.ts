@@ -1,3 +1,4 @@
+import type { ImageEntry } from "@shared/schema";
 import * as fs from "fs";
 import * as path from "path";
 import type { Validator, ValidatorResult, ValidationContext, ValidationIssue } from "../shared/types";
@@ -9,25 +10,9 @@ import {
 import { mediaGallery } from "../../../server/media-gallery";
 import { IMAGES_ISSUE_CODES } from "./images.issueCodes";
 
-interface ImageRegistryEntry {
-  src: string;
-  alt: string;
-  focal_point?: string;
-  tags?: string[];
+type ImageRegistryEntry = ImageEntry & {
   usage_count?: number;
-  protected?: boolean;
-  source_url?: string;
-  source_item?: string;
-  srcset?: Array<{ url: string; w: number }>;
-  origin?: "upload" | "import" | "ai";
-  ai?: {
-    generated: true;
-    model?: string;
-    prompt?: string;
-    generated_at?: string;
-  };
-  last_impression_at?: string;
-}
+};
 
 interface ImageRegistry {
   presets: Record<string, unknown>;

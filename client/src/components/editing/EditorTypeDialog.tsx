@@ -168,7 +168,7 @@ function RelationSourceCombobox({
         container={portalContainer}
         onOpenAutoFocus={(e) => {
           e.preventDefault();
-          const input = e.currentTarget.querySelector<HTMLInputElement>("input");
+          const input = (e.currentTarget as HTMLElement | null)?.querySelector<HTMLInputElement>("input");
           input?.focus({ preventScroll: true });
         }}
         onCloseAutoFocus={(e) => e.preventDefault()}

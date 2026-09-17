@@ -34,7 +34,7 @@
 //   Terser minification of 9 662 modules takes >5 min in Vite 8 / Rolldown,
 //   blocking CI/CD. esbuild minification completes in ~30 s and is the Vite 8
 //   default. console/debugger stripping is handled via build.esbuildOptions.
-import { defineConfig, type Plugin, searchForWorkspaceRoot } from "vite";
+import { defineConfig, type Plugin, type UserConfig, searchForWorkspaceRoot } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import fs from "fs";
@@ -147,7 +147,7 @@ const viteCacheDir =
   process.env.VITE_CACHE_DIR?.trim() ||
   path.resolve(import.meta.dirname, "node_modules", ".vite");
 
-export default defineConfig(async () => ({
+export default defineConfig(async (): Promise<UserConfig> => ({
   cacheDir: viteCacheDir,
   plugins: [
     siteComponentSchemasStubPlugin(),
@@ -159,7 +159,7 @@ export default defineConfig(async () => ({
           ['babel-plugin-react-compiler', { target: '18' }],
         ],
       },
-    }),
+    } as Parameters<typeof react>[0]),
     runtimeErrorOverlay(),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
@@ -201,7 +201,7 @@ export default defineConfig(async () => ({
     // Rolldown (bundled with Vite 8) accepts the same manualChunks API.
     rolldownOptions: {
       output: {
-        manualChunks(id) {
+        manualChunks(id: string) {
           if (id.includes('recharts') || id.includes('victory-vendor')) {
             return 'charts';
           }

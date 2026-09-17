@@ -6,8 +6,8 @@ import {
   getUnpublishedEvents,
   markEventsPublished,
   setDispatcherWake,
-  type ContentEvent,
 } from "./event-store";
+import type { ContentEvent } from "./types";
 import { isOutboxDispatchable } from "./types";
 import { enqueueJob } from "../jobs/queue";
 import { getSiteContextMap } from "../site-manager";
@@ -142,8 +142,11 @@ async function dispatchEvent(event: ContentEvent): Promise<void> {
     case "site_redirects_changed": {
       await enqueueIndexRefresh(event, ctx.contentRoot);
       scheduleRedirectsValidation({
-        site: event.site,
         contentRoot: ctx.contentRoot,
+        contentRootName: event.site,
+        ci: ctx.contentIndex,
+        cache: ctx.validationCache,
+        redirectsChanged: true,
       });
       break;
     }

@@ -116,7 +116,8 @@ function distributeVideosAcrossColumns(items: GridItem[], columns: number): Grid
   return columnBuckets.flat();
 }
 
-export function TestimonialsGrid({ data }: TestimonialsGridProps) {
+export function TestimonialsGrid({ data: raw }: TestimonialsGridProps) {
+  const data = raw as TestimonialsGridSectionType & Record<string, any>;
   const columns = data.columns || 3;
 
   // `items` is resolved server-side from dynamic_entries (grid is bank-only).

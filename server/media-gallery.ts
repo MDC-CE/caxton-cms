@@ -1768,8 +1768,8 @@ export class MediaGallery {
           await this.deleteBySrc(oldSrc);
         } catch (err) {
           log.warn(
-            `[MediaGallery] Failed to delete old primary after replace "${id}":`,
-            err instanceof Error ? err.message : String(err),
+            { err, id },
+            `[MediaGallery] Failed to delete old primary after replace "${id}"`,
           );
         }
       }
@@ -1842,8 +1842,8 @@ export class MediaGallery {
         await this.deleteBySrc(entry.url);
       } catch (err) {
         log.warn(
-          `[MediaGallery] Failed to delete srcset variant ${entry.url}:`,
-          err instanceof Error ? err.message : String(err),
+          { err, url: entry.url },
+          `[MediaGallery] Failed to delete srcset variant ${entry.url}`,
         );
       }
     }
@@ -1861,8 +1861,8 @@ export class MediaGallery {
       })
       .catch((err) => {
         log.warn(
-          `[MediaGallery] Auto-tag failed for "${imageId}":`,
-          err instanceof Error ? err.message : String(err),
+          { err, imageId },
+          `[MediaGallery] Auto-tag failed for "${imageId}"`,
         );
       });
   }

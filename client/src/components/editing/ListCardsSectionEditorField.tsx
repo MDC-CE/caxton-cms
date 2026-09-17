@@ -95,7 +95,7 @@ export function ListCardsSectionEditorField({
   resolvedItems = [],
   unsaved,
   "data-testid": testId,
-}: ListCardsSectionEditorFieldProps) {
+}: ListCardsSectionEditorFieldProps): React.ReactElement {
   const [limitOpen, setLimitOpen] = useState(false);
   const [rankingOpen, setRankingOpen] = useState(false);
   const [visitorSearchOpen, setVisitorSearchOpen] = useState(false);

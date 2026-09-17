@@ -70,6 +70,7 @@ import {
   eventAgentReport,
   eventHasTypedDetails,
   eventValidationEntryRef,
+  type PipelineContentEvent,
 } from "@/components/pipeline/EventLogSummaries";
 import {
   EventHeadline,
@@ -79,6 +80,7 @@ import {
 import {
   EventTimeline,
   jumpToLatestRange,
+  type EventTimelineEvent,
   type VisibleTimeRange,
 } from "@/components/pipeline/EventTimeline";
 import { AgentIcon } from "@/components/pipeline/AgentIcon";
@@ -148,19 +150,7 @@ type PipelineStatus = {
   status: "ok" | "degraded" | "stalled";
 };
 
-type ContentEvent = {
-  id: number;
-  type: string;
-  attribution: Array<{ author?: string; actor?: { type: string; client?: string; model?: string; source?: string } }>;
-  cause?: string;
-  resource: Record<string, unknown>;
-  payload: Record<string, unknown>;
-  triggeredByEventId?: number;
-  triggeredByEventIds?: number[];
-  agent_session_id?: string;
-  published: boolean;
-  created_at: number;
-};
+type ContentEvent = PipelineContentEvent;
 
 type AgentSessionSummary = {
   agent_session_id: string;
@@ -1018,7 +1008,7 @@ const EventRow = memo(function EventRow({
         </div>
         <EventCausalityLine
           event={event}
-          loadedEventIds={loadedEventIds}
+          loadedEventIds={loadedEventIds as Set<number>}
           onNavigateToEvent={onNavigateToEvent}
         />
         <EventSummary event={event} />
@@ -1559,7 +1549,8 @@ function EventLogPanel({
   }, []);
 
   const getActivityLabel = useCallback(
-    (event: ContentEvent) => formatEventHeadlinePlain(event, { includeId: false }),
+    (event: EventTimelineEvent) =>
+      formatEventHeadlinePlain(event as PipelineContentEvent, { includeId: false }),
     [],
   );
 

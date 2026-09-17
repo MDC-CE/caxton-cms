@@ -227,7 +227,7 @@ async function queueRedirectsJob(args: OnSaveValidationArgs): Promise<void> {
     });
     if (result.status === "busy") {
       log.info(
-        { job_id: result.job_id },
+        { job_id: "job_id" in result ? result.job_id : undefined },
         "[OnSaveValidation] Redirects job deferred — diagnostics busy (scope left dirty)",
       );
       return;

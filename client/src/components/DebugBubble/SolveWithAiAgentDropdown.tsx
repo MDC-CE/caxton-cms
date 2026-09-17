@@ -1,4 +1,4 @@
-import React, { useState, type ComponentType, type SVGProps } from "react";
+import React, { useState, type ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +30,7 @@ export type SolveWithAiAgentSelectPayload = {
   prefillUrlPrefix?: string;
 };
 
-type TriggerIcon = ComponentType<SVGProps<SVGSVGElement> & { className?: string }>;
+type TriggerIcon = ComponentType<{ className?: string }>;
 
 export type AskActivityStep = "activity" | "agents";
 
@@ -135,7 +135,7 @@ export function SolveWithAiAgentDropdown({
   testId = "solve-with-ai-agent",
   buttonVariant = "default",
   size = "default",
-  icon: Icon = IconSparkles,
+  icon: Icon = IconSparkles as TriggerIcon,
   ariaLabel,
   className,
   entryKey,

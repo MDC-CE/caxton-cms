@@ -734,7 +734,8 @@ function emitProposalEvent(
     | "proposal_withdrawn"
     | "proposal_revised"
     | "proposal_escalated"
-    | "proposal_deescalated",
+    | "proposal_deescalated"
+    | "proposal_review_situations_set",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -1921,6 +1922,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         traffic_siblings?: Array<{ slug: string; locale: string; allocation: number }>;
         existing_proposal?: ProposalRecord;
         activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
+        review_context?: Record<string, unknown>;
       }
   > {
     const db = dbFor(site);

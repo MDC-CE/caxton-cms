@@ -26,7 +26,7 @@ export interface LeadFormOverrideCondition {
    * `contains`: substring on strings; membership on arrays of scalars (ids/strings).
    */
   match_method?: LeadFormOverrideMatchMethod;
-  value: unknown;
+  value?: unknown;
 }
 
 export interface LeadFormOverrideSuccess {

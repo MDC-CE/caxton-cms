@@ -581,7 +581,7 @@ export class ContentIndex {
         clearRedirectCache();
       })
       .catch((err) => {
-        log.warn({ err }, "[ContentIndex] Failed to clear live redirect cache:");
+        log.warn({ err }, "[ContentIndex] Failed to clear live redirect cache");
       });
   }
 
@@ -1182,7 +1182,10 @@ export class ContentIndex {
               );
             }
           } catch (err) {
-            log.warn(`[ContentIndex] Could not inspect ${path.basename(existingPath)}:`, err instanceof Error ? err.message : err);
+            log.warn(
+              { err: err instanceof Error ? err.message : err },
+              `[ContentIndex] Could not inspect ${path.basename(existingPath)}`,
+            );
           }
           continue;
         }
@@ -1246,8 +1249,8 @@ export class ContentIndex {
         );
       } catch (err) {
         log.warn(
-          `[ContentIndex] Could not remove ${LEGACY_COMMON_SINGLE_BASENAME}:`,
-          err instanceof Error ? err.message : err,
+          { err: err instanceof Error ? err.message : err },
+          `[ContentIndex] Could not remove ${LEGACY_COMMON_SINGLE_BASENAME}`,
         );
       }
     }
@@ -1270,8 +1273,8 @@ export class ContentIndex {
         );
       } catch (err) {
         log.warn(
-          `[ContentIndex] Could not scrub ${name}:`,
-          err instanceof Error ? err.message : err,
+          { err: err instanceof Error ? err.message : err },
+          `[ContentIndex] Could not scrub ${name}`,
         );
       }
     }

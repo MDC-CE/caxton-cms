@@ -974,7 +974,7 @@ export function FunnelTab({
       productOptions={productOptions}
       portalContainer={portalContainer}
       isProgram={isProgram}
-      contentSlug={contentInfo.slug}
+      contentSlug={contentInfo.slug ?? undefined}
       warnings={data?.warnings}
       storeMembership={data?.storeMembership}
       relativePathHint={data?.relativePath}

@@ -245,7 +245,7 @@ export class SqliteCache implements IDatabaseCache {
             `[SqliteCache] Migrated ${jsonPath} → SQLite (db=${dbName}, variant=${variant || "mapped"})`
           );
         } catch (err) {
-          log.warn(`[SqliteCache] Failed to migrate ${jsonPath}:`, err);
+          log.warn({ err, jsonPath }, `[SqliteCache] Failed to migrate ${jsonPath}`);
         }
       }
 

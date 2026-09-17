@@ -27,7 +27,8 @@ export interface AwardBadgeItem {
 }
 
 export function AwardBadges({ data }: { data: any }) {
-  const { items = [], variant = "simple", className = "", showBorder = false } = data;
+  const { variant = "simple", className = "", showBorder = false } = data;
+  const items: AwardBadgeItem[] = Array.isArray(data.items) ? data.items : [];
   const handleLinkClick = useInternalNav();
   if (!items || items.length === 0) return null;
 

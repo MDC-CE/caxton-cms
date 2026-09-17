@@ -357,7 +357,6 @@ export default function HeroProductShowcase({
                           className: "w-full max-w-md",
                         } as LeadFormData
                       }
-                      landingLocations={landingLocations}
                       termsStyle={data.form_terms_color ? { color: data.form_terms_color } : undefined}
                     />
                   </Suspense>
@@ -599,7 +598,6 @@ export default function HeroProductShowcase({
                             className: "w-full",
                           } as LeadFormData
                         }
-                        landingLocations={landingLocations}
                         termsStyle={data.form_terms_color ? { color: data.form_terms_color } : undefined}
                       />
                     </Suspense>
@@ -674,7 +672,6 @@ export default function HeroProductShowcase({
                         className: "w-full",
                       } as LeadFormData
                     }
-                    landingLocations={landingLocations}
                     termsStyle={data.form_terms_color ? { color: data.form_terms_color } : undefined}
                   />
                 </Suspense>

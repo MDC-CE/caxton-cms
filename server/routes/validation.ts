@@ -586,7 +586,7 @@ export function registerValidationRoutes(app: Express): void {
       res.json({
         contentFiles: typeCounts,
         totalFiles: contentFiles.length,
-        availableSchemas: context.availableSchemas.length,
+        availableSchemas: context.availableSchemas.size,
         redirects: context.redirectMap.size,
       });
     } catch (error) {
@@ -853,7 +853,7 @@ export function registerValidationRoutes(app: Express): void {
     const auth = await requireCapability(req, res, "metrics_view");
     if (!auth.authorized) return;
     const cache = getValidationCache(res);
-    const urlRows = Array.from(cache.getAll().entries()).map(([url, entry]) => {
+    const urlRows = (Array.from(cache.getAll().entries()) as Array<[string, { lastFullRunAt?: string | null }]>).map(([url, entry]) => {
       const entryKey = cache.resolveEntryKeyFromUrl(url);
       return {
         url,
@@ -867,7 +867,10 @@ export function registerValidationRoutes(app: Express): void {
       : "all";
     const page = typeof req.query.page === "string" ? Number(req.query.page) : undefined;
     const pageSize = typeof req.query.pageSize === "string" ? Number(req.query.pageSize) : undefined;
-    const result = buildUrlCoveragePage(urlRows, [...ENTRY_LOCAL_VALIDATOR_NAMES], {
+    const result = buildUrlCoveragePage(
+      urlRows as Parameters<typeof buildUrlCoveragePage>[0],
+      [...ENTRY_LOCAL_VALIDATOR_NAMES],
+      {
       q,
       filter,
       page: Number.isFinite(page) ? page : undefined,
@@ -938,7 +941,10 @@ export function registerValidationRoutes(app: Express): void {
       // Default remains open-only (staff Diagnostics unchanged). MCP passes true for completed/all.
       includeCompleted: includeCompleted || undefined,
     };
-    const result = listCacheIssues(getValidationCache(res), filters);
+    const result = listCacheIssues(
+      getValidationCache(res),
+      filters as import("../services/validationCacheService").ListCacheIssuesFilters,
+    );
     res.json(result);
   });
 
@@ -1086,7 +1092,9 @@ export function registerValidationRoutes(app: Express): void {
       sort: parsedSort.sort,
       sortDir: parsedSort.sort_dir,
     };
-    const result = archive.list(filters);
+    const result = archive.list(
+      filters as import("../services/resolvedIssuesArchiveService").ResolvedIssuesListFilters,
+    );
     res.json(result);
   });
 
@@ -1892,7 +1900,7 @@ export function registerValidationRoutes(app: Express): void {
 
       const storedIssues = cache.getIssuesByEntryKey(entryKey);
       const runMeta = cache.getRunMetaForEntry(entryKey);
-      const issues = storedIssues.map((s) => {
+      const issues = storedIssues.map((s: (typeof storedIssues)[number]) => {
         const completion = cache.getCompletion(s.id);
         const claim = cache.getActiveClaim(s.id);
         const attempts = cache.getAttempts(s.id);

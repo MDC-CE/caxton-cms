@@ -183,11 +183,11 @@ async function applyPendingSnapshots(
     try {
       const raw = fs.readFileSync(resultsPath, "utf-8");
       const parsed = JSON.parse(raw) as {
-        validators?: import("../../scripts/validation/service").ValidatorResult[];
+        validators?: Array<Record<string, unknown>>;
         entryKeys?: string[];
       };
       if (parsed.validators) {
-        cache.applyValidatorResults(parsed.validators, {
+        cache.applyValidatorResults(parsed.validators as never, {
           contentFiles: [],
           entryKeys: parsed.entryKeys,
           markSiteWide: false,

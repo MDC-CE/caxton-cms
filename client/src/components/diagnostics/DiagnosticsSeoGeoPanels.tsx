@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { Info } from "lucide-react";
@@ -144,7 +144,7 @@ function DiagnosticsSeoOverview() {
   }
   return (
     <SeoTab
-      data={overview}
+      data={overview as ComponentProps<typeof SeoTab>["data"]}
       organicMarket={organicMarket}
       onOrganicMarketChange={setOrganicMarket}
     />
@@ -245,7 +245,7 @@ export function DiagnosticsFunnelPanel() {
           </p>
         </CardContent>
       </Card>
-      <DiagnosticsFunnelTab data={overview} />
+      <DiagnosticsFunnelTab data={overview as ComponentProps<typeof DiagnosticsFunnelTab>["data"]} />
     </div>
   );
 }
@@ -262,5 +262,5 @@ export function DiagnosticsGeoPanel() {
   if (!overview) {
     return <p className="text-muted-foreground text-sm text-center py-12">Failed to load GEO data</p>;
   }
-  return <GeoTab data={overview} brand={brand} />;
+  return <GeoTab data={overview as ComponentProps<typeof GeoTab>["data"]} brand={brand ?? null} />;
 }

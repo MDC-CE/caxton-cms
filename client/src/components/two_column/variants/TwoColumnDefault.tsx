@@ -480,7 +480,9 @@ function ColumnContent({ column, defaultBulletIcon, hideHeadingOnTablet, columnK
       })()}
       {column.video && (() => {
         const videoIsObj = typeof column.video === "object" && column.video !== null;
-        const videoUrl = videoIsObj ? (column.video as { url: string }).url : (column.video as string);
+        const videoUrl = videoIsObj
+          ? (column.video as unknown as { url: string }).url
+          : (column.video as string);
         if (!videoUrl?.trim() || videoUrl === "null" || videoUrl === "undefined" || /\{\{.*\}\}/.test(videoUrl)) return null;
         const videoRatio = videoIsObj ? ((column.video as { ratio?: string }).ratio || "16:9") : (column.video_ratio || "16:9");
         const videoPreviewImage = videoIsObj ? (column.video as { preview_image_url?: string }).preview_image_url : column.video_preview_image;

@@ -195,7 +195,7 @@ export function resolveAnchorAlias(
       // No alias for this id — leave unchanged (will fall back to append-at-end)
       return undefined;
     }
-    const next = aliases[current!];
+    const next: string | null = aliases[current!];
     if (next === null) {
       // Predecessor was the very first section → insert before all
       return null;

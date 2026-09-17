@@ -249,7 +249,11 @@ export function buildVisitorImageRegistrySubset(opts: {
     if (result.success) {
       pageData = result.data;
       const raw = contentIndex.loadMergedContent(contentType as any, slug, locale);
-      const layout = resolveLayout(contentType, raw.data || (pageData as object), contentRoot);
+      const layout = resolveLayout(
+        contentType,
+        raw.data || (pageData as Record<string, unknown>),
+        contentRoot,
+      );
       if (pageData && typeof pageData === "object") {
         (pageData as Record<string, unknown>).layout = layout;
         (pageData as Record<string, unknown>).locale = locale;

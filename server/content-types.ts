@@ -162,6 +162,8 @@ export interface ContentTypeEntry {
     purpose: string;
     constraints?: string[];
   };
+  /** Default page intent for Component Insights when entry YAML omits insights_intent. */
+  insights_intent?: string;
 }
 
 interface ContentTypesRegistry {

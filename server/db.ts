@@ -100,7 +100,7 @@ try {
     log.info("[DB] Migrated conversations.visitor_id → user_id");
   }
 } catch (err) {
-  log.warn("[DB] Column migration check failed (non-fatal):", err);
+  log.warn({ err }, "[DB] Column migration check failed (non-fatal)");
 }
 
 sqlite.exec(`

@@ -245,7 +245,10 @@ export class VersioningManager {
       visitorSets.set(key, new Set(visitorIds as string[]));
     }
 
-    log.info("[Versioning] Loaded state:", Object.keys(this.state.counts).length, "variant keys");
+    log.info(
+      { variantKeys: Object.keys(this.state.counts).length },
+      "[Versioning] Loaded state",
+    );
   }
 
   private async loadStateFromBucket(): Promise<void> {

@@ -81,7 +81,7 @@ export function RelatedFeaturesPicker({ value, onChange, locale = "en", context 
       if (pf.item_property_slug === "related_features") continue;
       const filterValues = (Array.isArray(pf.value) ? pf.value : [pf.value]).map(String);
       result = result.filter((item) => {
-        const itemVal = (item as Record<string, unknown>)[pf.item_property_slug];
+        const itemVal = (item as unknown as Record<string, unknown>)[pf.item_property_slug];
         return filterValues.some((v) => {
           if (Array.isArray(itemVal)) return itemVal.map(String).includes(v);
           return String(itemVal ?? "") === v;

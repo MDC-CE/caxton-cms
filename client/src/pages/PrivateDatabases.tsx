@@ -3027,6 +3027,10 @@ function _DeprecatedItemEditModal({
         ).sort()
       : [];
     const options = Array.from(new Set([...manualOptions, ...dataOptions]));
+    const optionValue = (opt: string | { value: string; label: string }) =>
+      typeof opt === "string" ? opt : opt.value;
+    const optionLabel = (opt: string | { value: string; label: string }) =>
+      typeof opt === "string" ? opt : opt.label;
     const value = formData[key];
 
     switch (type) {
@@ -3073,8 +3077,8 @@ function _DeprecatedItemEditModal({
             </SelectTrigger>
             <SelectContent>
               {options.map((opt) => (
-                <SelectItem key={opt} value={String(opt)}>
-                  {opt}
+                <SelectItem key={optionValue(opt)} value={optionValue(opt)}>
+                  {optionLabel(opt)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -3097,7 +3101,8 @@ function _DeprecatedItemEditModal({
           const COLLAPSE_THRESHOLD = 8;
           const isExpanded = !!expandedTagFields[key];
           const visibleOptions = isExpanded ? options : options.slice(0, COLLAPSE_THRESHOLD);
-          const customTags = tags.filter((t) => !options.includes(t));
+          const optionValues = options.map(optionValue);
+          const customTags = tags.filter((t) => !optionValues.includes(t));
           const toggle = (opt: string) => {
             if (tags.includes(opt)) {
               setValue(key, tags.filter((t) => t !== opt));
@@ -3109,13 +3114,14 @@ function _DeprecatedItemEditModal({
             <div className="space-y-2" data-testid={`tags-${key}`}>
               <div className="flex flex-wrap gap-1.5">
                 {visibleOptions.map((opt) => {
-                  const selected = tags.includes(opt);
+                  const optVal = optionValue(opt);
+                  const selected = tags.includes(optVal);
                   return (
                     <button
-                      key={opt}
+                      key={optVal}
                       type="button"
-                      onClick={() => toggle(opt)}
-                      data-testid={`button-tag-${key}-${opt}`}
+                      onClick={() => toggle(optVal)}
+                      data-testid={`button-tag-${key}-${optVal}`}
                       className="inline-flex"
                     >
                       <Badge
@@ -3123,7 +3129,7 @@ function _DeprecatedItemEditModal({
                         className={selected ? "" : "text-muted-foreground"}
                       >
                         {selected && <Check className="h-3 w-3 mr-1" />}
-                        {opt}
+                        {optionLabel(opt)}
                       </Badge>
                     </button>
                   );
@@ -4936,9 +4942,13 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                             </p>
                             {(config.editor![key].options?.length ?? 0) > 0 && (
                               <div className="flex flex-wrap gap-1 pt-1">
-                                {config.editor![key].options!.map((o) => (
-                                  <code key={o} className="bg-muted px-1.5 py-0.5 rounded text-[10px]">{o}</code>
-                                ))}
+                                {config.editor![key].options!.map((o) => {
+                                  const val = typeof o === "string" ? o : o.value;
+                                  const lbl = typeof o === "string" ? o : o.label;
+                                  return (
+                                    <code key={val} className="bg-muted px-1.5 py-0.5 rounded text-[10px]">{lbl}</code>
+                                  );
+                                })}
                               </div>
                             )}
                           </PopoverContent>

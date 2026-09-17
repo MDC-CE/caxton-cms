@@ -1,9 +1,9 @@
-import type { AuthIdentity, AdmissionResult } from "./staff-auth/types";
+import type { AuthIdentity, AdmissionErrorCode, AdmissionResult } from "./staff-auth/types";
 import * as userStore from "./user-store";
 import { rekeyStaffSessions } from "./staff-session";
 import { rekeyUserGitHubToken } from "./github-user-tokens";
 
-const MESSAGES: Record<AdmissionResult extends { ok: false } ? AdmissionResult["code"] : never, string> = {
+const MESSAGES: Record<AdmissionErrorCode, string> = {
   auth_email_unverified:
     "Only GitHub accounts with a verified email can sign in. Add a verified email on GitHub and try again.",
   staff_identity_ambiguous:

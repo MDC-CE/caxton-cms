@@ -66,6 +66,7 @@ import {
   type MenuFileItem,
   type MenuData,
   type PageDiagnostics,
+  type AutoCommitStatus,
 } from "./types";
 import { deslugify, detectContentInfo, getPersistedMenuView } from "./utils/debugHelpers";
 const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditorPanel"));
@@ -258,20 +259,26 @@ export function DebugBubble() {
   const [advancedOptionsOpen, setAdvancedOptionsOpen] = useState(false);
   const [isIgnoringAllChanges, setIsIgnoringAllChanges] = useState(false);
 
-  const [autoCommitStatus, setAutoCommitStatus] = useState<{
-    enabled: boolean;
-    pendingFiles: number;
-    pendingFilesList: string[];
-    pendingFilesDetails: Array<{ filePath: string; author: string; timestamp: number }>;
-    lastCommitAt: string | null;
-    lastCommitSha: string | null;
-    lastError: string | null;
-    conflictedFiles: string[];
-    commitIntervalSeconds: number;
-    nextSyncAt: number | null;
-    isCommitting: boolean;
-    githubConfigured: boolean;
-  } | null>(null);
+  const [autoCommitStatus, setAutoCommitStatus] = useState<AutoCommitStatus | null>(null);
+  const normalizeAutoCommitStatus = (data: Partial<AutoCommitStatus> | null | undefined): AutoCommitStatus | null => {
+    if (!data || typeof data !== "object") return null;
+    return {
+      enabled: Boolean(data.enabled),
+      pendingFiles: data.pendingFiles ?? 0,
+      pendingFilesList: data.pendingFilesList ?? [],
+      pendingFilesDetails: data.pendingFilesDetails ?? [],
+      lastCommitAt: data.lastCommitAt ?? null,
+      lastCommitSha: data.lastCommitSha ?? null,
+      lastError: data.lastError ?? null,
+      conflictedFiles: data.conflictedFiles ?? [],
+      commitIntervalSeconds: data.commitIntervalSeconds ?? 0,
+      nextSyncAt: data.nextSyncAt ?? null,
+      isCommitting: Boolean(data.isCommitting),
+      githubConfigured: Boolean(data.githubConfigured),
+      autoCommitEligibleFiles: data.autoCommitEligibleFiles ?? [],
+    };
+  };
+
   const [autoCommitCountdown, setAutoCommitCountdown] = useState<number | null>(null);
   const [isFlushing, setIsFlushing] = useState(false);
   const [manualActionsOpen, setManualActionsOpen] = useState(false);
@@ -946,7 +953,7 @@ export function DebugBubble() {
     const fetchStatus = () => {
       fetch('/api/github/auto-commit/status')
         .then(r => r.json())
-        .then(data => setAutoCommitStatus(data))
+        .then(data => setAutoCommitStatus(normalizeAutoCommitStatus(data)))
         .catch(() => {});
     };
     
@@ -967,7 +974,7 @@ export function DebugBubble() {
       if (remaining <= 0) {
         fetch('/api/github/auto-commit/status')
           .then(r => r.json())
-          .then(data => setAutoCommitStatus(data))
+          .then(data => setAutoCommitStatus(normalizeAutoCommitStatus(data)))
           .catch(() => {});
         if (manualActionsOpen) {
           setPendingChangesLoading(true);
@@ -1102,7 +1109,7 @@ export function DebugBubble() {
       await fetch('/api/github/auto-commit/flush', { method: 'POST', headers });
       const res = await fetch('/api/github/auto-commit/status');
       const data = await res.json();
-      setAutoCommitStatus(data);
+      setAutoCommitStatus(normalizeAutoCommitStatus(data));
       fetchPendingChanges();
     } catch (e) {
       console.error('Flush failed:', e);
@@ -1123,7 +1130,7 @@ export function DebugBubble() {
       });
       const res = await fetch('/api/github/auto-commit/status');
       const data = await res.json();
-      setAutoCommitStatus(data);
+      setAutoCommitStatus(normalizeAutoCommitStatus(data));
     } catch (e) {
       console.error('Clear conflict failed:', e);
     }
@@ -2170,7 +2177,9 @@ export function DebugBubble() {
         toast({ title: "Error", description: "Failed to open the template YAML", variant: "destructive" });
       }
     },
-    handleLinkClick,
+    handleLinkClick: (href: string) => {
+      handleLinkClick.navigate(href);
+    },
     sitemapUrls,
     sitemapLoading,
     sitemapSearch,

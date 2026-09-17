@@ -833,7 +833,7 @@ export function CreateContentModal({
       if (createContentSlugEs) valid.add(slugLocaleAckKey(loc1, createContentSlugEs));
       let changed = false;
       const next = new Set<string>();
-      for (const key of prev) {
+      for (const key of Array.from(prev)) {
         if (valid.has(key)) next.add(key);
         else changed = true;
       }
@@ -1673,7 +1673,11 @@ export function CreateContentModal({
                         setUniqueFieldValues((prev) => ({ ...prev, [field]: e.target.value }));
                         setCreateError(null);
                       }}
-                      placeholder={exampleData?.fields?.[field] ?? humanizeField(field)}
+                      placeholder={
+                        exampleData?.fields?.[field] != null
+                          ? String(exampleData.fields[field])
+                          : humanizeField(field)
+                      }
                       className="flex-1 px-2 py-1 text-xs font-mono rounded-md border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                       data-testid={`input-field-${field}`}
                     />

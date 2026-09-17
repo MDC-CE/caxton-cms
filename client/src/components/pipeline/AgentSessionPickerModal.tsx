@@ -20,6 +20,7 @@ import {
   resolveAgentId,
   type AgentId,
 } from "./agentIcons";
+import type { EventAttributionEntry } from "@/lib/formatIssueActor";
 
 export const SESSION_UNSCOPED = "unscoped";
 
@@ -30,10 +31,7 @@ export type AgentSessionPickerSummary = {
   event_count: number;
   write_count: number;
   issue_complete_count: number;
-  attribution: Array<{
-    author?: string;
-    actor?: { type: string; client?: string; model?: string; source?: string };
-  }>;
+  attribution: EventAttributionEntry[];
 };
 
 type SortMode = "date" | "writes";

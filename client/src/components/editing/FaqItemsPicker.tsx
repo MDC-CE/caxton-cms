@@ -398,7 +398,7 @@ export const FaqItemsPicker = forwardRef<FaqItemsPickerHandle, FaqItemsPickerPro
       for (const pf of permanentFilters) {
         const filterValues = (Array.isArray(pf.value) ? pf.value : [pf.value]).map(String);
         dbItems = dbItems.filter((item) => {
-          const itemVal = (item as Record<string, unknown>)[pf.item_property_slug];
+          const itemVal = (item as unknown as Record<string, unknown>)[pf.item_property_slug];
           return filterValues.some((v) => {
             if (Array.isArray(itemVal)) return itemVal.map(String).includes(v);
             return String(itemVal ?? "") === v;
@@ -423,8 +423,8 @@ export const FaqItemsPicker = forwardRef<FaqItemsPickerHandle, FaqItemsPickerPro
           : null;
 
         uniqueDbItems = [...uniqueDbItems].sort((a, b) => {
-          const aVal = (a as Record<string, unknown>)[slug];
-          const bVal = (b as Record<string, unknown>)[slug];
+          const aVal = (a as unknown as Record<string, unknown>)[slug];
+          const bVal = (b as unknown as Record<string, unknown>)[slug];
           const aArr = Array.isArray(aVal) ? aVal.map(String) : [String(aVal ?? "")];
           const bArr = Array.isArray(bVal) ? bVal.map(String) : [String(bVal ?? "")];
           const aCount = filterValues.filter((v) => aArr.includes(v)).length;
@@ -432,8 +432,8 @@ export const FaqItemsPicker = forwardRef<FaqItemsPickerHandle, FaqItemsPickerPro
           if (bCount !== aCount) return bCount - aCount;
 
           const tieField = explicitSortField ?? "priority";
-          const aT = (a as Record<string, unknown>)[tieField];
-          const bT = (b as Record<string, unknown>)[tieField];
+          const aT = (a as unknown as Record<string, unknown>)[tieField];
+          const bT = (b as unknown as Record<string, unknown>)[tieField];
           if (aT == null && bT == null) return 0;
           if (aT == null) return 1;
           if (bT == null) return -1;
@@ -449,8 +449,8 @@ export const FaqItemsPicker = forwardRef<FaqItemsPickerHandle, FaqItemsPickerPro
         const desc = sortField.startsWith("-");
         const field = desc ? sortField.slice(1) : sortField;
         uniqueDbItems = [...uniqueDbItems].sort((a, b) => {
-          const aVal = (a as Record<string, unknown>)[field];
-          const bVal = (b as Record<string, unknown>)[field];
+          const aVal = (a as unknown as Record<string, unknown>)[field];
+          const bVal = (b as unknown as Record<string, unknown>)[field];
           if (aVal == null && bVal == null) return 0;
           if (aVal == null) return 1;
           if (bVal == null) return -1;

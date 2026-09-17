@@ -87,7 +87,7 @@ async function getFileSha(config: GitHubConfig, filePath: string): Promise<strin
     }
     
     if (!response.ok) {
-      log.error('GitHub API error getting file SHA:', response.status, await response.text());
+      log.error({ status: response.status, body: await response.text() }, 'GitHub API error getting file SHA');
       return null;
     }
     
@@ -194,7 +194,7 @@ export async function commitToGitHub(options: GitHubCommitOptions): Promise<{ su
     
     if (!response.ok) {
       const errorText = await response.text();
-      log.error('GitHub API error:', response.status, errorText);
+      log.error({ status: response.status, body: errorText }, 'GitHub API error');
       return { 
         success: false, 
         error: `GitHub API error: ${response.status}` 
@@ -415,7 +415,7 @@ async function createTree(
     });
     
     if (!response.ok) {
-      log.error('GitHub API error creating tree:', response.status, await response.text());
+      log.error({ status: response.status, body: await response.text() }, 'GitHub API error creating tree');
       return null;
     }
     
@@ -462,7 +462,7 @@ async function createCommitObject(
     });
     
     if (!response.ok) {
-      log.error('GitHub API error creating commit:', response.status, await response.text());
+      log.error({ status: response.status, body: await response.text() }, 'GitHub API error creating commit');
       return null;
     }
     
@@ -501,7 +501,7 @@ async function updateBranchRef(
     
     if (!response.ok) {
       const errorText = await response.text();
-      log.error('GitHub API error updating ref:', response.status, errorText);
+      log.error({ status: response.status, body: errorText }, 'GitHub API error updating ref');
       return false;
     }
     
@@ -2309,7 +2309,7 @@ export async function commitSingleFile(options: {
     
     if (!response.ok) {
       const errorText = await response.text();
-      log.error('GitHub API error:', response.status, errorText);
+      log.error({ status: response.status, body: errorText }, 'GitHub API error');
       return { success: false, error: `GitHub API error: ${response.status}` };
     }
     

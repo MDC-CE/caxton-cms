@@ -156,7 +156,7 @@ export function EventCausalityLine({
   onNavigateToEvent,
 }: {
   event: PipelineContentEvent;
-  loadedEventIds: Set<number>;
+  loadedEventIds: ReadonlySet<number>;
   onNavigateToEvent?: (eventId: number) => void;
 }) {
   const label = formatCausalityLabel(event, loadedEventIds);

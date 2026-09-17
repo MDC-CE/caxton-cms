@@ -67,7 +67,7 @@ function loadConfig(contentRoot?: string): LLMConfig {
       return yaml.load(raw) as LLMConfig;
     }
   } catch (err) {
-    log.warn("[AgentService] Failed to load llm.yml:", err);
+    log.warn({ err }, "[AgentService] Failed to load llm.yml");
   }
   return {};
 }
@@ -194,7 +194,9 @@ Always respond in the same language as the user's message.`;
 
     if (enabledToolNames.length === 0) return [];
 
-    return TOOL_DEFINITIONS.filter(t => enabledToolNames.includes(t.function.name));
+    return TOOL_DEFINITIONS.filter((t) =>
+      enabledToolNames.includes((t as OpenAI.Chat.ChatCompletionFunctionTool).function.name),
+    );
   }
 
   private async autoTagMessage(content: string): Promise<string | null> {
@@ -291,7 +293,9 @@ Respond with ONLY the category name, nothing else.`;
 
     while (assistantMessage?.tool_calls && assistantMessage.tool_calls.length > 0 && iterations < maxIterations) {
       iterations++;
-      const toolNames = assistantMessage.tool_calls.map(tc => tc.function.name);
+      const toolNames = assistantMessage.tool_calls.map(
+        (tc) => (tc as OpenAI.Chat.ChatCompletionMessageFunctionToolCall).function.name,
+      );
       log.info(`[AgentService] Tool-call iteration ${iterations}/${maxIterations} — tools: [${toolNames.join(", ")}]`);
 
       messages.push({
@@ -301,16 +305,17 @@ Respond with ONLY the category name, nothing else.`;
       });
 
       for (const toolCall of assistantMessage.tool_calls) {
+        const fnCall = toolCall as OpenAI.Chat.ChatCompletionMessageFunctionToolCall;
         let args: Record<string, string> = {};
         try {
-          args = JSON.parse(toolCall.function.arguments || "{}");
+          args = JSON.parse(fnCall.function.arguments || "{}");
         } catch {
           args = {};
         }
-        const result = executeToolCall(toolCall.function.name, args);
+        const result = executeToolCall(fnCall.function.name, args);
 
         trace.toolCalls.push({
-          name: toolCall.function.name,
+          name: fnCall.function.name,
           arguments: args,
           result,
         });

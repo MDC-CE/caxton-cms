@@ -246,7 +246,9 @@ export function registerProductRoutes(app: Express): void {
           description: parsed.data.description,
           purchasable: parsed.data.purchasable,
           offer: parsed.data.offer,
-          personas: parsed.data.personas,
+          personas: parsed.data.personas as
+            | Array<Record<string, unknown> & { id: string }>
+            | undefined,
           clear_personas: parsed.data.clear_personas,
           replace_personas: parsed.data.replace_personas,
         },

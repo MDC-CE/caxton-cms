@@ -89,10 +89,10 @@ export async function pullProductionProposals(
     return {
       success: false,
       pulled: false,
-      productionOrigin,
       imported: 0,
       reason: tokenRequired.error,
       ...tokenRequired,
+      productionOrigin,
     };
   }
 

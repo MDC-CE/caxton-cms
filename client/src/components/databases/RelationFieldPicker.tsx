@@ -59,7 +59,7 @@ export function RelationFieldPicker({
     staleTime: 60_000,
     queryFn: async () => {
       const url = buildQueryOptionsUrl(
-        { content_type: source, value: valuePath, label: labelPath },
+        { content_type: source, value_path: valuePath, label_path: labelPath },
         // Omit locale → all locales; server dedupes by value
         undefined,
       );

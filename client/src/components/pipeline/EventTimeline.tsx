@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { IconAlertTriangle, IconArrowRight } from "@tabler/icons-react";
-import { DataSet, Timeline } from "vis-timeline/standalone";
+import { DataSet } from "vis-data";
+import { Timeline } from "vis-timeline/standalone";
 import type { DataGroup, DataItem, TimelineOptions } from "vis-timeline/standalone";
 import "vis-timeline/styles/vis-timeline-graph2d.min.css";
 import "./EventTimeline.css";
@@ -487,7 +488,7 @@ export function EventTimeline({
     const theme = getDocumentTheme();
     const next = layoutStaffItems(events, getActivityLabelRef.current, theme);
     const nextIds = new Set(next.map((i) => i.id));
-    const removeIds = items.getIds().filter((id) => !nextIds.has(id as number));
+    const removeIds = items.getIds().filter((id: string | number) => !nextIds.has(id as number));
     if (removeIds.length > 0) items.remove(removeIds);
     items.update(next);
     sanitizeTimelineChrome(containerRef.current);

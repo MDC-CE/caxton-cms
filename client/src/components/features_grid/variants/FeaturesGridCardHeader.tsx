@@ -1,4 +1,4 @@
-import { useState, createElement } from "react";
+import { useState, createElement, type ComponentType } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Check } from "lucide-react";
@@ -103,12 +103,12 @@ export default function FeaturesGridCardHeader({ data }: FeaturesGridCardHeaderP
               >
                 <CardContent className="p-5 flex flex-col items-start gap-3">
                   {isCustom
-                    ? createElement(IconComponent, {
+                    ? createElement(IconComponent as ComponentType<{ width?: string; height?: string; className?: string }>, {
                         width: "32",
                         height: "32",
                         className: "w-8 h-8",
                       })
-                    : createElement(IconComponent, {
+                    : createElement(IconComponent as ComponentType<{ className?: string }>, {
                         className: "w-8 h-8 text-primary",
                       })}
                   <p className="text-foreground text-sm md:text-base">

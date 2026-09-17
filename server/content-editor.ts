@@ -21,7 +21,6 @@ import {
 } from "./live-entry-seo-gate";
 import {
   getEntryContentDir,
-  isTemplateVersioningSlug,
   listLiveLocales,
 } from "./draft-entry";
 import {
@@ -696,10 +695,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
     if (attachedStructuralErr) {
       const hasSectionOps = operations.some((op) => {
         if (
-          op.action === "add_section" ||
-          op.action === "remove_section" ||
           op.action === "reorder_sections" ||
-          op.action === "duplicate_section" ||
           op.action === "update_section" ||
           op.action === "replace_all_sections" ||
           op.action === "add_item" ||
@@ -726,12 +722,11 @@ export async function editContent(request: ContentEditRequest): Promise<{
               return p === "layout" || p.startsWith("layout.") || p.startsWith("sections");
             }
             return (
-              op.action === "add_section" ||
-              op.action === "remove_section" ||
               op.action === "reorder_sections" ||
-              op.action === "duplicate_section" ||
               op.action === "update_section" ||
-              op.action === "replace_all_sections"
+              op.action === "replace_all_sections" ||
+              op.action === "add_item" ||
+              op.action === "remove_item"
             );
           });
         if (onlyEntryLayer && request.layoutTarget === "entry") {
@@ -868,7 +863,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
             const p = (op as { path?: string }).path || "";
             return !p || p.startsWith("sections") || p === "layout" || p.startsWith("layout.");
           }
-          return op.action !== "update_field";
+          return true;
         });
         // Data-only top-level fields still allowed
         const allTopLevelDataFields = operations.length > 0 && operations.every(
@@ -1689,6 +1684,7 @@ function writeStructuralChangesToTemplate(opts: {
   warning?: string;
   updatedSections?: unknown[];
   clearedFields?: ClearedField[];
+  errorCode?: string;
 } {
   const { operations, filePath, localeData, author, contentRoot, contentType, contentSlug, requesterId } = opts;
   const ci = opts.ci ?? contentIndex;
@@ -1928,10 +1924,11 @@ function writeTopLevelFieldsToPerEntryFile(opts: {
 
     const previousEntryData = cloneYamlData(entryData);
     for (const op of operations) {
+      if (op.action !== "update_field") continue;
       if (op.value === null || op.value === undefined) {
-        delete entryData[op.path as string];
+        delete entryData[op.path];
       } else {
-        setValueAtPath(entryData, op.path as string, op.value);
+        setValueAtPath(entryData, op.path, op.value);
       }
     }
 
@@ -2012,7 +2009,7 @@ function writeEntryOverlayOps(opts: {
   author?: string;
   contentRoot?: string;
   ci?: ContentIndex;
-}): { success: boolean; error?: string; updatedSections?: unknown[] } {
+}): { success: boolean; error?: string; errorCode?: string; updatedSections?: unknown[] } {
   const { contentType, slug, locale, operations, author } = opts;
   const ci = opts.ci ?? contentIndex;
   const rawRoot = opts.contentRoot ?? getDefaultContentRootName();
@@ -2097,6 +2094,7 @@ function handleSharedTemplateEdit(opts: {
 }): {
   success: boolean;
   error?: string;
+  errorCode?: string;
   warning?: string;
   updatedSections?: unknown[];
   clearedFields?: ClearedField[];
@@ -2344,7 +2342,10 @@ function handleSharedTemplateEdit(opts: {
     if (isInvalidSectionIndexError(err)) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
-    log.error("[editContent] Failed to write non-DB field changes to shared template:", err instanceof Error ? err.message : err);
+    log.error(
+      { err: err instanceof Error ? err.message : err },
+      "[editContent] Failed to write non-DB field changes to shared template",
+    );
   }
 
   // Apply operations to localeData in-memory so the returned sections reflect
@@ -2353,7 +2354,10 @@ function handleSharedTemplateEdit(opts: {
     try {
       applyOperation(localeData, operation);
     } catch (err) {
-      log.warn("[editContent] Skipping invalid operation on shared template:", operation.action, err instanceof Error ? err.message : err);
+      log.warn(
+        { action: operation.action, err: err instanceof Error ? err.message : err },
+        "[editContent] Skipping invalid operation on shared template",
+      );
     }
   }
 

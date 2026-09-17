@@ -109,7 +109,10 @@ function buildPreviewSection(
   // Only required component props block capture. Optional mappings (category, author,
   // content → reading_time, etc.) simply omit that part of the card when empty.
   const schema = loadSchema(preview.component, preview.version || "1.0");
-  const mappable = collectMappablePropsFromSchema(schema, preview.variant || "default");
+  const mappable = collectMappablePropsFromSchema(
+    schema as Parameters<typeof collectMappablePropsFromSchema>[0],
+    preview.variant || "default",
+  );
   const requiredKeys = new Set(mappable.filter((p) => p.required).map((p) => p.key));
   const missingVisible = missing.filter((k) => requiredKeys.has(k));
 
@@ -190,8 +193,6 @@ import {
 import { mediaGallery } from "../media-gallery";
 import { media } from "../media";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
 import { contentIndex, type ContentType } from "../content-index";
 import { observeParamValuesByLocale, localeYamlCandidatesForObserve } from "../url-param-peers";
 import {
@@ -765,7 +766,7 @@ export function registerContentRoutes(app: Express): void {
         ...dynamicEntriesOptions(res),
         singleEntry: singleEntry || undefined,
       }) as any;
-      applyComponentImageSizes(locationData.sections);
+      applyComponentImageSizes(locationData.sections as unknown[]);
     }
     const param = contentParamBag(req, res, "location", slug, locale, locationData);
     if (singleEntry) {
@@ -1243,8 +1244,8 @@ export function registerContentRoutes(app: Express): void {
       return;
     }
 
-    const page = result.data;
-    const genericPageData = page as unknown as Record<string, unknown>;
+    const page = result.data as Record<string, unknown> & { sections?: unknown[] };
+    const genericPageData = page;
     let singleEntry = buildSingleEntryFromContent(contentType, genericPageData, {
       slug,
       locale,
@@ -2112,9 +2113,10 @@ export function registerContentRoutes(app: Express): void {
             });
             return;
           }
-          update.preview = draftPreview;
+          update.preview = draftPreview as import("../content-types").ContentTypePreviewConfig;
           if (circularProps.length > 0) {
-            (res.locals as { previewCircularWarn?: string[] }).previewCircularWarn = circularProps;
+            (res.locals as unknown as { previewCircularWarn?: string[] }).previewCircularWarn =
+              circularProps;
           }
         } else {
           res.status(400).json({ error: "preview must be an object or null" });
@@ -2363,7 +2365,7 @@ export function registerContentRoutes(app: Express): void {
           : {}),
         ...((res.locals as { previewCircularWarn?: string[] }).previewCircularWarn
           ? {
-              warning: `preview.props references reserved image field (circular): ${(res.locals as { previewCircularWarn: string[] }).previewCircularWarn.join(", ")}`,
+              warning: `preview.props references reserved image field (circular): ${(res.locals as unknown as { previewCircularWarn: string[] }).previewCircularWarn.join(", ")}`,
             }
           : {}),
       });
@@ -3043,10 +3045,7 @@ export function registerContentRoutes(app: Express): void {
         ...(facets ? { facets } : {}),
       });
     } catch (err) {
-      log.error(
-        `[ContentTypes] Error fetching items for ${req.params.type}:`,
-        err,
-      );
+      log.error({ err, type: req.params.type }, `[ContentTypes] Error fetching items for ${req.params.type}`);
       res.status(500).json({ error: String(err) });
     }
   });
@@ -4743,7 +4742,7 @@ export function registerContentRoutes(app: Express): void {
       const { cloudflareBrowserConfigError } = await import("../cloudflare-browser");
       res.json({
         contentType: type,
-        configError: cloudflareBrowserConfigError(site.contentRoot),
+        configError: cloudflareBrowserConfigError(),
         queue: getEntryPreviewQueueStats(site.contentRootName),
       });
     } catch (err) {
@@ -4962,7 +4961,7 @@ export function registerContentRoutes(app: Express): void {
           const dbConfig = getDB(res).get(ctConfig.database.slug) as {
             editor?: Record<string, { type?: string; schema?: unknown }>;
           };
-          editorHints = { ...(dbConfig.editor || {}), ...editorHints };
+          editorHints = { ...(dbConfig.editor || {}), ...editorHints } as typeof editorHints;
         } catch {
           // ignore missing DB editor
         }
@@ -5089,7 +5088,7 @@ export function registerContentRoutes(app: Express): void {
         const dbConfig = getDB(res).get(dbName) as {
           editor?: Record<string, { type?: string; schema?: unknown }>;
         };
-        editorHints = { ...(dbConfig.editor || {}), ...editorHints };
+        editorHints = { ...(dbConfig.editor || {}), ...editorHints } as typeof editorHints;
       } catch {
         // ignore
       }
@@ -5198,7 +5197,7 @@ export function registerContentRoutes(app: Express): void {
           success: true,
           path: result.relativePath,
           noop: result.noop,
-          message: result.noop ? result.error : undefined,
+          message: result.noop ? (result as { error?: string }).error : undefined,
           isVariantLayer: result.isVariantLayer,
           indexRebuilt: result.indexRebuilt,
         });
@@ -5229,7 +5228,7 @@ export function registerContentRoutes(app: Express): void {
           storage: result.storage,
           path: result.relativePath,
           noop: result.noop,
-          message: result.noop ? result.error : undefined,
+          message: result.noop ? (result as { error?: string }).error : undefined,
           isVariantLayer: result.isVariantLayer,
         });
         return;
@@ -5328,7 +5327,7 @@ export function registerContentRoutes(app: Express): void {
       getCI(res).refresh();
       invalidateContentCaches(type, getCI(res));
 
-      res.json({ success: true, detached: true, ...result });
+      res.json({ ...result, success: true, detached: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const status =
@@ -5373,7 +5372,7 @@ export function registerContentRoutes(app: Express): void {
         getCI(res).refresh();
         invalidateContentCaches(type, getCI(res));
 
-        res.json({ success: true, detached: false, ...result });
+        res.json({ ...result, success: true, detached: false });
       } catch (err) {
         if (err instanceof ReattachRequiredFieldsError) {
           res.status(400).json({

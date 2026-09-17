@@ -77,8 +77,12 @@ export function TestimonialsSection({ data, testimonials }: TestimonialsSectionP
   // `items` is resolved server-side from dynamic_entries: manually-added rows
   // first, then bank matches, already capped at dynamic_entries.limit.
   const resolvedItems = (data?.items ?? []) as TestimonialBankRow[];
-  const hardcodedCount = data?.dynamic_entries?.hardcoded_entries?.length
-    ?? data?.hardcoded_entries?.length
+  const dataExt = data as typeof data & {
+    dynamic_entries?: { hardcoded_entries?: unknown[] };
+    hardcoded_entries?: unknown[];
+  };
+  const hardcodedCount = dataExt?.dynamic_entries?.hardcoded_entries?.length
+    ?? dataExt?.hardcoded_entries?.length
     ?? 0;
 
   const items: TestimonialItem[] = resolvedItems.length

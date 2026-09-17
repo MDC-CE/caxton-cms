@@ -324,18 +324,21 @@ export function registerFormsRoutes(app: Express): void {
       }
 
       // Log the application (in production, this would send to a CRM or database)
-      log.info("New application received:", {
-        program,
-        location,
-        firstName,
-        lastName,
-        email,
-        phone,
-        consentMarketing,
-        consentSms,
-        locale,
-        timestamp: new Date().toISOString(),
-      });
+      log.info(
+        {
+          program,
+          location,
+          firstName,
+          lastName,
+          email,
+          phone,
+          consentMarketing,
+          consentSms,
+          locale,
+          timestamp: new Date().toISOString(),
+        },
+        "New application received",
+      );
 
       // In the future, this could:
       // 1. Send to Breathecode API
@@ -531,7 +534,7 @@ export function registerFormsRoutes(app: Express): void {
 
       if (!webhookResponse.ok) {
         const errorText = await webhookResponse.text();
-        log.error("Lead webhook delivery error:", webhookResponse.status, errorText);
+        log.error({ status: webhookResponse.status, body: errorText }, "Lead webhook delivery error");
         res.status(webhookResponse.status).json({
           error: "Failed to submit lead",
           details: errorText,

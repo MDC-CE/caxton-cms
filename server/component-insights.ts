@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
-import { getAllConfigs, getFolder } from "./content-types";
+import { getAllConfigs, getFolder, type ContentTypeEntry } from "./content-types";
 import { contentIndex } from "./content-index";
 import { databaseManager } from "./database";
 import {
@@ -334,12 +334,16 @@ function loadTemplateSections(contentType: string, contentRoot: string): {
   return { sections: [] };
 }
 
-function listSlugsForContentType(contentType: string, config: Record<string, unknown>): string[] {
+function listSlugsForContentType(
+  contentType: string,
+  config: ContentTypeEntry | Record<string, unknown>,
+): string[] {
   const dirSlugs = contentIndex.listContentSlugs(
     contentType as Parameters<typeof contentIndex.listContentSlugs>[0],
   );
 
-  const dbSlug = (config.database as { slug?: string } | undefined)?.slug;
+  const db = config.database as { slug?: string } | undefined;
+  const dbSlug = db?.slug;
   if (!dbSlug) return dirSlugs;
 
   const items = databaseManager.getMappedItems(dbSlug) ?? [];
@@ -425,11 +429,10 @@ function scanInventory(
   >();
 
   for (const [contentType, config] of Object.entries(configs)) {
-    const cfg = config as Record<string, unknown>;
     const ctDefault = contentTypeIntentMap.get(contentType) ?? DEFAULT_INTENT;
-    const contentDir = path.join(process.cwd(), contentFolder, cfg.directory as string);
+    const contentDir = path.join(process.cwd(), contentFolder, config.directory);
     const shared = isSharedLayoutType(contentType, contentRoot);
-    const slugs = listSlugsForContentType(contentType, cfg);
+    const slugs = listSlugsForContentType(contentType, config);
 
     if (shared) {
       const template = loadTemplateSections(contentType, contentRoot);
@@ -761,9 +764,8 @@ export function runScan(): ComponentInsightsData {
 
   const contentTypeIntentMap = new Map<string, string>();
   for (const [ct, cfg] of Object.entries(configs)) {
-    const raw = cfg as Record<string, unknown>;
-    if (typeof raw.insights_intent === "string") {
-      const ctIntent = raw.insights_intent as string;
+    if (typeof cfg.insights_intent === "string") {
+      const ctIntent = cfg.insights_intent;
       if (!validIntentIds.has(ctIntent)) {
         log.warn(
           `[ComponentInsights] Content type "${ct}" has insights_intent "${ctIntent}" which is not in settings.yml page_intents. Falling back to "${DEFAULT_INTENT}".`,

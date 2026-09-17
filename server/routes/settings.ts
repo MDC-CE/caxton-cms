@@ -237,11 +237,9 @@ import {
   ValidationFixRunState,
   ValidationFixRunLogEntry,
   FixerItemStatus,
-  safeYamlLoad,
 } from "./_helpers";
 import { applyLogoStructureFromMaster } from "../menu-logo-structure";
 import { child } from "../logger";
-import { applyLogoStructureFromMaster } from "../menu-logo-structure";
 const log = child({ module: "routes/settings" });
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
@@ -1999,7 +1997,7 @@ export function registerSettingsRoutes(app: Express): void {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 8000);
-      let probeRes: Response;
+      let probeRes: globalThis.Response;
       try {
         probeRes = await fetch(testUrl, {
           method: "GET",
@@ -2776,10 +2774,7 @@ export function registerSettingsRoutes(app: Express): void {
             markFileAsModified(translationFilePath, authorName, undefined, contentRoot);
             syncResults[targetLocale] = "synced";
           } catch (syncError) {
-            log.error(
-              `Error syncing structure to ${targetLocale}:`,
-              syncError,
-            );
+            log.error({ err: syncError, targetLocale }, `Error syncing structure to ${targetLocale}`);
             syncResults[targetLocale] = "error";
           }
         }

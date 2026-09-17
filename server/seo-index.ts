@@ -1120,7 +1120,12 @@ export function resetSeoOverlayField(opts: {
       relativePath: relativeFromCwd(filePath),
       filePath,
       isVariantLayer: !isLiveLocaleBasename(filePath),
-      error: `Nothing to reset — "${opts.fieldPath}" is not set on this locale seo: block.`,
+      warnings: [
+        {
+          code: "seo_reset_noop",
+          message: `Nothing to reset — "${opts.fieldPath}" is not set on this locale seo: block.`,
+        },
+      ],
     };
   }
 
@@ -1184,6 +1189,7 @@ export function resetSeoOverlayField(opts: {
     relativePath: relativeFromCwd(filePath),
     filePath,
     isVariantLayer: isVariant,
+    warnings: [],
     indexRebuilt,
   };
 }

@@ -18,6 +18,7 @@ import {
   readSidequestRestartFlag,
   readSidequestWorkerPid,
   SIDEQUEST_DB_PATH,
+  SIDEQUEST_LOG_PATH,
   SIDEQUEST_HEARTBEAT_PATH,
   SIDEQUEST_PID_PATH,
   SIDEQUEST_RESTART_FLAG_PATH,

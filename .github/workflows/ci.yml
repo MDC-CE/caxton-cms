@@ -21,25 +21,21 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
+      # site_* / sites.yml are gitignored. Seed before typecheck + tests.
+      - name: Install CI content fixture
+        run: npx tsx scripts/ensure-ci-content-fixture.ts --force
+
       - name: Typecheck MCP server
         run: npm run check:mcp
 
-      - name: Typecheck (advisory)
-        continue-on-error: true
+      - name: Typecheck
         run: npm run check
-
-      # site_* / sites.yml are gitignored. Seed enough for shared/schema + CT tests.
-      - name: Install CI content fixture
-        run: |
-          cp fixtures/ci/sites.fixture.yml sites.yml
-          rm -rf site_4geeks-com
-          cp -a fixtures/ci/content-4geeks-com site_4geeks-com
 
       - name: Unit tests
         # Single worker avoids SQLITE_BUSY on shared db-cache.sqlite across Vitest pools.

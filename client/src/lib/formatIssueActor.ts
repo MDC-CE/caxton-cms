@@ -44,7 +44,7 @@ export function formatAttributionSummary(
 
 export function formatCausalityLabel(
   event: Pick<PipelineContentEventLike, "triggeredByEventId" | "triggeredByEventIds">,
-  loadedIds: Set<number>,
+  loadedIds: ReadonlySet<number>,
 ): string | null {
   const ids =
     event.triggeredByEventIds && event.triggeredByEventIds.length > 0

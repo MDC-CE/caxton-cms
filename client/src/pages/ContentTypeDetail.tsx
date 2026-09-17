@@ -91,7 +91,7 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
   const alternates = useAlternateUrls(currentLocation);
   const metaWithAlternates = data?.meta ? { ...(data.meta as object), alternates } : undefined;
   usePageMeta(metaWithAlternates, effectiveLocale);
-  useSchemaOrg(data?.schema);
+  useSchemaOrg(data?.schema as Parameters<typeof useSchemaOrg>[0]);
 
   const handleRefetch = () => {
     refetch();
@@ -174,7 +174,7 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
         </div>
         <SectionRenderer
           sections={(data.sections as any[]) || []}
-          settings={data.settings}
+          settings={data.settings as import("@shared/schema").PageSettings | undefined}
           contentType={type}
           slug={slug}
           locale={effectiveLocale}

@@ -489,7 +489,7 @@ export function getReattachSectionLossPreview(opts: {
       (typeof section.name === "string" && section.name) ||
       sectionId ||
       type;
-    sectionsThatWillBeLost.push({ sectionId, type, label: String(label) });
+    sectionsThatWillBeLost.push({ sectionId: sectionId ?? null, type, label: String(label) });
   }
 
   const variantsThatWillBeLost: ReattachVariantLossItem[] = [];

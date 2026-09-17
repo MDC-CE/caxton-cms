@@ -1016,7 +1016,7 @@ export function SectionBindingDialog({
                                 onClick={(e) => e.stopPropagation()}
                                 data-testid={`link-group-member-${m.contentType}:${m.slug}:${m.sectionIndex}`}
                               >
-                                {m.localeSlug || m.slug}
+                                {(m as { localeSlug?: string }).localeSlug || m.slug}
                               </a>
                               {" "}— section {m.sectionIndex}
                             </p>

@@ -14,7 +14,10 @@ import { runManifestGeneration } from "./navigation-eager-manifest";
 
 const contentRoot = process.argv[2] || undefined;
 
-runManifestGeneration(contentIndex, resolvePageQuery, contentRoot).catch((err) => {
+runManifestGeneration(contentIndex, (pagePath, ci) =>
+  resolvePageQuery(pagePath, ci as import("./content-index").ContentIndex),
+  contentRoot,
+).catch((err) => {
   console.error("[NavigationManifest runner] Failed:", err);
   process.exit(1);
 });

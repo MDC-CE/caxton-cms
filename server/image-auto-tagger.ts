@@ -345,8 +345,8 @@ async function aiClassify(
     }
   } catch (err) {
     log.warn(
-      `[ImageAutoTagger] AI classification failed for ${imageId}:`,
-      err instanceof Error ? err.message : String(err),
+      { err, imageId },
+      `[ImageAutoTagger] AI classification failed for ${imageId}`,
     );
   }
   return [];

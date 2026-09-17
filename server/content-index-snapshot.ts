@@ -1,12 +1,13 @@
-import type { ContentIndex } from "../content-index";
-import type { RedirectEntry } from "../redirects";
+import type { ContentIndex, RedirectEntry } from "./content-index";
+
+type SnapshotEntry = ReturnType<ContentIndex["exportSnapshotEntries"]>[number];
 
 export type IndexSnapshot = {
   generation: number;
   site: string;
   entries: ReturnType<ContentIndex["exportSnapshotEntries"]>;
   bySlug: Record<string, ReturnType<ContentIndex["exportSnapshotEntries"]>>;
-  byPath: Record<string, ReturnType<ContentIndex["exportSnapshotEntries"][number]>>;
+  byPath: Record<string, SnapshotEntry>;
   byUrl: Record<string, unknown>;
   localeSlugMap: Record<string, string>;
   imageUsage: Record<string, string[]>;

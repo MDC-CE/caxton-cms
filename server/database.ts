@@ -92,10 +92,10 @@ export { TRANSFORM_ERROR_SENTINEL };
 function countTransformErrorsInValue(val: unknown): number {
   if (val === TRANSFORM_ERROR_SENTINEL) return 1;
   if (Array.isArray(val)) {
-    return val.reduce((sum, el) => sum + countTransformErrorsInValue(el), 0);
+    return val.reduce<number>((sum, el) => sum + countTransformErrorsInValue(el), 0);
   }
   if (val && typeof val === "object") {
-    return Object.values(val as Record<string, unknown>).reduce(
+    return Object.values(val as Record<string, unknown>).reduce<number>(
       (sum, el) => sum + countTransformErrorsInValue(el),
       0,
     );

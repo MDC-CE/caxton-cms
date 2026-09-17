@@ -1644,6 +1644,9 @@ export interface VariantUsageStat {
   pageCount: number;
 }
 
+/** Content type key (e.g. `landing`, `blog`). Same as server/content-index `ContentType`. */
+export type ContentType = string;
+
 export interface ContentTypeUsageStat {
   contentType: string;
   count: number;

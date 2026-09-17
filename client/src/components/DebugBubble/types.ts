@@ -58,6 +58,7 @@ export interface ContentInfo {
   type: string | null;
   slug: string | null;
   label: string;
+  locale?: string | null;
 }
 
 export interface VariantInfo {
@@ -175,8 +176,11 @@ export interface MenuData {
   };
 }
 
+/** Lucide or Tabler (and similar) icons used in DebugBubble menus. */
+export type MenuIcon = ComponentType<{ className?: string }>;
+
 export interface MenuItemProps {
-  icon: LucideIcon;
+  icon: MenuIcon;
   label: string;
   onClick?: () => void;
   href?: string;
@@ -189,7 +193,7 @@ export interface MenuItemProps {
 }
 
 export interface ExpandableMenuItemProps {
-  icon: LucideIcon;
+  icon: MenuIcon;
   label: string;
   expanded: boolean;
   onToggle: () => void;
@@ -295,4 +299,5 @@ export interface SeoLocation {
 
 export type SlugCheckStatus = 'idle' | 'checking' | 'available' | 'taken';
 export type ContentTypeValue = string;
-import { LucideIcon } from "lucide-react";
+import type { ComponentType } from "react";
+import type { LucideIcon } from "lucide-react";

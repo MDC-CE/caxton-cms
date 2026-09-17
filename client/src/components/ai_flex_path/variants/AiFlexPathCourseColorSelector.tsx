@@ -1073,7 +1073,7 @@ export default function AiFlexPathCourseColorSelector({ data }: { data: AiFlexPa
     setActiveDeltaY(event.delta.y);
   }
 
-  function handleDragOver(event: { over?: { id: string } | null }) {
+  function handleDragOver(event: import("@dnd-kit/core").DragOverEvent) {
     const overId = event.over?.id as string | undefined;
     if (overId?.startsWith("path-slot-")) {
       const slot = parseInt(overId.replace("path-slot-", ""));

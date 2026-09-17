@@ -542,7 +542,10 @@ export async function convertContentTypeToStatic(
             detached: true,
           };
           if (typeof page.title !== "string" || !page.title) {
-            page.title = typeof singleItem.title === "string" ? singleItem.title : urlSlug;
+            page.title =
+              typeof (singleItem as Record<string, unknown>).title === "string"
+                ? ((singleItem as Record<string, unknown>).title as string)
+                : urlSlug;
           }
           localePages.set(locale, page);
           continue;
@@ -556,13 +559,15 @@ export async function convertContentTypeToStatic(
         };
         if (typeof page.title !== "string" || !page.title) {
           page.title =
-            typeof singleItem.title === "string" ? singleItem.title : urlSlug;
+            typeof (singleItem as Record<string, unknown>).title === "string"
+              ? ((singleItem as Record<string, unknown>).title as string)
+              : urlSlug;
         }
         if (
-          typeof singleItem.description === "string" &&
+          typeof (singleItem as Record<string, unknown>).description === "string" &&
           page.description === undefined
         ) {
-          page.description = singleItem.description;
+          page.description = (singleItem as Record<string, unknown>).description as string;
         }
 
         const overlay = loadEntryOverlayLayer(entryDir, locale);

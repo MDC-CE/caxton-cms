@@ -59,7 +59,7 @@ function loadYamlConfig(contentRoot?: string): LLMYamlConfig | null {
       return yaml.load(raw) as LLMYamlConfig;
     }
   } catch (err) {
-    log.warn("Failed to load llm.yml config, using env var fallback:", err);
+    log.warn({ err }, "Failed to load llm.yml config, using env var fallback");
   }
   return null;
 }

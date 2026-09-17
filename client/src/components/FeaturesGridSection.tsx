@@ -14,7 +14,8 @@ function resolveIcon(iconName: string) {
   return getIcon(iconName) || Star;
 }
 
-export function FeaturesGridSection({ data }: FeaturesGridSectionProps) {
+export function FeaturesGridSection({ data: raw }: FeaturesGridSectionProps) {
+  const data = raw as FeaturesGridSectionData & Record<string, any>;
   return (
     <section 
       className="px-4 bg-muted/30"
@@ -39,7 +40,7 @@ export function FeaturesGridSection({ data }: FeaturesGridSectionProps) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {data.items.map((item, index) => {
+          {(data.items as Array<{ icon: string; title: string; description?: string; value?: string }>).map((item, index) => {
             const IconComponent = resolveIcon(item.icon || "Star");
             return (
               <Card 

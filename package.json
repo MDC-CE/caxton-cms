@@ -46,7 +46,7 @@
     "build:server": "node scripts/build-bundles.mjs",
     "build": "vite build && vite build --ssr src/entry-server.tsx && npm run build:server",
     "start": "bash scripts/start-production.sh",
-    "check": "tsc",
+    "check": "tsx scripts/ensure-ci-content-fixture.ts && tsc",
     "check:mcp": "tsx scripts/check-mcp-types.ts",
     "db:push": "drizzle-kit push",
     "ssr:check": "bash scripts/ssr-check.sh",

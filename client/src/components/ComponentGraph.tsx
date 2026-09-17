@@ -118,7 +118,7 @@ export default function ComponentGraph({
     return { nodes, links, neighborSet, maxDegree, hubThreshold };
   })();
 
-  // Tune d3 charge force on mount and when nodes change.
+  // Tune d3 charge + link distance on mount and when nodes change.
   // We also call zoomToFit here after a short delay so the initial layout
   // is visible rather than waiting for engine stop.
   useEffect(() => {
@@ -127,7 +127,15 @@ export default function ComponentGraph({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge = (fg as any).d3Force("charge");
     if (charge) charge.strength(-70).distanceMax(300);
-    // Reheat so the new charge takes effect
+    // Higher PMI → shorter distance (nodes pulled closer)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const linkForce = (fg as any).d3Force("link");
+    if (linkForce?.distance) {
+      linkForce.distance((l: GraphLink) =>
+        Math.max(60, Math.min(220, 120 - (l.pmi ?? 0) * 40)),
+      );
+    }
+    // Reheat so the new forces take effect
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (fg as any).d3ReheatSimulation?.();
     // Zoom to fit after simulation has had time to settle
@@ -135,7 +143,7 @@ export default function ComponentGraph({
       fg.zoomToFit(800, 52);
     }, 3000);
     return () => clearTimeout(timer);
-  }, [nodes]);
+  }, [nodes, links]);
 
   // Also zoom to fit when simulation fully stops
   const handleEngineStop = () => {
@@ -294,11 +302,6 @@ export default function ComponentGraph({
             return Math.max(0.5, Math.min(2, link.frequency * 12));
           }}
           linkColor={linkColor}
-          linkDistance={(l) => {
-            const link = l as GraphLink;
-            // Higher PMI → shorter distance (nodes pulled closer)
-            return Math.max(60, Math.min(220, 120 - link.pmi * 40));
-          }}
           onNodeHover={handleNodeHover}
           onNodeClick={handleNodeClick}
           onEngineStop={handleEngineStop}

@@ -421,7 +421,7 @@ export class ResolvedIssuesArchiveService {
     const sorted = sortIssueRows(
       filtered as unknown as Array<Record<string, unknown>>,
       { set: "resolved", sort, sort_dir },
-    ) as ResolvedIssueArchiveRow[];
+    ) as unknown as ResolvedIssueArchiveRow[];
     const rows = sorted.slice(offset, offset + limit);
     const summary = this.summary(filters);
     return { rows, total, summary, sort, sort_dir };

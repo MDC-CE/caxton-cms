@@ -569,10 +569,7 @@ export async function loadDatabaseSinglePage(
 
     return page;
   } catch (err) {
-    log.error(
-      `[DatabaseSingle] Error loading ${contentType}/${slug}:`,
-      err,
-    );
+    log.error({ err, contentType, slug }, `[DatabaseSingle] Error loading ${contentType}/${slug}`);
     return null;
   }
 }

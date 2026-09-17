@@ -1169,13 +1169,13 @@ export function registerSectionsRoutes(app: Express): void {
       const siteId = getContentRootName(res);
       const normalizedLocaleForBinding = normalizeLocale(locale);
       const baseSlugForBinding = getCI(res).resolveBaseSlug(slug, contentType);
-      const bindingHolder = bindingHolderId(authorName, contentType, baseSlugForBinding);
+      const bindingHolder = bindingHolderId(authorName ?? "", contentType, baseSlugForBinding ?? slug);
       if (touchedSectionIndexes.size > 0) {
         const leaseConflict = checkBindingLeaseConflicts(
           siteId,
           bindingHolder,
           contentType,
-          baseSlugForBinding,
+          baseSlugForBinding ?? slug,
           normalizedLocaleForBinding,
           [...touchedSectionIndexes],
         );
@@ -1553,7 +1553,7 @@ export function registerSectionsRoutes(app: Express): void {
       if (hasMeta) {
         const authMeta = await requireCapability(req, res, "seo_edit", ct);
         if (!authMeta.authorized) return;
-        authorName = authMeta.author;
+        authorName = authMeta.author ?? undefined;
       }
       if (hasFunnel) {
         const authFunnel = await requireCapability(req, res, "content_edit_structure", ct);
@@ -1914,8 +1914,14 @@ export function registerSectionsRoutes(app: Express): void {
       const { type, slugEn, slugEs, title, sourceUrl, sourceSlug, sourceType, changeContentType, author: rawAuthor, skipLocales: rawSkipLocales, uniqueFieldValues: rawUniqueFieldValues, localeTitles: rawLocaleTitles } = req.body;
       const author = auth.author || (rawAuthor && typeof rawAuthor === "string" ? rawAuthor : undefined);
       const skipLocales: string[] = Array.isArray(rawSkipLocales) ? rawSkipLocales.filter((l: unknown) => typeof l === "string") : [];
-      const uniqueFieldValues: Record<string, string | boolean> = rawUniqueFieldValues && typeof rawUniqueFieldValues === "object"
-        ? Object.fromEntries(Object.entries(rawUniqueFieldValues).filter(([, v]) => typeof v === "string" || typeof v === "boolean")) : {};
+      const uniqueFieldValues: Record<string, string | boolean> =
+        rawUniqueFieldValues && typeof rawUniqueFieldValues === "object"
+          ? (Object.fromEntries(
+              Object.entries(rawUniqueFieldValues).filter(
+                ([, v]) => typeof v === "string" || typeof v === "boolean",
+              ),
+            ) as Record<string, string | boolean>)
+          : {};
       const rawUrlParamValues = req.body.urlParamValues;
       const urlParamValues: Record<string, Record<string, string>> =
         rawUrlParamValues && typeof rawUrlParamValues === "object"
@@ -1930,8 +1936,12 @@ export function registerSectionsRoutes(app: Express): void {
                 ]),
             )
           : {};
-      const localeTitles: Record<string, string> = rawLocaleTitles && typeof rawLocaleTitles === "object"
-        ? Object.fromEntries(Object.entries(rawLocaleTitles).filter(([, v]) => typeof v === "string")) : {};
+      const localeTitles: Record<string, string> =
+        rawLocaleTitles && typeof rawLocaleTitles === "object"
+          ? (Object.fromEntries(
+              Object.entries(rawLocaleTitles).filter(([, v]) => typeof v === "string"),
+            ) as Record<string, string>)
+          : {};
       const result = await runWithContentWriteContextAsync(writeGate.ctx, () =>
         createContentEntry({
           type, title, sourceUrl,

@@ -492,7 +492,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
       }
     }
   } catch (err) {
-    log.warn("[Sitemap] Could not load DB-backed content types for sitemap:", err);
+    log.warn({ err }, "[Sitemap] Could not load DB-backed content types for sitemap");
   }
 
   const handledTypes = new Set(["program", "location", "page"]);
@@ -558,7 +558,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
       }
     }
   } catch (err) {
-    log.warn("[Sitemap] Error generating dynamic content type entries:", err);
+    log.warn({ err }, "[Sitemap] Error generating dynamic content type entries");
   }
 
   return entriesMap;
@@ -1194,7 +1194,7 @@ function buildDebugSitemapUrlsUncached(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
         }
       }
     } catch (err) {
-      log.warn("[Sitemap] Debug list: could not load DB-backed types:", err);
+      log.warn({ err }, "[Sitemap] Debug list: could not load DB-backed types");
     }
 
     // Other YAML content types
@@ -1268,7 +1268,7 @@ function buildDebugSitemapUrlsUncached(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
         }
       }
     } catch (err) {
-      log.warn("[Sitemap] Debug list: error scanning YAML content types:", err);
+      log.warn({ err }, "[Sitemap] Debug list: error scanning YAML content types");
     }
 
     return out;

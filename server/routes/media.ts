@@ -1134,7 +1134,7 @@ export function registerMediaRoutes(app: Express): void {
 
   app.post("/api/media/crop-resize", async (req, res) => {
     if (process.env.DEBUG_CROP_RESIZE) {
-      log.info("[CropResize] Handler reached — body keys:", Object.keys(req.body || {}));
+      log.info({ keys: Object.keys(req.body || {}) }, "[CropResize] Handler reached — body keys");
     }
     try {
       const bodySchema = z.object({

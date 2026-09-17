@@ -379,7 +379,7 @@ export function registerWebhooksRoutes(app: Express): void {
 
   app.get("/api/webhooks/clear-cache/url", async (req, res) => {
     try {
-      const auth = await requireCapability(req, res, "content_edit");
+      const auth = await requireCapability(req, res, "content_edit_default");
       if (!auth.authorized) return;
 
       const secret = getWebhookSecret();

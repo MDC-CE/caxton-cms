@@ -299,8 +299,8 @@ export async function regenerateNavigationEagerManifest(
     return;
   }
 
-  const ci = ciArg ?? ciMod.contentIndex;
-  await runManifestGeneration(ci, idmMod.resolvePageQuery, contentRoot);
+  const ci = ciArg ?? ciMod!.contentIndex;
+  await runManifestGeneration(ci, idmMod!.resolvePageQuery, contentRoot);
 }
 
 export type NavigationEagerManifestPayload = ReturnType<typeof buildManifestPayload>;

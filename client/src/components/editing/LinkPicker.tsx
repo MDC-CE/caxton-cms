@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, type ReactElement } from "react";
 import { ArrowDown, Check, ExternalLink, Layers, Link, PanelBottom, Search } from "lucide-react";
 import { IconChevronDown, IconPencil, IconPlus, IconX } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
@@ -453,7 +453,7 @@ interface LinkPickerProps {
   allowInlineRender?: boolean;
 }
 
-export function LinkPicker({ value, onChange, locale = "en", allSections, contextPath, testId = "link-picker", portalContainer, compact = false, allowedTypes, allowInlineRender = false }: LinkPickerProps) {
+export function LinkPicker({ value, onChange, locale = "en", allSections, contextPath, testId = "link-picker", portalContainer, compact = false, allowedTypes, allowInlineRender = false }: LinkPickerProps): ReactElement {
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [customUrl, setCustomUrl] = useState(value || "");

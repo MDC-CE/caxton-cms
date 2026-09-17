@@ -102,12 +102,12 @@ function resolveSlugContentType(
   if (hint) {
     const config = getContentTypeConfig(hint, contentRoot);
     if (!config) return null;
-    const dir = path.join(contentRoot, getDirectory(hint, config), slug);
+    const dir = path.join(contentRoot, getDirectory(hint, contentRoot), slug);
     if (fs.existsSync(dir)) return { contentType: hint };
     return null;
   }
   for (const [ct, config] of Object.entries(getAllConfigs(contentRoot))) {
-    const dir = path.join(contentRoot, getDirectory(ct, config), slug);
+    const dir = path.join(contentRoot, getDirectory(ct, contentRoot), slug);
     if (fs.existsSync(dir)) return { contentType: ct };
   }
   return null;
@@ -118,7 +118,7 @@ function entryHasVersioning(contentRoot: string, contentType: string, slug: stri
   if (!config) return false;
   const versioningPath = path.join(
     contentRoot,
-    getDirectory(contentType, config),
+    getDirectory(contentType, contentRoot),
     slug,
     "versioning.yml",
   );

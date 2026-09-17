@@ -176,7 +176,7 @@ function AILearningFeatureTabs({ data }: { data: AiLearningFeatureTabsSection })
 
         {/* Hover Feature Cards */}
         <div className="grid md:grid-cols-3 gap-3 md:gap-6 mb-8">
-          {features.slice(0, 3).map((feature: Feature, index: number) => {
+          {(features as Feature[]).slice(0, 3).map((feature, index) => {
             const showRigobotLogo = feature.show_rigobot_logo ?? feature.title?.toLowerCase().includes('rigobot') ?? false;
             return (
               <HoverFeatureCard

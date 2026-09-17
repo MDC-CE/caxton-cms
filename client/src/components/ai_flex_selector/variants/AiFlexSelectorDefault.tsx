@@ -215,7 +215,8 @@ export default function AiFlexSelectorDefault({ data }: { data: AiFlexSelectorDe
   const [slideDir, setSlideDir] = useState<"none" | "exit-fwd" | "enter-fwd" | "exit-back" | "enter-back">("none");
   const [selectedCourses, setSelectedCourses] = useState<Set<string>>(new Set());
   const [counterFlash, setCounterFlash] = useState(false);
-  const nav = useInternalNav();
+  const internalNav = useInternalNav();
+  const nav = internalNav.navigate;
 
   const totalQ = data.questions.length;
   const isResults = step >= totalQ;

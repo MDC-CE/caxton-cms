@@ -228,10 +228,12 @@ export function normalizeAuthSignupFieldMapInput(
     const hasConstant = Object.prototype.hasOwnProperty.call(row, "constant");
     const hasGlobal = typeof row.global === "string";
 
+    const fromStr = hasFrom ? (row.from as string) : "";
+    const globalStr = hasGlobal ? (row.global as string) : "";
     const kinds =
-      (hasFrom && row.from.trim() ? 1 : 0) +
+      (hasFrom && fromStr.trim() ? 1 : 0) +
       (hasConstant ? 1 : 0) +
-      (hasGlobal && row.global.trim() ? 1 : 0);
+      (hasGlobal && globalStr.trim() ? 1 : 0);
 
     // Empty global / empty from with no other source
     if (kinds === 0) {
@@ -251,7 +253,7 @@ export function normalizeAuthSignupFieldMapInput(
       );
     }
 
-    if (hasConstant && !hasFrom && !(hasGlobal && row.global.trim())) {
+    if (hasConstant && !hasFrom && !(hasGlobal && globalStr.trim())) {
       const constant =
         typeof row.constant === "string" ? row.constant.trim() : "";
       if (!constant) {
@@ -266,8 +268,8 @@ export function normalizeAuthSignupFieldMapInput(
       continue;
     }
 
-    if (hasGlobal && row.global.trim() && !hasFrom && !hasConstant) {
-      const global = row.global.trim();
+    if (hasGlobal && globalStr.trim() && !hasFrom && !hasConstant) {
+      const global = globalStr.trim();
       if (!isValidGlobalVarName(global)) {
         throw new Error(
           `${fieldLabel}[${i}].global "${global}" must match global.<name>`,

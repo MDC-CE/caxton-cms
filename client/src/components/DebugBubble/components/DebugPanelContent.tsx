@@ -34,13 +34,13 @@ import {
   useGitHubUserConnection,
 } from "@/hooks/useGitHubUserConnection";
 import { ActivateGitHubLoginModal } from "./ActivateGitHubLoginModal";
-import { ComponentsView } from "./ComponentsView";
+import { ComponentsView, type RegistryComponentRow } from "./ComponentsView";
 import { VersioningView } from "./VersioningView";
 import { MenusView } from "./MenusView";
 import { CreateMenuModal } from "./CreateMenuModal";
 import { DatabasesView } from "./DatabasesView";
 import { ContentTypesView } from "./ContentTypesView";
-import { SitemapView } from "./SitemapView";
+import { SitemapView, type SitemapFolder } from "./SitemapView";
 import type { RobotsSettingsResponse } from "@/components/settings/RobotsTab";
 import { apiFetch } from "@/lib/queryClient";
 import type {
@@ -49,10 +49,11 @@ import type {
   GitHubSyncStatus,
   PendingChange,
   SitemapUrl,
-  ComponentItem,
   MenuItemProps,
   ExpandableMenuItemProps,
+  VersioningResponse,
 } from "../types";
+import type { Dispatch, SetStateAction } from "react";
 
 interface EditModeState {
   isEditMode: boolean;
@@ -118,15 +119,15 @@ export interface DebugPanelContentProps {
   setComponentSearch: (v: string) => void;
   showComponentSearch: boolean;
   setShowComponentSearch: (v: boolean) => void;
-  filteredComponents: ComponentItem[];
+  filteredComponents: RegistryComponentRow[];
   componentRegistryData: unknown;
-  componentIconMap: Record<string, unknown>;
+  componentIconMap: Record<string, import("lucide-react").LucideIcon | undefined>;
   siteInfo?: { domain: string; contentFolder: string; isMultiSite: boolean; isDevOverride: boolean; githubRepoUrl?: string } | null;
   onOpenSiteManager: () => void;
 
   versioningLoading: boolean;
   versioningData: unknown;
-  onVersioningDataUpdate?: (data: unknown) => void;
+  onVersioningDataUpdate?: Dispatch<SetStateAction<VersioningResponse | null>>;
   pageIsSharedLayout?: boolean;
   pageIsDetached?: boolean;
   detachBusy?: boolean;
@@ -154,7 +155,7 @@ export interface DebugPanelContentProps {
   sitemapPresenceFilter: "all" | "in-sitemap" | "not-in-sitemap";
   setSitemapPresenceFilter: (v: "all" | "in-sitemap" | "not-in-sitemap") => void;
   filteredSitemapUrls: SitemapUrl[];
-  folders: Record<string, SitemapUrl[]>;
+  folders: SitemapFolder[];
   rootUrls: SitemapUrl[];
   expandedFolders: Set<string>;
   toggleFolder: (folder: string) => void;
@@ -800,7 +801,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                     }
                   }}
                   className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                    props.editMode.isEditMode
+                    props.editMode?.isEditMode
                       ? "bg-primary text-primary-foreground"
                       : "text-foreground"
                   }`}
@@ -812,8 +813,8 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                   onClick={async (e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    if (!props.editMode!.isEditMode) return;
-                    props.editMode!.toggleEditMode();
+                    if (!props.editMode?.isEditMode) return;
+                    props.editMode.toggleEditMode();
                     let targetUrl = props.publicPageUrl;
                     if (!targetUrl && props.pathname.startsWith("/private/preview/")) {
                       try {
@@ -841,7 +842,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                     }
                   }}
                   className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                    !props.editMode.isEditMode
+                    !props.editMode?.isEditMode
                       ? "bg-foreground text-background shadow-sm"
                       : "text-foreground"
                   }`}

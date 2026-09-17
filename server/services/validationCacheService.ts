@@ -252,7 +252,8 @@ export function stripMigrationOrphans(
   }
 
   const byScopeIn = { ...(data.runMeta?.byScope ?? {}) };
-  const byScope: typeof byScopeIn = {};
+  type ScopeMetaMap = NonNullable<ValidationCacheFileV5["runMeta"]>["byScope"];
+  const byScope: Record<string, NonNullable<ScopeMetaMap>[keyof ScopeMetaMap]> = {};
   for (const [scope, meta] of Object.entries(byScopeIn)) {
     if (!meta) continue;
     if (meta.byValidator?.legacy) {
@@ -289,7 +290,15 @@ function migrateCache(parsed: ValidationCacheFile): ValidationCacheFileV5 {
         lastFullRunAt: v5.meta.lastFullRunAt ?? null,
         lastSiteWideRunAt: v5.meta.lastSiteWideRunAt ?? v5.meta.lastFullRunAt ?? null,
       },
-      indexes: v5.indexes ?? rebuildIndexes(v5.issues, v5.indexes?.byUrl ?? {}),
+      indexes:
+        v5.indexes ??
+        rebuildIndexes(
+          v5.issues,
+          ((v5.indexes as { byUrl?: Record<string, string> } | undefined)?.byUrl ?? {}) as Record<
+            string,
+            string
+          >,
+        ),
       runMeta: v5.runMeta ?? { byEntry: {}, byScope: {} },
       completions: v5.completions ?? {},
       claims: v5.claims ?? {},

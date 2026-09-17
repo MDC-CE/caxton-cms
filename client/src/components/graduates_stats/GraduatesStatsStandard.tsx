@@ -7,7 +7,8 @@ interface GraduatesStatsStandardProps {
 }
 
 export function GraduatesStatsStandard({ data }: GraduatesStatsStandardProps) {
-  const { heading, subheading, stats, collage_images, background } = data;
+  const { heading, subheading, stats, background } = data;
+  const collage_images = "collage_images" in data ? data.collage_images : undefined;
 
   if (!stats || stats.length === 0) {
     return null;
@@ -18,7 +19,7 @@ export function GraduatesStatsStandard({ data }: GraduatesStatsStandardProps) {
       className="relative grid grid-cols-12 auto-rows-[60px] lg:auto-rows-[70px] gap-2 lg:gap-3"
       data-testid="graduates-stats-collage"
     >
-      {collage_images && collage_images.map((img, index) => {
+      {collage_images && collage_images.map((img: (typeof collage_images)[number], index: number) => {
         const colSpan = img.col_span || 6;
         const rowSpan = img.row_span || 2;
         

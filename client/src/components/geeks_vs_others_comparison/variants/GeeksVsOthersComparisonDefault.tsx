@@ -23,13 +23,24 @@ const featureIcons: Record<string, typeof Briefcase> = {
   "Previous Knowledge": School,
 };
 
-function CellValue({ value, isHighlighted }: { value: string; isHighlighted?: boolean }) {
-  if (value === "yes" || value === "Yes" || value === "✓") {
+function cellValueText(value: string | { text?: string }): string {
+  return typeof value === "string" ? value : value.text ?? "";
+}
+
+function CellValue({
+  value,
+  isHighlighted,
+}: {
+  value: string | { text?: string };
+  isHighlighted?: boolean;
+}) {
+  const text = cellValueText(value);
+  if (text === "yes" || text === "Yes" || text === "✓") {
     return (
       <Check className="w-6 h-6 text-primary mx-auto" />
     );
   }
-  if (value === "no" || value === "No" || value === "✗") {
+  if (text === "no" || text === "No" || text === "✗") {
     return (
       <X className="w-6 h-6 text-muted-foreground mx-auto" />
     );
@@ -39,12 +50,12 @@ function CellValue({ value, isHighlighted }: { value: string; isHighlighted?: bo
     return (
       <span className="flex items-center justify-center gap-2">
         <Check className="w-4 h-4 text-primary flex-shrink-0" />
-        <span>{value}</span>
+        <span>{text}</span>
       </span>
     );
   }
 
-  return <span>{value}</span>;
+  return <span>{text}</span>;
 }
 
 export function GeeksVsOthersComparison({ data }: ComparisonTableProps) {

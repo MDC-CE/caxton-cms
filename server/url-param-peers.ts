@@ -5,10 +5,12 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 import {
-  type ContentTypeConfig,
+  type ContentTypeEntry,
   getRawUrlParamValue,
   listExtraUrlPatternParams,
 } from "./content-types";
+
+type ContentTypeConfig = ContentTypeEntry;
 
 function safeLoad(raw: string): Record<string, unknown> | null {
   try {
@@ -68,7 +70,11 @@ export function observeParamValues(
       try {
         const data = safeLoad(fs.readFileSync(file, "utf-8"));
         if (!data) continue;
-        const raw = getRawUrlParamValue(data, param, mapping);
+        const raw = getRawUrlParamValue(
+          data,
+          param,
+          mapping as Record<string, string | null> | undefined,
+        );
         const slug = extractParamSlug(raw);
         if (slug) seen.add(slug);
       } catch {

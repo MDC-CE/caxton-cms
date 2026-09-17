@@ -717,6 +717,8 @@ export function isLivePublicUrl(result: RedirectTestResult): boolean {
   return result.match === true && result.destinationExists === true;
 }
 
+export type PublicUrlResolver = ReturnType<typeof createPublicUrlResolver>;
+
 export function createPublicUrlResolver(
   ci: typeof contentIndex = contentIndex,
   opts?: { freshRedirects?: boolean },

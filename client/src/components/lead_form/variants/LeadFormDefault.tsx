@@ -297,8 +297,11 @@ export interface LeadFormData {
 }
 
 interface LeadFormProps {
-  data: LeadFormData;
+  /** Accepts local shape or Zod-inferred schema LeadFormData (form_overrides variance). */
+  data: LeadFormData | import("@shared/schema").LeadFormData;
   termsStyle?: React.CSSProperties;
+  /** Optional location slugs for landing-scoped forms (ignored when omitted). */
+  landingLocations?: string[];
 }
 
 interface FormOptions {
@@ -722,8 +725,9 @@ function buildEffectiveSubmitConfig(
   };
 }
 
-export default function LeadForm({ data, termsStyle }: LeadFormProps) {
-  const landingLocations = undefined as string[] | undefined;
+export default function LeadForm({ data: dataProp, termsStyle, landingLocations: landingLocationsProp }: LeadFormProps) {
+  const data = dataProp as LeadFormData;
+  const landingLocations = landingLocationsProp;
   const { slug, contentType, singleEntry, locale: sectionLocale } = useSectionContext();
   const programContext = contentType === "program" ? slug : undefined;
   const pageFunnel = usePageFunnel();

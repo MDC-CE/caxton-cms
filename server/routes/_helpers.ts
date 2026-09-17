@@ -705,8 +705,7 @@ export function resolveIssueActor(
   return { type: "ui" };
 }
 
-import type { EventActor } from "./events/types";
-import { markFileAsModified } from "../sync-state";
+import type { EventActor } from "../events/types";
 
 /**
  * Resolve actor provenance for content writes and background events.

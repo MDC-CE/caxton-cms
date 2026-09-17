@@ -195,7 +195,9 @@ export function validateFormFieldSources(
     (opts.sections ? collectFormsFromSections(opts.sections) : []);
 
   const issues: FormFieldSourceIssue[] = [];
-  for (const { form, sectionIndex, formPathPrefix } of forms) {
+  for (const formEntry of forms) {
+    const { form, sectionIndex } = formEntry;
+    const formPathPrefix = "formPathPrefix" in formEntry ? formEntry.formPathPrefix : undefined;
     const fields = form.fields;
     if (!isPlainObject(fields)) continue;
     for (const [fieldName, cfg] of Object.entries(fields)) {

@@ -16,7 +16,7 @@ const log = child({ module: "entry-preview-lifecycle" });
 
 function resolveSite(siteName: string) {
   for (const ctx of getSiteContextMap().values()) {
-    if (ctx.contentRootName === siteName || ctx.domain === siteName) return ctx;
+    if (ctx.contentRootName === siteName || ctx.config.domain === siteName) return ctx;
   }
   // Prefer contentRootName match from event.site (usually content root name)
   const byName = [...getSiteContextMap().values()].find((c) => c.contentRootName === siteName);
@@ -76,7 +76,7 @@ export async function scheduleOgCaptureFromLocaleEvent(event: ContentEvent): Pro
  */
 export async function requeueDirtyEntryPreviewsOnBoot(): Promise<void> {
   for (const site of getSiteContextMap().values()) {
-    if (cloudflareBrowserConfigError(site.contentRoot)) continue;
+    if (cloudflareBrowserConfigError()) continue;
     const types = getAllTypes(site.contentRoot);
     for (const contentType of types) {
       const preview = getPreviewConfig(contentType, site.contentRoot);
