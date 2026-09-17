@@ -35,6 +35,8 @@ interface FooterConfig {
   legal_links: FooterLegalLink[];
   copyright_text: string;
   subscribe_text: string;
+  /** When false, hide the FLDOE seal next to copyright. Default true. */
+  show_fldoe_logo?: boolean;
 }
 
 const socialIconMap: Record<string, typeof Linkedin> = {
@@ -97,6 +99,7 @@ export default function Footer({ menuId = "main-footer" }: FooterProps) {
     /^\d{4}\s*/,
     "",
   );
+  const showFldoeLogo = config.show_fldoe_logo !== false;
 
   return (
     <footer className="text-foreground" data-testid="section-global-footer">
@@ -222,11 +225,13 @@ export default function Footer({ menuId = "main-footer" }: FooterProps) {
               className="flex items-center gap-3 max-w-xl"
               data-testid="text-copyright"
             >
-              <img
-                src={fldoeLogo}
-                alt="Florida Department of Education"
-                className="h-10 w-auto shrink-0 rounded-sm"
-              />
+              {showFldoeLogo && (
+                <img
+                  src={fldoeLogo}
+                  alt="Florida Department of Education"
+                  className="h-10 w-auto shrink-0 rounded-sm"
+                />
+              )}
               <p className="text-sm text-foreground/60 leading-snug">
                 {copyrightText}
               </p>
