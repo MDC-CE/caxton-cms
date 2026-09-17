@@ -370,13 +370,43 @@ describe("classifyProposalReview", () => {
     expect(ctx.active_checklists).not.toContain("adjacent_findings");
   });
 
-  it("idea with no related_entries → none", () => {
+  it("idea with no related_entries → none damage, opportunity harm situation", () => {
     const ctx = classifyProposalReview({
       proposal: baseProposal({ kind: "idea" }),
       lookups: [],
     });
     expect(ctx.damage_class).toBe("none");
+    expect(ctx.review_situations).toEqual(["idea_opportunity_harm"]);
+    expect(ctx.filed_review_situations).toEqual([]);
+    expect(ctx.situation_source).toBe("inferred");
     expect(ctx.active_checklists).toContain("idea_accept");
+    expect(ctx.active_checklists).toContain("idea_opportunity_harm");
+    expect(ctx.active_checklists).not.toContain("new_content_brand");
+    expect(ctx.staff_summary.badge_label).toBe("Idea brief");
+  });
+
+  it("idea with missing public related → new_public_content damage without brand checklist", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        related_entries: [{ contentType: "blog", slug: "new-spoke", locale: "en" }],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "new-spoke",
+          locale: "en",
+          existence: "missing",
+          draftExists: false,
+        },
+      ],
+    });
+    expect(ctx.damage_class).toBe("new_public_content");
+    expect(ctx.review_situations).toEqual(["idea_opportunity_harm"]);
+    expect(ctx.active_checklists).toContain("idea_opportunity_harm");
+    expect(ctx.active_checklists).toContain("idea_accept");
+    expect(ctx.active_checklists).not.toContain("new_content_brand");
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
   });
 
   it("title/description only → title_description_ctr without verify_copy", () => {

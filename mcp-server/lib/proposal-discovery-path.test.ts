@@ -175,7 +175,7 @@ describe("buildProposalDiscoveryPath", () => {
     expect(verify?.kind).toBe("think");
   });
 
-  it("builds idea path without apply-research tools", () => {
+  it("builds idea path with explain tool by default", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: {
         id: "i1",
@@ -186,9 +186,10 @@ describe("buildProposalDiscoveryPath", () => {
       allowedTools: catalog,
     });
     expect(discovery_path).not.toBeNull();
-    expect(discovery_path!.items.every((i) => i.kind === "think")).toBe(true);
-    expect(warnings).toEqual([]);
     expect(discovery_path!.goal.toLowerCase()).toMatch(/accept/);
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools.some((t) => t.kind === "tool" && t.tool === "explain_site")).toBe(true);
+    expect(warnings).toEqual([]);
   });
 
   it("builds short notes path without apply-research tools", () => {

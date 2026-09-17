@@ -175,6 +175,7 @@ export function registerProposalTools(
       "Optional related_entries for idea context (slug need not exist yet). " +
       "Edits: optional implements_proposal_id to link an accepted idea; required when that idea reserved the same type+slug+locale. " +
       "Edits: optional review_situations[] (catalog ids — see explain_site topic review-situations). Empty → reviewer infers from ops. " +
+      "Ideas: review_situations not accepted (default-on idea_opportunity_harm on classify — see topic idea-opportunity-harm-proposals). " +
       "Hub/internal links → prefer review_situations:[\"internal_links\"] and explain topic internal-links-proposals. " +
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] and explain topic serp-title-description-proposals. " +
       "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] and explain topic funnel-classification-proposals (persona → product → stage). " +
@@ -899,6 +900,11 @@ export function registerProposalTools(
               status?: string;
               ops?: Array<{ field_path?: string } | null> | null;
             }>;
+            related_entries?: Array<{
+              contentType: string;
+              slug: string;
+              locale?: string;
+            }>;
             open_blocker_count?: number;
             blockers?: unknown[];
             recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
@@ -928,6 +934,7 @@ export function registerProposalTools(
                 escalated: match.escalated,
                 escalated_note: match.escalated_note,
                 entries: match.entries,
+                related_entries: match.related_entries,
                 open_blocker_count: match.open_blocker_count,
                 blockers: match.blockers,
               },

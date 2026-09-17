@@ -12,6 +12,7 @@ import {
   TITLE_DESCRIPTION_STAFF_NOTE,
   INTERNAL_LINKS_STAFF_NOTE,
   FUNNEL_CLASSIFICATION_STAFF_NOTE,
+  IDEA_OPPORTUNITY_HARM_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
@@ -28,6 +29,7 @@ import {
   inferSituationsFromOps,
   mergeSituations,
   staffNotesForSituations,
+  IDEA_DEFAULT_SITUATION_ID,
   type ReviewSituationId,
   type SituationSource,
 } from "./review-situations";
@@ -341,6 +343,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
     checklists.add("disposition");
   } else if (proposal.kind === "idea") {
+    liveSituations = [IDEA_DEFAULT_SITUATION_ID];
+    filedReviewSituations = [];
+    situationSource = "inferred";
+    for (const c of checklistIdsForSituations(liveSituations)) {
+      checklists.add(c);
+    }
+
     const related = proposal.related_entries ?? [];
     if (related.length === 0) {
       damage_class = "none";
@@ -374,8 +383,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           checklists.add("existence_unknown");
         }
       }
-      if (damage_class === "selling_page") checklists.add("selling_page_figures");
-      if (damage_class === "new_public_content") checklists.add("new_content_brand");
+      // Brand / selling-figure ship gates stay on follow-up edits — not on idea accept.
     }
   }
 
@@ -431,6 +439,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   const summaryParts = [meta.situation_description];
+  if (proposal.kind === "idea") {
+    summaryParts[0] = IDEA_OPPORTUNITY_HARM_STAFF_NOTE;
+  }
   if (block_apply) summaryParts.push("Apply is blocked — target no longer exists.");
   if (situation_changed_since_filed) {
     summaryParts.push(`Changed since filed (was ${snapshot!.damage_class}).`);
@@ -453,6 +464,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       note !== TITLE_DESCRIPTION_STAFF_NOTE &&
       note !== INTERNAL_LINKS_STAFF_NOTE &&
       note !== FUNNEL_CLASSIFICATION_STAFF_NOTE &&
+      note !== IDEA_OPPORTUNITY_HARM_STAFF_NOTE &&
       !summaryParts.includes(note)
     ) {
       summaryParts.push(note);
@@ -461,7 +473,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
-    : meta.situation_description;
+    : proposal.kind === "idea"
+      ? IDEA_OPPORTUNITY_HARM_STAFF_NOTE
+      : meta.situation_description;
   if (hasTitleDescChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
   }
@@ -487,9 +501,17 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     ...(siblings.length ? { related_open_proposals: siblings } : {}),
     summary: summaryParts.join(" "),
     staff_summary: {
-      badge_label: block_apply ? "Target missing" : meta.badge_label,
+      badge_label: block_apply
+        ? "Target missing"
+        : proposal.kind === "idea"
+          ? "Idea brief"
+          : meta.badge_label,
       situation_description: staffSituation,
-      risk: block_apply ? "Apply blocked — target gone." : meta.risk,
+      risk: block_apply
+        ? "Apply blocked — target gone."
+        : proposal.kind === "idea"
+          ? "Accept locks a brief only — no live YAML until a later edits proposal."
+          : meta.risk,
       undo: UNDO_COPY[undo_cost],
       ...(relatedStaff ? { related: relatedStaff } : {}),
     },

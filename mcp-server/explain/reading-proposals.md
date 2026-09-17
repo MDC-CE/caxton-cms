@@ -4,9 +4,9 @@ When you open a single open/partial proposal via `list_proposals(proposal_id)`, 
 
 List rows may include a **`review_context_snapshot`** (filed-at-create or last shape-change hint). Prefer live `review_context` for decisions.
 
-**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. Author-declared **`review_situations`** (optional) plus inferred packs drive which checklists fire — see **`explain` topic `review-situations`**. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
+**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. On **edits**, author-declared **`review_situations`** (optional) plus inferred packs drive which checklists fire — see **`explain` topic `review-situations`**. On **ideas**, classify always injects **`idea_opportunity_harm`** (filed list empty; no retag) — see **`idea-opportunity-harm-proposals`**. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
 
-**Role split:** proposers optimize opportunity (CTR / query fit) via create skills; reviewers use checklists to stop **harm** (invented claims, query drops, false scope) — not to rewrite for punchier copy.
+**Role split:** proposers optimize opportunity (CTR / query fit) via create skills; reviewers use checklists to stop **harm** (invented claims, query drops, false scope, unjustified new URLs) — not to rewrite for punchier copy.
 
 ## Two axes
 
@@ -21,12 +21,13 @@ Selling content types (`landing` / `landings` / `program` / `programs`) always c
 
 | ID | When it fires |
 |---|---|
-| `selling_page_figures` | Selling page damage |
-| `new_content_brand` | New public content |
+| `selling_page_figures` | Selling page damage on **edits** |
+| `new_content_brand` | New public content on **edits** (ship gate — not on ideas) |
 | `dedup_coordinate` | Open notes (or non-edits) sibling shares an issue |
 | `dedup_competing_edits` | Open edits sibling shares an issue |
 | `dedup_fix_pending` | Reviewing **notes** while an edits sibling is open — check the fix before closing as wont_fix |
-| `idea_accept` | Always on ideas |
+| `idea_opportunity_harm` | Always on ideas — opportunity vs site harm scorecard. Playbook: `idea-opportunity-harm-proposals` |
+| `idea_accept` | Always on ideas — accept locks brief only (`accepted_entry` + `next_step`) |
 | `notes_close` | Notes kind |
 | `review_mode_inert` | Notes/idea (apply does not write YAML) |
 | `title_description_ctr` | Any remaining op on `meta.page_title` and/or `meta.description` — SERP harm scorecard (Query/Specifics/Claims). Stacks with other checklists; meta-only omits `verify_copy`. Playbook: `explain` topic `serp-title-description-proposals` |
@@ -105,7 +106,7 @@ When `list_proposals(proposal_id)` builds `discovery_path` for open|partial **ed
 
 ## Ideas
 
-After mixed-risk refuse, a surviving idea has one class: worst of related targets (missing public → `new_public_content`; selling → `selling_page`; other existing → `existing_content`; no targets → `none`). `idea_accept` always fires.
+After mixed-risk refuse, a surviving idea has one class: worst of related targets (missing public → `new_public_content`; selling → `selling_page`; other existing → `existing_content`; no targets → `none`). `idea_opportunity_harm` + `idea_accept` always fire; `new_content_brand` / `selling_page_figures` do **not** attach on ideas.
 
 ## Partial proposals
 

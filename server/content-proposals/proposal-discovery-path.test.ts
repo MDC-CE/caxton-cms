@@ -183,7 +183,7 @@ describe("buildProposalDiscoveryPath", () => {
     expect(verify?.kind).toBe("think");
   });
 
-  it("builds idea path without apply-research tools", () => {
+  it("builds idea path with explain tool and no related page tools", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: {
         id: "i1",
@@ -192,11 +192,58 @@ describe("buildProposalDiscoveryPath", () => {
         summary: "We should write a new spoke about X with a clear funnel CTA.",
       },
       allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "idea_opportunity_harm",
+              title: "Score opportunity vs site harm",
+              why: "Accept greenlights a brief only.",
+              look_for: ["Goal", "Evidence"],
+            },
+          ],
+        },
+      },
     });
     expect(discovery_path).not.toBeNull();
-    expect(discovery_path!.items.every((i) => i.kind === "think")).toBe(true);
-    expect(warnings).toEqual([]);
     expect(discovery_path!.goal.toLowerCase()).toMatch(/accept/);
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools.map((t) => (t.kind === "tool" ? t.tool : ""))).toEqual(["explain_site"]);
+    expect(tools.every((t) => t.kind === "tool" && t.available)).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("builds idea path with related tools; unavailable when caps empty", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i2",
+        status: "open",
+        kind: "idea",
+        summary: "Delete a low-traffic hub after confirming spokes are dead.",
+        related_entries: [{ contentType: "blog", slug: "ai-tools-hub", locale: "en" }],
+      },
+      allowedTools: new Set(),
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "idea_opportunity_harm",
+              title: "Score opportunity vs site harm",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools.length).toBeGreaterThanOrEqual(2);
+    expect(tools.every((t) => t.kind === "tool" && t.available === false)).toBe(true);
+    expect(warnings.some((w) => w.code === "discovery_tool_capped")).toBe(true);
+    expect(discovery_path!.non_effects.join(" ")).toMatch(/optional/i);
   });
 
   it("builds short notes path without apply-research tools", () => {

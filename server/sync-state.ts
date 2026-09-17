@@ -221,6 +221,66 @@ export interface FileSyncInfo {
   committedAt?: string;
 }
 
+/** Intentional local edit still on disk: recorded sha matches disk and differs from remote. */
+export function isProtectedLocalEdit(fileInfo: FileSyncInfo, diskSha: string): boolean {
+  return Boolean(
+    fileInfo.sha &&
+      fileInfo.remoteSha &&
+      diskSha === fileInfo.sha &&
+      diskSha !== fileInfo.remoteSha,
+  );
+}
+
+/**
+ * Intentional pending delete: remote still has the file, local sha cleared (or dirty).
+ * Stale deploy missing files usually keep sha === remoteSha in sync-state from GCS.
+ */
+export function isProtectedLocalDelete(fileInfo: FileSyncInfo): boolean {
+  return Boolean(fileInfo.remoteSha && (!fileInfo.sha || fileInfo.sha !== fileInfo.remoteSha));
+}
+
+/**
+ * Same-commit restart classification: protect tracked local dirties, pull true stale.
+ * `diskSha` returns null when the file is missing on disk.
+ */
+export function classifySameCommitDrift(
+  files: Record<string, FileSyncInfo>,
+  opts: {
+    shouldTrack: (filePath: string) => boolean;
+    diskSha: (filePath: string) => string | null;
+  },
+): {
+  staleFiles: string[];
+  protectedLocal: Array<{ filePath: string; author?: string }>;
+} {
+  const staleFiles: string[] = [];
+  const protectedLocal: Array<{ filePath: string; author?: string }> = [];
+
+  for (const [filePath, fileInfo] of Object.entries(files)) {
+    if (!opts.shouldTrack(filePath) || !fileInfo.remoteSha) continue;
+
+    const localSha = opts.diskSha(filePath);
+    if (localSha === null) {
+      if (isProtectedLocalDelete(fileInfo)) {
+        protectedLocal.push({ filePath, author: fileInfo.author });
+      } else {
+        staleFiles.push(filePath);
+      }
+      continue;
+    }
+
+    if (localSha === fileInfo.remoteSha) continue;
+
+    if (isProtectedLocalEdit(fileInfo, localSha)) {
+      protectedLocal.push({ filePath, author: fileInfo.author });
+    } else {
+      staleFiles.push(filePath);
+    }
+  }
+
+  return { staleFiles, protectedLocal };
+}
+
 export interface SyncConfig {
   commitIntervalSeconds: number;
 }
@@ -584,10 +644,14 @@ export function markFileAsModified(
       simple_changes: effectiveSimpleChanges,
     });
   } else if (state.files[relativePath]) {
-    // File deleted / missing — do not invent a content-change timestamp from a touch.
+    // File deleted / missing — clear local sha so sha !== remoteSha marks a pending delete
+    // (restart reconcile can protect it instead of restoring from GitHub).
+    const now = new Date().toISOString();
     state.files[relativePath] = {
       ...state.files[relativePath],
+      sha: "",
       author: author || state.files[relativePath].author,
+      modifiedAt: now,
     };
     
     scheduleDebouncedSaveSyncState(state, contentRoot);

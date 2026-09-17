@@ -1352,6 +1352,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         escalated: proposal.escalated,
         escalated_note: proposal.escalated_note,
         entries: proposal.entries,
+        related_entries: proposal.related_entries,
         open_blocker_count: proposal.open_blocker_count,
         blockers: proposal.blockers,
       },

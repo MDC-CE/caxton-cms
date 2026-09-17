@@ -72,6 +72,17 @@ describe("review-situations", () => {
     expect(refreshed.situations).not.toContain("serp_title_description");
   });
 
+  it("checklist ids for idea_opportunity_harm", () => {
+    expect(checklistIdsForSituations(["idea_opportunity_harm"])).toEqual(["idea_opportunity_harm"]);
+  });
+
+  it("parses idea_opportunity_harm id", () => {
+    expect(parseReviewSituationIds(["idea_opportunity_harm"])).toEqual({
+      ok: true,
+      ids: ["idea_opportunity_harm"],
+    });
+  });
+
   it("checklist ids for internal_links", () => {
     expect(checklistIdsForSituations(["internal_links"])).toEqual(["internal_links"]);
   });

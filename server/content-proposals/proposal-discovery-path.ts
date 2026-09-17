@@ -100,6 +100,47 @@ const ORGANIC_TOOL = {
   look_for: ["high-traffic paths", "sudden drops after similar changes"],
 } as const;
 
+const IDEA_EXPLAIN_TOOL = {
+  id: "idea_harm_playbook",
+  tool: "explain_site",
+  why: "Load the idea opportunity-vs-harm scorecard before accept or close.",
+  look_for: [
+    "Goal → Evidence → Fit → Brand → dilution",
+    "incomplete brief → add_blocker; wrong vehicle → close and refile as edits",
+    "accept ≠ live YAML; brand/figures ship on later edits",
+  ],
+} as const;
+
+const IDEA_ENTRY_SEO_TOOL = {
+  id: "related_seo",
+  tool: "get_entry_seo",
+  why: "Optional: cluster membership and public path for a related page named on the idea.",
+  look_for: [
+    "pillar / include_in_clustering / locale",
+    "is this a new spoke vs refresh of an existing slug",
+  ],
+} as const;
+
+const IDEA_CLUSTER_ENTRIES_TOOL = {
+  id: "cluster_siblings",
+  tool: "list_seo_cluster_entries",
+  why: "Optional: sibling spokes for cannibal / dilution check.",
+  look_for: [
+    "nearby spokes with the same angle",
+    "hub vs spoke traffic roles before deleting or adding URLs",
+  ],
+} as const;
+
+const IDEA_ORGANIC_TOOL = {
+  id: "idea_traffic_risk",
+  tool: "get_organic_traffic",
+  why: "Optional: visit risk on related paths (e.g. hub deletion or busy sibling).",
+  look_for: [
+    "does the hub or sibling still carry clicks the brief claims are dead",
+    "short visit dip vs lasting loss — evidence in brief or here",
+  ],
+} as const;
+
 const FUNNEL_ANALYTICS_TOOL = {
   id: "journey_metrics",
   tool: "get_product_funnel_analytics",
@@ -157,7 +198,7 @@ const SEO_RESEARCH_IDEAS_TOOL = {
   ],
 } as const;
 
-/** All tool names that may appear on an edits discovery_path (for catalog checks). */
+/** All tool names that may appear on a proposal discovery_path (for catalog checks). */
 export function proposalDiscoveryToolNames(): string[] {
   return [
     ...CORE_EDITS_TOOLS.map((t) => t.tool),
@@ -168,6 +209,10 @@ export function proposalDiscoveryToolNames(): string[] {
     SITE_ANALYTICS_TOOL.tool,
     SEO_RESEARCH_SERP_TOOL.tool,
     SEO_RESEARCH_IDEAS_TOOL.tool,
+    IDEA_EXPLAIN_TOOL.tool,
+    IDEA_ENTRY_SEO_TOOL.tool,
+    IDEA_CLUSTER_ENTRIES_TOOL.tool,
+    IDEA_ORGANIC_TOOL.tool,
   ];
 }
 
@@ -192,6 +237,12 @@ export type ProposalDiscoveryInput = {
   escalated?: boolean;
   escalated_note?: string | null;
   entries?: ProposalDiscoveryEntry[];
+  /** Idea context targets (slug may not exist yet). */
+  related_entries?: Array<{
+    contentType: string;
+    slug: string;
+    locale?: string;
+  }>;
   open_blocker_count?: number;
   blockers?: unknown[];
 };
@@ -481,6 +532,47 @@ export function buildEditsDiscoveryToolItems(opts: {
   return { items, anyCapped };
 }
 
+/**
+ * Idea discovery: playbook always; SEO/cluster/organic when related_entries exist.
+ * Unavailable tools stay listed with available:false — skip never blocks accept.
+ */
+export function buildIdeaDiscoveryToolItems(opts: {
+  allowed: Set<string> | null;
+  related?: Array<{ contentType: string; slug: string; locale?: string }> | null;
+}): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
+  const { allowed, related } = opts;
+  const items: DiscoveryPathToolItem[] = [
+    toToolItem(IDEA_EXPLAIN_TOOL, allowed, { topic: "idea-opportunity-harm-proposals" }),
+  ];
+
+  const first = related?.find((r) => r.contentType?.trim() && r.slug?.trim()) ?? null;
+  if (first) {
+    const locale = first.locale?.trim() || "en";
+    items.push(
+      toToolItem(IDEA_ENTRY_SEO_TOOL, allowed, {
+        contentType: first.contentType,
+        slug: first.slug,
+        locale,
+      }),
+    );
+    items.push(
+      toToolItem(IDEA_CLUSTER_ENTRIES_TOOL, allowed, {
+        q: first.slug,
+        bucket: "clustered",
+      }),
+    );
+    items.push(
+      toToolItem(IDEA_ORGANIC_TOOL, allowed, {
+        mode: "paths",
+        // Agent resolves public paths via get_entry_seo.urls when needed.
+      }),
+    );
+  }
+
+  const anyCapped = items.some((i) => !i.available);
+  return { items, anyCapped };
+}
+
 function thinkFromPreview(items: AgentPreviewThink[]): DiscoveryPathItem[] {
   return items.slice(0, 6).map((t) => ({
     kind: "think" as const,
@@ -692,6 +784,19 @@ export function buildProposalDiscoveryPath(
         code: DISCOVERY_TOOL_CAPPED,
         message:
           "One or more discovery research tools are not available on this role. See discovery_path items with available:false — ask a human to enable access, then refresh MCP.",
+      });
+    }
+  } else if (kind === "idea") {
+    const built = buildIdeaDiscoveryToolItems({
+      allowed,
+      related: proposal.related_entries ?? null,
+    });
+    tools = built.items;
+    if (built.anyCapped) {
+      warnings.push({
+        code: DISCOVERY_TOOL_CAPPED,
+        message:
+          "One or more discovery research tools are not available on this role. See discovery_path items with available:false — ask a human to enable access, then refresh MCP. Skip does not block accept or close.",
       });
     }
   }

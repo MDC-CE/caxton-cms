@@ -6,6 +6,22 @@ window_days: 6
 
 entries:
   - date: "2026-09-17"
+    summary: "Idea review situation idea_opportunity_harm — opportunity vs site harm before accept"
+    agent_impact:
+      - "Open ideas always get review_situations:[idea_opportunity_harm] + checklist idea_opportunity_harm (Goal→Evidence→Fit→Brand→dilution) stacked with idea_accept. Do not pass review_situations on ideas."
+      - "list_proposals(idea) discovery_path: explain_site topic idea-opportunity-harm-proposals; with related_entries also get_entry_seo / list_seo_cluster_entries / get_organic_traffic (optional; available:false if uncapped; skip never blocks accept)."
+      - "new_content_brand / selling_page_figures no longer attach on ideas — ship gates stay on follow-up edits. Reconnect MCP for explain_site topic list."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-discovery-path.ts
+
+  - date: "2026-09-17"
     summary: "SEO research visibility — discovery_path, get_entry_seo next_actions, organic prompts"
     agent_impact:
       - "get_entry_seo may return next_actions → get_or_refresh_seo_research action keyword_metrics when research is on and metrics are weak/stale."

@@ -526,7 +526,7 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "explain_site_review_situations",
     tool: "explain_site",
-    about: "Architecture docs: topic=review-situations (proposal situation catalog).",
+    about: "Architecture docs: topic=review-situations (edits catalog + ideas default-on idea_opportunity_harm).",
     buildArgs: (ctx) => withSite(ctx, { topic: "review-situations" }),
     reps: 1,
     class: "docs",

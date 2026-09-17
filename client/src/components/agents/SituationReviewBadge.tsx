@@ -194,12 +194,15 @@ export function resolveSituationDisplay(opts: {
       damage_class: "none",
       undo_cost: "none",
       staff_summary: {
-        badge_label: opts.kind === "idea" ? "Idea" : fb.badge_label,
+        badge_label: opts.kind === "idea" ? "Idea brief" : fb.badge_label,
         situation_description:
           opts.kind === "idea"
-            ? "Idea to accept or decline — accepting does not change the live site by itself."
+            ? "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site."
             : fb.situation_description,
-        risk: fb.risk,
+        risk:
+          opts.kind === "idea"
+            ? "Accept locks a brief only — no live YAML until a later edits proposal."
+            : fb.risk,
         undo: "No live change.",
       },
     };
@@ -584,10 +587,11 @@ export function ProposalSituationCallout({
               <Badge
                 key={id}
                 variant="secondary"
-                className="font-mono text-[10px] font-normal"
+                className="text-[10px] font-normal"
                 data-testid={`chip-review-situation-${id}`}
+                title={STAFF_REVIEW_SITUATION_LABELS[id] ?? id}
               >
-                {id}
+                {STAFF_REVIEW_SITUATION_LABELS[id] ?? id}
               </Badge>
             ))}
             {resolved.situation_source ? (
@@ -614,7 +618,19 @@ export function ProposalSituationCallout({
   );
 }
 
-/** Catalog labels for staff multi-select (keep in sync with server review-situations). */
+/** Labels for live situation chips (includes idea-only ids not in the edits editor). */
+export const STAFF_REVIEW_SITUATION_LABELS: Record<string, string> = {
+  internal_links: "Hub / internal links",
+  serp_title_description: "Search title / description",
+  funnel_classification: "Funnel stage / products",
+  body_copy_edit: "Body / field edit",
+  selling_figures: "Selling-page figures",
+  new_public_content: "New public content",
+  promote_draft: "Promote draft",
+  idea_opportunity_harm: "Idea opportunity vs harm",
+};
+
+/** Catalog labels for staff multi-select on edits only (keep in sync with server review-situations). */
 export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
   id: string;
   label: string;

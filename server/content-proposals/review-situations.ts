@@ -17,9 +17,13 @@ export const REVIEW_SITUATION_IDS = [
   "selling_figures",
   "new_public_content",
   "promote_draft",
+  "idea_opportunity_harm",
 ] as const;
 
 export type ReviewSituationId = (typeof REVIEW_SITUATION_IDS)[number];
+
+/** Default-on for every open idea — not author-declared; not used on edits. */
+export const IDEA_DEFAULT_SITUATION_ID: ReviewSituationId = "idea_opportunity_harm";
 
 export type SituationSource = "author" | "inferred" | "merged";
 
@@ -161,6 +165,26 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
       "Promote this draft to live. Summary explains why the draft should become public.",
     ],
   },
+  idea_opportunity_harm: {
+    id: "idea_opportunity_harm",
+    label: "Idea opportunity vs harm",
+    when_to_use:
+      "Every idea brief — score whether the opportunity is real and whether accepting would harm the site. Default-on; not author-declared.",
+    explain_topic: "idea-opportunity-harm-proposals",
+    checklist_ids: ["idea_opportunity_harm"],
+    staff_note:
+      "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site.",
+    discovery_content_look_for: [
+      "90-day goal cite/rank/assist — not fill a cluster hole",
+      "query evidence or SERP set in the brief",
+      "named siblings / cannibal risk",
+      "kill criterion; link budget; locale doubling",
+      "wrong vehicle (funnel/SERP/links-only) → close and refile as edits",
+    ],
+    author_summary_hints: [
+      "Pitch a new URL or structural brief with goal, evidence, cannibal check, kill line, and link budget. Accept is greenlight only — no YAML.",
+    ],
+  },
 };
 
 export function isReviewSituationId(value: string): value is ReviewSituationId {
@@ -285,6 +309,8 @@ export function situationsRelevantToOps(
         return damage === "new_public_content" || paths.length > 0;
       case "promote_draft":
         return promoteOnly || (opts?.promoteOnApply === true && paths.length === 0);
+      case "idea_opportunity_harm":
+        return false;
       default:
         return false;
     }

@@ -21,6 +21,7 @@ export type ChecklistId =
   | "dedup_coordinate"
   | "dedup_competing_edits"
   | "dedup_fix_pending"
+  | "idea_opportunity_harm"
   | "idea_accept"
   | "notes_close"
   | "review_mode_inert"
@@ -32,6 +33,10 @@ export type ChecklistId =
   | "disposition"
   | "existence_unknown"
   | "target_missing";
+
+/** Staff always-visible line when idea_opportunity_harm is active. */
+export const IDEA_OPPORTUNITY_HARM_STAFF_NOTE =
+  "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site.";
 
 /** SERP title/description field paths that attach the title_description_ctr checklist. */
 export const TITLE_DESCRIPTION_FIELD_PATHS = new Set([
@@ -172,6 +177,22 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "close notes as fixed_elsewhere only after the fix is applied or tracked",
     ],
     priority: 20,
+  },
+  idea_opportunity_harm: {
+    id: "idea_opportunity_harm",
+    title: "Score opportunity vs site harm",
+    why: "Accept greenlights a brief only. A weak idea that later ships becomes a lasting URL — stop dilution, thin pages, and unjustified locks here.",
+    look_for: [
+      "Goal: one 90-day outcome — cite, rank, or assist a real program (not fill a cluster hole)",
+      "Evidence: query/GSC/SERP set or traffic proof in the brief — missing → add_blocker",
+      "Fit: not a dupe of a sibling; locale justified; wrong vehicle (funnel/SERP/hub-links-only) → close and refile as edits",
+      "Brand: educational angle, checkable facts, real program CTA — invent/endorsement without source → reject or close",
+      "Dilution: if this ships and gets ~0 visits, would we still tax hubs, crawl, freshness, inventory?",
+      "Kill criterion named; refresh_tier:fast needs owner + recrawl trigger; default zero new hub links",
+      "Dilution improvement alone ≠ pass (e.g. hub deletion still needs visit/redirect evidence)",
+      "Disposition: accept | add_blocker | close | reject — never apply or revise_entries",
+    ],
+    priority: 3,
   },
   idea_accept: {
     id: "idea_accept",

@@ -1149,6 +1149,37 @@ describe("content proposals", () => {
     expect(created.proposal.kind).toBe("idea");
     expect(created.proposal.related_entries?.[0]?.slug).toBe("miami-ai-bootcamp-new");
 
+    const withSituations = await svc.create(
+      {
+        kind: "idea",
+        title: "Idea with illegal situations",
+        summary:
+          "Pitch that wrongly declares review situations which are edits-only on this API. ".repeat(2),
+        review_situations: ["body_copy_edit"],
+      },
+      mcpAlice,
+    );
+    expect(withSituations.ok).toBe(false);
+    if (!withSituations.ok) expect(withSituations.code).toBe("review_situations_edits_only");
+
+    const incompleteStillCreates = await svc.create(
+      {
+        kind: "idea",
+        title: "Thin brief",
+        summary:
+          "Just a cluster hole story without goal evidence or kill line but still long enough. ".repeat(2),
+      },
+      mcpAlice,
+    );
+    expect(incompleteStillCreates.ok).toBe(true);
+
+    const setSitOnIdea = await svc.update(created.proposal.id, "set_review_situations", {
+      ...mcpAlice,
+      review_situations: ["idea_opportunity_harm"],
+    });
+    expect(setSitOnIdea.ok).toBe(false);
+    if (!setSitOnIdea.ok) expect(setSitOnIdea.code).toBe("wrong_kind");
+
     const selfAccept = await svc.update(created.proposal.id, "accept", {
       ...mcpAlice,
       next_step: "Draft the landing hero and CTA in a follow-up edits proposal.",

@@ -19,7 +19,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 
 See also **`explain` topic `reading-proposals`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
-**Review situations:** optional `review_situations` on edits (`explain` topics **`review-situations`**, **`internal-links-proposals`**, **`serp-title-description-proposals`**). Empty → infer from ops.
+**Review situations:** optional `review_situations` on **edits** (`explain` topics **`review-situations`**, **`internal-links-proposals`**, **`serp-title-description-proposals`**, **`funnel-classification-proposals`**). Empty → infer from ops. Ideas always get default-on **`idea_opportunity_harm`** (topic **`idea-opportunity-harm-proposals`**) — do not pass `review_situations` on ideas.
 
 | `update_proposal` | `proposals_create` and/or `proposals_review` (actions filtered) | See action allowlists below. |
 | `get_entry_activity` | same as list | Read recent writes (14 days). Use before `confirm_recent_activity`. |
@@ -68,10 +68,11 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 
 ## Ideas
 
+- **Live review:** default-on situation `idea_opportunity_harm` + checklist `idea_opportunity_harm` (Goal → Evidence → Fit → Brand → dilution) stacked with `idea_accept` (lock/`next_step`). Playbook: `explain_site` topic **`idea-opportunity-harm-proposals`**. Incomplete brief → `add_blocker`; wrong vehicle → close/refile edits. Discovery tools optional.
 - **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; **`accepted_entry`** `{ contentType, slug, locale }` required (locks that page+locale); → `finished` + `accepted`. **No YAML.** Refuse if another accepted idea already holds that entry (`accepted_entry_taken`).
 - **close** park: `wont_fix` \| `tracked_elsewhere` \| `other` (not four-eyes). Do not use close for “yes.”
 - Optional `related_entries`: context only; targets may not exist yet (prefills accept UI when present).
-- **Follow-up edits:** pass `implements_proposal_id` to the accepted idea. Required when creating edits for a reserved entry. At most one **open/partial** implements child (`idea_already_in_progress`). Entry must match `accepted_entry`.
+- **Follow-up edits:** pass `implements_proposal_id` to the accepted idea. Required when creating edits for a reserved entry. At most one **open/partial** implements child (`idea_already_in_progress`). Entry must match `accepted_entry`. Brand / selling-figure ship gates run on that edits proposal (`new_content_brand` / `selling_page_figures`), not on the idea.
 - **Stalled:** accepted idea with a locked entry and **no** implements child in `open`/`partial`/`finished`. Rejected/withdrawn children resurface stalled. List with `stalled: true`; stats include `stalled_ideas`. Legacy accepts without `accepted_entry` are not stalled.
 
 ## Recent activity gate

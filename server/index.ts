@@ -737,6 +737,14 @@ app.use((req, res, next) => {
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");
     try {
       flushAllPendingSyncStateWrites();
+      const { isAutoCommitEnabled, flushPendingChanges } = await import("./auto-commit");
+      if (isAutoCommitEnabled()) {
+        logger.info("[Shutdown] flushing pending auto-commit…");
+        const flushResult = await flushPendingChanges();
+        if (!flushResult.success) {
+          logger.warn({ error: flushResult.error }, "[Shutdown] auto-commit flush failed");
+        }
+      }
       stopJobApplier();
       await getVersioningManager().shutdown();
       await shutdownValidationCaches();
