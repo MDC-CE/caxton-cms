@@ -12,9 +12,12 @@ import {
   flushDueBuffersForSite,
   flushHookIfDue,
   getHookBuffer,
+  getProposalForWebhookFilter,
+  hookMatchesEvent,
   isHookDue,
   listEnabledHooksForType,
   loadEventWebhookConfig,
+  matchFilterString,
   maybeEnqueueEventWebhook,
   parseEventWebhookConfig,
   recordDelivery,
@@ -27,10 +30,11 @@ import {
   stopEventWebhookDueScanForTests,
   type EventWebhookConfig,
   type EventWebhookHook,
+  type EventWebhookProposalSummary,
 } from "./event-webhooks";
 import { emitEvent } from "./event-store";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
-import { clearSiteSqliteCacheForTests } from "../db";
+import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
 import type { ContentEvent } from "./types";
 
 const TEST_SITE = `site_event-webhooks-test-${Date.now()}`;
@@ -53,6 +57,62 @@ function hook(partial: Partial<EventWebhookHook> & { id: string; url: string }):
     max_events_per_call: 50,
     ...partial,
   };
+}
+
+function insertProposal(opts: {
+  id: string;
+  kind?: string;
+  proposer_username: string;
+  proposer_actor?: Record<string, unknown>;
+  entries?: Array<{ entry_key: string; locale: string }>;
+}) {
+  const now = Date.now();
+  const db = getSiteSqlite(TEST_SITE);
+  db.prepare(
+    `INSERT INTO content_proposals (
+      id, site, fingerprint, status, kind, category, title, summary,
+      documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
+      created_at, updated_at, tags_json, search_text
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    opts.id,
+    TEST_SITE,
+    "fp",
+    "open",
+    opts.kind ?? "edits",
+    "content.field",
+    "T",
+    "S".repeat(80),
+    "{}",
+    "[]",
+    opts.proposer_username,
+    JSON.stringify(opts.proposer_actor ?? {}),
+    now,
+    now,
+    "[]",
+    "",
+  );
+  for (const e of opts.entries ?? []) {
+    db.prepare(
+      `INSERT INTO content_proposal_entries (
+        proposal_id, entry_key, locale, status, ops_json, baseline_context_json
+      ) VALUES (?,?,?,?,?,?)`,
+    ).run(opts.id, e.entry_key, e.locale, "pending", "[]", "{}");
+  }
+}
+
+function baseEvent(partial: Partial<ContentEvent> = {}): ContentEvent {
+  return {
+    id: 1,
+    type: "proposal_finished",
+    site: TEST_SITE,
+    resource: {},
+    attribution: [],
+    payload: { proposal_id: "p1" },
+    published: true,
+    created_at: Date.now(),
+    ...partial,
+  } as ContentEvent;
 }
 
 describe("event-webhooks", () => {
@@ -553,6 +613,336 @@ describe("event-webhooks", () => {
     } as ContentEvent;
     const slim = slimEventForWebhook(event);
     expect(slim.payload).toEqual({ proposal_id: "abc" });
+  });
+
+  it("parses filter and rejects unknown keys / invalid kinds", () => {
+    const cfg = parseEventWebhookConfig({
+      version: 1,
+      subscriptions: {
+        proposal_finished: [
+          {
+            id: "f1",
+            enabled: true,
+            url: "https://example.com/f",
+            filter: {
+              proposal_authors: ["Alice", "alice"],
+              proposal_models: ["grok*"],
+              kinds: ["edits"],
+            },
+          },
+        ],
+      },
+    });
+    const f = cfg.subscriptions.proposal_finished?.[0]?.filter;
+    expect(f?.proposal_authors).toEqual(["Alice"]);
+    expect(f?.proposal_models).toEqual(["grok*"]);
+    expect(f?.kinds).toEqual(["edits"]);
+
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          proposal_finished: [
+            {
+              id: "bad",
+              enabled: true,
+              url: "https://example.com/f",
+              filter: { not_a_real_key: ["x"] },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/unknown filter key/);
+
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          proposal_finished: [
+            {
+              id: "bad2",
+              enabled: true,
+              url: "https://example.com/f",
+              filter: { kinds: ["nope"] },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/invalid value/);
+  });
+
+  it("matchFilterString supports exact and prefix *", () => {
+    expect(matchFilterString("grok-4", ["grok*"])).toBe(true);
+    expect(matchFilterString("grok-4", ["grok"])).toBe(false);
+    expect(matchFilterString("Grok", ["grok"])).toBe(true);
+  });
+
+  it("hookMatchesEvent ANDs fields; empty filter matches; excludes work", () => {
+    const proposal: EventWebhookProposalSummary = {
+      id: "p1",
+      kind: "edits",
+      proposer_username: "alesanchezr",
+      proposer_actor: { type: "mcp", model: "grok-4" },
+      content_types: ["landing", "blog"],
+      locales: ["en", "es"],
+    };
+    const event = baseEvent({
+      attribution: [{ author: "reviewer", actor: { type: "ui" } }],
+    });
+
+    expect(
+      hookMatchesEvent(
+        event,
+        hook({ id: "any", url: "https://x.com" }),
+        proposal,
+        true,
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      hookMatchesEvent(
+        event,
+        hook({
+          id: "ok",
+          url: "https://x.com",
+          filter: {
+            proposal_authors: ["alesanchezr"],
+            proposal_models: ["grok*"],
+            kinds: ["edits"],
+            content_types: ["blog"],
+            locales: ["es"],
+          },
+        }),
+        proposal,
+        true,
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      hookMatchesEvent(
+        event,
+        hook({
+          id: "and-fail",
+          url: "https://x.com",
+          filter: { proposal_authors: ["alesanchezr"], kinds: ["idea"] },
+        }),
+        proposal,
+        true,
+      ),
+    ).toEqual({ ok: false, reason: "no_match" });
+
+    expect(
+      hookMatchesEvent(
+        event,
+        hook({
+          id: "ex",
+          url: "https://x.com",
+          filter: { exclude_content_types: ["landing"] },
+        }),
+        proposal,
+        true,
+      ),
+    ).toEqual({ ok: false, reason: "no_match" });
+
+    expect(
+      hookMatchesEvent(
+        event,
+        hook({
+          id: "model-miss",
+          url: "https://x.com",
+          filter: { proposal_models: ["claude*"] },
+        }),
+        { ...proposal, proposer_actor: { type: "mcp" } },
+        true,
+      ),
+    ).toEqual({ ok: false, reason: "no_match" });
+  });
+
+  it("missing proposal with proposal filter → skipped delivery; event-only still matches", async () => {
+    const { enqueueJob } = await import("../jobs/queue");
+    vi.mocked(enqueueJob).mockClear();
+
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: {
+        proposal_finished: [
+          hook({
+            id: "need-prop",
+            url: "https://example.com/a",
+            debounce_ms: 0,
+            max_wait_ms: 0,
+            filter: { proposal_authors: ["alesanchezr"] },
+          }),
+          hook({
+            id: "event-only",
+            url: "https://example.com/b",
+            debounce_ms: 0,
+            max_wait_ms: 0,
+            filter: { event_authors: ["reviewer"] },
+          }),
+        ],
+      },
+    });
+
+    const e = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_finished",
+      attribution: [{ author: "reviewer", actor: { type: "ui" } }],
+      payload: { proposal_id: "missing-proposal" },
+    });
+    maybeEnqueueEventWebhook(e, tmpRoot);
+
+    expect(getHookBuffer(TEST_SITE, "proposal_finished", "need-prop").pendingCount).toBe(0);
+    const skipped = listDeliveries(TEST_SITE, { status: "skipped", hookId: "need-prop" });
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.error).toBe("proposal_unresolved");
+
+    expect(getHookBuffer(TEST_SITE, "proposal_finished", "event-only").pendingCount).toBe(0);
+    expect(enqueueJob).toHaveBeenCalled();
+  });
+
+  it("filters by proposal author+model and does not buffer non-matches", () => {
+    insertProposal({
+      id: "p-match",
+      proposer_username: "alesanchezr",
+      proposer_actor: { type: "mcp", model: "grok-4" },
+      entries: [{ entry_key: "landing/home", locale: "en" }],
+    });
+    insertProposal({
+      id: "p-other",
+      proposer_username: "other",
+      proposer_actor: { type: "mcp", model: "claude-3" },
+      entries: [{ entry_key: "blog/x", locale: "es" }],
+    });
+
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: {
+        proposal_finished: [
+          hook({
+            id: "swarm",
+            url: "https://example.com/swarm",
+            debounce_ms: 30_000,
+            max_wait_ms: 60_000,
+            filter: {
+              proposal_authors: ["alesanchezr"],
+              proposal_models: ["grok*"],
+            },
+          }),
+        ],
+      },
+    });
+
+    const matchEv = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_finished",
+      payload: { proposal_id: "p-match" },
+    });
+    maybeEnqueueEventWebhook(matchEv, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "proposal_finished", "swarm").pendingCount).toBe(1);
+
+    const missEv = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_finished",
+      payload: { proposal_id: "p-other" },
+    });
+    maybeEnqueueEventWebhook(missEv, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "proposal_finished", "swarm").pendingCount).toBe(1);
+    expect(listDeliveries(TEST_SITE, { status: "skipped" })).toHaveLength(0);
+
+    const loaded = getProposalForWebhookFilter(TEST_SITE, "p-match");
+    expect(loaded?.content_types).toContain("landing");
+    expect(loaded?.locales).toContain("en");
+  });
+
+  it("filter change on save drops waiting buffer", () => {
+    setHookBuffer(TEST_SITE, "proposal_finished", "f", {
+      pendingEventIds: [1],
+      pendingCount: 1,
+      first_pending_at: 1,
+      last_event_at: 1,
+    });
+    const before: EventWebhookConfig = {
+      version: 1,
+      subscriptions: {
+        proposal_finished: [
+          hook({
+            id: "f",
+            url: "https://example.com/a",
+            filter: { proposal_authors: ["a"] },
+          }),
+        ],
+      },
+    };
+    const after: EventWebhookConfig = {
+      version: 1,
+      subscriptions: {
+        proposal_finished: [
+          hook({
+            id: "f",
+            url: "https://example.com/a",
+            filter: { proposal_authors: ["b"] },
+          }),
+        ],
+      },
+    };
+    const dropped = computeDroppedBuffersOnSave(TEST_SITE, before, after);
+    expect(dropped.some((d) => d.hookId === "f" && d.dropped === 1)).toBe(true);
+    expect(getHookBuffer(TEST_SITE, "proposal_finished", "f").pendingCount).toBe(0);
+  });
+
+  it("hooks without filter remain backward compatible", () => {
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: {
+        proposal_created: [
+          hook({ id: "plain", url: "https://example.com/p", debounce_ms: 0, max_wait_ms: 0 }),
+        ],
+      },
+    });
+    const e = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_created",
+      payload: { proposal_id: "anything" },
+    });
+    maybeEnqueueEventWebhook(e, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "plain").pendingCount).toBe(0);
+  });
+
+  it("listDeliveries can filter skipped status", () => {
+    recordDelivery({
+      site: TEST_SITE,
+      eventType: "proposal_finished",
+      hookId: "s",
+      eventIds: [1],
+      url: "https://example.com",
+      status: "skipped",
+      error: "proposal_unresolved",
+      source: "live",
+    });
+    const rows = listDeliveries(TEST_SITE, { status: "skipped" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("skipped");
+  });
+
+  it("slimEventForWebhook attaches proposal summary when provided", () => {
+    const event = baseEvent({ id: 99, payload: { proposal_id: "p1" } });
+    const slim = slimEventForWebhook(event, {
+      id: "p1",
+      kind: "edits",
+      proposer_username: "a",
+      proposer_actor: { type: "mcp", model: "grok" },
+      content_types: ["landing"],
+      locales: ["en"],
+    });
+    expect(slim.proposal).toEqual({
+      id: "p1",
+      kind: "edits",
+      proposer_username: "a",
+      proposer_actor: { type: "mcp", model: "grok" },
+      content_types: ["landing"],
+      locales: ["en"],
+    });
   });
 });
 

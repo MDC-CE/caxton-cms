@@ -34,6 +34,7 @@ export type AskAgentPromptId =
   | "page-diagnostics"
   | "draft-feedback"
   | "redirect-overwrites-content"
+  | "resolved-issue-context"
   | "polish-ask-agent-prompt";
 
 /** All registered templates (including meta polish). */
@@ -45,6 +46,7 @@ export const ASK_AGENT_PROMPT_IDS: AskAgentPromptId[] = [
   "page-diagnostics",
   "draft-feedback",
   "redirect-overwrites-content",
+  "resolved-issue-context",
   "polish-ask-agent-prompt",
 ];
 

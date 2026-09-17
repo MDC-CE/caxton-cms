@@ -1,10 +1,14 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { ChevronDown } from "lucide-react";
+import { Bot, ChevronDown, ExternalLink } from "lucide-react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  SolveWithAiAgentDropdown,
+  type SolveWithAiAgentSelectPayload,
+} from "@/components/DebugBubble/SolveWithAiAgentDropdown";
 import { useFormatSitePath } from "@/hooks/useFormatSitePath";
 import { apiFetch } from "@/lib/queryClient";
 import { formatIssueActorLine } from "@/lib/formatIssueActor";
@@ -56,11 +60,15 @@ export function ResolvedIssueRow({
   idx,
   defaultOpen = false,
   issueCodeMap,
+  askAgentPrompt,
+  onAgentSelect,
 }: {
   row: ResolvedArchiveRow;
   idx: number;
   defaultOpen?: boolean;
   issueCodeMap?: Map<string, IssueCodeDefinitionClient>;
+  askAgentPrompt?: string;
+  onAgentSelect?: (payload: SolveWithAiAgentSelectPayload) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -76,6 +84,7 @@ export function ResolvedIssueRow({
     row.code,
     row.suggestion,
   );
+  const showAskAgent = Boolean(askAgentPrompt?.trim() && onAgentSelect);
 
   const { data: siteInfo } = useQuery<SiteInfo>({
     queryKey: ["/api/site/info"],
@@ -109,67 +118,83 @@ export function ResolvedIssueRow({
         )}
         data-testid={`resolved-issue-row-${idx}`}
       >
-        <CollapsibleTrigger asChild>
-          <button
-            type="button"
-            className="group flex w-full items-start gap-2.5 text-left"
-            data-testid={`button-resolved-issue-expand-${idx}`}
-            aria-expanded={open}
-          >
-            <ChevronDown
-              className={cn(
-                "mt-[3px] h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform group-hover:text-foreground",
-                open && "rotate-180",
-              )}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                      row.severity === "error"
-                        ? "bg-destructive/10 text-destructive"
-                        : "bg-chart-2/10 text-chart-2",
-                    )}
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                    {row.severity}
-                  </span>
-                  <IssueCodePopover
-                    code={row.code}
-                    validator={row.validator}
-                    help={help}
-                    className="truncate text-[11px] font-medium text-foreground/80"
-                  />
-                  {row.reopenedAt ? (
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                      data-testid="badge-resolved-reopened"
+        <div className="flex items-start gap-3">
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="group flex min-w-0 flex-1 items-start gap-2.5 text-left"
+              data-testid={`button-resolved-issue-expand-${idx}`}
+              aria-expanded={open}
+            >
+              <ChevronDown
+                className={cn(
+                  "mt-[3px] h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform group-hover:text-foreground",
+                  open && "rotate-180",
+                )}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                        row.severity === "error"
+                          ? "bg-destructive/10 text-destructive"
+                          : "bg-chart-2/10 text-chart-2",
+                      )}
                     >
-                      Reopened
-                    </Badge>
-                  ) : null}
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      {row.severity}
+                    </span>
+                    <IssueCodePopover
+                      code={row.code}
+                      validator={row.validator}
+                      help={help}
+                      className="truncate text-[11px] font-medium text-foreground/80"
+                    />
+                    {row.reopenedAt ? (
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                        data-testid="badge-resolved-reopened"
+                      >
+                        Reopened
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                    {formatDistanceToNow(new Date(row.resolvedAt), { addSuffix: true })}
+                  </span>
                 </div>
-                <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-                  {formatDistanceToNow(new Date(row.resolvedAt), { addSuffix: true })}
-                </span>
+                <p
+                  className="mt-1.5 line-clamp-2 leading-relaxed text-foreground"
+                  title={row.message}
+                >
+                  {formatSitePathsInText(row.message, formatSitePath)}
+                </p>
+                <p className="mt-1 truncate text-[10px] text-muted-foreground">
+                  {validatorLabel}
+                  {categoryLabel ? ` · ${categoryLabel}` : ""} · resolved by{" "}
+                  {formatIssueActorLine(row.resolvedBy, row.actor)}
+                </p>
               </div>
-              <p
-                className="mt-1.5 line-clamp-2 leading-relaxed text-foreground"
-                title={row.message}
-              >
-                {formatSitePathsInText(row.message, formatSitePath)}
-              </p>
-              <p className="mt-1 truncate text-[10px] text-muted-foreground">
-                {validatorLabel}
-                {categoryLabel ? ` · ${categoryLabel}` : ""} · resolved by{" "}
-                {formatIssueActorLine(row.resolvedBy, row.actor)}
-              </p>
+            </button>
+          </CollapsibleTrigger>
+          {showAskAgent ? (
+            <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5">
+              <SolveWithAiAgentDropdown
+                icon={Bot}
+                ariaLabel="Agent"
+                prompt={askAgentPrompt!}
+                size="sm"
+                buttonVariant="ghost"
+                className="h-6 px-2 text-[10px] text-muted-foreground"
+                testId={`ask-resolved-issue-${idx}`}
+                onAgentSelect={onAgentSelect!}
+              />
             </div>
-          </button>
-        </CollapsibleTrigger>
+          ) : null}
+        </div>
         <CollapsibleContent>
           {open ? (
             <div className="ml-6 mt-3 space-y-3 rounded-md border border-border/60 bg-background/50 p-3">
@@ -200,7 +225,24 @@ export function ResolvedIssueRow({
               </DetailRow>
               {row.url || row.file ? (
                 <DetailRow label="Where">
-                  {row.url ? <p className="truncate text-muted-foreground">{row.url}</p> : null}
+                  {row.url ? (
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <p className="min-w-0 truncate text-muted-foreground" title={row.url}>
+                        {row.url}
+                      </p>
+                      <a
+                        href={row.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        aria-label="Open page in new window"
+                        data-testid="link-resolved-issue-url"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <ExternalLink className="h-3 w-3" aria-hidden />
+                      </a>
+                    </div>
+                  ) : null}
                   {row.file ? (
                     <p
                       className="truncate font-mono text-[11px] text-muted-foreground"

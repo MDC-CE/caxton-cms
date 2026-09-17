@@ -427,6 +427,31 @@ function buildCachedIssueAskAgentPrompt(issue: CachedIssueRow): string {
   });
 }
 
+function buildResolvedIssueAskAgentPrompt(row: ResolvedArchiveRow): string {
+  const parsed = row.entryKey ? parseEntryKey(row.entryKey) : null;
+  const mcpUrl = typeof window !== "undefined" ? getMcpServerUrl() : "/mcp";
+  const reopenedLine = row.reopenedAt?.trim()
+    ? `- Reopened: ${row.reopenedAt.trim()}\n`
+    : "";
+  return renderAskAgentPrompt("resolved-issue-context", {
+    issue_id: row.issueId || "(unknown)",
+    code: row.code || "(unknown)",
+    severity: row.severity || "(unknown)",
+    validator: row.validator || "(unknown)",
+    url: row.url?.trim() || "(none)",
+    content_type: parsed?.contentType || "(unknown)",
+    slug: parsed?.slug || "(unknown)",
+    locale: parsed?.locale || "(unknown)",
+    variant_line: parsed?.variant ? `\n- variant: ${parsed.variant}` : "",
+    file_path: row.file?.trim() || "(none)",
+    mcp_url: mcpUrl,
+    message: row.message?.trim() || "(none)",
+    resolved_at: row.resolvedAt || "(unknown)",
+    resolved_by: formatIssueActorLine(row.resolvedBy, row.actor) || "(unknown)",
+    reopened_line: reopenedLine,
+  });
+}
+
 type ResolvedIssuesResponse = {
   rows: ResolvedArchiveRow[];
   total: number;
@@ -2824,6 +2849,8 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
                   row={row}
                   idx={idx}
                   issueCodeMap={issueCodeMap}
+                  askAgentPrompt={buildResolvedIssueAskAgentPrompt(row)}
+                  onAgentSelect={openAskAgent}
                 />
               ))
             )}

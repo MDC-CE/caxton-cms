@@ -2283,7 +2283,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const withSnap = get(id)!;
     emitProposalEvent(site, "proposal_created", id, proposer.username, {
       ...(supersedesId ? { supersedes_proposal_id: supersedesId } : {}),
-    });
+    }, proposer.actor && typeof proposer.actor === "object" && "type" in proposer.actor
+      ? (proposer.actor as EventActor)
+      : undefined);
     if (deps.indexSearch) {
       deps.indexSearch(withSnap).catch((err) => log.warn({ err }, "proposal index failed"));
     }
@@ -2444,7 +2446,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
          WHERE id = ?`,
       ).run(now, "withdrawn", withdrawNote, caller.username, now, id);
       captureDecisionDebug(proposal, "withdraw", caller, reviewBeforeWithdraw);
-      emitProposalEvent(site, "proposal_withdrawn", id, caller.username);
+      emitProposalEvent(site, "proposal_withdrawn", id, caller.username, {}, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2505,7 +2507,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       captureDecisionDebug(proposal, "reject", caller, reviewBeforeReject);
       emitProposalEvent(site, "proposal_rejected", id, caller.username, {
         reject_kind: kindRaw,
-      });
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2592,7 +2594,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         close_reason: "accepted",
         close_note: nextStep,
         accepted_entry: acceptedEntry,
-      });
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2650,7 +2652,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: validated.reason,
         close_note: validated.note,
-      });
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -3074,7 +3076,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       emitProposalEvent(site, "proposal_revised", id, caller.username, {
         entry_count: captured.length,
         open_blocker_count: after.open_blocker_count,
-      });
+      }, caller.actor);
       return {
         ok: true,
         proposal: get(id)!,
@@ -3473,10 +3475,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
         status: next,
         done: fresh.entries.filter((e) => e.status === "done").length,
         total: fresh.entries.length,
-      });
+      }, caller.actor);
       if (next === "finished") {
         captureDecisionDebug(proposal, "apply", caller, reviewForApply);
-        emitProposalEvent(site, "proposal_finished", id, caller.username);
+        emitProposalEvent(site, "proposal_finished", id, caller.username, {}, caller.actor);
       }
       return { ok: true, proposal: fresh };
     }

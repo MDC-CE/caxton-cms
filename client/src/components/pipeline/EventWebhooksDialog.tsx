@@ -1,8 +1,12 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ComponentType } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  IconBulb,
+  IconCheck,
   IconChevronDown,
+  IconFilter,
   IconLoader2,
+  IconNote,
   IconPencil,
   IconPlus,
   IconRefresh,
@@ -44,9 +48,37 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import JsonViewer from "@/components/editing/JsonViewer";
+import { TagInput } from "@/components/editing/TagInput";
+import { SearchableMultiCombobox } from "@/components/ui/searchable-multi-combobox";
 import { EventWebhookLogsPanel } from "@/components/pipeline/EventWebhookLogsPanel";
+import type { StaffDirectoryEntry } from "@/components/editing";
+import { getDebugToken } from "@/hooks/useDebugAuth";
+import { getSessionHeaders } from "@/lib/sessionHeaders";
+
+export type EventWebhookFilter = {
+  event_authors?: string[];
+  exclude_event_authors?: string[];
+  event_actor_types?: Array<"ui" | "mcp" | "system">;
+  event_models?: string[];
+  exclude_event_models?: string[];
+  event_clients?: string[];
+  exclude_event_clients?: string[];
+  proposal_authors?: string[];
+  exclude_proposal_authors?: string[];
+  proposal_models?: string[];
+  exclude_proposal_models?: string[];
+  proposal_actor_types?: Array<"ui" | "mcp" | "system">;
+  proposal_roles?: string[];
+  kinds?: Array<"idea" | "edits" | "notes">;
+  exclude_kinds?: Array<"idea" | "edits" | "notes">;
+  content_types?: string[];
+  exclude_content_types?: string[];
+  locales?: string[];
+  exclude_locales?: string[];
+};
 
 export type EventWebhookHook = {
   id: string;
@@ -57,6 +89,7 @@ export type EventWebhookHook = {
   max_wait_ms: number;
   max_events_per_call: number;
   headers?: Record<string, string>;
+  filter?: EventWebhookFilter;
 };
 
 export type EventWebhookConfig = {
@@ -70,7 +103,7 @@ type DeliveryRow = {
   hook_id: string;
   event_ids: number[];
   url_host: string;
-  status: "success" | "failure";
+  status: "success" | "failure" | "skipped";
   http_status: number | null;
   error: string | null;
   duration_ms: number | null;
@@ -161,6 +194,171 @@ function parseHeadersText(text: string): Record<string, string> {
   return out;
 }
 
+function stableFilterJson(f: EventWebhookFilter | undefined): string {
+  if (!f || Object.keys(f).length === 0) return "";
+  const keys = Object.keys(f).sort();
+  const norm: Record<string, string[]> = {};
+  for (const k of keys) {
+    const v = (f as Record<string, string[] | undefined>)[k];
+    if (!v || v.length === 0) continue;
+    norm[k] = [...v].map((s) => s.toLowerCase()).sort();
+  }
+  return JSON.stringify(norm);
+}
+
+function filtersEqual(a: EventWebhookFilter | undefined, b: EventWebhookFilter | undefined): boolean {
+  return stableFilterJson(a) === stableFilterJson(b);
+}
+
+function pruneFilter(f: EventWebhookFilter | undefined): EventWebhookFilter | undefined {
+  if (!f) return undefined;
+  const out: EventWebhookFilter = {};
+  for (const [k, v] of Object.entries(f)) {
+    if (Array.isArray(v) && v.length > 0) {
+      (out as Record<string, string[]>)[k] = v;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function filterActiveCount(f: EventWebhookFilter | undefined): number {
+  if (!f) return 0;
+  let n = 0;
+  for (const v of Object.values(f)) {
+    if (Array.isArray(v) && v.length > 0) n += 1;
+  }
+  return n;
+}
+
+function patchFilter(
+  hook: EventWebhookHook,
+  patch: Partial<EventWebhookFilter>,
+): EventWebhookHook {
+  const next = pruneFilter({ ...(hook.filter ?? {}), ...patch });
+  if (!next) {
+    const { filter: _drop, ...rest } = hook;
+    return rest;
+  }
+  return { ...hook, filter: next };
+}
+
+const KIND_OPTIONS = ["idea", "edits", "notes"] as const;
+
+/** Icons match ProposalKindBadge; chart tones keep kinds visually distinct. */
+const KIND_CHIP_META: Record<
+  (typeof KIND_OPTIONS)[number],
+  {
+    label: string;
+    icon: ComponentType<{ className?: string }>;
+    idle: string;
+    selected: string;
+    iconClass: string;
+  }
+> = {
+  idea: {
+    label: "idea",
+    icon: IconBulb,
+    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
+    selected: "border-chart-5/40 bg-chart-5/15 text-foreground",
+    iconClass: "text-chart-5",
+  },
+  edits: {
+    label: "edits",
+    icon: IconPencil,
+    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
+    selected: "border-chart-1/40 bg-chart-1/15 text-foreground",
+    iconClass: "text-chart-1",
+  },
+  notes: {
+    label: "notes",
+    icon: IconNote,
+    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
+    selected: "border-chart-3/40 bg-chart-3/15 text-foreground",
+    iconClass: "text-chart-3",
+  },
+};
+
+const ACTOR_TYPE_OPTIONS = ["ui", "mcp", "system"] as const;
+
+function KindChips({
+  values,
+  onChange,
+  testId,
+}: {
+  values: string[];
+  onChange: (v: Array<"idea" | "edits" | "notes">) => void;
+  testId?: string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5" data-testid={testId}>
+      {KIND_OPTIONS.map((k) => {
+        const on = values.includes(k);
+        const meta = KIND_CHIP_META[k];
+        const KindIcon = meta.icon;
+        return (
+          <button
+            key={k}
+            type="button"
+            aria-pressed={on}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs transition-colors",
+              on ? meta.selected : meta.idle,
+            )}
+            onClick={() => {
+              onChange(
+                on
+                  ? (values.filter((x) => x !== k) as Array<"idea" | "edits" | "notes">)
+                  : ([...values, k] as Array<"idea" | "edits" | "notes">),
+              );
+            }}
+          >
+            {on ? <IconCheck className={cn("h-3 w-3 shrink-0", meta.iconClass)} aria-hidden /> : null}
+            <KindIcon className={cn("h-3 w-3 shrink-0", meta.iconClass)} aria-hidden />
+            {meta.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ActorTypeChips({
+  values,
+  onChange,
+  testId,
+}: {
+  values: string[];
+  onChange: (v: Array<"ui" | "mcp" | "system">) => void;
+  testId?: string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5" data-testid={testId}>
+      {ACTOR_TYPE_OPTIONS.map((k) => {
+        const on = values.includes(k);
+        return (
+          <Button
+            key={k}
+            type="button"
+            size="sm"
+            variant={on ? "default" : "outline"}
+            className="h-7 text-xs"
+            aria-pressed={on}
+            onClick={() => {
+              onChange(
+                on
+                  ? (values.filter((x) => x !== k) as Array<"ui" | "mcp" | "system">)
+                  : ([...values, k] as Array<"ui" | "mcp" | "system">),
+              );
+            }}
+          >
+            {k}
+          </Button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Matches server test body shape (triggered_at refreshes at send time). */
 function buildTestPayloadPreview(opts: {
   site: string;
@@ -219,6 +417,7 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
   const queryClient = useQueryClient();
   const [advanced, setAdvanced] = useState(false);
   const [editing, setEditing] = useState<{
+    mode: "settings" | "filters";
     eventType: string;
     hook: EventWebhookHook;
     headersText: string;
@@ -230,6 +429,8 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
     hook: EventWebhookHook;
   } | null>(null);
   const [testHeadersOpen, setTestHeadersOpen] = useState(false);
+  /** Prevent filters Dialog from closing while a nested combobox popover is open. */
+  const [nestedComboboxOpen, setNestedComboboxOpen] = useState(false);
 
   const summaryQuery = useQuery({
     queryKey: ["/api/admin/event-webhooks"],
@@ -254,10 +455,119 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
   const allowlist = summaryQuery.data?.allowlist ?? [];
   const config = summaryQuery.data?.config ?? { version: 1 as const, subscriptions: {} };
   const pending = summaryQuery.data?.pending ?? {};
+  const siteKey = summaryQuery.data?.site ?? "";
   const eventTypes = useMemo(() => [...allowlist], [allowlist]);
+  const filtersDialogOpen = editing?.mode === "filters";
+
+  const proposersQuery = useQuery({
+    queryKey: ["/api/admin/proposals/proposers", 30],
+    queryFn: async () => {
+      const res = await apiFetch("/api/admin/proposals/proposers?days=30");
+      if (!res.ok) throw new Error("Failed to load proposers");
+      const data = (await res.json()) as { proposers?: string[] };
+      return Array.isArray(data.proposers) ? data.proposers : [];
+    },
+    enabled: filtersDialogOpen,
+    staleTime: 30_000,
+  });
+
+  const staffQuery = useQuery({
+    queryKey: ["/api/staff"],
+    queryFn: async () => {
+      const token = getDebugToken();
+      const headers: Record<string, string> = { ...getSessionHeaders() };
+      if (token) {
+        headers.Authorization = `Token ${token}`;
+        headers["X-Debug-Token"] = token;
+      }
+      const res = await fetch("/api/staff", { headers });
+      if (!res.ok) throw new Error("Failed to load staff");
+      const data = await res.json();
+      return Array.isArray(data?.staff) ? (data.staff as StaffDirectoryEntry[]) : [];
+    },
+    enabled: filtersDialogOpen,
+    staleTime: 60_000,
+  });
+
+  const eventAuthorsQuery = useQuery({
+    queryKey: ["/api/admin/events/authors", siteKey],
+    queryFn: async () => {
+      const res = await apiFetch(
+        `/api/admin/events/authors?site=${encodeURIComponent(siteKey)}`,
+      );
+      if (!res.ok) throw new Error("Failed to load authors");
+      const data = (await res.json()) as { authors?: string[] };
+      return Array.isArray(data.authors) ? data.authors : [];
+    },
+    enabled: filtersDialogOpen && Boolean(siteKey),
+    staleTime: 30_000,
+  });
+
+  const contentTypesQuery = useQuery({
+    queryKey: ["/api/content-types"],
+    queryFn: async () => {
+      const res = await fetch("/api/content-types");
+      if (!res.ok) return [] as Array<{ name: string; label: string }>;
+      return res.json() as Promise<Array<{ name: string; label: string }>>;
+    },
+    enabled: filtersDialogOpen,
+    staleTime: 60_000,
+  });
+
+  const localesQuery = useQuery({
+    queryKey: ["/api/settings/locales"],
+    queryFn: async () => {
+      const res = await fetch("/api/settings/locales");
+      if (!res.ok) {
+        return { supported_locales: [{ code: "en", label: "English" }] };
+      }
+      return res.json() as Promise<{
+        supported_locales?: Array<{ code: string; label: string }>;
+      }>;
+    },
+    enabled: filtersDialogOpen,
+    staleTime: 60_000,
+  });
+
+  const proposerOptions = useMemo(
+    () => (proposersQuery.data ?? []).map((u) => ({ value: u })),
+    [proposersQuery.data],
+  );
+
+  const eventAuthorOptions = useMemo(() => {
+    const staff = staffQuery.data ?? [];
+    const logAuthors = eventAuthorsQuery.data ?? [];
+    const staffSet = new Set(staff.map((s) => s.username));
+    const opts = staff.map((s) => ({
+      value: s.username,
+      label: s.displayName !== s.username ? s.displayName : undefined,
+    }));
+    for (const a of logAuthors) {
+      if (!staffSet.has(a)) opts.push({ value: a, label: undefined });
+    }
+    return opts;
+  }, [staffQuery.data, eventAuthorsQuery.data]);
+
+  const contentTypeOptions = useMemo(
+    () =>
+      (contentTypesQuery.data ?? []).map((ct) => ({
+        value: ct.name,
+        label: ct.label && ct.label !== ct.name ? ct.label : undefined,
+      })),
+    [contentTypesQuery.data],
+  );
+
+  const localeOptions = useMemo(
+    () =>
+      (localesQuery.data?.supported_locales ?? []).map((l) => ({
+        value: l.code,
+        label: l.label && l.label !== l.code ? l.label : undefined,
+      })),
+    [localesQuery.data],
+  );
 
   const lastLiveByHook = useMemo(() => {
-    const map = new Map<string, { created_at: number; status: "success" | "failure" }>();
+    const map = new Map<string, { created_at: number; status: "success" | "failure" | "skipped" }>();
     for (const d of deliveriesQuery.data?.deliveries ?? []) {
       if (d.source !== "live") continue;
       const key = bufferKey(d.event_type, d.hook_id);
@@ -362,12 +672,50 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
     !editing.isNew &&
     !!previousHook &&
     pendingForEdit > 0 &&
-    (editing.hook.url.trim() !== (previousHook.url || "") ||
-      editing.hook.enabled === false ||
-      (previousHook.enabled && !editing.hook.enabled));
+    (editing.mode === "settings"
+      ? editing.hook.url.trim() !== (previousHook.url || "") ||
+        editing.hook.enabled === false ||
+        (previousHook.enabled && !editing.hook.enabled)
+      : !filtersEqual(editing.hook.filter, previousHook.filter));
 
   const requestSave = () => {
     if (!editing) return;
+
+    if (editing.mode === "filters") {
+      if (editing.isNew || !previousHook) {
+        toast({ title: "Save the hook first", variant: "destructive" });
+        return;
+      }
+      const filter = pruneFilter(editing.hook.filter);
+      const hook: EventWebhookHook = {
+        ...previousHook,
+        ...(filter ? { filter } : {}),
+      };
+      if (!filter) {
+        delete hook.filter;
+      }
+      let next: EventWebhookConfig;
+      try {
+        next = buildNextConfig(editing.eventType, hook, false);
+      } catch (err) {
+        toast({
+          title: "Invalid hook",
+          description: err instanceof Error ? err.message : String(err),
+          variant: "destructive",
+        });
+        return;
+      }
+      const apply = async () => {
+        await saveMutation.mutateAsync(next);
+      };
+      if (willDropOnSave) {
+        setDropConfirm({ kind: "save", count: pendingForEdit, apply });
+        return;
+      }
+      void apply();
+      return;
+    }
+
     const hook: EventWebhookHook = {
       ...editing.hook,
       id: slugifyHookId(editing.hook.id).replace(/^-+|-+$/g, ""),
@@ -385,7 +733,18 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
         Math.max(1, Math.floor(Number(editing.hook.max_events_per_call) || 1)),
       ),
       headers: parseHeadersText(editing.headersText),
+      // Preserve filters when editing settings; new hooks start with none.
+      ...(editing.isNew
+        ? {}
+        : previousHook?.filter
+          ? { filter: previousHook.filter }
+          : {}),
     };
+    if (editing.isNew) {
+      delete hook.filter;
+    } else if (!previousHook?.filter) {
+      delete hook.filter;
+    }
     if (!hook.id) {
       toast({ title: "Hook id required", variant: "destructive" });
       return;
@@ -526,6 +885,7 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                             size="sm"
                             onClick={() =>
                               setEditing({
+                                mode: "settings",
                                 eventType,
                                 hook: emptyHook(`hook-${hooks.length + 1}`),
                                 headersText: "",
@@ -622,15 +982,45 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                                       type="button"
                                       variant="outline"
                                       size="sm"
-                                      aria-label="Edit hook"
+                                      aria-label="Edit filters"
+                                      title="Filters"
                                       onClick={() =>
                                         setEditing({
+                                          mode: "filters",
                                           eventType,
                                           hook: { ...hook },
                                           headersText: headersToText(hook.headers),
                                           isNew: false,
                                         })
                                       }
+                                      data-testid={`button-edit-hook-filters-${eventType}-${hook.id}`}
+                                    >
+                                      <IconFilter className="h-3.5 w-3.5" />
+                                      {filterActiveCount(hook.filter) > 0 ? (
+                                        <Badge
+                                          variant="secondary"
+                                          className="ml-1 h-5 min-w-5 px-1 text-[10px]"
+                                        >
+                                          {filterActiveCount(hook.filter)}
+                                        </Badge>
+                                      ) : null}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      aria-label="Edit hook settings"
+                                      title="Settings"
+                                      onClick={() =>
+                                        setEditing({
+                                          mode: "settings",
+                                          eventType,
+                                          hook: { ...hook },
+                                          headersText: headersToText(hook.headers),
+                                          isNew: false,
+                                        })
+                                      }
+                                      data-testid={`button-edit-hook-settings-${eventType}-${hook.id}`}
                                     >
                                       <IconPencil className="h-3.5 w-3.5" />
                                     </Button>
@@ -655,16 +1045,16 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
       </div>
 
       <Dialog
-        open={!!editing}
+        open={editing?.mode === "settings"}
         onOpenChange={(open) => {
           if (!open) setEditing(null);
         }}
       >
         <DialogContent
-          className="sm:max-w-lg bg-background text-foreground"
+          className="sm:max-w-lg max-h-[90vh] overflow-y-auto bg-background text-foreground"
           data-testid="form-event-webhook-edit"
         >
-          {editing ? (
+          {editing?.mode === "settings" ? (
             <>
               <DialogHeader>
                 <DialogTitle>
@@ -860,6 +1250,360 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
       </Dialog>
 
       <Dialog
+        modal={false}
+        open={editing?.mode === "filters"}
+        onOpenChange={(open) => {
+          if (!open && nestedComboboxOpen) return;
+          if (!open) {
+            setEditing(null);
+            setNestedComboboxOpen(false);
+          }
+        }}
+      >
+        <DialogContent
+          forceOverlay
+          className="sm:max-w-lg max-h-[90vh] overflow-y-auto bg-background text-foreground"
+          data-testid="form-event-webhook-filters"
+          onPointerDownOutside={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest("[data-radix-popper-content-wrapper]")) {
+              e.preventDefault();
+            }
+          }}
+          onFocusOutside={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest("[data-radix-popper-content-wrapper]")) {
+              e.preventDefault();
+            }
+          }}
+          onInteractOutside={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest("[data-radix-popper-content-wrapper]")) {
+              e.preventDefault();
+            }
+          }}
+        >
+          {editing?.mode === "filters" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Hook filters</DialogTitle>
+                <DialogDescription>
+                  Only fire when every filled condition matches. Leave blank for any. Hook{" "}
+                  <code className="font-mono text-xs">{editing.hook.id}</code> ·{" "}
+                  <code className="font-mono text-xs">{editing.eventType}</code>.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 py-1">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Proposal writer</Label>
+                    <SearchableMultiCombobox
+                      values={editing.hook.filter?.proposal_authors ?? []}
+                      onChange={(proposal_authors) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { proposal_authors }),
+                        })
+                      }
+                      options={proposerOptions}
+                      isLoading={proposersQuery.isLoading}
+                      placeholder="Any writer"
+                      searchPlaceholder="Search proposers…"
+                      emptyMessage="No proposers in the last 30 days"
+                      onOpenChange={setNestedComboboxOpen}
+                      testId="filter-proposal-authors"
+                      mono
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Writer model</Label>
+                    <TagInput
+                      values={editing.hook.filter?.proposal_models ?? []}
+                      suggestions={[]}
+                      onChange={(proposal_models) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { proposal_models }),
+                        })
+                      }
+                      placeholder="e.g. grok*"
+                      testId="input-filter-proposal-models"
+                      emptyMessage="Model id or prefix ending in *"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Match the model that wrote the proposal. Example:{" "}
+                      <code className="font-mono text-[11px]">grok*</code> matches{" "}
+                      <code className="font-mono text-[11px]">grok-4</code> and{" "}
+                      <code className="font-mono text-[11px]">grok-4.1</code>.{" "}
+                      <Popover modal={false} onOpenChange={setNestedComboboxOpen}>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="underline underline-offset-2 hover:text-foreground"
+                            data-testid="button-writer-model-more-examples"
+                          >
+                            More examples
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          className="z-[10001] w-80 space-y-2 p-3 text-xs text-muted-foreground"
+                          sideOffset={6}
+                          onOpenAutoFocus={(e) => e.preventDefault()}
+                          data-testid="popover-writer-model-examples"
+                        >
+                          <p className="font-medium text-foreground">Writer model matching</p>
+                          <ul className="space-y-2 list-none">
+                            <li>
+                              <code className="font-mono text-[11px] text-foreground">grok*</code>
+                              <span className="block mt-0.5">
+                                Any model id that starts with <code className="font-mono">grok</code>{" "}
+                                (family match — usual pick for “wake this swarm”).
+                              </span>
+                            </li>
+                            <li>
+                              <code className="font-mono text-[11px] text-foreground">
+                                anthropic/claude-sonnet-4*
+                              </code>
+                              <span className="block mt-0.5">
+                                Prefix of a provider-scoped id; catches version suffixes after the
+                                star.
+                              </span>
+                            </li>
+                            <li>
+                              <code className="font-mono text-[11px] text-foreground">
+                                gpt-5.6-sol-medium
+                              </code>
+                              <span className="block mt-0.5">
+                                Exact id only (case-insensitive). Use when one specific model must
+                                match — not siblings like{" "}
+                                <code className="font-mono">gpt-5.6-sol-high</code>.
+                              </span>
+                            </li>
+                            <li>
+                              <code className="font-mono text-[11px] text-foreground">claude*</code>
+                              {" + "}
+                              <code className="font-mono text-[11px] text-foreground">gpt*</code>
+                              <span className="block mt-0.5">
+                                Add several tags: a proposal matches if its model hits{" "}
+                                <span className="font-medium text-foreground">any</span> of them.
+                              </span>
+                            </li>
+                            <li>
+                              <span className="text-foreground font-medium">Empty</span>
+                              <span className="block mt-0.5">
+                                No model gate — any writer model (or missing model) is allowed.
+                              </span>
+                            </li>
+                          </ul>
+                          <p>
+                            Tip: prefer a short prefix with{" "}
+                            <code className="font-mono">*</code> over a brittle full string; model
+                            labels drift between providers.
+                          </p>
+                        </PopoverContent>
+                      </Popover>
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Who triggered this event</Label>
+                    <SearchableMultiCombobox
+                      values={editing.hook.filter?.event_authors ?? []}
+                      onChange={(event_authors) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { event_authors }),
+                        })
+                      }
+                      options={eventAuthorOptions}
+                      isLoading={staffQuery.isLoading || eventAuthorsQuery.isLoading}
+                      placeholder="Anyone"
+                      searchPlaceholder="Search authors…"
+                      emptyMessage="No authors found"
+                      onOpenChange={setNestedComboboxOpen}
+                      testId="filter-event-authors"
+                      mono
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Kind</Label>
+                    <KindChips
+                      values={editing.hook.filter?.kinds ?? []}
+                      onChange={(kinds) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { kinds }),
+                        })
+                      }
+                      testId="chips-filter-kinds"
+                    />
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Content type</Label>
+                    <SearchableMultiCombobox
+                      values={editing.hook.filter?.content_types ?? []}
+                      onChange={(content_types) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { content_types }),
+                        })
+                      }
+                      options={contentTypeOptions}
+                      isLoading={contentTypesQuery.isLoading}
+                      placeholder="Any content type"
+                      searchPlaceholder="Search content types…"
+                      emptyMessage="No content types"
+                      onOpenChange={setNestedComboboxOpen}
+                      testId="filter-content-types"
+                      mono
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Locale</Label>
+                    <SearchableMultiCombobox
+                      values={editing.hook.filter?.locales ?? []}
+                      onChange={(locales) =>
+                        setEditing({
+                          ...editing,
+                          hook: patchFilter(editing.hook, { locales }),
+                        })
+                      }
+                      options={localeOptions}
+                      isLoading={localesQuery.isLoading}
+                      placeholder="Any locale"
+                      searchPlaceholder="Search locales…"
+                      emptyMessage="No locales"
+                      onOpenChange={setNestedComboboxOpen}
+                      testId="filter-locales"
+                      mono
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Event source</Label>
+                  <ActorTypeChips
+                    values={editing.hook.filter?.event_actor_types ?? []}
+                    onChange={(event_actor_types) =>
+                      setEditing({
+                        ...editing,
+                        hook: patchFilter(editing.hook, { event_actor_types }),
+                      })
+                    }
+                    testId="chips-filter-event-actor-types"
+                  />
+                </div>
+                <Collapsible>
+                  <CollapsibleTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" className="h-7 px-0 text-xs">
+                      <IconChevronDown className="h-3.5 w-3.5 mr-1" />
+                      Exclude lists
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-3 pt-2">
+                    <div className="space-y-1.5">
+                      <Label>Exclude proposal writers</Label>
+                      <SearchableMultiCombobox
+                        values={editing.hook.filter?.exclude_proposal_authors ?? []}
+                        onChange={(exclude_proposal_authors) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_proposal_authors }),
+                          })
+                        }
+                        options={proposerOptions}
+                        isLoading={proposersQuery.isLoading}
+                        placeholder="None excluded"
+                        searchPlaceholder="Search proposers…"
+                        onOpenChange={setNestedComboboxOpen}
+                        testId="filter-exclude-proposal-authors"
+                        mono
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Exclude kinds</Label>
+                      <KindChips
+                        values={editing.hook.filter?.exclude_kinds ?? []}
+                        onChange={(exclude_kinds) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_kinds }),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Exclude content types</Label>
+                      <SearchableMultiCombobox
+                        values={editing.hook.filter?.exclude_content_types ?? []}
+                        onChange={(exclude_content_types) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_content_types }),
+                          })
+                        }
+                        options={contentTypeOptions}
+                        isLoading={contentTypesQuery.isLoading}
+                        placeholder="None excluded"
+                        searchPlaceholder="Search content types…"
+                        onOpenChange={setNestedComboboxOpen}
+                        testId="filter-exclude-content-types"
+                        mono
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Exclude locales</Label>
+                      <SearchableMultiCombobox
+                        values={editing.hook.filter?.exclude_locales ?? []}
+                        onChange={(exclude_locales) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_locales }),
+                          })
+                        }
+                        options={localeOptions}
+                        isLoading={localesQuery.isLoading}
+                        placeholder="None excluded"
+                        searchPlaceholder="Search locales…"
+                        onOpenChange={setNestedComboboxOpen}
+                        testId="filter-exclude-locales"
+                        mono
+                      />
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+                {willDropOnSave ? (
+                  <p className="text-xs text-amber-500">
+                    Saving will drop {pendingForEdit} waiting event(s) for this hook. They will not
+                    be sent.
+                  </p>
+                ) : null}
+              </div>
+              <DialogFooter className="flex-wrap gap-2">
+                <Button type="button" variant="outline" onClick={() => setEditing(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={requestSave}
+                  disabled={saveMutation.isPending}
+                  data-testid="button-save-hook-filters"
+                >
+                  {saveMutation.isPending ? (
+                    <IconLoader2 className="h-4 w-4 animate-spin mr-1.5" />
+                  ) : null}
+                  Save filters
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={!!testConfirm}
         onOpenChange={(open) => {
           if (!open && !testMutation.isPending) {
@@ -878,8 +1622,8 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                 <DialogTitle>Send test webhook?</DialogTitle>
                 <DialogDescription>
                   We will POST a sample JSON body to this hook&apos;s URL right away. It is logged
-                  as Test in the 48-hour delivery history. Waiting events and the live throttle
-                  buffer are not changed.
+                  as Test in the 48-hour delivery history. Waiting events, the live throttle
+                  buffer, and hook filters are not applied (filters still apply to live traffic).
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3 text-sm">
@@ -979,8 +1723,9 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Drop waiting events?</AlertDialogTitle>
             <AlertDialogDescription>
-              Turning this off or changing the URL will drop {dropConfirm?.count ?? 0} waiting
-              event(s). They will not be sent.
+              {editing?.mode === "filters"
+                ? `Changing filters will drop ${dropConfirm?.count ?? 0} waiting event(s). They will not be sent.`
+                : `Turning this off or changing the URL will drop ${dropConfirm?.count ?? 0} waiting event(s). They will not be sent.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

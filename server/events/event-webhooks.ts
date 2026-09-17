@@ -53,7 +53,72 @@ const WEBHOOK_TIMEOUT_MS = 8_000;
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export type EventWebhookDeliverySource = "live" | "test" | "retry";
-export type EventWebhookDeliveryStatus = "success" | "failure";
+export type EventWebhookDeliveryStatus = "success" | "failure" | "skipped";
+
+export const EVENT_WEBHOOK_FILTER_ACTOR_TYPES = ["ui", "mcp", "system"] as const;
+export const EVENT_WEBHOOK_FILTER_KINDS = ["idea", "edits", "notes"] as const;
+
+export type EventWebhookFilterActorType = (typeof EVENT_WEBHOOK_FILTER_ACTOR_TYPES)[number];
+export type EventWebhookFilterKind = (typeof EVENT_WEBHOOK_FILTER_KINDS)[number];
+
+/** Optional include/exclude gates on a hook. Empty/omitted field = no restriction. */
+export type EventWebhookFilter = {
+  event_authors?: string[];
+  exclude_event_authors?: string[];
+  event_actor_types?: EventWebhookFilterActorType[];
+  event_models?: string[];
+  exclude_event_models?: string[];
+  event_clients?: string[];
+  exclude_event_clients?: string[];
+  proposal_authors?: string[];
+  exclude_proposal_authors?: string[];
+  proposal_models?: string[];
+  exclude_proposal_models?: string[];
+  proposal_actor_types?: EventWebhookFilterActorType[];
+  proposal_roles?: string[];
+  kinds?: EventWebhookFilterKind[];
+  exclude_kinds?: EventWebhookFilterKind[];
+  content_types?: string[];
+  exclude_content_types?: string[];
+  locales?: string[];
+  exclude_locales?: string[];
+};
+
+const FILTER_STRING_LIST_KEYS = [
+  "event_authors",
+  "exclude_event_authors",
+  "event_models",
+  "exclude_event_models",
+  "event_clients",
+  "exclude_event_clients",
+  "proposal_authors",
+  "exclude_proposal_authors",
+  "proposal_models",
+  "exclude_proposal_models",
+  "proposal_roles",
+  "content_types",
+  "exclude_content_types",
+  "locales",
+  "exclude_locales",
+] as const;
+
+const FILTER_ACTOR_TYPE_KEYS = ["event_actor_types", "proposal_actor_types"] as const;
+const FILTER_KIND_KEYS = ["kinds", "exclude_kinds"] as const;
+
+const ALL_FILTER_KEYS = new Set<string>([
+  ...FILTER_STRING_LIST_KEYS,
+  ...FILTER_ACTOR_TYPE_KEYS,
+  ...FILTER_KIND_KEYS,
+]);
+
+export type EventWebhookProposalSummary = {
+  id: string;
+  kind: string;
+  proposer_username: string;
+  proposer_actor: Record<string, unknown>;
+  content_types: string[];
+  locales: string[];
+};
 
 export type EventWebhookHook = {
   id: string;
@@ -64,7 +129,13 @@ export type EventWebhookHook = {
   max_wait_ms: number;
   max_events_per_call: number;
   headers?: Record<string, string>;
+  filter?: EventWebhookFilter;
 };
+
+export type HookMatchResult =
+  | { ok: true; proposal?: EventWebhookProposalSummary }
+  | { ok: false; reason: "no_match" }
+  | { ok: false; reason: "proposal_unresolved" };
 
 export type EventWebhookConfig = {
   version: 1;
@@ -162,6 +233,338 @@ function emptyConfig(): EventWebhookConfig {
   return { version: 1, subscriptions: {} };
 }
 
+function normalizeStringList(raw: unknown, field: string, hookId: string, eventType: string): string[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) {
+    throw new Error(`Hook "${hookId}" under ${eventType}: filter.${field} must be a list`);
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "string") {
+      throw new Error(`Hook "${hookId}" under ${eventType}: filter.${field} values must be strings`);
+    }
+    const t = item.trim();
+    if (!t) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+function parseFilter(
+  raw: unknown,
+  hookId: string,
+  eventType: string,
+): EventWebhookFilter | undefined {
+  if (raw == null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Hook "${hookId}" under ${eventType}: filter must be a mapping`);
+  }
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!ALL_FILTER_KEYS.has(key)) {
+      throw new Error(`Hook "${hookId}" under ${eventType}: unknown filter key "${key}"`);
+    }
+  }
+  const filter: EventWebhookFilter = {};
+
+  for (const key of FILTER_STRING_LIST_KEYS) {
+    if (obj[key] === undefined) continue;
+    const list = normalizeStringList(obj[key], key, hookId, eventType);
+    if (list.length > 0) (filter as Record<string, string[]>)[key] = list;
+  }
+
+  for (const key of FILTER_ACTOR_TYPE_KEYS) {
+    if (obj[key] === undefined) continue;
+    const list = normalizeStringList(obj[key], key, hookId, eventType);
+    const allowed = new Set<string>(EVENT_WEBHOOK_FILTER_ACTOR_TYPES);
+    for (const v of list) {
+      if (!allowed.has(v.toLowerCase())) {
+        throw new Error(
+          `Hook "${hookId}" under ${eventType}: filter.${key} invalid value "${v}" (ui|mcp|system)`,
+        );
+      }
+    }
+    const normalized = [
+      ...new Set(list.map((v) => v.toLowerCase() as EventWebhookFilterActorType)),
+    ];
+    if (normalized.length > 0) (filter as Record<string, string[]>)[key] = normalized;
+  }
+
+  for (const key of FILTER_KIND_KEYS) {
+    if (obj[key] === undefined) continue;
+    const list = normalizeStringList(obj[key], key, hookId, eventType);
+    const allowed = new Set<string>(EVENT_WEBHOOK_FILTER_KINDS);
+    for (const v of list) {
+      if (!allowed.has(v.toLowerCase())) {
+        throw new Error(
+          `Hook "${hookId}" under ${eventType}: filter.${key} invalid value "${v}" (idea|edits|notes)`,
+        );
+      }
+    }
+    const normalized = [
+      ...new Set(list.map((v) => v.toLowerCase() as EventWebhookFilterKind)),
+    ];
+    if (normalized.length > 0) (filter as Record<string, string[]>)[key] = normalized;
+  }
+
+  return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+/** Stable JSON compare for filter objects (order-insensitive list values via sorted copy). */
+export function filtersEqual(
+  a: EventWebhookFilter | undefined,
+  b: EventWebhookFilter | undefined,
+): boolean {
+  return stableFilterJson(a) === stableFilterJson(b);
+}
+
+function stableFilterJson(f: EventWebhookFilter | undefined): string {
+  if (!f || Object.keys(f).length === 0) return "";
+  const keys = Object.keys(f).sort();
+  const norm: Record<string, string[]> = {};
+  for (const k of keys) {
+    const v = (f as Record<string, string[] | undefined>)[k];
+    if (!v || v.length === 0) continue;
+    norm[k] = [...v].map((s) => s.toLowerCase()).sort();
+  }
+  return JSON.stringify(norm);
+}
+
+export function filterNeedsProposal(filter: EventWebhookFilter | undefined): boolean {
+  if (!filter) return false;
+  return Boolean(
+    filter.proposal_authors?.length ||
+      filter.exclude_proposal_authors?.length ||
+      filter.proposal_models?.length ||
+      filter.exclude_proposal_models?.length ||
+      filter.proposal_actor_types?.length ||
+      filter.proposal_roles?.length ||
+      filter.kinds?.length ||
+      filter.exclude_kinds?.length ||
+      filter.content_types?.length ||
+      filter.exclude_content_types?.length ||
+      filter.locales?.length ||
+      filter.exclude_locales?.length,
+  );
+}
+
+/** Case-insensitive exact, or prefix when needle ends with `*`. */
+export function matchFilterString(haystack: string | null | undefined, needles: string[]): boolean {
+  if (!haystack) return false;
+  const h = haystack.toLowerCase();
+  for (const n of needles) {
+    const needle = n.toLowerCase();
+    if (needle.endsWith("*")) {
+      const prefix = needle.slice(0, -1);
+      if (prefix.length === 0 || h.startsWith(prefix)) return true;
+    } else if (h === needle) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function includeListMatches(
+  value: string | null | undefined,
+  list: string[] | undefined,
+): boolean {
+  if (!list || list.length === 0) return true;
+  if (!value) return false;
+  return matchFilterString(value, list);
+}
+
+function excludeListHits(value: string | null | undefined, list: string[] | undefined): boolean {
+  if (!list || list.length === 0) return false;
+  if (!value) return false;
+  return matchFilterString(value, list);
+}
+
+function anyIncludeMatches(values: string[], list: string[] | undefined): boolean {
+  if (!list || list.length === 0) return true;
+  return values.some((v) => matchFilterString(v, list));
+}
+
+function anyExcludeHits(values: string[], list: string[] | undefined): boolean {
+  if (!list || list.length === 0) return false;
+  return values.some((v) => matchFilterString(v, list));
+}
+
+function entryKeyContentType(entryKey: string): string {
+  const i = entryKey.indexOf("/");
+  return i > 0 ? entryKey.slice(0, i) : entryKey;
+}
+
+/** Slim proposal load for filter match + delivery summary (no circular import). */
+export function getProposalForWebhookFilter(
+  site: string,
+  proposalId: string,
+): EventWebhookProposalSummary | null {
+  try {
+    ensureSchema(site);
+    const db = getSiteSqlite(site);
+    const row = db
+      .prepare(
+        `SELECT id, kind, proposer_username, proposer_actor_json
+         FROM content_proposals WHERE id = ? AND site = ?`,
+      )
+      .get(proposalId, site) as
+      | {
+          id: string;
+          kind: string;
+          proposer_username: string;
+          proposer_actor_json: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    let proposer_actor: Record<string, unknown> = {};
+    try {
+      proposer_actor = row.proposer_actor_json
+        ? (JSON.parse(row.proposer_actor_json) as Record<string, unknown>)
+        : {};
+    } catch {
+      proposer_actor = {};
+    }
+    const entryRows = db
+      .prepare(
+        `SELECT entry_key, locale FROM content_proposal_entries WHERE proposal_id = ? ORDER BY id`,
+      )
+      .all(proposalId) as Array<{ entry_key: string; locale: string }>;
+    const content_types: string[] = [];
+    const locales: string[] = [];
+    const seenCt = new Set<string>();
+    const seenLoc = new Set<string>();
+    for (const e of entryRows) {
+      const ct = entryKeyContentType(e.entry_key);
+      if (ct && !seenCt.has(ct.toLowerCase())) {
+        seenCt.add(ct.toLowerCase());
+        content_types.push(ct);
+      }
+      const loc = (e.locale || "").trim();
+      if (loc && !seenLoc.has(loc.toLowerCase())) {
+        seenLoc.add(loc.toLowerCase());
+        locales.push(loc);
+      }
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      proposer_username: row.proposer_username,
+      proposer_actor,
+      content_types,
+      locales,
+    };
+  } catch (err) {
+    log.warn({ err, site, proposalId }, "[EventWebhooks] proposal load for filter failed");
+    return null;
+  }
+}
+
+function actorField(
+  actor: Record<string, unknown> | undefined,
+  key: "type" | "model" | "client" | "role",
+): string | undefined {
+  if (!actor || typeof actor !== "object") return undefined;
+  const v = actor[key];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+export function hookMatchesEvent(
+  event: ContentEvent,
+  hook: EventWebhookHook,
+  proposal: EventWebhookProposalSummary | null | undefined,
+  proposalLoaded: boolean,
+): HookMatchResult {
+  const filter = hook.filter;
+  if (!filter || Object.keys(filter).length === 0) {
+    return { ok: true, ...(proposal ? { proposal } : {}) };
+  }
+
+  const attr = event.attribution?.[0];
+  const eventAuthor = attr?.author?.trim() || undefined;
+  const eventActor = attr?.actor as Record<string, unknown> | undefined;
+  const eventActorType = actorField(eventActor, "type");
+  const eventModel = actorField(eventActor, "model");
+  const eventClient = actorField(eventActor, "client");
+
+  if (!includeListMatches(eventAuthor, filter.event_authors)) return { ok: false, reason: "no_match" };
+  if (excludeListHits(eventAuthor, filter.exclude_event_authors)) {
+    return { ok: false, reason: "no_match" };
+  }
+  if (filter.event_actor_types?.length) {
+    if (!eventActorType || !filter.event_actor_types.includes(eventActorType as EventWebhookFilterActorType)) {
+      return { ok: false, reason: "no_match" };
+    }
+  }
+  if (!includeListMatches(eventModel, filter.event_models)) return { ok: false, reason: "no_match" };
+  if (excludeListHits(eventModel, filter.exclude_event_models)) {
+    return { ok: false, reason: "no_match" };
+  }
+  if (!includeListMatches(eventClient, filter.event_clients)) return { ok: false, reason: "no_match" };
+  if (excludeListHits(eventClient, filter.exclude_event_clients)) {
+    return { ok: false, reason: "no_match" };
+  }
+
+  if (filterNeedsProposal(filter)) {
+    if (!proposalLoaded || !proposal) {
+      return { ok: false, reason: "proposal_unresolved" };
+    }
+    if (!includeListMatches(proposal.proposer_username, filter.proposal_authors)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (excludeListHits(proposal.proposer_username, filter.exclude_proposal_authors)) {
+      return { ok: false, reason: "no_match" };
+    }
+    const pModel = actorField(proposal.proposer_actor, "model");
+    const pType = actorField(proposal.proposer_actor, "type");
+    const pRole = actorField(proposal.proposer_actor, "role");
+    if (!includeListMatches(pModel, filter.proposal_models)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (excludeListHits(pModel, filter.exclude_proposal_models)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (filter.proposal_actor_types?.length) {
+      if (!pType || !filter.proposal_actor_types.includes(pType as EventWebhookFilterActorType)) {
+        return { ok: false, reason: "no_match" };
+      }
+    }
+    if (!includeListMatches(pRole, filter.proposal_roles)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (filter.kinds?.length) {
+      const k = proposal.kind.toLowerCase();
+      if (!filter.kinds.includes(k as EventWebhookFilterKind)) {
+        return { ok: false, reason: "no_match" };
+      }
+    }
+    if (filter.exclude_kinds?.length) {
+      const k = proposal.kind.toLowerCase();
+      if (filter.exclude_kinds.includes(k as EventWebhookFilterKind)) {
+        return { ok: false, reason: "no_match" };
+      }
+    }
+    if (!anyIncludeMatches(proposal.content_types, filter.content_types)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (anyExcludeHits(proposal.content_types, filter.exclude_content_types)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (!anyIncludeMatches(proposal.locales, filter.locales)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (anyExcludeHits(proposal.locales, filter.exclude_locales)) {
+      return { ok: false, reason: "no_match" };
+    }
+    return { ok: true, proposal };
+  }
+
+  return { ok: true, ...(proposal ? { proposal } : {}) };
+}
+
 function parseHook(raw: unknown, eventType: string, seenIds: Set<string>): EventWebhookHook {
   if (!raw || typeof raw !== "object") {
     throw new Error(`Invalid hook under ${eventType}`);
@@ -227,6 +630,8 @@ function parseHook(raw: unknown, eventType: string, seenIds: Set<string>): Event
     max_events_per_call = EVENT_WEBHOOK_MAX_EVENTS_MAX;
   }
 
+  const filter = parseFilter(h.filter, id, eventType);
+
   return {
     id,
     enabled,
@@ -236,6 +641,7 @@ function parseHook(raw: unknown, eventType: string, seenIds: Set<string>): Event
     max_wait_ms,
     max_events_per_call,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    ...(filter ? { filter } : {}),
   };
 }
 
@@ -597,7 +1003,12 @@ function rowToDelivery(row: Record<string, unknown>): EventWebhookDeliveryRow {
     hook_id: String(row.hook_id),
     event_ids: eventIds,
     url_host: String(row.url_host ?? ""),
-    status: row.status === "success" ? "success" : "failure",
+    status:
+      row.status === "success"
+        ? "success"
+        : row.status === "skipped"
+          ? "skipped"
+          : "failure",
     http_status: typeof row.http_status === "number" ? row.http_status : null,
     error: typeof row.error === "string" ? row.error : null,
     duration_ms: typeof row.duration_ms === "number" ? row.duration_ms : null,
@@ -643,7 +1054,11 @@ export function listDeliveries(
     clauses.push("hook_id = ?");
     params.push(opts.hookId);
   }
-  if (opts?.status === "success" || opts?.status === "failure") {
+  if (
+    opts?.status === "success" ||
+    opts?.status === "failure" ||
+    opts?.status === "skipped"
+  ) {
     clauses.push("status = ?");
     params.push(opts.status);
   }
@@ -755,10 +1170,13 @@ export function getDeliveryById(site: string, id: number): EventWebhookDeliveryR
   return row ? rowToDelivery(row) : null;
 }
 
-export function slimEventForWebhook(event: ContentEvent): Record<string, unknown> {
+export function slimEventForWebhook(
+  event: ContentEvent,
+  proposal?: EventWebhookProposalSummary | null,
+): Record<string, unknown> {
   const proposalId =
     typeof event.payload?.proposal_id === "string" ? event.payload.proposal_id : undefined;
-  return {
+  const out: Record<string, unknown> = {
     id: event.id,
     type: event.type,
     created_at: event.created_at,
@@ -766,6 +1184,17 @@ export function slimEventForWebhook(event: ContentEvent): Record<string, unknown
     payload: proposalId ? { proposal_id: proposalId } : {},
     attribution: event.attribution,
   };
+  if (proposal) {
+    out.proposal = {
+      id: proposal.id,
+      kind: proposal.kind,
+      proposer_username: proposal.proposer_username,
+      proposer_actor: proposal.proposer_actor,
+      content_types: proposal.content_types,
+      locales: proposal.locales,
+    };
+  }
+  return out;
 }
 
 export function buildWebhookBody(opts: {
@@ -778,9 +1207,21 @@ export function buildWebhookBody(opts: {
   const enricher = isEventWebhookAllowlisted(opts.eventType)
     ? enrichEventWebhookPayload[opts.eventType]
     : undefined;
+
+  const proposalCache = new Map<string, EventWebhookProposalSummary | null>();
+  const resolveProposal = (event: ContentEvent): EventWebhookProposalSummary | null => {
+    const proposalId =
+      typeof event.payload?.proposal_id === "string" ? event.payload.proposal_id : undefined;
+    if (!proposalId) return null;
+    if (proposalCache.has(proposalId)) return proposalCache.get(proposalId) ?? null;
+    const loaded = getProposalForWebhookFilter(opts.site, proposalId);
+    proposalCache.set(proposalId, loaded);
+    return loaded;
+  };
+
   const events = enricher
     ? enricher(opts.events, opts.hook)
-    : opts.events.map(slimEventForWebhook);
+    : opts.events.map((ev) => slimEventForWebhook(ev, resolveProposal(ev)));
   return {
     event: "pipeline.events",
     site: opts.site,
@@ -1006,8 +1447,43 @@ export function maybeEnqueueEventWebhook(
     const hooks = listEnabledHooksForType(config, event.type);
     if (hooks.length === 0) return;
 
+    const proposalId =
+      typeof event.payload?.proposal_id === "string" ? event.payload.proposal_id : undefined;
+    const anyNeedsProposal = hooks.some((h) => filterNeedsProposal(h.filter));
+    let proposal: EventWebhookProposalSummary | null = null;
+    let proposalLoaded = false;
+    if (anyNeedsProposal && proposalId) {
+      proposal = getProposalForWebhookFilter(event.site, proposalId);
+      proposalLoaded = true;
+    } else if (anyNeedsProposal && !proposalId) {
+      proposalLoaded = true;
+      proposal = null;
+    }
+
     const now = Date.now();
     for (const hook of hooks) {
+      const match = hookMatchesEvent(
+        event,
+        hook,
+        filterNeedsProposal(hook.filter) ? proposal : null,
+        filterNeedsProposal(hook.filter) ? proposalLoaded : true,
+      );
+      if (!match.ok) {
+        if (match.reason === "proposal_unresolved") {
+          recordDelivery({
+            site: event.site,
+            eventType: event.type,
+            hookId: hook.id,
+            eventIds: [event.id],
+            url: hook.url,
+            status: "skipped",
+            error: "proposal_unresolved",
+            source: "live",
+          });
+        }
+        continue;
+      }
+
       const buf = getHookBuffer(event.site, event.type, hook.id);
       const wasEmpty = buf.pendingEventIds.length === 0;
       const nextIds = [...buf.pendingEventIds, event.id];
@@ -1090,7 +1566,10 @@ export function computeDroppedBuffersOnSave(
     const [eventType, hookId] = key.split("::") as [string, string];
     const next = afterMap.get(key);
     const shouldDrop =
-      !next || next.enabled === false || (prev.url || "") !== (next.url || "");
+      !next ||
+      next.enabled === false ||
+      (prev.url || "") !== (next.url || "") ||
+      !filtersEqual(prev.filter, next?.filter);
     if (!shouldDrop) continue;
     const n = clearHookBuffer(site, eventType, hookId);
     if (n > 0) dropped.push({ key, eventType, hookId, dropped: n });

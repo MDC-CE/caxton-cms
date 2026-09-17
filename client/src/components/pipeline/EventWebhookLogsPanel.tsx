@@ -66,7 +66,7 @@ type DeliveryRow = {
   hook_id: string;
   event_ids: number[];
   url_host: string;
-  status: "success" | "failure";
+  status: "success" | "failure" | "skipped";
   http_status: number | null;
   error: string | null;
   duration_ms: number | null;
@@ -78,7 +78,7 @@ type DeliveryRow = {
 export type WebhookLogFilters = {
   type: string;
   hook: string;
-  status: "" | "success" | "failure";
+  status: "" | "success" | "failure" | "skipped";
   from: string;
   to: string;
   order: "asc" | "desc";
@@ -117,7 +117,10 @@ function parseLogSearch(search: string): WebhookLogFilters {
   return {
     type: params.get("type")?.trim() ?? "",
     hook: params.get("hook")?.trim() ?? "",
-    status: statusRaw === "success" || statusRaw === "failure" ? statusRaw : "",
+    status:
+      statusRaw === "success" || statusRaw === "failure" || statusRaw === "skipped"
+        ? statusRaw
+        : "",
     from: params.get("from")?.trim() ?? "",
     to: params.get("to")?.trim() ?? "",
     order: orderRaw === "asc" ? "asc" : "desc",
@@ -458,7 +461,9 @@ export function EventWebhookLogsPanel({
                           className={cn(
                             d.status === "success"
                               ? "text-status-online"
-                              : "text-destructive",
+                              : d.status === "skipped"
+                                ? "text-status-away"
+                                : "text-destructive",
                           )}
                         >
                           {d.status}
@@ -578,7 +583,8 @@ export function EventWebhookLogsPanel({
                 onValueChange={(v) =>
                   setDraft((d) => ({
                     ...d,
-                    status: v === "success" || v === "failure" ? v : "",
+                    status:
+                      v === "success" || v === "failure" || v === "skipped" ? v : "",
                   }))
                 }
               >
@@ -589,6 +595,7 @@ export function EventWebhookLogsPanel({
                   <SelectItem value="__any__">Any</SelectItem>
                   <SelectItem value="success">success</SelectItem>
                   <SelectItem value="failure">failure</SelectItem>
+                  <SelectItem value="skipped">skipped</SelectItem>
                 </SelectContent>
               </Select>
             </div>

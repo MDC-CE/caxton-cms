@@ -289,7 +289,9 @@ export function registerEventWebhookRoutes(app: Express): void {
     const statusRaw =
       typeof req.query.status === "string" ? req.query.status.trim() : "";
     const status =
-      statusRaw === "success" || statusRaw === "failure" ? statusRaw : undefined;
+      statusRaw === "success" || statusRaw === "failure" || statusRaw === "skipped"
+        ? statusRaw
+        : undefined;
     const order =
       typeof req.query.order === "string" && req.query.order.trim().toLowerCase() === "asc"
         ? ("asc" as const)
