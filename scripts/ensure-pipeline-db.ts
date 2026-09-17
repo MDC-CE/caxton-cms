@@ -2,6 +2,10 @@
 /**
  * Pipeline SQLite migration preflight (dry-run) or manual apply.
  *
+ * Run via `npm run ensure:pipeline-db` (registers site-schema stub hooks for
+ * deploys without site_4geeks-com/component-registry). Direct `tsx` without
+ * `--import ./shared/register-site-schema-stub.mjs` will fail in that case.
+ *
  * Usage:
  *   npm run ensure:pipeline-db -- --dry-run   # deploy preflight (copies DBs, migrates copies only)
  *   npm run ensure:pipeline-db -- --apply     # manual live apply
