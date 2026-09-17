@@ -2,6 +2,7 @@ import { spawn, execFileSync, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { isWeblifyDebug } from "../../../shared/debug.js";
+import { shouldUseSiteSchemaStub } from "../../../shared/site-schema-stub-mode.js";
 import { readEnvFile } from "../lib/env-file.js";
 import { error as logError, info, warn } from "../lib/log.js";
 
@@ -136,7 +137,17 @@ export async function startMcpServer(opts: {
   const mcpEntry = path.join(packageRoot, "mcp-server", "index.ts");
   const tsxBin = path.join(packageRoot, "node_modules", ".bin", "tsx");
   const runner = fs.existsSync(tsxBin) ? tsxBin : "npx";
-  const args = fs.existsSync(tsxBin) ? [mcpEntry] : ["tsx", mcpEntry];
+  const useSchemaStub = shouldUseSiteSchemaStub(projectRoot);
+  const tsxArgs: string[] = [];
+  // Same stub remap as start-server (MCP imports shared/schema → site bridge).
+  if (useSchemaStub) {
+    tsxArgs.push(
+      "--import",
+      path.join(packageRoot, "shared", "register-site-schema-stub.mjs"),
+    );
+  }
+  tsxArgs.push(mcpEntry);
+  const args = fs.existsSync(tsxBin) ? tsxArgs : ["tsx", ...tsxArgs];
 
   const secret =
     process.env.MCP_SERVER_SECRET?.trim() ||
@@ -162,6 +173,9 @@ export async function startMcpServer(opts: {
     PUBLIC_URL: origin,
     MCP_PUBLIC_URL: origin,
   };
+  if (useSchemaStub && !env.WEBLIFY_SITE_SCHEMAS_STUB?.trim()) {
+    env.WEBLIFY_SITE_SCHEMAS_STUB = "1";
+  }
   const token = connectionToken?.trim();
   if (token) {
     env.WEBLIFY_CONNECTION_TOKEN = token;
