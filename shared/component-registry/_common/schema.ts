@@ -29,6 +29,29 @@ export const ctaButtonSchema = z.object({
 export type CtaButton = z.infer<typeof ctaButtonSchema>;
 
 // Video configuration - used in hero, two_column, etc.
+export const videoOverlayOnMutedSchema = z.object({
+  title: z
+    .string()
+    .optional()
+    .describe("Overlay title shown while the clip autoplays muted"),
+  subtitle: z
+    .string()
+    .optional()
+    .describe("Overlay subtitle; often a click-to-listen prompt"),
+  icon: z
+    .string()
+    .optional()
+    .describe("Icon slug for the muted overlay (icon-picker, e.g. volume-x)"),
+  restart_video_on_click: z
+    .boolean()
+    .optional()
+    .describe(
+      "Local files only: unmute continues from current time when false, restarts from 0 when true. YouTube always restarts",
+    ),
+});
+
+export type VideoOverlayOnMuted = z.infer<typeof videoOverlayOnMutedSchema>;
+
 export const videoConfigSchema = z.object({
   url: z.string().optional(),
   ratio: z.string().optional(),
@@ -39,6 +62,17 @@ export const videoConfigSchema = z.object({
   loop: z.boolean().optional(),
   preview_image_url: z.string().optional(),
   with_shadow_border: z.boolean().optional(),
+  open_modal_on_click: z
+    .boolean()
+    .optional()
+    .describe(
+      "Desktop: open the video Dialog on play/unmute click (default true). Set false to play inline. Mobile preview always plays inline",
+    ),
+  overlay_on_muted: videoOverlayOnMutedSchema
+    .optional()
+    .describe(
+      "Optional card over muted autoplay (local files or YouTube). Presence enables the overlay; ignored when autoplay is off",
+    ),
 });
 
 export type VideoConfig = z.infer<typeof videoConfigSchema>;

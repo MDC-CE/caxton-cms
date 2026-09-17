@@ -158,8 +158,9 @@ export default function HeroSimpleTwoColumn({ data }: HeroSimpleTwoColumnProps) 
         loop={video.loop}
         preview_image_url={video.preview_image_url}
         withShadowBorder={video.with_shadow_border}
+        open_modal_on_click={video.open_modal_on_click}
+        overlay_on_muted={video.overlay_on_muted}
         className="w-full"
-        data-testid={`video-hero${suffix}`}
       />
     ) : (
       <UniversalImage

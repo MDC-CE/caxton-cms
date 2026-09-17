@@ -88,11 +88,18 @@ export const heroSingleColumnSchema = z.object({
   subtitle: z.string().optional(),
   badge: z.string().optional(),
   cta_buttons: z.array(ctaButtonSchema).optional(),
+  cta_below_media: z
+    .boolean()
+    .optional()
+    .describe(
+      "When true, CTA buttons render below the image/video instead of above it",
+    ),
   trust_bar: trustBarSchema.optional(),
   award_badges: z.array(awardBadgeSchema).optional(),
   image: z.object({ src: z.string(), alt: z.string().optional(), fallback: z.string().optional() }).optional(),
   image_full_width: z.boolean().optional(),
   image_width: z.string().optional(),
+  video: videoConfigSchema.optional(),
 }).passthrough();
 
 /** Author entry for blogHero byline (hydrated from `{{ entry.authors }}`). */

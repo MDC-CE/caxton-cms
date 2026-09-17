@@ -8,8 +8,8 @@ description: >-
   heading/media/CTA-only layouts.
 when_to_use: >
   Use this component when you need a features section with optional cards (up to 4) in a grid layout. The default
-  variant shows optional feature cards with optional header images. The laptopEdge variant displays a laptop mockup
-  with the content. Omit cards when you only need heading, media, and/or CTA.
+  variant shows optional feature cards with optional header images. The laptopEdge variant displays a laptop mockup with
+  the content. Omit cards when you only need heading, media, and/or CTA.
 image_sizes:
   laptopEdge.laptop_image.image_id: 100vw
 props:
@@ -104,6 +104,25 @@ props:
       with_shadow_border:
         type: boolean
         required: false
+      open_modal_on_click:
+        type: boolean
+        required: false
+      overlay_on_muted:
+        type: object
+        required: false
+        properties:
+          title:
+            type: string
+            required: false
+          subtitle:
+            type: string
+            required: false
+          icon:
+            type: string
+            required: false
+          restart_video_on_click:
+            type: boolean
+            required: false
     description: Video URL (YouTube, Vimeo, or local). When provided, replaces images with video.
     example: https://www.youtube.com/watch?v=MBXqEnhodx0
   description_with_background:
