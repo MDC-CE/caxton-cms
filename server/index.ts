@@ -31,6 +31,7 @@ import { loadGscInspectionStoresFromBucket } from "./gsc-url-inspection";
 import { emitEntryEventsFromFileChange } from "./content-events";
 import { startEventPruneTimer, wipeAllSiteEventStores } from "./events/event-store";
 import { startEventDispatcher } from "./events/dispatcher";
+import { startEventWebhookDueScan } from "./events/event-webhooks";
 import { registerAllJobs } from "./jobs/register";
 import { configureJobQueue } from "./jobs/queue";
 import { ensurePipelineDbForSites } from "./pipeline-db/runner";
@@ -516,6 +517,7 @@ app.use((req, res, next) => {
     // ─────────────────────────────────────────────────────────────────────────
 
     // All deferred background tasks fire here — server is already ready to handle requests.
+    startEventWebhookDueScan();
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();
     }

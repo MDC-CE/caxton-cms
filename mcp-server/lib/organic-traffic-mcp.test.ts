@@ -20,6 +20,7 @@ import {
   siteVsPathsSourceWarning,
   sortLeaderboardEntries,
   opportunitiesDatesRejectMessage,
+  opportunitiesMissingSerpResearchHints,
   validateBatchSize,
   MAX_ORGANIC_PATHS,
   MAX_ORGANIC_HUBS,
@@ -182,6 +183,29 @@ describe("clamp opportunities pagination", () => {
     expect(clampOpportunitiesLimit(999)).toBe(OPPORTUNITIES_MAX_LIMIT);
     expect(clampOpportunitiesOffset(-5)).toBe(0);
     expect(clampOpportunitiesOffset(10)).toBe(10);
+  });
+});
+
+describe("opportunitiesMissingSerpResearchHints", () => {
+  it("empty when no missing_serp", () => {
+    expect(opportunitiesMissingSerpResearchHints({ hasMissingSerp: false })).toEqual({
+      next_actions: [],
+      warnings: [],
+    });
+  });
+
+  it("adds serp next_action and warning when missing_serp present", () => {
+    const r = opportunitiesMissingSerpResearchHints({
+      hasMissingSerp: true,
+      site: "4geeks-com",
+    });
+    expect(r.next_actions).toHaveLength(1);
+    expect(r.next_actions[0]).toMatchObject({
+      tool: "get_or_refresh_seo_research",
+      priority: "optional",
+      args_hint: { action: "serp", site: "4geeks-com" },
+    });
+    expect(r.warnings.some((w) => w.code === "seo_research_serp_hint")).toBe(true);
   });
 });
 

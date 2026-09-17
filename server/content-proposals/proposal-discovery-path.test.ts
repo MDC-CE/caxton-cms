@@ -298,6 +298,52 @@ describe("buildProposalDiscoveryPath", () => {
       expect(tools[0].look_for.some((l) => /duplicate_weaker|revise_entries/i.test(l))).toBe(true);
     }
     expect(warnings.some((w) => w.code === "recent_entry_writes")).toBe(false);
+    const researchIds = tools
+      .filter((t) => t.kind === "tool")
+      .map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(researchIds).toContain("seo_research_serp");
+    expect(researchIds).toContain("seo_research_ideas");
+    const serp = tools.find((t) => t.kind === "tool" && t.id === "seo_research_serp");
+    expect(serp?.kind).toBe("tool");
+    if (serp?.kind === "tool") {
+      expect(serp.tool).toBe("get_or_refresh_seo_research");
+      expect(serp.args_hint).toMatchObject({ action: "serp", contentType: "blog", slug: "how-much" });
+      expect(serp.available).toBe(true);
+    }
+  });
+
+  it("SEO research discovery tools are unavailable without seo_edit", () => {
+    const allowed = new Set(
+      [...catalog].filter((t) => t !== "get_or_refresh_seo_research"),
+    );
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "how-much",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "meta.page_title", value: "New" }],
+          },
+        ],
+      },
+      allowedTools: allowed,
+      reviewContext: {
+        damage_class: "existing_metadata",
+        review_situations: ["serp_title_description"],
+      },
+    });
+    const serp = discovery_path!.items.find(
+      (i) => i.kind === "tool" && i.id === "seo_research_serp",
+    );
+    expect(serp?.kind).toBe("tool");
+    if (serp?.kind === "tool") {
+      expect(serp.available).toBe(false);
+      expect(serp.hint).toBeTruthy();
+    }
+    expect(warnings.some((w) => w.code === "discovery_tool_capped")).toBe(true);
   });
 
   it("no SERP + zero filtered writes keeps preview_content before recent_writes", () => {

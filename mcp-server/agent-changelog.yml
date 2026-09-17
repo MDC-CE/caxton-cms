@@ -5,6 +5,40 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-17"
+    summary: "SEO research visibility — discovery_path, get_entry_seo next_actions, organic prompts"
+    agent_impact:
+      - "get_entry_seo may return next_actions → get_or_refresh_seo_research action keyword_metrics when research is on and metrics are weak/stale."
+      - "SERP title/description proposal discovery_path adds optional seo_research_serp + seo_research_ideas (seo_edit). get_seo_cluster may attach discovery_path for thin/empty hubs."
+      - "Conventions v26: SEO research toolkit. Organic Ask Agent prompts mention action:serp. Reconnect MCP / re-bootstrap for explain + conventions."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/seo-clusters.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - mcp-server/lib/organic-traffic-mcp.ts
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/overview.md
+      - mcp-server/agent-conventions.md
+      - shared/ask-agent-prompts/organic-missing-serp.md
+
+  - date: "2026-09-17"
+    summary: "get_or_refresh_seo_research replaces refresh_keyword_metrics — multi-action cache + budgets"
+    agent_impact:
+      - "Hard rename: refresh_keyword_metrics → get_or_refresh_seo_research. Reconnect MCP so tools/list updates."
+      - "Actions: keyword_metrics | serp | keyword_ideas | competitors | keyword_gaps. Cache-first (7d/14d); force skips TTL only. Session+daily budgets; warn% → confirm_seo_research_budget; 100% → seo_research_budget_exhausted. No YAML kw_* writes."
+      - "Conventions v25: SEO_KEYWORD_RESEARCH_INCOMPLETE uses action keyword_metrics. Agent codes avoid vendor names (seo_research_inactive)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/seo-clusters.ts
+      - mcp-server/lib/seo-research-mcp.ts
+      - mcp-server/lib/seo-research-gate.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/seo.md
+      - shared/mcp-tool-catalog.ts
+      - server/seo-research-budget.ts
+      - server/seo-research-cache.ts
+
   - date: "2026-09-16"
     summary: "Idea follow-through agent visibility — conventions, explain blurbs, idea_accept"
     agent_impact:
@@ -133,6 +167,8 @@ entries:
       - mcp-server/tools/explain.ts
       - mcp-server/lib/mcp-playbook.ts
       - mcp-server/agent-conventions.md
+
+  - date: "2026-09-16"
     summary: "Staff GitHub login returns to the multi-site host you started from"
     agent_impact:
       - "OAuth callback still uses SITE_URL (e.g. 4geeks.com); return_to may be absolute to another sites.yml domain (e.g. fl.4geeksacademy.com) so the staff session is minted there."
@@ -142,6 +178,7 @@ entries:
       - client/src/hooks/useDebugAuth.ts
       - server/private-html-auth.ts
     tools_changed: false
+
   - date: "2026-09-16"
     summary: "Non-production plain /mcp allows freestyle mutates"
     agent_impact:

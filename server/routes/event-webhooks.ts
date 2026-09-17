@@ -120,7 +120,7 @@ export function registerEventWebhookRoutes(app: Express): void {
       return;
     }
 
-    // Flush hooks that kept URL and are already due after events_per_call change
+    // Re-check waiting piles under new timing (edge 1a): flush if now due / immediate.
     for (const type of EVENT_WEBHOOK_ALLOWLIST) {
       for (const hook of next.subscriptions[type] ?? []) {
         if (!hook.enabled || !hook.url) continue;

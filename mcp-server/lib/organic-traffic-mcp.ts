@@ -300,6 +300,34 @@ export function paginateFlat<T>(
   return { items: slice, total, offset, next_offset: next };
 }
 
+/** Soft SERP research hints when opportunities page includes missing_serp. */
+export function opportunitiesMissingSerpResearchHints(opts: {
+  hasMissingSerp: boolean;
+  site?: string;
+}): { next_actions: NextAction[]; warnings: McpWarning[] } {
+  if (!opts.hasMissingSerp) return { next_actions: [], warnings: [] };
+  return {
+    next_actions: [
+      {
+        tool: "get_or_refresh_seo_research",
+        priority: "optional",
+        reason:
+          "Refresh SERP research for a missing_serp query (action:serp). Cache-first and budgeted — separate from this read-only opportunities list.",
+        args_hint: {
+          action: "serp",
+          ...(opts.site ? { site: opts.site } : {}),
+        },
+      },
+    ],
+    warnings: [
+      warn(
+        "seo_research_serp_hint",
+        "Page includes missing_serp items. Optional: get_or_refresh_seo_research action:serp (does not backfill GSC days).",
+      ),
+    ],
+  };
+}
+
 export function pathDayCacheConfigured(organic: OrganicPathTraffic): boolean {
   return organic.days_present > 0;
 }
@@ -913,7 +941,7 @@ export async function assembleOpportunitiesMode(opts: {
     ...identityNonEffectWarnings(),
     warn(
       "opportunities_read_only",
-      "Read-only opportunities from organic day cache. Does not backfill Search Console days or refresh SERP (staff Diagnostics).",
+      "Read-only opportunities from organic day cache. Does not backfill Search Console days. SERP refresh uses get_or_refresh_seo_research (budgeted), not this tool.",
     ),
   ];
   if (opts.marketProvided) warnings.push(marketIgnoredWarning("opportunities"));
@@ -933,6 +961,16 @@ export async function assembleOpportunitiesMode(opts: {
         "Search Console / BigQuery organic data typically lags 2–3 days behind live queries.",
       ),
     );
+  }
+
+  const next_actions = configured ? [] : unconfiguredNextActions(opts.site);
+  if (configured) {
+    const hints = opportunitiesMissingSerpResearchHints({
+      hasMissingSerp: page.items.some((it) => it.kind === "missing_serp"),
+      site: opts.site,
+    });
+    next_actions.push(...hints.next_actions);
+    warnings.push(...hints.warnings);
   }
 
   return {
@@ -956,7 +994,7 @@ export async function assembleOpportunitiesMode(opts: {
       opportunities_limit: limit,
     },
     warnings,
-    next_actions: configured ? [] : unconfiguredNextActions(opts.site),
+    next_actions,
   };
 }
 

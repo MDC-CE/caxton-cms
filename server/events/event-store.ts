@@ -14,6 +14,7 @@ import {
   AGENT_SESSION_IDLE_MS,
   normalizeMcpClientName,
 } from "../../shared/agent-identity";
+import { createRequire } from "node:module";
 import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import type {
@@ -32,6 +33,8 @@ import {
   systemJobAttribution,
   unionAttribution,
 } from "./types";
+
+const requireFromEsm = createRequire(import.meta.url);
 
 /** Stamp window: only recent writes without a SHA get commitSha (R2-4A). */
 export const COMMIT_SHA_STAMP_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -172,7 +175,7 @@ export function emitEvent(opts: EmitEventOpts): EmitResult {
     const {
       maybeEnqueueEventWebhook,
       resolveContentRootForSite,
-    } = require("./event-webhooks") as typeof import("./event-webhooks");
+    } = requireFromEsm("./event-webhooks") as typeof import("./event-webhooks");
     maybeEnqueueEventWebhook(event, resolveContentRootForSite(opts.site));
   } catch {
     // Never fail emit because of webhooks

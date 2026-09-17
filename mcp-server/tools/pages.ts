@@ -96,6 +96,10 @@ import {
 import { enrichIssueCatalogFields } from "../lib/issue-code-enrichment.js";
 import { clusterResolutionConfirmRequired } from "../lib/cluster-resolution-gate.js";
 import { seoResearchWriteGate } from "../lib/seo-research-gate.js";
+import {
+  buildKeywordMetricsResearchNextAction,
+  isWeakKeywordMetricsForResearch,
+} from "../lib/entry-seo-research-hints.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
 import {
   buildAvailableFieldsCatalog,
@@ -1914,7 +1918,8 @@ export function registerPageTools(
     "get_entry_seo",
     "Get the SEO/meta block plus structured-data preview for a page, with the identifying envelope (contentType, slug, locale, locales, urls). " +
     "Returns meta, seo (locale seo.main_keyword / kw_monthly_volume / kw_difficulty / pillar_path / is_pillar / refresh_tier), " +
-    "keyword_metrics (resolved OpenRush cache over YAML when OpenRush is on; source / may_not_be_recent / stale / fetched_at / notes), " +
+    "keyword_metrics (resolved research cache over YAML when SEO research is on; source / may_not_be_recent / stale / fetched_at / notes); " +
+    "when research is on and metrics are weak/stale/missing, may include next_actions → get_or_refresh_seo_research action keyword_metrics, " +
     "include_in_clustering (derived: false only when seo.pillar_path is explicit null), " +
     "index (live seo-index.json topic-cluster inventory row including refresh_tier — NOT search-engine indexing; omitted for variants), " +
     "optional search_engines when include_search_engines:true (cached Google Search Console + Bing stub; read-only, does not refresh cache or call live APIs), " +
@@ -2148,7 +2153,7 @@ export function registerPageTools(
         kmWarnings.push({
           code: "keyword_metrics_yaml_fallback",
           message:
-            "keyword_metrics uses YAML seo.kw_* fallback (may not be recent). OpenRush cache wins when configured and present. Refresh from staff SEO Geo does not write YAML.",
+            "keyword_metrics uses YAML seo.kw_* fallback (may not be recent). SEO research cache wins when configured and present. Prefer get_or_refresh_seo_research action keyword_metrics (does not write YAML).",
         });
       }
       if (keyword_metrics.notes) {
@@ -2156,6 +2161,18 @@ export function registerPageTools(
           code: "keyword_metrics_notes",
           message: keyword_metrics.notes,
         });
+      }
+
+      const next_actions: NextAction[] = [];
+      if (isWeakKeywordMetricsForResearch(mainKw, keyword_metrics)) {
+        next_actions.push(
+          buildKeywordMetricsResearchNextAction({
+            contentType: payload.contentType,
+            slug: payload.slug,
+            locale: payload.locale,
+            ...(site ? { site } : {}),
+          }),
+        );
       }
 
       if (include_search_engines) {
@@ -2173,6 +2190,7 @@ export function registerPageTools(
       } else if (kmWarnings.length) {
         seoPayload.warnings = kmWarnings;
       }
+      if (next_actions.length) seoPayload.next_actions = next_actions;
 
       return { content: [{ type: "text", text: JSON.stringify(seoPayload, null, 2) }] };
     }
@@ -3161,7 +3179,7 @@ export function registerPageTools(
     "seo.refresh_tier is fast|medium|evergreen (fact-staleness); cannot clear (null/reset forbidden) — omit to leave unchanged; pick help via get_entry_fields fill_intent or explain_site topic seo; " +
     "research writes: if any of main_keyword|kw_monthly_volume|kw_difficulty is in updates, omitted metrics are forced to null (pass both integers to keep them); " +
     "kw_monthly_volume ≥ 0 integer; kw_difficulty 0–100 integer; not GSC. " +
-    "B+B1: when OpenRush is configured, writing kw_* is rejected (seo_research_use_openrush) — call refresh_keyword_metrics (cache only, no YAML). " +
+    "B+B1: when OpenRush is configured, writing kw_* is rejected (seo_research_use_openrush) — call get_or_refresh_seo_research action keyword_metrics (cache only, no YAML). " +
     "When OpenRush is off, kw_* sets require seo_research_source: staff_provided|external:<name> (guesses rejected). " +
     "live seo.main_keyword must be unique site-wide (exact after trim; self may re-save); conflict → seo_keyword_taken; missing seo-index.json → seo_index_unavailable (hard block); " +
     "on=true needs non-empty seo.pillar_path or seo.is_pillar:true after merge; on=false → pillar_path:null + is_pillar:false; " +
@@ -3214,7 +3232,7 @@ export function registerPageTools(
         .optional()
         .describe(
           "Required when setting seo.kw_monthly_volume and/or seo.kw_difficulty while OpenRush is off: staff_provided or external:<tool_name>. " +
-            "Rejected when OpenRush is on (use refresh_keyword_metrics). Rejected: openrush, estimated, model, empty.",
+            "Rejected when OpenRush is on (use get_or_refresh_seo_research action keyword_metrics). Rejected: openrush, estimated, model, empty.",
         ),
       create_redirect: z.boolean().optional().describe(
         "When renaming live slug (field_path slug): required if published_at is >= 24h ago. Adds old URL to meta.redirects.",
@@ -4235,7 +4253,7 @@ let renameResult: Record<string, unknown> | null = null;
               code: "seo_research_not_gsc",
               message:
                 "seo.kw_monthly_volume / seo.kw_difficulty are research metrics for main_keyword (not live GSC). " +
-                "When OpenRush is on, prefer refresh_keyword_metrics (cache) over YAML.",
+                "When OpenRush is on, prefer get_or_refresh_seo_research action keyword_metrics (cache) over YAML.",
             });
           }
         }
@@ -9807,7 +9825,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     "list_entry_seo",
     "Return SEO-relevant fields (meta, title, schema, url, and seo-index keyword chips + refresh_tier) for content entries. " +
     "Works for YAML and DB-backed types via the main server seo-entries API. " +
-    "main_keyword / kw_monthly_volume / kw_difficulty / refresh_tier come from the live seo-index (YAML-backed index values), not OpenRush effective metrics — use refresh_keyword_metrics or the SEO modal for OpenRush. " +
+    "main_keyword / kw_monthly_volume / kw_difficulty / refresh_tier come from the live seo-index (YAML-backed index values), not OpenRush effective metrics — use get_or_refresh_seo_research or the SEO modal for OpenRush. " +
     "Sections/body content are never returned. " +
     "IMPORTANT: Omitting slugs does NOT dump the full type — returns a minimal sample (default 5; limit 1–20). " +
     "Pass slugs for full meta on those entries. Prefer get_entry_seo for one slug; get_content_type_info for type contract. Requires content_view or seo_edit. " +

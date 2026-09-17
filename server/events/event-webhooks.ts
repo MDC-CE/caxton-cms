@@ -1,9 +1,11 @@
 /**
  * Proposal event outbound webhooks: durable YAML config + SQLite buffers/deliveries.
+ * Throttle: debounce + max wait + optional max_events_per_call safety cap.
  */
 
 import fs from "fs";
 import path from "path";
+import { createRequire } from "node:module";
 import yaml from "js-yaml";
 import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
@@ -12,6 +14,8 @@ import { sanitizeWebhookHeaders } from "../../shared/webhookHeaders";
 import { child } from "../logger";
 import type { ContentEvent, EventType } from "./types";
 import { getEventById } from "./event-store";
+
+const requireFromEsm = createRequire(import.meta.url);
 
 const log = child({ module: "event-webhooks" });
 
@@ -30,8 +34,17 @@ export const EVENT_WEBHOOK_ALLOWLIST = [
 
 export type EventWebhookAllowlistedType = (typeof EVENT_WEBHOOK_ALLOWLIST)[number];
 
-export const EVENT_WEBHOOK_EVENTS_PER_CALL_MIN = 1;
-export const EVENT_WEBHOOK_EVENTS_PER_CALL_MAX = 50;
+export const EVENT_WEBHOOK_MAX_EVENTS_MIN = 1;
+export const EVENT_WEBHOOK_MAX_EVENTS_MAX = 50;
+/** @deprecated Use EVENT_WEBHOOK_MAX_EVENTS_MIN */
+export const EVENT_WEBHOOK_EVENTS_PER_CALL_MIN = EVENT_WEBHOOK_MAX_EVENTS_MIN;
+/** @deprecated Use EVENT_WEBHOOK_MAX_EVENTS_MAX */
+export const EVENT_WEBHOOK_EVENTS_PER_CALL_MAX = EVENT_WEBHOOK_MAX_EVENTS_MAX;
+
+export const EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS = 30_000;
+export const EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS = 60_000;
+export const EVENT_WEBHOOK_THROTTLE_MS_MAX = 600_000;
+export const EVENT_WEBHOOK_DUE_SCAN_INTERVAL_MS = 5_000;
 export const EVENT_WEBHOOK_DELIVERY_RETENTION_MS = 48 * 60 * 60 * 1000;
 export const EVENT_WEBHOOK_FILE = "event-webhooks.yml";
 const BUFFERS_KEY = "event_webhook_buffers";
@@ -47,7 +60,9 @@ export type EventWebhookHook = {
   enabled: boolean;
   url: string;
   method: "POST";
-  events_per_call: number;
+  debounce_ms: number;
+  max_wait_ms: number;
+  max_events_per_call: number;
   headers?: Record<string, string>;
 };
 
@@ -59,9 +74,19 @@ export type EventWebhookConfig = {
 export type EventWebhookBuffer = {
   pendingEventIds: number[];
   pendingCount: number;
+  /** Epoch ms of first event in this pile; missing with ids = legacy → treat as due */
+  first_pending_at?: number;
+  /** Epoch ms of most recent event; missing with ids = legacy → treat as due */
+  last_event_at?: number;
 };
 
 export type EventWebhookBuffers = Record<string, EventWebhookBuffer>;
+
+export type EventWebhookClaim = {
+  eventIds: number[];
+  first_pending_at?: number;
+  last_event_at?: number;
+};
 
 export type EventWebhookDeliveryRow = {
   id: number;
@@ -89,6 +114,10 @@ export const enrichEventWebhookPayload: Partial<
   Record<EventWebhookAllowlistedType, EventWebhookPayloadEnricher>
 > = {};
 
+/** In-memory flush timers (latency only; SQLite timestamps + scan are source of truth). */
+const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let dueScanTimer: ReturnType<typeof setInterval> | null = null;
+
 function ensureSchema(site: string): void {
   ensurePipelineDb(site);
 }
@@ -101,13 +130,28 @@ export function bufferKey(eventType: string, hookId: string): string {
   return `${eventType}::${hookId}`;
 }
 
-export function clampEventsPerCall(n: unknown): number {
+function timerKey(site: string, eventType: string, hookId: string): string {
+  return `${site}::${bufferKey(eventType, hookId)}`;
+}
+
+export function clampMaxEventsPerCall(n: unknown): number {
   const raw = typeof n === "number" ? n : Number(n);
-  if (!Number.isFinite(raw)) return EVENT_WEBHOOK_EVENTS_PER_CALL_MIN;
+  if (!Number.isFinite(raw)) return EVENT_WEBHOOK_MAX_EVENTS_MAX;
   return Math.min(
-    EVENT_WEBHOOK_EVENTS_PER_CALL_MAX,
-    Math.max(EVENT_WEBHOOK_EVENTS_PER_CALL_MIN, Math.floor(raw)),
+    EVENT_WEBHOOK_MAX_EVENTS_MAX,
+    Math.max(EVENT_WEBHOOK_MAX_EVENTS_MIN, Math.floor(raw)),
   );
+}
+
+/** @deprecated Use clampMaxEventsPerCall */
+export function clampEventsPerCall(n: unknown): number {
+  return clampMaxEventsPerCall(n);
+}
+
+export function clampThrottleMs(n: unknown, fallback: number): number {
+  const raw = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.min(EVENT_WEBHOOK_THROTTLE_MS_MAX, Math.max(0, Math.floor(raw)));
 }
 
 export function getEventWebhooksPath(contentRoot: string): string {
@@ -157,12 +201,40 @@ function parseHook(raw: unknown, eventType: string, seenIds: Set<string>): Event
       ? (h.headers as Record<string, string>)
       : undefined,
   );
+
+  const hasDebounce = h.debounce_ms !== undefined && h.debounce_ms !== null;
+  const hasMaxWait = h.max_wait_ms !== undefined && h.max_wait_ms !== null;
+  const debounce_ms = clampThrottleMs(
+    hasDebounce ? h.debounce_ms : EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+    EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+  );
+  const max_wait_ms = clampThrottleMs(
+    hasMaxWait ? h.max_wait_ms : EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+    EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+  );
+  if (debounce_ms > 0 && max_wait_ms > 0 && max_wait_ms < debounce_ms) {
+    throw new Error(
+      `Hook "${id}" under ${eventType}: max wait must be greater than or equal to quiet period`,
+    );
+  }
+
+  let max_events_per_call: number;
+  if (h.max_events_per_call !== undefined && h.max_events_per_call !== null) {
+    max_events_per_call = clampMaxEventsPerCall(h.max_events_per_call);
+  } else if (h.events_per_call !== undefined && h.events_per_call !== null) {
+    max_events_per_call = clampMaxEventsPerCall(h.events_per_call);
+  } else {
+    max_events_per_call = EVENT_WEBHOOK_MAX_EVENTS_MAX;
+  }
+
   return {
     id,
     enabled,
     url,
     method: "POST",
-    events_per_call: clampEventsPerCall(h.events_per_call ?? 1),
+    debounce_ms,
+    max_wait_ms,
+    max_events_per_call,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
 }
@@ -252,6 +324,27 @@ export function urlHost(url: string): string {
   }
 }
 
+function normalizeBuffer(buf: EventWebhookBuffer | undefined): EventWebhookBuffer {
+  if (!buf) return { pendingEventIds: [], pendingCount: 0 };
+  const pendingEventIds = Array.isArray(buf.pendingEventIds)
+    ? buf.pendingEventIds.filter((n) => typeof n === "number")
+    : [];
+  const first =
+    typeof buf.first_pending_at === "number" && Number.isFinite(buf.first_pending_at)
+      ? buf.first_pending_at
+      : undefined;
+  const last =
+    typeof buf.last_event_at === "number" && Number.isFinite(buf.last_event_at)
+      ? buf.last_event_at
+      : undefined;
+  return {
+    pendingEventIds,
+    pendingCount: pendingEventIds.length,
+    ...(first !== undefined ? { first_pending_at: first } : {}),
+    ...(last !== undefined ? { last_event_at: last } : {}),
+  };
+}
+
 function readBuffers(site: string): EventWebhookBuffers {
   ensureSchema(site);
   const row = getSiteSqlite(site)
@@ -278,17 +371,11 @@ function writeBuffers(site: string, buffers: EventWebhookBuffers): void {
 
 export function getHookBuffer(site: string, eventType: string, hookId: string): EventWebhookBuffer {
   const key = bufferKey(eventType, hookId);
-  const buf = readBuffers(site)[key];
-  if (!buf) return { pendingEventIds: [], pendingCount: 0 };
-  return {
-    pendingEventIds: Array.isArray(buf.pendingEventIds)
-      ? buf.pendingEventIds.filter((n) => typeof n === "number")
-      : [],
-    pendingCount: typeof buf.pendingCount === "number" ? buf.pendingCount : 0,
-  };
+  return normalizeBuffer(readBuffers(site)[key]);
 }
 
 export function clearHookBuffer(site: string, eventType: string, hookId: string): number {
+  clearFlushTimer(site, eventType, hookId);
   const buffers = readBuffers(site);
   const key = bufferKey(eventType, hookId);
   const prev = buffers[key];
@@ -308,15 +395,78 @@ export function setHookBuffer(
 ): void {
   const buffers = readBuffers(site);
   const key = bufferKey(eventType, hookId);
-  if (buffer.pendingCount <= 0 || buffer.pendingEventIds.length === 0) {
+  const normalized = normalizeBuffer(buffer);
+  if (normalized.pendingCount <= 0 || normalized.pendingEventIds.length === 0) {
     delete buffers[key];
+    clearFlushTimer(site, eventType, hookId);
   } else {
     buffers[key] = {
-      pendingEventIds: [...buffer.pendingEventIds],
-      pendingCount: buffer.pendingEventIds.length,
+      pendingEventIds: [...normalized.pendingEventIds],
+      pendingCount: normalized.pendingEventIds.length,
+      ...(normalized.first_pending_at !== undefined
+        ? { first_pending_at: normalized.first_pending_at }
+        : {}),
+      ...(normalized.last_event_at !== undefined ? { last_event_at: normalized.last_event_at } : {}),
     };
   }
   writeBuffers(site, buffers);
+}
+
+/**
+ * Atomically take the pending pile (claim-then-flush). Loser of a race sees empty.
+ */
+export function claimHookBuffer(
+  site: string,
+  eventType: string,
+  hookId: string,
+): EventWebhookClaim {
+  clearFlushTimer(site, eventType, hookId);
+  const db = getSiteSqlite(site);
+  return db.transaction(() => {
+    const buffers = readBuffers(site);
+    const key = bufferKey(eventType, hookId);
+    const buf = normalizeBuffer(buffers[key]);
+    if (buf.pendingEventIds.length === 0) {
+      return { eventIds: [] };
+    }
+    const claim: EventWebhookClaim = {
+      eventIds: [...buf.pendingEventIds],
+      ...(buf.first_pending_at !== undefined ? { first_pending_at: buf.first_pending_at } : {}),
+      ...(buf.last_event_at !== undefined ? { last_event_at: buf.last_event_at } : {}),
+    };
+    delete buffers[key];
+    writeBuffers(site, buffers);
+    return claim;
+  })();
+}
+
+/** Put a failed claim back, merging any events that arrived while claimed. */
+export function restoreClaimedBuffer(
+  site: string,
+  eventType: string,
+  hookId: string,
+  claim: EventWebhookClaim,
+): void {
+  if (claim.eventIds.length === 0) return;
+  const db = getSiteSqlite(site);
+  db.transaction(() => {
+    const current = getHookBuffer(site, eventType, hookId);
+    const claimed = new Set(claim.eventIds);
+    const newer = current.pendingEventIds.filter((id) => !claimed.has(id));
+    const merged = [...claim.eventIds, ...newer];
+    const firstCandidates = [claim.first_pending_at, current.first_pending_at].filter(
+      (n): n is number => typeof n === "number",
+    );
+    const lastCandidates = [claim.last_event_at, current.last_event_at].filter(
+      (n): n is number => typeof n === "number",
+    );
+    setHookBuffer(site, eventType, hookId, {
+      pendingEventIds: merged,
+      pendingCount: merged.length,
+      ...(firstCandidates.length > 0 ? { first_pending_at: Math.min(...firstCandidates) } : {}),
+      ...(lastCandidates.length > 0 ? { last_event_at: Math.max(...lastCandidates) } : {}),
+    });
+  })();
 }
 
 export function getAllPendingCounts(site: string): Record<string, number> {
@@ -326,6 +476,64 @@ export function getAllPendingCounts(site: string): Record<string, number> {
     out[key] = buf.pendingCount ?? buf.pendingEventIds?.length ?? 0;
   }
   return out;
+}
+
+export function isHookDue(
+  buf: EventWebhookBuffer,
+  hook: EventWebhookHook,
+  now: number = Date.now(),
+): boolean {
+  if (buf.pendingEventIds.length === 0) return false;
+  if (buf.pendingCount >= hook.max_events_per_call) return true;
+  if (hook.debounce_ms === 0 && hook.max_wait_ms === 0) return true;
+  // Legacy piles without timestamps → already due
+  if (buf.first_pending_at == null || buf.last_event_at == null) return true;
+  if (hook.debounce_ms > 0 && now - buf.last_event_at >= hook.debounce_ms) return true;
+  if (hook.max_wait_ms > 0 && now - buf.first_pending_at >= hook.max_wait_ms) return true;
+  return false;
+}
+
+function msUntilDue(buf: EventWebhookBuffer, hook: EventWebhookHook, now: number): number | null {
+  if (buf.pendingEventIds.length === 0) return null;
+  if (isHookDue(buf, hook, now)) return 0;
+  if (buf.first_pending_at == null || buf.last_event_at == null) return 0;
+  const delays: number[] = [];
+  if (hook.debounce_ms > 0) {
+    delays.push(hook.debounce_ms - (now - buf.last_event_at));
+  }
+  if (hook.max_wait_ms > 0) {
+    delays.push(hook.max_wait_ms - (now - buf.first_pending_at));
+  }
+  if (delays.length === 0) return null;
+  return Math.max(0, Math.min(...delays));
+}
+
+export function clearFlushTimer(site: string, eventType: string, hookId: string): void {
+  const key = timerKey(site, eventType, hookId);
+  const existing = flushTimers.get(key);
+  if (existing) clearTimeout(existing);
+  flushTimers.delete(key);
+}
+
+export function scheduleFlushTimer(
+  site: string,
+  eventType: string,
+  hook: EventWebhookHook,
+): void {
+  const buf = getHookBuffer(site, eventType, hook.id);
+  const now = Date.now();
+  const delay = msUntilDue(buf, hook, now);
+  clearFlushTimer(site, eventType, hook.id);
+  if (delay === null) return;
+  const key = timerKey(site, eventType, hook.id);
+  const handle = setTimeout(() => {
+    flushTimers.delete(key);
+    void flushHookIfDue({ site, eventType, hook }).catch((err) => {
+      log.warn({ err, site, eventType, hookId: hook.id }, "[EventWebhooks] timer flush failed");
+    });
+  }, delay);
+  handle.unref?.();
+  flushTimers.set(key, handle);
 }
 
 export function recordDelivery(opts: {
@@ -466,7 +674,9 @@ export function previewDeliveryPayload(
     id: string;
     enabled: boolean;
     url_host: string;
-    events_per_call: number;
+    debounce_ms: number;
+    max_wait_ms: number;
+    max_events_per_call: number;
   } | null;
   warnings: string[];
 } | null {
@@ -481,7 +691,9 @@ export function previewDeliveryPayload(
         id: hook.id,
         enabled: hook.enabled,
         url_host: urlHost(hook.url),
-        events_per_call: hook.events_per_call,
+        debounce_ms: hook.debounce_ms,
+        max_wait_ms: hook.max_wait_ms,
+        max_events_per_call: hook.max_events_per_call,
       }
     : null;
 
@@ -512,7 +724,9 @@ export function previewDeliveryPayload(
     enabled: false,
     url: "",
     method: "POST",
-    events_per_call: Math.max(1, delivery.batch_size || 1),
+    debounce_ms: EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+    max_wait_ms: EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+    max_events_per_call: Math.max(1, delivery.batch_size || 1),
   };
 
   const payload = buildWebhookBody({
@@ -575,7 +789,9 @@ export function buildWebhookBody(opts: {
     hook_id: opts.hook.id,
     event_type: opts.eventType,
     throttle: {
-      events_per_call: opts.hook.events_per_call,
+      debounce_ms: opts.hook.debounce_ms,
+      max_wait_ms: opts.hook.max_wait_ms,
+      max_events_per_call: opts.hook.max_events_per_call,
       count_in_batch: opts.events.length,
     },
     events,
@@ -586,7 +802,10 @@ export async function deliverEventWebhookHttp(opts: {
   url: string;
   headers?: Record<string, string>;
   body: Record<string, unknown>;
-}): Promise<{ ok: true; status: number; durationMs: number } | { ok: false; status: number | null; error: string; durationMs: number }> {
+}): Promise<
+  | { ok: true; status: number; durationMs: number }
+  | { ok: false; status: number | null; error: string; durationMs: number }
+> {
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
@@ -617,7 +836,11 @@ export async function deliverEventWebhookHttp(opts: {
     return {
       ok: false,
       status: null,
-      error: aborted ? "Webhook upstream timed out" : err instanceof Error ? err.message : String(err),
+      error: aborted
+        ? "Webhook upstream timed out"
+        : err instanceof Error
+          ? err.message
+          : String(err),
       durationMs,
     };
   } finally {
@@ -644,8 +867,8 @@ async function enqueueDeliveryJob(payload: {
 }
 
 /**
- * After a due batch is taken from the buffer, enqueue delivery.
- * On enqueue failure: log + batch already dropped (caller cleared buffer first).
+ * Enqueue delivery for known event ids (retry path / already claimed).
+ * Returns whether the job was queued. Does not restore buffers.
  */
 export async function enqueueHookDelivery(opts: {
   site: string;
@@ -653,7 +876,7 @@ export async function enqueueHookDelivery(opts: {
   hook: EventWebhookHook;
   eventIds: number[];
   source: EventWebhookDeliverySource;
-}): Promise<void> {
+}): Promise<{ queued: boolean }> {
   const result = await enqueueDeliveryJob({
     site: opts.site,
     eventType: opts.eventType,
@@ -672,28 +895,101 @@ export async function enqueueHookDelivery(opts: {
       error: result.error ?? "could not queue",
       source: opts.source,
     });
+    return { queued: false };
   }
+  return { queued: true };
+}
+
+/**
+ * Claim → enqueue; restore claim on enqueue failure.
+ */
+export async function flushHookBuffer(opts: {
+  site: string;
+  eventType: string;
+  hook: EventWebhookHook;
+  source?: EventWebhookDeliverySource;
+}): Promise<number> {
+  const claim = claimHookBuffer(opts.site, opts.eventType, opts.hook.id);
+  if (claim.eventIds.length === 0) return 0;
+  const queued = await enqueueHookDelivery({
+    site: opts.site,
+    eventType: opts.eventType,
+    hook: opts.hook,
+    eventIds: claim.eventIds,
+    source: opts.source ?? "live",
+  });
+  if (!queued.queued) {
+    restoreClaimedBuffer(opts.site, opts.eventType, opts.hook.id, claim);
+    scheduleFlushTimer(opts.site, opts.eventType, opts.hook);
+    return 0;
+  }
+  return claim.eventIds.length;
 }
 
 export async function flushHookIfDue(opts: {
   site: string;
   eventType: string;
   hook: EventWebhookHook;
+  now?: number;
 }): Promise<number> {
   const buf = getHookBuffer(opts.site, opts.eventType, opts.hook.id);
-  if (buf.pendingCount < opts.hook.events_per_call || buf.pendingEventIds.length === 0) {
+  if (!isHookDue(buf, opts.hook, opts.now ?? Date.now())) {
     return 0;
   }
-  const eventIds = [...buf.pendingEventIds];
-  clearHookBuffer(opts.site, opts.eventType, opts.hook.id);
-  await enqueueHookDelivery({
+  return flushHookBuffer({
     site: opts.site,
     eventType: opts.eventType,
     hook: opts.hook,
-    eventIds,
-    source: "live",
   });
-  return eventIds.length;
+}
+
+export async function flushDueBuffersForSite(
+  site: string,
+  contentRoot: string,
+): Promise<number> {
+  const config = loadEventWebhookConfigSafe(contentRoot);
+  let flushed = 0;
+  for (const type of EVENT_WEBHOOK_ALLOWLIST) {
+    for (const hook of listEnabledHooksForType(config, type)) {
+      try {
+        flushed += await flushHookIfDue({ site, eventType: type, hook });
+      } catch (err) {
+        log.warn({ err, site, type, hookId: hook.id }, "[EventWebhooks] due flush failed");
+      }
+    }
+  }
+  return flushed;
+}
+
+export async function flushDueBuffersAllSites(): Promise<void> {
+  try {
+    // Lazy import to avoid circular deps at module load (ESM — no require).
+    const { getSiteContextMap } = await import("../site-manager");
+    for (const ctx of getSiteContextMap().values()) {
+      await flushDueBuffersForSite(ctx.contentRootName, ctx.contentRoot);
+    }
+  } catch (err) {
+    log.warn({ err }, "[EventWebhooks] flushDueBuffersAllSites failed");
+  }
+}
+
+/** Start periodic due-buffer scan (idempotent). Call once from server boot. */
+export function startEventWebhookDueScan(): void {
+  if (dueScanTimer) return;
+  dueScanTimer = setInterval(() => {
+    void flushDueBuffersAllSites();
+  }, EVENT_WEBHOOK_DUE_SCAN_INTERVAL_MS);
+  dueScanTimer.unref?.();
+}
+
+/** Test helper: stop the due scan interval. */
+export function stopEventWebhookDueScanForTests(): void {
+  if (dueScanTimer) {
+    clearInterval(dueScanTimer);
+    dueScanTimer = null;
+  }
+  for (const handle of flushTimers.values()) clearTimeout(handle);
+  flushTimers.clear();
 }
 
 /**
@@ -710,29 +1006,37 @@ export function maybeEnqueueEventWebhook(
     const hooks = listEnabledHooksForType(config, event.type);
     if (hooks.length === 0) return;
 
+    const now = Date.now();
     for (const hook of hooks) {
       const buf = getHookBuffer(event.site, event.type, hook.id);
+      const wasEmpty = buf.pendingEventIds.length === 0;
       const nextIds = [...buf.pendingEventIds, event.id];
-      const nextCount = nextIds.length;
-      if (nextCount >= hook.events_per_call) {
-        setHookBuffer(event.site, event.type, hook.id, {
-          pendingEventIds: [],
-          pendingCount: 0,
-        });
-        void enqueueHookDelivery({
-          site: event.site,
-          eventType: event.type,
-          hook,
-          eventIds: nextIds,
-          source: "live",
-        }).catch((err) => {
-          log.warn({ err, eventId: event.id, hookId: hook.id }, "[EventWebhooks] enqueue failed");
-        });
+      // Preserve missing timestamps on legacy non-empty piles (stay due).
+      const nextBuf: EventWebhookBuffer = {
+        pendingEventIds: nextIds,
+        pendingCount: nextIds.length,
+        ...(wasEmpty
+          ? { first_pending_at: now, last_event_at: now }
+          : buf.first_pending_at == null || buf.last_event_at == null
+            ? {}
+            : {
+                first_pending_at: buf.first_pending_at,
+                last_event_at: now,
+              }),
+      };
+      setHookBuffer(event.site, event.type, hook.id, nextBuf);
+
+      if (isHookDue(nextBuf, hook, now)) {
+        void flushHookIfDue({ site: event.site, eventType: event.type, hook, now }).catch(
+          (err) => {
+            log.warn(
+              { err, eventId: event.id, hookId: hook.id },
+              "[EventWebhooks] enqueue failed",
+            );
+          },
+        );
       } else {
-        setHookBuffer(event.site, event.type, hook.id, {
-          pendingEventIds: nextIds,
-          pendingCount: nextCount,
-        });
+        scheduleFlushTimer(event.site, event.type, hook);
       }
     }
   } catch (err) {
@@ -742,9 +1046,8 @@ export function maybeEnqueueEventWebhook(
 
 export function resolveContentRootForSite(site: string): string | null {
   try {
-    // Lazy import to avoid circular deps at module load.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getSiteContextMap } = require("../site-manager") as typeof import("../site-manager");
+    // Lazy load via createRequire to avoid circular deps at module load (ESM).
+    const { getSiteContextMap } = requireFromEsm("../site-manager") as typeof import("../site-manager");
     for (const ctx of getSiteContextMap().values()) {
       if (ctx.contentRootName === site) return ctx.contentRoot;
     }
@@ -787,9 +1090,7 @@ export function computeDroppedBuffersOnSave(
     const [eventType, hookId] = key.split("::") as [string, string];
     const next = afterMap.get(key);
     const shouldDrop =
-      !next ||
-      next.enabled === false ||
-      (prev.url || "") !== (next.url || "");
+      !next || next.enabled === false || (prev.url || "") !== (next.url || "");
     if (!shouldDrop) continue;
     const n = clearHookBuffer(site, eventType, hookId);
     if (n > 0) dropped.push({ key, eventType, hookId, dropped: n });

@@ -53,7 +53,9 @@ export type EventWebhookHook = {
   enabled: boolean;
   url: string;
   method?: "POST";
-  events_per_call: number;
+  debounce_ms: number;
+  max_wait_ms: number;
+  max_events_per_call: number;
   headers?: Record<string, string>;
 };
 
@@ -99,8 +101,35 @@ function hostOf(url: string): string {
   }
 }
 
+const DEFAULT_DEBOUNCE_MS = 30_000;
+const DEFAULT_MAX_WAIT_MS = 60_000;
+const DEFAULT_MAX_EVENTS = 50;
+
 function emptyHook(id: string): EventWebhookHook {
-  return { id, enabled: false, url: "", events_per_call: 1 };
+  return {
+    id,
+    enabled: false,
+    url: "",
+    debounce_ms: DEFAULT_DEBOUNCE_MS,
+    max_wait_ms: DEFAULT_MAX_WAIT_MS,
+    max_events_per_call: DEFAULT_MAX_EVENTS,
+  };
+}
+
+function formatMsShort(ms: number): string {
+  if (ms <= 0) return "0s";
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  if (ms % 1_000 === 0) return `${ms / 1_000}s`;
+  return `${ms}ms`;
+}
+
+function formatThrottleSummary(hook: EventWebhookHook): string {
+  if (hook.debounce_ms === 0 && hook.max_wait_ms === 0) return "immediate";
+  return `${formatMsShort(hook.debounce_ms)} quiet / ${formatMsShort(hook.max_wait_ms)} max`;
+}
+
+function throttleTimingInvalid(hook: EventWebhookHook): boolean {
+  return hook.debounce_ms > 0 && hook.max_wait_ms > 0 && hook.max_wait_ms < hook.debounce_ms;
 }
 
 /** Live-type slug: spaces → hyphens; lowercase a-z0-9_-, max 64. */
@@ -146,7 +175,9 @@ function buildTestPayloadPreview(opts: {
     hook_id: opts.hook.id,
     event_type: opts.eventType,
     throttle: {
-      events_per_call: opts.hook.events_per_call,
+      debounce_ms: opts.hook.debounce_ms,
+      max_wait_ms: opts.hook.max_wait_ms,
+      max_events_per_call: opts.hook.max_events_per_call,
       count_in_batch: 0,
     },
     events: [],
@@ -341,14 +372,30 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
       ...editing.hook,
       id: slugifyHookId(editing.hook.id).replace(/^-+|-+$/g, ""),
       url: editing.hook.url.trim(),
-      events_per_call: Math.min(
+      debounce_ms: Math.min(
+        600_000,
+        Math.max(0, Math.floor(Number(editing.hook.debounce_ms) || 0)),
+      ),
+      max_wait_ms: Math.min(
+        600_000,
+        Math.max(0, Math.floor(Number(editing.hook.max_wait_ms) || 0)),
+      ),
+      max_events_per_call: Math.min(
         50,
-        Math.max(1, Math.floor(Number(editing.hook.events_per_call) || 1)),
+        Math.max(1, Math.floor(Number(editing.hook.max_events_per_call) || 1)),
       ),
       headers: parseHeadersText(editing.headersText),
     };
     if (!hook.id) {
       toast({ title: "Hook id required", variant: "destructive" });
+      return;
+    }
+    if (throttleTimingInvalid(hook)) {
+      toast({
+        title: "Max wait too short",
+        description: "Max wait must be greater than or equal to the quiet period (or set either to 0).",
+        variant: "destructive",
+      });
       return;
     }
     if (hook.enabled && !hook.url) {
@@ -430,9 +477,12 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
               <CollapsibleContent className="text-xs text-muted-foreground space-y-1 pt-1">
                 <p>
                   File: <code className="font-mono">event-webhooks.yml</code>. Allowlisted proposal event
-                  types only. Key <code className="font-mono">events_per_call</code>. Slim JSON payload;
-                  optional code enrichers. Buffers and delivery rows live in site SQLite. Production
-                  proposal import does not notify.
+                  types only. Timing keys: <code className="font-mono">debounce_ms</code>,{" "}
+                  <code className="font-mono">max_wait_ms</code>, safety{" "}
+                  <code className="font-mono">max_events_per_call</code>. Waiting events live in site
+                  SQLite until due; saving re-checks timing. Changing URL or disabling drops waiting
+                  events. Slim JSON payload; optional code enrichers. Production proposal import does
+                  not notify.
                 </p>
               </CollapsibleContent>
             </Collapsible>
@@ -529,7 +579,7 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                                     </ToggleButtonBarTrigger>
                                   </ToggleButtonBar>
                                   <span className="text-xs text-muted-foreground">
-                                    every {hook.events_per_call}
+                                    {formatThrottleSummary(hook)}
                                   </span>
                                   {waiting > 0 ? (
                                     <span className="text-xs text-amber-500">{waiting} waiting</span>
@@ -621,55 +671,107 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                   {editing.isNew ? "New hook" : "Edit hook"}
                 </DialogTitle>
                 <DialogDescription>
-                  Configure notify URL and throttle for{" "}
+                  Events wait briefly so a burst becomes one notification. They always send within
+                  the max wait, even if more keep arriving. Event{" "}
                   <code className="font-mono text-xs">{editing.eventType}</code>.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3 py-1">
+                <div className="space-y-1.5">
+                  <Label htmlFor="hook-id">Id</Label>
+                  <Input
+                    id="hook-id"
+                    value={editing.hook.id}
+                    disabled={!editing.isNew}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        hook: { ...editing.hook, id: slugifyHookId(e.target.value) },
+                      })
+                    }
+                    placeholder="my-hook"
+                    data-testid="input-hook-id"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Lowercase letters, numbers, hyphens, or underscores. Spaces become hyphens.
+                  </p>
+                </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label htmlFor="hook-id">Id</Label>
+                    <Label htmlFor="hook-quiet">Quiet period (seconds)</Label>
                     <Input
-                      id="hook-id"
-                      value={editing.hook.id}
-                      disabled={!editing.isNew}
-                      onChange={(e) =>
-                        setEditing({
-                          ...editing,
-                          hook: { ...editing.hook, id: slugifyHookId(e.target.value) },
-                        })
-                      }
-                      placeholder="my-hook"
-                      data-testid="input-hook-id"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Lowercase letters, numbers, hyphens, or underscores. Spaces become hyphens.
-                    </p>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="hook-every">Every N events (max 50)</Label>
-                    <Input
-                      id="hook-every"
+                      id="hook-quiet"
                       type="number"
-                      min={1}
-                      max={50}
-                      value={editing.hook.events_per_call}
+                      min={0}
+                      max={600}
+                      value={Math.round((editing.hook.debounce_ms ?? 0) / 1000)}
                       onChange={(e) =>
                         setEditing({
                           ...editing,
                           hook: {
                             ...editing.hook,
-                            events_per_call: Number(e.target.value) || 1,
+                            debounce_ms: Math.max(0, Math.floor(Number(e.target.value) || 0) * 1000),
                           },
                         })
                       }
-                      data-testid="input-hook-events-per-call"
+                      data-testid="input-hook-debounce-sec"
                     />
-                    <p className="text-xs text-muted-foreground">
-                      Wait until this many events pile up, then send them together in one call. Use 1
-                      to notify on every event.
-                    </p>
                   </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="hook-max-wait">Max wait (seconds)</Label>
+                    <Input
+                      id="hook-max-wait"
+                      type="number"
+                      min={0}
+                      max={600}
+                      value={Math.round((editing.hook.max_wait_ms ?? 0) / 1000)}
+                      onChange={(e) =>
+                        setEditing({
+                          ...editing,
+                          hook: {
+                            ...editing.hook,
+                            max_wait_ms: Math.max(0, Math.floor(Number(e.target.value) || 0) * 1000),
+                          },
+                        })
+                      }
+                      data-testid="input-hook-max-wait-sec"
+                    />
+                  </div>
+                </div>
+                {throttleTimingInvalid(editing.hook) ? (
+                  <p className="text-xs text-destructive" data-testid="text-hook-timing-error">
+                    Max wait must be greater than or equal to the quiet period (or set either to 0).
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Set both to 0 to notify on every event. Defaults are 30s quiet / 60s max.
+                  </p>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="hook-max-events">Max events per call (safety)</Label>
+                  <Input
+                    id="hook-max-events"
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={editing.hook.max_events_per_call ?? DEFAULT_MAX_EVENTS}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        hook: {
+                          ...editing.hook,
+                          max_events_per_call: Math.min(
+                            50,
+                            Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                          ),
+                        },
+                      })
+                    }
+                    data-testid="input-hook-max-events"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Flush early if this many events pile up before the quiet/max wait timers. Max 50.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="hook-url">URL</Label>
@@ -742,7 +844,7 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                   <Button
                     type="button"
                     onClick={requestSave}
-                    disabled={saveMutation.isPending}
+                    disabled={saveMutation.isPending || throttleTimingInvalid(editing.hook)}
                     data-testid="button-save-hook"
                   >
                     {saveMutation.isPending ? (

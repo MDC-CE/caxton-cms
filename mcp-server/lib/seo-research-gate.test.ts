@@ -72,7 +72,7 @@ describe("seo-research-gate", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.code).toBe("seo_research_use_openrush");
-      expect(r.next_actions.some((a) => a.tool === "refresh_keyword_metrics")).toBe(true);
+      expect(r.next_actions.some((a) => a.tool === "get_or_refresh_seo_research")).toBe(true);
     }
   });
 

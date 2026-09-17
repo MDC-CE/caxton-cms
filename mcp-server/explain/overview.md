@@ -55,6 +55,6 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `serp-title-description-proposals` | SERP title/description author + reviewer playbook |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 
-**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries / leaderboard), and `get_analytics_report` for GA4 behavioral reports (site summary / top pages / page detail / events / traffic sources / traffic source conversions). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
+**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for measured GSC clicks, `get_or_refresh_seo_research` for planning keyword/SERP research (not GSC), and `get_analytics_report` for GA4 behavioral reports. Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see organic + research tools. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
 
 **Before making any structural change to this codebase, call `explain_site` with the relevant topic.**

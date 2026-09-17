@@ -89,6 +89,15 @@ export function keywordEntryFresh(
   return now - t < KEYWORD_TTL_MS;
 }
 
+/** Fresh TTL and both volume + difficulty present (skip re-fetch for research tool). */
+export function keywordMetricsCompleteAndFresh(
+  entry: OpenRushKeywordEntry | undefined,
+  now = Date.now(),
+): boolean {
+  if (!keywordEntryFresh(entry, now)) return false;
+  return entry!.monthly_volume != null && entry!.kw_difficulty != null;
+}
+
 export function getKeywordEntry(
   keyword: string,
   location: string,

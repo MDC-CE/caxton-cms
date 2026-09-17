@@ -125,11 +125,17 @@ On field mutates and issue `complete`, pass `why` (goal/ticket in plain English)
 Claim an issue only when you already have a **valid fix path you can execute** with MCP (or a cited offline source). Do not invent facts (search volume, difficulty, rankings).
 
 For `SEO_KEYWORD_RESEARCH_INCOMPLETE`:
-- **OpenRush on:** call `refresh_keyword_metrics` (cache only). Do **not** write `seo.kw_monthly_volume` / `seo.kw_difficulty` YAML.
-- **OpenRush off:** write both `kw_*` only with `seo_research_source: staff_provided` or `external:<tool_name>` from a real source.
+- **SEO research on:** call `get_or_refresh_seo_research` with `action: keyword_metrics` (cache-first). Do **not** write `seo.kw_monthly_volume` / `seo.kw_difficulty` YAML.
+- **SEO research off:** write both `kw_*` only with `seo_research_source: staff_provided` or `external:<tool_name>` from a real source.
 - **No reliable source:** do not claim, or claim→`release` blocked — never guess numbers.
 
-**Worked example:** OpenRush configured + keyword set without metrics → `refresh_keyword_metrics`, then revalidate — not `update_fields` with invented 1300/33.
+**Worked example:** research configured + keyword set without metrics → `get_or_refresh_seo_research` (`action: keyword_metrics`), then revalidate — not `update_fields` with invented 1300/33.
+
+### 6b. SEO research toolkit (vs measured traffic)
+
+- **Measured GSC clicks/impressions:** `get_organic_traffic` (day cache / BigQuery).
+- **Planning research:** `get_or_refresh_seo_research` — `keyword_metrics` | `serp` | `keyword_ideas` | `competitors` | `keyword_gaps`. Cache-first; session + daily budgets; warn % → `confirm_seo_research_budget`; does **not** write `seo.kw_*` YAML.
+- Do not invent volume, difficulty, or SERP features. `keyword_gaps` needs a non-empty `competitors` list (run `competitors` first).
 
 ### 7. Set `seo.refresh_tier` when clustering / topic nature is known
 

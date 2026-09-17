@@ -23,6 +23,9 @@ export type OpenRushSerpEntry = {
   has_paa: boolean;
   our_serp_rank: number | null;
   visible_in_serp: boolean | null;
+  /** Market used for this snapshot (for freshness / market mismatch). */
+  location?: string;
+  language?: string;
 };
 
 export type OpenRushSerpCacheFile = {
@@ -71,6 +74,22 @@ export function serpEntryFresh(entry: OpenRushSerpEntry | undefined, now = Date.
   const t = Date.parse(entry.fetched_at);
   if (Number.isNaN(t)) return false;
   return now - t < SERP_TTL_MS;
+}
+
+/** Fresh for current settings market (location + language). Legacy rows without market count as mismatch. */
+export function serpEntryFreshForMarket(
+  entry: OpenRushSerpEntry | undefined,
+  location: string,
+  language: string,
+  now = Date.now(),
+): boolean {
+  if (!serpEntryFresh(entry, now)) return false;
+  const loc = (location || "United States").trim().toLowerCase();
+  const lang = (language || "English").trim().toLowerCase();
+  const entryLoc = (entry!.location || "").trim().toLowerCase();
+  const entryLang = (entry!.language || "").trim().toLowerCase();
+  if (!entryLoc || !entryLang) return false;
+  return entryLoc === loc && entryLang === lang;
 }
 
 export function listStaleOrMissingQueries(

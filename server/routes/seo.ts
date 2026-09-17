@@ -1899,12 +1899,22 @@ export function registerSeoRoutes(app: Express): void {
         inspectKeywordQuery,
         OPENRUSH_INSPECT_KEYWORD_CREDITS,
       } = await import("../openrush-client");
+      const { getOpenRushSettings } = await import("../settings");
+      const {
+        getKeywordEntry,
+        keywordMetricsCompleteAndFresh,
+      } = await import("../openrush-keyword-cache");
+      const {
+        wouldSpend,
+        recordSpend,
+        STAFF_BUDGET_SESSION_KEY,
+      } = await import("../seo-research-budget");
       const contentRoot = getContentRoot(res);
       const contentFolder = getContentRootName(res);
       if (!isOpenRushConfigured(contentRoot)) {
         return res.status(400).json({
-          error: "OpenRush must be activated to refresh keyword metrics",
-          code: "openrush_inactive",
+          error: "SEO research must be activated to refresh keyword metrics",
+          code: "seo_research_inactive",
         });
       }
 
@@ -1933,29 +1943,72 @@ export function registerSeoRoutes(app: Express): void {
         return res.status(400).json({ error: "No keyword configured for this entry" });
       }
 
+      const force = req.body?.force === true;
+      const settings = getOpenRushSettings(contentRoot);
+      const location = settings.location || "United States";
+      const language = settings.language || "English";
+      const cached = getKeywordEntry(keyword, location, language, contentFolder);
+      if (!force && keywordMetricsCompleteAndFresh(cached)) {
+        return res.json({
+          ok: true,
+          outcome: "cache_hit",
+          keyword: cached!.keyword,
+          kw_monthly_volume: cached!.monthly_volume,
+          kw_difficulty: cached!.kw_difficulty,
+          fetched_at: cached!.fetched_at,
+          notes: cached!.notes,
+          source: "seo_research_cache",
+          credits: 0,
+        });
+      }
+
+      const gate = wouldSpend({
+        contentFolder,
+        contentRoot,
+        sessionKey: STAFF_BUDGET_SESSION_KEY,
+        applySessionCap: false,
+        cost: OPENRUSH_INSPECT_KEYWORD_CREDITS,
+        confirm: true,
+        settings,
+      });
+      if (!gate.ok) {
+        return res.status(429).json({
+          error: gate.message,
+          code: gate.code,
+          budget: gate.snapshot,
+        });
+      }
+
       const inspected = await inspectKeywordQuery({ keyword, contentRoot, contentFolder });
       if (!inspected.ok || !inspected.metrics) {
-        return res.status(400).json({ error: inspected.error || "OpenRush keyword lookup failed" });
+        return res.status(400).json({ error: inspected.error || "Keyword research lookup failed" });
       }
 
       const volume = inspected.entry?.monthly_volume ?? inspected.metrics.monthly_volume;
       const difficulty = inspected.entry?.kw_difficulty ?? inspected.metrics.kw_difficulty;
       if (volume == null && difficulty == null && !inspected.entry) {
         return res.status(400).json({
-          error: "OpenRush returned no volume or difficulty for this keyword",
+          error: "Provider returned no volume or difficulty for this keyword",
           keyword,
           metrics: inspected.metrics,
         });
       }
 
+      recordSpend({
+        contentFolder,
+        sessionKey: STAFF_BUDGET_SESSION_KEY,
+        cost: OPENRUSH_INSPECT_KEYWORD_CREDITS,
+      });
+
       res.json({
         ok: true,
+        outcome: "fetched",
         keyword: inspected.metrics.keyword,
         kw_monthly_volume: volume,
         kw_difficulty: difficulty,
         fetched_at: inspected.entry?.fetched_at ?? null,
         notes: inspected.entry?.notes ?? null,
-        source: "openrush_cache",
+        source: "seo_research_cache",
         credits: OPENRUSH_INSPECT_KEYWORD_CREDITS,
         credits_note: inspected.credits_note,
       });
@@ -2128,12 +2181,19 @@ export function registerSeoRoutes(app: Express): void {
         inspectSerpQuery,
         OPENRUSH_INSPECT_SERP_CREDITS,
       } = await import("../openrush-client");
+      const { getOpenRushSettings } = await import("../settings");
+      const { loadSerpCache, serpEntryFreshForMarket } = await import("../openrush-serp-cache");
+      const {
+        wouldSpend,
+        recordSpend,
+        STAFF_BUDGET_SESSION_KEY,
+      } = await import("../seo-research-budget");
       const contentRoot = getContentRoot(res);
       const contentFolder = getContentRootName(res);
       if (!isOpenRushConfigured(contentRoot)) {
         return res.status(400).json({
-          error: "OpenRush must be activated to request SERP snapshots",
-          code: "openrush_inactive",
+          error: "SEO research must be activated to request SERP snapshots",
+          code: "seo_research_inactive",
         });
       }
 
@@ -2166,6 +2226,38 @@ export function registerSeoRoutes(app: Express): void {
         });
       }
 
+      const force = req.body?.force === true;
+      const settings = getOpenRushSettings(contentRoot);
+      const location = settings.location || "United States";
+      const language = settings.language || "English";
+      const cached = loadSerpCache(contentFolder).entries[keyword];
+      if (!force && serpEntryFreshForMarket(cached, location, language)) {
+        return res.json({
+          ok: true,
+          outcome: "cache_hit",
+          query: cached!.query,
+          entry: cached,
+          credits: 0,
+        });
+      }
+
+      const gate = wouldSpend({
+        contentFolder,
+        contentRoot,
+        sessionKey: STAFF_BUDGET_SESSION_KEY,
+        applySessionCap: false,
+        cost: OPENRUSH_INSPECT_SERP_CREDITS,
+        confirm: true,
+        settings,
+      });
+      if (!gate.ok) {
+        return res.status(429).json({
+          error: gate.message,
+          code: gate.code,
+          budget: gate.snapshot,
+        });
+      }
+
       const entryPath = (row?.path || "").trim();
       const { getPublicSiteUrl } = await import("../cloudflare-browser");
       const siteBase = getPublicSiteUrl();
@@ -2181,11 +2273,18 @@ export function registerSeoRoutes(app: Express): void {
         targetUrl,
       });
       if (!inspected.ok || !inspected.entry) {
-        return res.status(400).json({ error: inspected.error || "OpenRush SERP lookup failed" });
+        return res.status(400).json({ error: inspected.error || "SERP lookup failed" });
       }
+
+      recordSpend({
+        contentFolder,
+        sessionKey: STAFF_BUDGET_SESSION_KEY,
+        cost: OPENRUSH_INSPECT_SERP_CREDITS,
+      });
 
       res.json({
         ok: true,
+        outcome: "fetched",
         query: inspected.entry.query,
         entry: inspected.entry,
         credits: OPENRUSH_INSPECT_SERP_CREDITS,

@@ -102,7 +102,9 @@ type PreviewResponse = {
     id: string;
     enabled: boolean;
     url_host: string;
-    events_per_call: number;
+    debounce_ms: number;
+    max_wait_ms: number;
+    max_events_per_call: number;
   } | null;
   warnings: string[];
 };

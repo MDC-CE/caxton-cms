@@ -8,9 +8,10 @@ Call this topic for **site-wide behavioral analytics** from the GA4 BigQuery exp
 |------|------|-----|----------|
 | `get_analytics_report` | GA4 `events_*` BigQuery | `metrics_view` | Site summary, top pages, one page’s sessions/views, event counts, traffic sources, leads by source |
 | `get_organic_traffic` | GSC clicks/impressions | `metrics_view` or `seo_edit` | Search demand, SERP risk, opportunities |
+| `get_or_refresh_seo_research` | Planning research (keyword/SERP/ideas/competitors/gaps) | `seo_edit` | Estimates & SERP snapshots — not measured GSC clicks |
 | `get_product_funnel_analytics` | Same GA4 export, scoped to a product journey | `content_view` | Per-SKU funnel page performance (not stage-to-stage flow) |
 
-Do not treat GSC and GA numbers as the same metric. Journey analytics does **not** prove traffic moved between funnel stages.
+Do not treat GSC and GA numbers as the same metric. Journey analytics does **not** prove traffic moved between funnel stages. Planning research (`get_or_refresh_seo_research`) is not a substitute for `get_organic_traffic`.
 
 ## `get_analytics_report`
 

@@ -76,7 +76,11 @@ const CORE_EDITS_TOOLS: Array<{
     id: "seo_context",
     tool: "get_entry_seo",
     why: "Review SEO/meta context for the entry.",
-    look_for: ["title/description fit", "keyword or schema gaps"],
+    look_for: [
+      "title/description fit",
+      "keyword or schema gaps",
+      "keyword_metrics source/stale — prefer get_or_refresh_seo_research over inventing YAML kw_*",
+    ],
   },
   {
     id: "diagnostics",
@@ -133,6 +137,26 @@ const SITE_ANALYTICS_TOOL = {
   look_for: ["high-traffic paths", "baseline sessions/views"],
 } as const;
 
+const SEO_RESEARCH_SERP_TOOL = {
+  id: "seo_research_serp",
+  tool: "get_or_refresh_seo_research",
+  why: "Optional: refresh live SERP snapshot for the entry main keyword (cache-first; budgeted).",
+  look_for: [
+    "featured snippet / PAA / organic rivals for the target query",
+    "do not invent SERP features; action:serp only",
+  ],
+} as const;
+
+const SEO_RESEARCH_IDEAS_TOOL = {
+  id: "seo_research_ideas",
+  tool: "get_or_refresh_seo_research",
+  why: "Optional: keyword ideas around the page main keyword / seed (cache-first; budgeted).",
+  look_for: [
+    "related demand phrases for title/description or body angle",
+    "action:keyword_ideas — not a substitute for get_organic_traffic",
+  ],
+} as const;
+
 /** All tool names that may appear on an edits discovery_path (for catalog checks). */
 export function proposalDiscoveryToolNames(): string[] {
   return [
@@ -142,6 +166,8 @@ export function proposalDiscoveryToolNames(): string[] {
     LIST_PRODUCTS_TOOL.tool,
     GET_PRODUCT_TOOL.tool,
     SITE_ANALYTICS_TOOL.tool,
+    SEO_RESEARCH_SERP_TOOL.tool,
+    SEO_RESEARCH_IDEAS_TOOL.tool,
   ];
 }
 
@@ -353,6 +379,8 @@ export function buildEditsDiscoveryToolItems(opts: {
   contentLookFor?: string[];
   /** When funnel_classification is active, include list_products / get_product. */
   includeProductAudienceTools?: boolean;
+  /** SERP title/description situations — optional research serp + ideas (≤2). */
+  includeSeoResearchTools?: boolean;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -362,6 +390,7 @@ export function buildEditsDiscoveryToolItems(opts: {
     prioritizeActivity = false,
     activityEntry = null,
     includeProductAudienceTools = false,
+    includeSeoResearchTools = false,
   } = opts;
 
   const activityHint = activityArgsHint(activityEntry ?? (entry as ProposalDiscoveryEntry | null));
@@ -432,6 +461,20 @@ export function buildEditsDiscoveryToolItems(opts: {
           }
         : { report: "site_summary" };
     items.push(toToolItem(SITE_ANALYTICS_TOOL, allowed, args_hint));
+  }
+
+  if (includeSeoResearchTools && entry?.contentType && entry.slug) {
+    const researchHint: Record<string, unknown> = {
+      contentType: entry.contentType,
+      slug: entry.slug,
+      locale: entry.locale || "en",
+    };
+    items.push(
+      toToolItem(SEO_RESEARCH_SERP_TOOL, allowed, { ...researchHint, action: "serp" }),
+    );
+    items.push(
+      toToolItem(SEO_RESEARCH_IDEAS_TOOL, allowed, { ...researchHint, action: "keyword_ideas" }),
+    );
   }
 
   const anyCapped = items.some((i) => !i.available);
@@ -621,6 +664,9 @@ export function buildProposalDiscoveryPath(
       situations.includes("funnel_classification") ||
       gateWriteCount > 0;
 
+    const includeSeoResearchTools =
+      hasSerp || situations.includes("serp_title_description");
+
     const hottest = pickHottestPendingEntry(proposal, recentActivity);
     const first = pending[0] ?? proposal.entries?.[0] ?? null;
 
@@ -638,6 +684,7 @@ export function buildProposalDiscoveryPath(
       activityEntry: hottest,
       contentLookFor,
       includeProductAudienceTools: funnelClassification,
+      includeSeoResearchTools,
     });
     tools = built.items;
     if (built.anyCapped) {

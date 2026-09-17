@@ -3,10 +3,16 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import {
+  claimHookBuffer,
   clearHookBuffer,
-  clampEventsPerCall,
+  clampMaxEventsPerCall,
   computeDroppedBuffersOnSave,
+  EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+  EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+  flushDueBuffersForSite,
+  flushHookIfDue,
   getHookBuffer,
+  isHookDue,
   listEnabledHooksForType,
   loadEventWebhookConfig,
   maybeEnqueueEventWebhook,
@@ -14,10 +20,13 @@ import {
   recordDelivery,
   listDeliveries,
   previewDeliveryPayload,
+  restoreClaimedBuffer,
   saveEventWebhookConfig,
   setHookBuffer,
   slimEventForWebhook,
+  stopEventWebhookDueScanForTests,
   type EventWebhookConfig,
+  type EventWebhookHook,
 } from "./event-webhooks";
 import { emitEvent } from "./event-store";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
@@ -35,6 +44,17 @@ function rmSite() {
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function hook(partial: Partial<EventWebhookHook> & { id: string; url: string }): EventWebhookHook {
+  return {
+    enabled: true,
+    method: "POST",
+    debounce_ms: EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+    max_wait_ms: EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+    max_events_per_call: 50,
+    ...partial,
+  };
+}
+
 describe("event-webhooks", () => {
   let tmpRoot: string;
 
@@ -44,9 +64,11 @@ describe("event-webhooks", () => {
     rmSite();
     ensurePipelineDb(TEST_SITE, { skipBackup: true });
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "event-webhooks-"));
+    stopEventWebhookDueScanForTests();
   });
 
   afterEach(() => {
+    stopEventWebhookDueScanForTests();
     resetPipelineDbCache();
     clearSiteSqliteCacheForTests();
     rmSite();
@@ -66,6 +88,13 @@ describe("event-webhooks", () => {
     });
     expect(cfg.subscriptions.proposal_created).toHaveLength(2);
     expect(listEnabledHooksForType(cfg, "proposal_created")).toHaveLength(1);
+    expect(cfg.subscriptions.proposal_created?.[0]?.max_events_per_call).toBe(2);
+    expect(cfg.subscriptions.proposal_created?.[0]?.debounce_ms).toBe(
+      EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
+    );
+    expect(cfg.subscriptions.proposal_created?.[0]?.max_wait_ms).toBe(
+      EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+    );
 
     expect(() =>
       parseEventWebhookConfig({
@@ -87,54 +116,93 @@ describe("event-webhooks", () => {
     ).toThrow(/Duplicate/);
   });
 
-  it("clamps events_per_call to 1..50", () => {
-    expect(clampEventsPerCall(0)).toBe(1);
-    expect(clampEventsPerCall(100)).toBe(50);
-    expect(clampEventsPerCall(5)).toBe(5);
+  it("clamps max_events_per_call to 1..50", () => {
+    expect(clampMaxEventsPerCall(0)).toBe(1);
+    expect(clampMaxEventsPerCall(100)).toBe(50);
+    expect(clampMaxEventsPerCall(5)).toBe(5);
   });
 
-  it("round-trips YAML save/load", () => {
+  it("rejects max_wait shorter than debounce when both positive", () => {
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          proposal_created: [
+            {
+              id: "bad",
+              enabled: true,
+              url: "https://example.com/a",
+              debounce_ms: 60_000,
+              max_wait_ms: 10_000,
+            },
+          ],
+        },
+      }),
+    ).toThrow(/max wait must be greater than or equal/i);
+  });
+
+  it("round-trips YAML save/load with new throttle keys (drops events_per_call)", () => {
     const config: EventWebhookConfig = {
       version: 1,
       subscriptions: {
         proposal_created: [
-          {
+          hook({
             id: "slack",
-            enabled: true,
             url: "https://hooks.example.com/x",
-            method: "POST",
-            events_per_call: 3,
-          },
+            max_events_per_call: 3,
+            debounce_ms: 5_000,
+            max_wait_ms: 15_000,
+          }),
         ],
       },
     };
     saveEventWebhookConfig(tmpRoot, config);
     const loaded = loadEventWebhookConfig(tmpRoot);
     expect(loaded.subscriptions.proposal_created?.[0]?.id).toBe("slack");
-    expect(loaded.subscriptions.proposal_created?.[0]?.events_per_call).toBe(3);
-    expect(fs.existsSync(path.join(tmpRoot, "event-webhooks.yml"))).toBe(true);
+    expect(loaded.subscriptions.proposal_created?.[0]?.max_events_per_call).toBe(3);
+    expect(loaded.subscriptions.proposal_created?.[0]?.debounce_ms).toBe(5_000);
+    expect(loaded.subscriptions.proposal_created?.[0]?.max_wait_ms).toBe(15_000);
+    const yamlText = fs.readFileSync(path.join(tmpRoot, "event-webhooks.yml"), "utf-8");
+    expect(yamlText).not.toMatch(/(^|[^_])events_per_call/);
+    expect(yamlText).toMatch(/debounce_ms/);
+    expect(yamlText).toMatch(/max_events_per_call/);
   });
 
-  it("buffers until events_per_call then enqueues for each hook", async () => {
+  it("migrates events_per_call to max_events_per_call with default timing", () => {
+    const cfg = parseEventWebhookConfig({
+      version: 1,
+      subscriptions: {
+        proposal_created: [
+          { id: "legacy", enabled: true, url: "https://example.com/a", events_per_call: 3 },
+        ],
+      },
+    });
+    const h = cfg.subscriptions.proposal_created?.[0];
+    expect(h?.max_events_per_call).toBe(3);
+    expect(h?.debounce_ms).toBe(EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS);
+    expect(h?.max_wait_ms).toBe(EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS);
+  });
+
+  it("buffers until debounce then flushes; immediate 0/0 enqueues on first event", async () => {
     const { enqueueJob } = await import("../jobs/queue");
     const config: EventWebhookConfig = {
       version: 1,
       subscriptions: {
         proposal_created: [
-          {
+          hook({
             id: "h1",
-            enabled: true,
             url: "https://example.com/1",
-            method: "POST",
-            events_per_call: 2,
-          },
-          {
+            debounce_ms: 30_000,
+            max_wait_ms: 60_000,
+            max_events_per_call: 50,
+          }),
+          hook({
             id: "h2",
-            enabled: true,
             url: "https://example.com/2",
-            method: "POST",
-            events_per_call: 1,
-          },
+            debounce_ms: 0,
+            max_wait_ms: 0,
+            max_events_per_call: 50,
+          }),
         ],
       },
     };
@@ -145,47 +213,166 @@ describe("event-webhooks", () => {
       type: "proposal_created",
       payload: { proposal_id: "p1" },
     });
-    // emit won't find contentRoot — call maybeEnqueue directly
     maybeEnqueueEventWebhook(e1, tmpRoot);
     expect(getHookBuffer(TEST_SITE, "proposal_created", "h1").pendingCount).toBe(1);
-    expect(enqueueJob).toHaveBeenCalled(); // h2 every 1
+    expect(enqueueJob).toHaveBeenCalled(); // h2 immediate
+
+    const now = Date.now();
+    setHookBuffer(TEST_SITE, "proposal_created", "h1", {
+      pendingEventIds: [e1.id],
+      pendingCount: 1,
+      first_pending_at: now - 31_000,
+      last_event_at: now - 31_000,
+    });
+    const flushed = await flushHookIfDue({
+      site: TEST_SITE,
+      eventType: "proposal_created",
+      hook: hook({
+        id: "h1",
+        url: "https://example.com/1",
+        debounce_ms: 30_000,
+        max_wait_ms: 60_000,
+      }),
+      now,
+    });
+    expect(flushed).toBe(1);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "h1").pendingCount).toBe(0);
+  });
+
+  it("max wait forces flush under continuous drip; size cap flushes early", async () => {
+    const h = hook({
+      id: "drip",
+      url: "https://example.com/drip",
+      debounce_ms: 60_000,
+      max_wait_ms: 10_000,
+      max_events_per_call: 50,
+    });
+    // max_wait < debounce is invalid for parse — use isHookDue directly
+    const now = Date.now();
+    const buf = {
+      pendingEventIds: [1, 2],
+      pendingCount: 2,
+      first_pending_at: now - 11_000,
+      last_event_at: now - 100,
+    };
+    expect(isHookDue(buf, h, now)).toBe(true);
+
+    const capHook = hook({
+      id: "cap",
+      url: "https://example.com/cap",
+      debounce_ms: 60_000,
+      max_wait_ms: 120_000,
+      max_events_per_call: 2,
+    });
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: { proposal_created: [capHook] },
+    });
+    const { enqueueJob } = await import("../jobs/queue");
+    vi.mocked(enqueueJob).mockClear();
+
+    const e1 = emitEvent({
+      site: TEST_SITE,
+      type: "proposal_created",
+      payload: { proposal_id: "c1" },
+    });
+    maybeEnqueueEventWebhook(e1, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "cap").pendingCount).toBe(1);
 
     const e2 = emitEvent({
       site: TEST_SITE,
       type: "proposal_created",
-      payload: { proposal_id: "p2" },
+      payload: { proposal_id: "c2" },
     });
     maybeEnqueueEventWebhook(e2, tmpRoot);
-    expect(getHookBuffer(TEST_SITE, "proposal_created", "h1").pendingCount).toBe(0);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "cap").pendingCount).toBe(0);
+    expect(enqueueJob).toHaveBeenCalled();
+  });
+
+  it("legacy buffer without timestamps is due on scan", async () => {
+    const { enqueueJob } = await import("../jobs/queue");
+    const h = hook({ id: "legacy", url: "https://example.com/legacy" });
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: { proposal_created: [h] },
+    });
+    setHookBuffer(TEST_SITE, "proposal_created", "legacy", {
+      pendingEventIds: [42],
+      pendingCount: 1,
+    });
+    expect(
+      isHookDue(getHookBuffer(TEST_SITE, "proposal_created", "legacy"), h, Date.now()),
+    ).toBe(true);
+    vi.mocked(enqueueJob).mockClear();
+    const n = await flushDueBuffersForSite(TEST_SITE, tmpRoot);
+    expect(n).toBe(1);
+    expect(enqueueJob).toHaveBeenCalled();
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "legacy").pendingCount).toBe(0);
+  });
+
+  it("claim-then-flush: second claim sees empty; enqueue failure restores buffer", async () => {
+    const { enqueueJob } = await import("../jobs/queue");
+    setHookBuffer(TEST_SITE, "proposal_created", "claim", {
+      pendingEventIds: [1, 2],
+      pendingCount: 2,
+      first_pending_at: 1,
+      last_event_at: 2,
+    });
+    const first = claimHookBuffer(TEST_SITE, "proposal_created", "claim");
+    expect(first.eventIds).toEqual([1, 2]);
+    const second = claimHookBuffer(TEST_SITE, "proposal_created", "claim");
+    expect(second.eventIds).toEqual([]);
+
+    restoreClaimedBuffer(TEST_SITE, "proposal_created", "claim", first);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "claim").pendingEventIds).toEqual([1, 2]);
+
+    const h = hook({
+      id: "fail",
+      url: "https://example.com/fail",
+      debounce_ms: 0,
+      max_wait_ms: 0,
+    });
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: { proposal_created: [h] },
+    });
+    setHookBuffer(TEST_SITE, "proposal_created", "fail", {
+      pendingEventIds: [9],
+      pendingCount: 1,
+      first_pending_at: Date.now(),
+      last_event_at: Date.now(),
+    });
+    vi.mocked(enqueueJob).mockResolvedValueOnce({ queued: false });
+    const flushed = await flushHookIfDue({
+      site: TEST_SITE,
+      eventType: "proposal_created",
+      hook: h,
+    });
+    expect(flushed).toBe(0);
+    expect(getHookBuffer(TEST_SITE, "proposal_created", "fail").pendingEventIds).toEqual([9]);
+    const failures = listDeliveries(TEST_SITE, { status: "failure", limit: 5 });
+    expect(failures.some((r) => r.hook_id === "fail")).toBe(true);
   });
 
   it("URL change / disable drops only that hook buffer", () => {
     setHookBuffer(TEST_SITE, "proposal_created", "keep", {
       pendingEventIds: [1, 2],
       pendingCount: 2,
+      first_pending_at: 1,
+      last_event_at: 2,
     });
     setHookBuffer(TEST_SITE, "proposal_created", "drop-me", {
       pendingEventIds: [3],
       pendingCount: 1,
+      first_pending_at: 1,
+      last_event_at: 1,
     });
     const before: EventWebhookConfig = {
       version: 1,
       subscriptions: {
         proposal_created: [
-          {
-            id: "keep",
-            enabled: true,
-            url: "https://example.com/a",
-            method: "POST",
-            events_per_call: 5,
-          },
-          {
-            id: "drop-me",
-            enabled: true,
-            url: "https://example.com/old",
-            method: "POST",
-            events_per_call: 5,
-          },
+          hook({ id: "keep", url: "https://example.com/a", max_events_per_call: 5 }),
+          hook({ id: "drop-me", url: "https://example.com/old", max_events_per_call: 5 }),
         ],
       },
     };
@@ -193,20 +380,8 @@ describe("event-webhooks", () => {
       version: 1,
       subscriptions: {
         proposal_created: [
-          {
-            id: "keep",
-            enabled: true,
-            url: "https://example.com/a",
-            method: "POST",
-            events_per_call: 2,
-          },
-          {
-            id: "drop-me",
-            enabled: true,
-            url: "https://example.com/new",
-            method: "POST",
-            events_per_call: 5,
-          },
+          hook({ id: "keep", url: "https://example.com/a", max_events_per_call: 2 }),
+          hook({ id: "drop-me", url: "https://example.com/new", max_events_per_call: 5 }),
         ],
       },
     };
@@ -216,10 +391,44 @@ describe("event-webhooks", () => {
     expect(getHookBuffer(TEST_SITE, "proposal_created", "drop-me").pendingCount).toBe(0);
   });
 
+  it("shortening wait on flushHookIfDue sends pending that are now due", async () => {
+    const { enqueueJob } = await import("../jobs/queue");
+    const now = Date.now();
+    setHookBuffer(TEST_SITE, "proposal_created", "shorten", {
+      pendingEventIds: [7],
+      pendingCount: 1,
+      first_pending_at: now - 5_000,
+      last_event_at: now - 5_000,
+    });
+    const longHook = hook({
+      id: "shorten",
+      url: "https://example.com/s",
+      debounce_ms: 30_000,
+      max_wait_ms: 60_000,
+    });
+    expect(await flushHookIfDue({ site: TEST_SITE, eventType: "proposal_created", hook: longHook, now })).toBe(
+      0,
+    );
+
+    const shortHook = hook({
+      id: "shorten",
+      url: "https://example.com/s",
+      debounce_ms: 1_000,
+      max_wait_ms: 5_000,
+    });
+    vi.mocked(enqueueJob).mockClear();
+    expect(
+      await flushHookIfDue({ site: TEST_SITE, eventType: "proposal_created", hook: shortHook, now }),
+    ).toBe(1);
+    expect(enqueueJob).toHaveBeenCalled();
+  });
+
   it("clearHookBuffer reports dropped count", () => {
     setHookBuffer(TEST_SITE, "proposal_closed", "x", {
       pendingEventIds: [9, 10, 11],
       pendingCount: 3,
+      first_pending_at: 1,
+      last_event_at: 2,
     });
     expect(clearHookBuffer(TEST_SITE, "proposal_closed", "x")).toBe(3);
     expect(clearHookBuffer(TEST_SITE, "proposal_closed", "x")).toBe(0);
@@ -255,7 +464,6 @@ describe("event-webhooks", () => {
       httpStatus: 200,
       source: "live",
     });
-    // bump created_at slightly by recording second after
     recordDelivery({
       site: TEST_SITE,
       eventType: "proposal_closed",
@@ -286,13 +494,12 @@ describe("event-webhooks", () => {
       version: 1,
       subscriptions: {
         proposal_created: [
-          {
+          hook({
             id: "preview-hook",
-            enabled: true,
             url: "https://hooks.example.com/in",
-            method: "POST",
-            events_per_call: 1,
-          },
+            debounce_ms: 0,
+            max_wait_ms: 0,
+          }),
         ],
       },
     };
@@ -313,6 +520,9 @@ describe("event-webhooks", () => {
     expect(ok!.warnings).toContain("recreated_not_archived");
     expect(ok!.payload).not.toBeNull();
     expect(ok!.events_found).toBe(1);
+    const throttle = ok!.payload!.throttle as Record<string, unknown>;
+    expect(throttle.debounce_ms).toBe(0);
+    expect(throttle.max_wait_ms).toBe(0);
     const events = ok!.payload!.events as Array<{ payload?: { proposal_id?: string } }>;
     expect(events[0]?.payload?.proposal_id).toBe("p-preview");
 

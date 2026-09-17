@@ -453,6 +453,12 @@ export interface OpenRushSettings {
   serp_top_n: number;
   location: string;
   language: string;
+  /** Agent session credit cap (agents only). */
+  session_credit_limit: number;
+  /** Shared daily credit cap (staff + agents). */
+  daily_credit_limit: number;
+  /** Warn band start as percent of limit (1–99); confirm required until 100%. */
+  budget_warn_percent: number;
 }
 
 export const DEFAULT_OPENRUSH_SETTINGS: OpenRushSettings = {
@@ -460,7 +466,16 @@ export const DEFAULT_OPENRUSH_SETTINGS: OpenRushSettings = {
   serp_top_n: 20,
   location: "United States",
   language: "English",
+  session_credit_limit: 50,
+  daily_credit_limit: 200,
+  budget_warn_percent: 80,
 };
+
+function clampPositiveInt(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
 
 export function parseOpenRushSettings(
   raw: unknown,
@@ -479,6 +494,24 @@ export function parseOpenRushSettings(
       typeof o.location === "string" && o.location.trim() ? o.location.trim() : defaults.location,
     language:
       typeof o.language === "string" && o.language.trim() ? o.language.trim() : defaults.language,
+    session_credit_limit: clampPositiveInt(
+      o.session_credit_limit,
+      defaults.session_credit_limit,
+      1,
+      100_000,
+    ),
+    daily_credit_limit: clampPositiveInt(
+      o.daily_credit_limit,
+      defaults.daily_credit_limit,
+      1,
+      1_000_000,
+    ),
+    budget_warn_percent: clampPositiveInt(
+      o.budget_warn_percent,
+      defaults.budget_warn_percent,
+      1,
+      99,
+    ),
   };
 }
 
@@ -1805,13 +1838,17 @@ export function updateOpenRushSettings(
     serp_top_n: merged.serp_top_n,
     location: merged.location,
     language: merged.language,
+    session_credit_limit: merged.session_credit_limit,
+    daily_credit_limit: merged.daily_credit_limit,
+    budget_warn_percent: merged.budget_warn_percent,
   };
 
   const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(
-    `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n}`,
+    `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n} ` +
+      `session=${merged.session_credit_limit} daily=${merged.daily_credit_limit} warn%=${merged.budget_warn_percent}`,
   );
   return merged;
 }
