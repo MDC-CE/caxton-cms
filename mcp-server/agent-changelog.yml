@@ -6,6 +6,21 @@ window_days: 6
 
 entries:
   - date: "2026-09-17"
+    summary: "Field write router — funnel.* always _common.yml; strip locale orphans"
+    agent_impact:
+      - "Proposal apply and update_fields funnel.* write live _common.yml (all languages), not locale YAML. locale/variant do not scope journey membership."
+      - "On funnel write, orphan top-level funnel: is stripped from every language file for that page. Warnings: funnel_locale_agnostic, funnel_stripped_from_locale_yamls, funnel_live_despite_variant."
+      - "editContent rejects funnel.* (use update_fields / Funnel tab). Reconnect MCP for updated apply behavior."
+    tools_changed: true
+    paths:
+      - server/field-write-router.ts
+      - server/funnel-fields.ts
+      - server/content-proposals/service.ts
+      - server/content-editor.ts
+      - mcp-server/tools/pages.ts
+      - server/bulk-update-entry-attributes.ts
+
+  - date: "2026-09-17"
     summary: "Slug rename queues async cluster pillar_path rewire for spokes"
     agent_impact:
       - "After live slug rename, if seo-index still has entries with seo.pillar_path equal to the old URL, a background cluster_hub_path_rewrite job updates those fields to the new hub URL (exact match only; body links unchanged)."

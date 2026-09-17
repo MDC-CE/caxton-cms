@@ -549,6 +549,12 @@ export default function ComponentPickerModal({
         index: effectiveInsertIndex,
       });
 
+      // Template-scoped adds must hit template.{locale}.yml — not the entry overlay.
+      // Attached entry files exist for data fields; without layoutTarget the server
+      // resolves to {slug}/{locale}.yml and merge then strips sections (silent miss).
+      const writeSharedTemplate =
+        isSharedTemplate && effectiveAddScope !== "entry";
+
       const token = getDebugToken();
       const author = await resolveAuthorName();
       const response = await fetch("/api/content/edit-sections", {
@@ -564,12 +570,13 @@ export default function ComponentPickerModal({
           variant,
           version,
           author,
-          ...(isSharedTemplate && variant ? { layoutTarget: "type_template" } : {}),
+          ...(writeSharedTemplate ? { layoutTarget: "type_template" } : {}),
           operations,
         }),
       });
 
-      if (response.ok) {
+      const result = await response.json().catch(() => ({} as { success?: boolean; error?: string }));
+      if (response.ok && result.success !== false) {
         onClose();
         emitContentUpdated({ contentType: contentType!, slug: slug!, locale: locale! });
         scrollAfterSchemaOrgAdd(selectedComponent.type);
@@ -580,11 +587,10 @@ export default function ComponentPickerModal({
             : `${selectedComponent?.label || "Section"} added to the page.`,
         });
       } else {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-        console.error("Failed to add section:", errorData);
+        console.error("Failed to add section:", result);
         toast({
           title: "Failed to add section",
-          description: errorData.error || "Unknown error occurred",
+          description: result.error || "Unknown error occurred",
           variant: "destructive",
         });
       }
@@ -683,11 +689,12 @@ export default function ComponentPickerModal({
       await executePerEntryAddSection(opts);
       return;
     }
-    if (effectiveAddScope === "template") {
-      await executeAddSection(opts);
-      return;
-    }
-    if (isSharedTemplate && !variant) {
+    // Any shared-template write (forced template scope, chosen "all entries", or
+    // legacy shared shell without variant) confirms blast radius first.
+    const writesSharedTemplate =
+      effectiveAddScope === "template" ||
+      (isSharedTemplate && effectiveAddScope !== "entry");
+    if (writesSharedTemplate) {
       pendingAddFn.current = () => executeAddSection(opts);
       setAddWarnOpen(true);
       return;
@@ -778,11 +785,8 @@ export default function ComponentPickerModal({
           <div className="mx-4 mt-3 flex items-start gap-2.5 rounded-md border bg-muted p-3" data-testid="text-shared-template-notice">
             <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
             <p className="text-sm text-foreground leading-snug">
-              {effectiveAddScope === "template" ? (
-                <><strong>Shared template:</strong> the section you add will appear on{" "}<strong>every {contentType} page</strong>.</>
-              ) : (
-                <><strong>Shared template:</strong> the section you add will appear on{" "}<strong>every {contentType} page</strong>, not just this one.</>
-              )}
+              <strong>Shared layout:</strong> you will confirm before this section is
+              added for every {singularLabel} of this type.
             </p>
           </div>
         )}
@@ -1047,7 +1051,11 @@ export default function ComponentPickerModal({
     </Dialog>
     <DbTemplateWarningDialog
       open={addWarnOpen}
-      onClose={() => { setAddWarnOpen(false); pendingAddFn.current = null; }}
+      onClose={() => {
+        // Cancel only the confirm — keep the picker open on configure (3a).
+        setAddWarnOpen(false);
+        pendingAddFn.current = null;
+      }}
       onConfirm={async () => {
         if (pendingAddFn.current) {
           await pendingAddFn.current();

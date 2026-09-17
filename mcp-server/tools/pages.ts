@@ -179,11 +179,11 @@ import { FUNNEL_STAGES } from "@shared/funnel";
 import {
   applyFunnelFieldUpdates,
   isFunnelFieldPath,
-  prepareAndWriteFunnelMerge,
   readFunnelBlockFromFile,
+  stripFunnelFromAllLocaleYamls,
   type FunnelFieldUpdate,
-  type FunnelMergePatch,
 } from "../../server/funnel-fields.js";
+import { applyFieldUpdates } from "../../server/field-write-router.js";
 import { assertFunnelAudienceGates } from "../../server/product/funnel-audience-gates.js";
 import {
   assertFunnelFilterConflict,
@@ -3489,9 +3489,7 @@ export function registerPageTools(
       }
 
       // Atomic funnel gate: validate merge before any YAML writes in this call.
-      let preparedFunnel:
-        | { patch: FunnelMergePatch; warnings: { code: string; message: string }[] }
-        | null = null;
+      let funnelValidated = false;
       if (funnelUpdates.length > 0) {
         const commonPath = path.join(
           contentPath,
@@ -3525,11 +3523,11 @@ export function registerPageTools(
             ],
           );
         }
-    const gates = assertFunnelAudienceGates(merged.coerced, {
-      contentType: resolved.contentType,
-      contentSlug: slug,
-      contentRoot: contentPath,
-    });
+        const gates = assertFunnelAudienceGates(merged.coerced, {
+          contentType: resolved.contentType,
+          contentSlug: slug,
+          contentRoot: contentPath,
+        });
         if (!gates.ok) {
           return actionRequired(
             {
@@ -3555,37 +3553,7 @@ export function registerPageTools(
             ],
           );
         }
-        const patch: FunnelMergePatch = {};
-        for (const u of funnelUpdates) {
-          if (u.field_path === "funnel.stage") {
-            patch.touchStage = true;
-            patch.stage = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel.products") {
-            patch.touchProducts = true;
-            patch.products = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel") {
-            if (u.reset) {
-              patch.touchStage = true;
-              patch.stage = null;
-              patch.touchProducts = true;
-              patch.products = null;
-            } else if (u.value && typeof u.value === "object" && !Array.isArray(u.value)) {
-              const b = u.value as Record<string, unknown>;
-              if ("stage" in b) {
-                patch.touchStage = true;
-                patch.stage = b.stage;
-              }
-              if ("products" in b) {
-                patch.touchProducts = true;
-                patch.products = b.products;
-              }
-            }
-          }
-        }
-        preparedFunnel = {
-          patch,
-          warnings: [...merged.warnings, ...gates.warnings],
-        };
+        funnelValidated = true;
       }
 
       const agenticGate = await runAgenticWriteGate({
@@ -3648,7 +3616,7 @@ export function registerPageTools(
           }
         }
 
-        if (setUpdates.length === 0 && !preparedFunnel) {
+        if (setUpdates.length === 0 && !funnelValidated) {
           const hasSeo = resetUpdates.some(
             (u) => u.field_path.startsWith("meta.") || isSeoPath(u.field_path),
           );
@@ -3998,7 +3966,7 @@ export function registerPageTools(
         ...variantWarningsIfNeeded(variant),
         ...clusterToggleWarnings,
       ];
-let renameResult: Record<string, unknown> | null = null;
+      let renameResult: Record<string, unknown> | null = null;
       if (touchesSections) {
         warnings.push({
           code: "section_index_no_create",
@@ -4012,6 +3980,64 @@ let renameResult: Record<string, unknown> | null = null;
           message:
             "Common meta (robots/priority/change_frequency or meta_target=common) writes _common.yml and ignores variant.",
         });
+      }
+
+      // Funnel writes live _common.yml first (journey kept if later locale writes fail).
+      if (funnelValidated) {
+        const funnelResult = await applyFieldUpdates({
+          contentType: resolved.contentType,
+          slug,
+          locale,
+          variant,
+          updates: funnelUpdates.map((u) => ({
+            field_path: u.field_path,
+            value: u.value,
+            reset: u.reset === true,
+          })),
+          author: "agent",
+          contentRoot: contentPath,
+          skipSharedLayoutFanOut: true,
+        });
+        if (!funnelResult.ok) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: funnelResult.code,
+              code: funnelResult.code,
+              message: funnelResult.error,
+              details: funnelResult.details,
+            },
+            [
+              {
+                tool: "update_fields",
+                priority: "required",
+                reason: "Retry funnel paths only",
+                args_hint: {
+                  slug,
+                  locale,
+                  contentType: resolved.contentType,
+                  confirm_live_edit: true,
+                  updates: funnelUpdates.map((u) =>
+                    u.reset === true
+                      ? { field_path: u.field_path, reset: true }
+                      : { field_path: u.field_path, value: u.value },
+                  ),
+                },
+              },
+            ],
+          );
+        }
+        for (const rel of funnelResult.wrote) {
+          if (rel.includes("/") || rel.endsWith(".yml") || rel.endsWith(".yaml")) {
+            notifyMcpContentWrite(rel, undefined, { agent_session_id });
+          }
+        }
+        results.push(`funnel → _common.yml`);
+        for (const w of funnelResult.warnings) {
+          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
+            warnings.push({ code: w.code, message: w.message });
+          }
+        }
       }
 
       if (localeEntries.length > 0) {
@@ -4130,79 +4156,6 @@ let renameResult: Record<string, unknown> | null = null;
           String(renamed.data.newSlug || slugRenameValue),
           locale,
         );
-      }
-
-      if (preparedFunnel) {
-        const funnelWrite = prepareAndWriteFunnelMerge(
-          resolved.contentType,
-          slug,
-          preparedFunnel.patch,
-          contentPath,
-          assertFunnelAudienceGates,
-        );
-        if (!funnelWrite.ok) {
-          if (results.length > 0) {
-            return actionRequired(
-              {
-                success: false,
-                action_required: funnelWrite.code,
-                code: funnelWrite.code,
-                message:
-                  `Other fields were written but funnel update failed: ${funnelWrite.error}. ` +
-                  "Retry update_fields with only funnel.* paths.",
-                wrote: results,
-                details: funnelWrite.details,
-              },
-              [
-                {
-                  tool: "update_fields",
-                  priority: "required",
-                  reason: "Retry funnel paths only",
-                  args_hint: {
-                    slug,
-                    locale,
-                    contentType: resolved.contentType,
-                    confirm_live_edit: true,
-                    updates: funnelUpdates.map((u) =>
-                      u.reset === true
-                        ? { field_path: u.field_path, reset: true }
-                        : { field_path: u.field_path, value: u.value },
-                    ),
-                  },
-                },
-              ],
-            );
-          }
-          return actionRequired(
-            {
-              success: false,
-              action_required: funnelWrite.code,
-              code: funnelWrite.code,
-              message: funnelWrite.error,
-              details: funnelWrite.details,
-            },
-            [],
-          );
-        }
-        if (funnelWrite.relativePath) {
-          notifyMcpContentWrite(funnelWrite.relativePath, undefined, {
-            agent_session_id,
-          });
-        }
-        results.push(`funnel → _common.yml`);
-        for (const w of preparedFunnel.warnings) {
-          warnings.push({ code: w.code, message: w.message });
-        }
-        for (const w of funnelWrite.warnings) {
-          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
-            warnings.push({ code: w.code, message: w.message });
-          }
-        }
-        warnings.push({
-          code: "funnel_locale_agnostic",
-          message:
-            "funnel.stage / funnel.products are page-level on _common.yml (all languages). locale and variant do not scope this write.",
-        });
       }
 
       if (results.length === 0) {

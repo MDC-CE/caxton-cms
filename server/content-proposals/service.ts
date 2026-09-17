@@ -5,7 +5,8 @@ import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { emitEvent } from "../events/event-store";
 import { singleAttribution, type EventActor } from "../events/types";
-import { getContentForEdit, editContent } from "../content-editor";
+import { getContentForEdit } from "../content-editor";
+import { applyFieldUpdates, readFieldValueAtPath } from "../field-write-router";
 import type { SiteContext } from "../site-manager";
 import { fingerprintEdits, fingerprintNotes, fingerprintIdeas, stableJson } from "./fingerprint";
 import {
@@ -578,16 +579,6 @@ function splitEntryKey(entryKey: string): { contentType: string; slug: string } 
 
 function makeEntryKey(contentType: string, slug: string): string {
   return `${contentType}/${slug}`;
-}
-
-function getByPath(obj: Record<string, unknown>, pathStr: string): unknown {
-  const parts = pathStr.replace(/\[(\d+)\]/g, ".$1").split(".").filter(Boolean);
-  let current: unknown = obj;
-  for (const part of parts) {
-    if (current === null || current === undefined || typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
 }
 
 function valuesEqual(a: unknown, b: unknown): boolean {
@@ -3681,7 +3672,16 @@ export function captureBaselineFromSite(ctx: SiteContext, entry: ProposalEntryIn
   }
   const values: Record<string, unknown> = {};
   for (const u of entry.updates ?? []) {
-    values[u.field_path] = getByPath(loaded.content, u.field_path);
+    const read = readFieldValueAtPath({
+      contentType: entry.contentType,
+      slug: entry.slug,
+      locale: entry.locale,
+      variant: entry.variant,
+      field_path: u.field_path,
+      contentRoot: ctx.contentRoot,
+      ci: ctx.contentIndex,
+    });
+    values[u.field_path] = read.value;
   }
   return { values };
 }
@@ -3713,23 +3713,23 @@ export async function applyUpdatesOnSite(
   author: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!entry.ops.length) return { ok: true };
-  const operations = entry.ops.map((u) =>
-    u.reset
-      ? { action: "update_field" as const, path: u.field_path, value: null }
-      : { action: "update_field" as const, path: u.field_path, value: u.value },
-  );
-  const result = await editContent({
+  const result = await applyFieldUpdates({
     contentType: entry.contentType,
     slug: entry.slug,
     locale: entry.locale,
     variant: entry.variant || undefined,
-    operations,
+    updates: entry.ops.map((u) => ({
+      field_path: u.field_path,
+      value: u.value,
+      reset: u.reset === true,
+    })),
     author,
     contentRoot: ctx.contentRoot,
+    contentRootName: ctx.contentRootName,
     ci: ctx.contentIndex,
     skipSharedLayoutFanOut: true,
   });
-  if (!result.success) return { ok: false, error: result.error || "Write failed" };
+  if (!result.ok) return { ok: false, error: result.error || "Write failed" };
   return { ok: true };
 }
 

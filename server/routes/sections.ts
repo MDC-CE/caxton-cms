@@ -1031,10 +1031,21 @@ export function registerSectionsRoutes(app: Express): void {
       // update_section targeting default content requires content_edit_default.
       const STRUCTURAL_ACTIONS = new Set([
         "add_section", "remove_section", "reorder_sections", "duplicate_section",
+        "replace_all_sections",
       ]);
       let requiredCap: CapabilityName;
       if (Array.isArray(operations) && operations.length > 0) {
-        const hasStructural = operations.some((op: { action: string }) => STRUCTURAL_ACTIONS.has(op.action));
+        const hasStructural = operations.some((op: { action: string; path?: string }) => {
+          if (STRUCTURAL_ACTIONS.has(op.action)) return true;
+          // UI/MCP add & remove sections via add_item / remove_item on "sections"
+          if (
+            (op.action === "add_item" || op.action === "remove_item") &&
+            op.path === "sections"
+          ) {
+            return true;
+          }
+          return false;
+        });
         const hasUpdate = operations.some((op: { action: string }) => op.action === "update_section");
         if (hasStructural) {
           requiredCap = "content_edit_structure";

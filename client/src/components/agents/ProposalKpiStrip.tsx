@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconInfoCircle, IconRefresh } from "@tabler/icons-react";
+import { IconInfoCircle, IconRefresh, IconX } from "@tabler/icons-react";
 import { AnimatedEllipsis } from "@/components/DebugBubble/components/PipelineCounts";
 import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -341,7 +341,7 @@ export function ProposalKpiStrip({
   stalledOnly?: boolean;
   stats?: ProposalListStats | null;
   headers: () => Record<string, string>;
-  onKindClick: (kind: ProposalKpiCardKind) => void;
+  onKindClick: (kind: ProposalKpiCardKind | "all") => void;
   onStatusClick: (status: ProposalListStatus) => void;
   /** Toggle stalled accepted ideas filter (Ideas card badge). */
   onStalledClick?: () => void;
@@ -611,10 +611,24 @@ export function ProposalKpiStrip({
       {focusedKind && chartByStatus ? (
         <Card data-testid="card-proposal-kpi-comparison">
           <CardContent className="pt-4 pb-3 space-y-2">
-            <p className="text-xs text-muted-foreground">
-              {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} · stock{" "}
-              {chartCaption}
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-muted-foreground">
+                {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} · stock{" "}
+                {chartCaption}
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0 gap-1 px-2 text-xs text-muted-foreground"
+                aria-label="Remove focus"
+                data-testid="button-proposal-kpi-remove-kind-focus"
+                onClick={() => onKindClick("all")}
+              >
+                <IconX className="h-3.5 w-3.5" />
+                Remove focus
+              </Button>
+            </div>
             <MultiStatusLineChart
               seriesByStatus={chartByStatus}
               focusStatus={chartFocus}

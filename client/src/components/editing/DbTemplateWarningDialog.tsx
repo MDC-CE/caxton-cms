@@ -45,11 +45,11 @@ function operationVerb(op: DbTemplateOperation): string {
 function operationExtra(op: DbTemplateOperation): string {
   switch (op) {
     case "delete":
-      return " The section is removed from every locale's single template (sibling locales stay in sync).";
+      return " Each language has its own shared layout — the section is also removed from the other language layouts for this type.";
     case "add":
-      return " The new section is mirrored to sibling locale singles; unfinished locales get a needs-edit label and stay hidden from the public until edited.";
+      return " Each language has its own shared layout. Confirming also adds this section to the other language layouts for this type; those languages may stay hidden until someone edits them.";
     case "update":
-      return " Allowlisted layout and visibility changes sync across locale singles. type/version/variant changes are not auto-replicated — update sibling locales manually.";
+      return " Each language has its own shared layout. Allowlisted layout and visibility changes sync to sibling language layouts; type/version/variant changes are not auto-copied — update other languages manually.";
   }
 }
 
@@ -72,10 +72,9 @@ export function DbTemplateWarningDialog({
             {operationLabel(operation)} — shared template
           </DialogTitle>
           <DialogDescription>
-            This change affects the shared template and will apply to{" "}
-            <strong>all {typeName} entries</strong> and every locale single template
-            on this site. Confirming will {operationVerb(operation)} the template for every{" "}
-            {typeName} entry.
+            This change affects the shared layout and will apply to{" "}
+            <strong>all {typeName} entries</strong> that use it. Confirming will{" "}
+            {operationVerb(operation)} the layout for every {typeName} entry.
             {operationExtra(operation)}
           </DialogDescription>
         </DialogHeader>
