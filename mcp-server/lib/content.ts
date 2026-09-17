@@ -10,6 +10,7 @@ import {
   resolveComponentBehaviors,
   type ComponentBehaviors,
 } from "../../shared/component-behaviors.js";
+import { getProjectRoot } from "../../shared/paths.js";
 
 // ─── Multi-site helpers ───────────────────────────────────────────────────────
 
@@ -20,6 +21,11 @@ export interface SiteConfigMcp {
 }
 
 let _mcpSiteConfigsCache: SiteConfigMcp[] | null = null;
+
+/** Project root (sites.yml / site_*). MCP may run with cwd=package under weblify. */
+function projectRoot(): string {
+  return getProjectRoot();
+}
 
 /** Clear cached sites.yml parse (tests / hot reload). */
 export function resetMcpSiteConfigsCache(): void {
@@ -38,7 +44,7 @@ export function setMcpSiteConfigsForTest(configs: SiteConfigMcp[] | null): void 
 export function getDefaultContentPath(): string {
   const configs = getMcpSiteConfigs();
   if (configs.length === 1) {
-    return path.join(process.cwd(), configs[0].contentFolder);
+    return path.join(projectRoot(), configs[0].contentFolder);
   }
   throw new Error(
     "Multi-site: content path required. Pass contentPath from resolveSiteContext (supply the site domain parameter).",
@@ -74,7 +80,7 @@ export function formatSitesYmlRequiredError(reason: string): string {
 }
 
 function parseSitesYml(): SiteConfigMcp[] {
-  const sitesYml = path.join(process.cwd(), "sites.yml");
+  const sitesYml = path.join(projectRoot(), "sites.yml");
 
   if (!fs.existsSync(sitesYml)) {
     throw new Error(formatSitesYmlRequiredError("sites.yml not found at project root"));
@@ -177,7 +183,7 @@ export function resolveSiteContext(domain?: string): SiteContextResult {
     }
     return {
       ok: true,
-      contentPath: path.join(process.cwd(), cfg.contentFolder),
+      contentPath: path.join(projectRoot(), cfg.contentFolder),
       contentFolder: cfg.contentFolder,
       domain: cfg.domain,
     };
@@ -210,7 +216,7 @@ export function resolveSiteContext(domain?: string): SiteContextResult {
 
   return {
     ok: true,
-    contentPath: path.join(process.cwd(), cfg.contentFolder),
+    contentPath: path.join(projectRoot(), cfg.contentFolder),
     contentFolder: cfg.contentFolder,
     domain: cfg.domain,
   };
@@ -649,10 +655,10 @@ function inheritForFolder(contentFolder: string): string | undefined {
 export function listComponents(contentPath?: string): ComponentInfo[] {
   const folder = contentFolderFromPath(contentPath);
   const inherit = inheritForFolder(folder);
-  assertNoRegistryCollisions(folder, process.cwd(), inherit);
+  assertNoRegistryCollisions(folder, projectRoot(), inherit);
   const components: ComponentInfo[] = [];
 
-  for (const entry of listMergedComponentTypes(folder, process.cwd(), inherit)) {
+  for (const entry of listMergedComponentTypes(folder, projectRoot(), inherit)) {
     const versionDirs = fs
       .readdirSync(entry.componentDir, { withFileTypes: true })
       .filter(d => d.isDirectory() && /^v\d/.test(d.name));
@@ -688,7 +694,7 @@ export interface ComponentSchemaSlim {
 
 export function getComponentSchema(componentType: string, contentPath?: string): ComponentSchemaSlim | null {
   const folder = contentFolderFromPath(contentPath);
-  const resolved = resolveComponentPath(componentType, folder, process.cwd(), inheritForFolder(folder));
+  const resolved = resolveComponentPath(componentType, folder, projectRoot(), inheritForFolder(folder));
   if (!resolved) return null;
 
   const versionDirs = fs
@@ -764,7 +770,7 @@ export function getComponentVariant(
   contentPath?: string,
 ): ComponentVariantDetail | null {
   const folder = contentFolderFromPath(contentPath);
-  const resolved = resolveComponentPath(componentType, folder, process.cwd(), inheritForFolder(folder));
+  const resolved = resolveComponentPath(componentType, folder, projectRoot(), inheritForFolder(folder));
   if (!resolved) return null;
   const componentPath = resolved.componentDir;
 

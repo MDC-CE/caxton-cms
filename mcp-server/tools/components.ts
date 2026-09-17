@@ -9,6 +9,7 @@ import {
 } from "../lib/content.js";
 import { assertSafeSegment, assertWithinBase } from "../lib/sanitize.js";
 import { getTokenUsername } from "../lib/oauth.js";
+import { getProjectRoot } from "../../shared/paths.js";
 import { resolveComponentPath } from "../../shared/registry-resolve.js";
 import { denyUnlessContentView } from "../lib/auth.js";
 import type { CatalogGrant } from "../lib/tool-catalog.js";
@@ -44,7 +45,7 @@ function assertResolvedComponent(componentType: string, contentFolder: string): 
     const resolved = resolveComponentPath(
       componentType,
       contentFolder,
-      process.cwd(),
+      getProjectRoot(),
       inheritForMcpFolder(contentFolder),
     );
     if (!resolved) return `Component '${componentType}' not found in registry.`;

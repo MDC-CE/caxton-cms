@@ -7,6 +7,7 @@ vi.mock("./user-store", () => ({
   assignRoles: vi.fn(),
   getOrCreateStaffUserId: vi.fn(),
   hasAnyRole: vi.fn(),
+  setMcpAccess: vi.fn(() => ({ ok: true, access: { mcpReadEnabled: true, mcpWriteEnabled: true } })),
   getEffectiveCapabilities: vi.fn(() => [{ name: "users_manage" }]),
 }));
 
@@ -50,6 +51,10 @@ describe("ensureWeblifyLocalOwner", () => {
         roles: expect.arrayContaining(["user_admin", "platform_steward", "copy_editor"]),
       }),
     );
+    expect(userStore.setMcpAccess).toHaveBeenCalledWith(WEBLIFY_LOCAL_USERNAME, {
+      mcpReadEnabled: true,
+      mcpWriteEnabled: true,
+    });
     expect(result.username).toBe(WEBLIFY_LOCAL_USERNAME);
   });
 
