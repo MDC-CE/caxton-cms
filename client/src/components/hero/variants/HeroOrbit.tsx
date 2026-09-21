@@ -1,7 +1,8 @@
-import { createElement, useRef, useState } from "react";
+import { createElement, useRef, useState, type MouseEventHandler } from "react";
 import { Button } from "@/components/ui/button";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { getIcon } from "@/lib/icons";
+import { cn } from "@/lib/utils";
 import type { HeroOrbit as HeroOrbitData } from "@shared/schema";
 
 interface HeroOrbitProps {
@@ -12,44 +13,69 @@ interface HeroOrbitProps {
 interface BadgeItem {
   label: string;
   highlight?: boolean;
+  url?: string;
 }
 
-function OrbitBadge({ label, highlight }: BadgeItem) {
-  return (
-    <div
-      className={[
-        "flex items-center rounded-full whitespace-nowrap",
-        "gap-[0.2rem] md:gap-[0.3rem] lg:gap-[0.4rem]",
-        "px-[0.45rem] py-[0.25rem] md:px-[0.8rem] md:py-[0.45rem] lg:px-[1.15rem] lg:py-[0.35rem]",
-      ].join(" ")}
-      style={
-        highlight
-          ? {
-              background: "hsl(210 88% 96%)",
-              border: "1px solid hsl(210 70% 82%)",
-              boxShadow:
-                "0 4px 14px hsl(210 80% 65% / 0.3), inset 0 1px 0 hsl(210 100% 99%), inset 0 -1px 0 hsl(210 55% 87%)",
-            }
-          : {
-              background: "hsl(215 20% 95%)",
-              border: "1px solid hsl(215 18% 83%)",
-              boxShadow:
-                "0 4px 12px rgba(0,0,0,0.10), inset 0 1px 0 hsl(0 0% 100%), inset 0 -1px 0 hsl(215 15% 88%)",
-            }
+interface OrbitBadgeProps extends BadgeItem {
+  onLinkClick?: MouseEventHandler<HTMLAnchorElement>;
+}
+
+function OrbitBadge({ label, highlight, url, onLinkClick }: OrbitBadgeProps) {
+  const pillClass = cn(
+    "flex items-center rounded-full whitespace-nowrap",
+    "gap-[0.2rem] md:gap-[0.3rem] lg:gap-[0.4rem]",
+    "px-[0.45rem] py-[0.25rem] md:px-[0.8rem] md:py-[0.45rem] lg:px-[1.15rem] lg:py-[0.35rem]",
+    url && "orbit-badge-link cursor-pointer transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2",
+  );
+  const pillStyle = highlight
+    ? {
+        background: "hsl(210 88% 96%)",
+        border: "1px solid hsl(210 70% 82%)",
+        boxShadow:
+          "0 4px 14px hsl(210 80% 65% / 0.3), inset 0 1px 0 hsl(210 100% 99%), inset 0 -1px 0 hsl(210 55% 87%)",
       }
-    >
+    : {
+        background: "hsl(215 20% 95%)",
+        border: "1px solid hsl(215 18% 83%)",
+        boxShadow:
+          "0 4px 12px rgba(0,0,0,0.10), inset 0 1px 0 hsl(0 0% 100%), inset 0 -1px 0 hsl(215 15% 88%)",
+      };
+
+  const content = (
+    <>
       <span
         className="rounded-full flex-shrink-0 w-[0.3rem] h-[0.3rem] md:w-[0.4rem] md:h-[0.4rem] lg:w-[0.45rem] lg:h-[0.45rem]"
         style={{ background: highlight ? "hsl(210 100% 50%)" : "hsl(215 14% 62%)" }}
       />
       <span
-        className={[
+        className={cn(
           "text-[0.58rem] md:text-[0.75rem] lg:text-[0.92rem]",
           highlight ? "font-extrabold text-primary" : "font-semibold text-[hsl(215_14%_52%)]",
-        ].join(" ")}
+        )}
       >
         {label}
       </span>
+    </>
+  );
+
+  if (url) {
+    const isExternal = /^https?:\/\//i.test(url);
+    return (
+      <a
+        href={url}
+        onClick={onLinkClick}
+        className={pillClass}
+        style={pillStyle}
+        {...(isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+      >
+        {content}
+      </a>
+    );
+  }
+
+  return (
+    <div className={pillClass} style={pillStyle}>
+      {content}
     </div>
   );
 }
@@ -61,13 +87,14 @@ interface OrbitRingProps {
   clockwise: boolean;
   badges: BadgeItem[];
   startDeg?: number;
+  onLinkClick?: MouseEventHandler<HTMLAnchorElement>;
 }
 
-function OrbitRing({ radiusPct, duration, clockwise, badges, startDeg = 0 }: OrbitRingProps) {
+function OrbitRing({ radiusPct, duration, clockwise, badges, startDeg = 0, onLinkClick }: OrbitRingProps) {
   const step = 360 / badges.length;
   return (
     <div
-      className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"
+      className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20"
       style={{ width: `${radiusPct * 2}cqw`, height: `${radiusPct * 2}cqw` }}
     >
       {badges.map((badge, i) => (
@@ -83,7 +110,12 @@ function OrbitRing({ radiusPct, duration, clockwise, badges, startDeg = 0 }: Orb
           } as React.CSSProperties}
         >
           <div className="orbit-item-inner">
-            <OrbitBadge label={badge.label} highlight={badge.highlight} />
+            <OrbitBadge
+              label={badge.label}
+              highlight={badge.highlight}
+              url={badge.url}
+              onLinkClick={onLinkClick}
+            />
           </div>
         </div>
       ))}
@@ -112,9 +144,10 @@ interface OrbitDiagramProps {
   inner: BadgeItem[];
   middle: BadgeItem[];
   outer: BadgeItem[];
+  onLinkClick?: MouseEventHandler<HTMLAnchorElement>;
 }
 
-function OrbitDiagram({ centerLabel, inner, middle, outer }: OrbitDiagramProps) {
+function OrbitDiagram({ centerLabel, inner, middle, outer, onLinkClick }: OrbitDiagramProps) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const [mouse, setMouse] = useState<{ x: number; y: number } | null>(null);
 
@@ -140,7 +173,7 @@ function OrbitDiagram({ centerLabel, inner, middle, outer }: OrbitDiagramProps) 
     >
       {/* Cursor spotlight */}
       <div
-        className="absolute inset-0 pointer-events-none blur-[12px] transition-opacity duration-500 z-20"
+        className="absolute inset-0 pointer-events-none blur-[12px] transition-opacity duration-500 z-[5]"
         style={{
           background: `radial-gradient(circle ${CQW.spotlight}cqw at ${mouse ? `${mouse.x}%` : "50%"} ${mouse ? `${mouse.y}%` : "50%"}, hsl(var(--primary) / 0.13) 0%, hsl(var(--primary) / 0.04) 50%, transparent 75%)`,
           opacity: mouse ? 1 : 0,
@@ -161,13 +194,13 @@ function OrbitDiagram({ centerLabel, inner, middle, outer }: OrbitDiagramProps) 
       ))}
 
       {/* Animated orbit rings */}
-      <OrbitRing radiusPct={CQW.radInner}  duration={36} clockwise        badges={inner}  startDeg={20}  />
-      <OrbitRing radiusPct={CQW.radMiddle} duration={34} clockwise={false} badges={middle} startDeg={200} />
-      <OrbitRing radiusPct={CQW.radOuter}  duration={34} clockwise        badges={outer}  startDeg={310} />
+      <OrbitRing radiusPct={CQW.radInner}  duration={36} clockwise        badges={inner}  startDeg={20}  onLinkClick={onLinkClick} />
+      <OrbitRing radiusPct={CQW.radMiddle} duration={34} clockwise={false} badges={middle} startDeg={200} onLinkClick={onLinkClick} />
+      <OrbitRing radiusPct={CQW.radOuter}  duration={34} clockwise        badges={outer}  startDeg={310} onLinkClick={onLinkClick} />
 
       {/* Center sphere */}
       <div
-        className="relative z-10 rounded-full flex items-center justify-center text-primary-foreground font-extrabold flex-shrink-0"
+        className="relative z-10 rounded-full flex items-center justify-center text-primary-foreground font-extrabold flex-shrink-0 pointer-events-none"
         style={{
           width: `${CQW.center}cqw`,
           height: `${CQW.center}cqw`,
@@ -244,6 +277,7 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
               inner={inner}
               middle={middle}
               outer={outer}
+              onLinkClick={handleLinkClick}
             />
           </div>
 

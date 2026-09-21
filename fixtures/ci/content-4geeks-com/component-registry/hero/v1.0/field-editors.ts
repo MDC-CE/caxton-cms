@@ -22,6 +22,10 @@ export const fieldEditors: Record<string, EditorType> = {
   "signup_card.cta_button.icon": "icon-picker",
   "orbit:title": "rich-text-editor:custom-font-size,custom-letter-spacing,custom-line-height,custom-font-weight",
   "orbit:body": "rich-text-editor",
+  "orbit:cta_buttons[].url": "link-picker",
+  "orbit:orbit_diagram.badges.inner[].url": "link-picker",
+  "orbit:orbit_diagram.badges.middle[].url": "link-picker",
+  "orbit:orbit_diagram.badges.outer[].url": "link-picker",
 
   // Variant-specific - prefixed with variant name
   "productShowcase:image": "image-with-style-picker",

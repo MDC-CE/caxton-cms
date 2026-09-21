@@ -21,18 +21,24 @@ orbit_diagram:
     inner:
       - label: Full Stack with AI
         highlight: false
+        url: "#course_selector"
       - label: AI Flex
         highlight: true
+        url: /en/apply
     middle:
       - label: Data Science & ML
         highlight: false
+        url: "#course_selector"
       - label: AI Fluency
         highlight: true
+        url: /en/apply
     outer:
       - label: AI Engineering
         highlight: true
+        url: /en/apply
       - label: Cybersecurity
         highlight: false
+        url: "#course_selector"
 section_id: hero-1v86vv
 paddingY:
   desktop: sm

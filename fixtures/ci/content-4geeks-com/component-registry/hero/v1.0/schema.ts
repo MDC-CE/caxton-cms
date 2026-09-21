@@ -391,6 +391,8 @@ export const heroApplyFormProductShowcaseSchema = z.object({
 export const heroOrbitBadgeSchema = z.object({
   label: z.string(),
   highlight: z.boolean().optional(),
+  /** Internal path (`/en/...`), same-page hash (`#section_id`), or external URL. */
+  url: z.string().optional(),
 });
 
 export const heroOrbitDiagramSchema = z.object({

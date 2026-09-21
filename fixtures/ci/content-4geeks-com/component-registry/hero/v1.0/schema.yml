@@ -2596,6 +2596,9 @@ variant_props:
                   type: boolean
                   required: false
                   description: true = primary color pill, false = muted pill
+                url:
+                  type: string
+                  required: false
             middle:
               type: array
               required: false
@@ -2606,6 +2609,9 @@ variant_props:
                 highlight:
                   type: boolean
                   required: false
+                url:
+                  type: string
+                  required: false
             outer:
               type: array
               required: false
@@ -2615,6 +2621,9 @@ variant_props:
                   required: true
                 highlight:
                   type: boolean
+                  required: false
+                url:
+                  type: string
                   required: false
           description: Badge pills for each of the three orbit rings. Each ring accepts 2 or more items.
   productShowcase:

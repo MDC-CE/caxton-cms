@@ -1068,6 +1068,20 @@
 .orbit-cw .orbit-item-inner { animation: counter-spin-cw var(--duration, 20s) linear infinite; }
 .orbit-ccw .orbit-item-inner { animation: counter-spin-ccw var(--duration, 20s) linear infinite; }
 
+/* Pause the hovered badge so orbit links are easy to click */
+.orbit-cw:has(.orbit-badge-link:hover),
+.orbit-cw:has(.orbit-badge-link:focus-visible),
+.orbit-ccw:has(.orbit-badge-link:hover),
+.orbit-ccw:has(.orbit-badge-link:focus-visible) {
+  animation-play-state: paused;
+}
+.orbit-cw:has(.orbit-badge-link:hover) .orbit-item-inner,
+.orbit-cw:has(.orbit-badge-link:focus-visible) .orbit-item-inner,
+.orbit-ccw:has(.orbit-badge-link:hover) .orbit-item-inner,
+.orbit-ccw:has(.orbit-badge-link:focus-visible) .orbit-item-inner {
+  animation-play-state: paused;
+}
+
 @keyframes spin-cw {
   from { transform: rotate(var(--angle, 0deg))                    translateX(var(--radius, 100px)); }
   to   { transform: rotate(calc(var(--angle, 0deg) + 360deg)) translateX(var(--radius, 100px)); }

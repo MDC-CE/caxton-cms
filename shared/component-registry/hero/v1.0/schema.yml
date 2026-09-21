@@ -159,7 +159,16 @@ variant_props:
               required: true
             method:
               type: string
-              required: true
+              required: false
+              options:
+                - POST
+                - GET
+            headers:
+              type: object
+              required: false
+            fail_silently:
+              type: boolean
+              required: false
         fields:
           type: object
           required: false
@@ -924,6 +933,88 @@ variant_props:
             message:
               type: string
               required: false
+            reload_entry_fields:
+              type: boolean
+              required: false
+        form_overrides:
+          type: array
+          required: false
+          items:
+            conditions:
+              type: array
+              required: true
+              items:
+                form_field_slug:
+                  type: string
+                  required: false
+                entry_field_slug:
+                  type: string
+                  required: false
+                match_method:
+                  type: string
+                  required: false
+                  options:
+                    - equals
+                    - contains
+                value:
+                  type: string
+                  required: false
+            conversion_name:
+              type: string
+              required: false
+            ecommerce_product_field:
+              type: string
+              required: false
+            success:
+              type: object
+              required: false
+              properties:
+                url:
+                  type: string
+                  required: false
+                message:
+                  type: string
+                  required: false
+                reload_entry_fields:
+                  type: boolean
+                  required: false
+            tags:
+              type: string
+              required: false
+            automations:
+              type: string
+              required: false
+            webhook:
+              type: object
+              required: false
+              properties:
+                url:
+                  type: string
+                  required: true
+                method:
+                  type: string
+                  required: false
+                  options:
+                    - POST
+                    - GET
+                headers:
+                  type: object
+                  required: false
+                fail_silently:
+                  type: boolean
+                  required: false
+            messages:
+              type: object
+              required: false
+        messages:
+          type: object
+          required: false
+        is_signup:
+          type: boolean
+          required: false
+        allow_signup:
+          type: boolean
+          required: false
         terms_url:
           type: string
           required: false
@@ -1389,7 +1480,16 @@ variant_props:
                   required: true
                 method:
                   type: string
-                  required: true
+                  required: false
+                  options:
+                    - POST
+                    - GET
+                headers:
+                  type: object
+                  required: false
+                fail_silently:
+                  type: boolean
+                  required: false
             fields:
               type: object
               required: false
@@ -2154,6 +2254,88 @@ variant_props:
                 message:
                   type: string
                   required: false
+                reload_entry_fields:
+                  type: boolean
+                  required: false
+            form_overrides:
+              type: array
+              required: false
+              items:
+                conditions:
+                  type: array
+                  required: true
+                  items:
+                    form_field_slug:
+                      type: string
+                      required: false
+                    entry_field_slug:
+                      type: string
+                      required: false
+                    match_method:
+                      type: string
+                      required: false
+                      options:
+                        - equals
+                        - contains
+                    value:
+                      type: string
+                      required: false
+                conversion_name:
+                  type: string
+                  required: false
+                ecommerce_product_field:
+                  type: string
+                  required: false
+                success:
+                  type: object
+                  required: false
+                  properties:
+                    url:
+                      type: string
+                      required: false
+                    message:
+                      type: string
+                      required: false
+                    reload_entry_fields:
+                      type: boolean
+                      required: false
+                tags:
+                  type: string
+                  required: false
+                automations:
+                  type: string
+                  required: false
+                webhook:
+                  type: object
+                  required: false
+                  properties:
+                    url:
+                      type: string
+                      required: true
+                    method:
+                      type: string
+                      required: false
+                      options:
+                        - POST
+                        - GET
+                    headers:
+                      type: object
+                      required: false
+                    fail_silently:
+                      type: boolean
+                      required: false
+                messages:
+                  type: object
+                  required: false
+            messages:
+              type: object
+              required: false
+            is_signup:
+              type: boolean
+              required: false
+            allow_signup:
+              type: boolean
+              required: false
             terms_url:
               type: string
               required: false
@@ -2596,6 +2778,9 @@ variant_props:
                   type: boolean
                   required: false
                   description: true = primary color pill, false = muted pill
+                url:
+                  type: string
+                  required: false
             middle:
               type: array
               required: false
@@ -2606,6 +2791,9 @@ variant_props:
                 highlight:
                   type: boolean
                   required: false
+                url:
+                  type: string
+                  required: false
             outer:
               type: array
               required: false
@@ -2615,6 +2803,9 @@ variant_props:
                   required: true
                 highlight:
                   type: boolean
+                  required: false
+                url:
+                  type: string
                   required: false
           description: Badge pills for each of the three orbit rings. Each ring accepts 2 or more items.
   productShowcase:
@@ -3388,9 +3579,6 @@ variant_props:
     live:
       type: object
       required: false
-      description: >-
-        Live event UI: label beside the badge; optional media strip above the form
-        (no countdown). Empty images → strip without media.
       properties:
         label:
           type: string
@@ -3399,19 +3587,24 @@ variant_props:
         images:
           type: array
           required: false
-          description: >-
-            Background GIFs/images for the live strip; cycles every 5s while live.
-            Empty / omitted → no media (does not fall back to countdown.background_image).
           items:
-            type: string
+            type:
+              type: string
+              required: true
+          description: >-
+            Background GIFs/images for the live strip; cycles every 5s while live. Empty / omitted → no media (does not
+            fall back to countdown.background_image).
+      description: >-
+        Live event UI: label beside the badge; optional media strip above the form (no countdown). Empty images → strip
+        without media.
     countdown:
       type: object
       required: false
-      description: Upcoming-only countdown strip
       properties:
         background_image:
           type: string
           required: false
+      description: Upcoming-only countdown strip
     form_card_title:
       type: string
       required: false
