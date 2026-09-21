@@ -629,6 +629,9 @@ export const STAFF_REVIEW_SITUATION_LABELS: Record<string, string> = {
   promote_draft: "Promote draft",
   locale_translation: "Locale translation",
   idea_opportunity_harm: "Idea opportunity vs harm",
+  anticipated_demand: "Anticipated demand",
+  fast_decay_news: "Fast-decay news",
+  broken_url: "Broken URL",
 };
 
 /** Catalog labels for staff multi-select on edits only (keep in sync with server review-situations). */
@@ -681,9 +684,35 @@ export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
   },
 ];
 
+/** Demand labels staff may set on open ideas (at most one). */
+export const STAFF_IDEA_DEMAND_SITUATION_OPTIONS: Array<{
+  id: string;
+  label: string;
+  when_to_use: string;
+}> = [
+  {
+    id: "anticipated_demand",
+    label: "Anticipated demand",
+    when_to_use:
+      "New product or feature that will become search volume — lasting questions, not today's volume.",
+  },
+  {
+    id: "fast_decay_news",
+    label: "Fast-decay news",
+    when_to_use: "Announcement with no lasting question — expect a quick reject.",
+  },
+  {
+    id: "broken_url",
+    label: "Broken URL",
+    when_to_use:
+      "Missing address still requested — redirect to a match, or one new page when demand is high.",
+  },
+];
+
 /**
- * Staff editor for author-declared review situations on open/partial edits.
- * Empty selection = clear declaration (server will infer from edits).
+ * Staff editor for author-declared review situations on open/partial edits or ideas.
+ * Edits: multi-select; empty = clear declaration (server infers).
+ * Ideas: at most one demand label; empty = no demand label (opportunity-vs-harm still on).
  */
 export function ReviewSituationsEditor({
   filedSituations,
@@ -693,6 +722,7 @@ export function ReviewSituationsEditor({
   saving,
   onSave,
   className,
+  mode = "edits",
 }: {
   filedSituations: string[];
   liveSituations?: string[];
@@ -701,7 +731,9 @@ export function ReviewSituationsEditor({
   saving?: boolean;
   onSave: (ids: string[]) => void;
   className?: string;
+  mode?: "edits" | "idea";
 }) {
+  const options = mode === "idea" ? STAFF_IDEA_DEMAND_SITUATION_OPTIONS : STAFF_REVIEW_SITUATION_OPTIONS;
   const [selected, setSelected] = useState<string[]>(() => [...filedSituations]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const filedKey = filedSituations.join(",");
@@ -715,6 +747,10 @@ export function ReviewSituationsEditor({
     selected.some((id) => !filedSituations.includes(id));
 
   function toggle(id: string) {
+    if (mode === "idea") {
+      setSelected((prev) => (prev.includes(id) ? [] : [id]));
+      return;
+    }
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
@@ -729,9 +765,18 @@ export function ReviewSituationsEditor({
       data-testid="panel-review-situations-editor"
     >
       <p className="text-sm text-foreground/90" data-testid="text-review-situations-edu">
-        Pick what kind of change this is so review uses the right checklist. You can leave empty —
-        we&apos;ll infer from the edits. Multiple packs each get their own checklist; apply only
-        after failing slices are removed or fixed.
+        {mode === "idea" ? (
+          <>
+            Optional demand label for how evidence is scored. Leave empty for ordinary briefs.
+            Opportunity vs harm stays on either way. Accepting does not publish.
+          </>
+        ) : (
+          <>
+            Pick what kind of change this is so review uses the right checklist. You can leave empty —
+            we&apos;ll infer from the edits. Multiple packs each get their own checklist; apply only
+            after failing slices are removed or fixed.
+          </>
+        )}
       </p>
       {(liveSituations?.length ?? 0) > 0 ? (
         <p className="text-xs text-muted-foreground" data-testid="text-review-situations-live">
@@ -740,7 +785,7 @@ export function ReviewSituationsEditor({
         </p>
       ) : null}
       <div className="flex flex-wrap gap-1.5">
-        {STAFF_REVIEW_SITUATION_OPTIONS.map((opt) => {
+        {options.map((opt) => {
           const on = selected.includes(opt.id);
           return (
             <button
@@ -771,7 +816,7 @@ export function ReviewSituationsEditor({
           onClick={() => onSave(selected)}
           data-testid="button-save-review-situations"
         >
-          {saving ? "Saving…" : "Save situations"}
+          {saving ? "Saving…" : mode === "idea" ? "Save demand label" : "Save situations"}
         </Button>
         <Button
           type="button"
@@ -781,7 +826,7 @@ export function ReviewSituationsEditor({
           onClick={() => setSelected([])}
           data-testid="button-clear-review-situations"
         >
-          Clear (infer)
+          {mode === "idea" ? "Clear label" : "Clear (infer)"}
         </Button>
       </div>
       <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
@@ -792,14 +837,29 @@ export function ReviewSituationsEditor({
           Read more (advanced)
         </CollapsibleTrigger>
         <CollapsibleContent className="mt-1 space-y-1 text-xs text-muted-foreground">
-          <p>
-            Filed tags are author-declared. Live review may add inferred packs when the edits need
-            more checklists (soft mismatch — create still succeeds).
-          </p>
-          <p>
-            On revise, tags that no longer match remaining edits drop. Per-situation ship: drop or
-            fix failing packs&apos; fields, then apply the rest in one go.
-          </p>
+          {mode === "idea" ? (
+            <>
+              <p>
+                Anticipated demand and fast-decay news change how search evidence is judged. Broken
+                URL requires hit counts from the runtime 404 log; accepting still only greenlights —
+                a later edit&apos;s approval writes the redirect or creates the post.
+              </p>
+              <p>
+                idea_opportunity_harm is always injected and is not selectable here.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                Filed tags are author-declared. Live review may add inferred packs when the edits need
+                more checklists (soft mismatch — create still succeeds).
+              </p>
+              <p>
+                On revise, tags that no longer match remaining edits drop. Per-situation ship: drop or
+                fix failing packs&apos; fields, then apply the rest in one go.
+              </p>
+            </>
+          )}
         </CollapsibleContent>
       </Collapsible>
     </div>

@@ -95,6 +95,14 @@ Proposals are a shared work item, not a chat. Prefer one open proposal per draft
 - Only the **active claimant** (human+role) may `resolve_blocker`. Do not resolve to overturn a disagreement — escalate or leave open; reviewers `reopen_blocker`.
 - Open blockers block **apply** and idea **accept** (reject/withdraw/close still OK). Cleared blockers ≠ ship — re-preview, then four-eyes `apply` / `accept`. For `promote_on_apply`, confirm ending experiments when asked (`confirm_end_experiment`).
 - **Idea follow-through:** after accept, file edits with `implements_proposal_id` (required when that idea reserved the page). At most one open implements child. Pickup stalled work via `list_proposals({ stalled: true })` or `proposal_stats.stalled_ideas`. Refuse codes: `explain_site` `topic: "proposals"` (subtopics `overview` / `reading`).
+- **New attached post (blog and other file-based shared layouts):** the slug is required; the folder need not exist. Do **not** call `create_entry` (it writes live and is not on specialist connectors) and do **not** attach a draft.
+
+**Worked example (new attached post):**
+
+1. Idea: `propose_change` with `kind: "idea"` and `related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }]`.
+2. Accept (a different role): `update_proposal` `action: "accept"` with that same `accepted_entry` and `next_step`. No YAML yet.
+3. Edits: `propose_change` with `implements_proposal_id`, `review_situations: ["new_public_content"]`, and `entries[]` of field `updates[]` only — **no** `variant`. Required live fields must be in the ops (blog: title, description, body/`content`, category).
+4. Apply (a different role): `update_proposal` `action: "apply"`. A new URL-param value (for example category) also needs `confirm_new_values: true` after principal approval. Apply writes `{slug}/_common.yml` and `{locale}.yml` with `sections: []` and does not touch `template.{locale}.yml`.
 - **Escalated hold:** when `escalated: true`, a Platform Steward paused agent work (staff UI only). Do **not** call `update_proposal` — every action fails with `code: escalated` until they release. Read `escalated_note`. Overlapping create may warn `escalated_sibling` but still succeeds. After release the note may remain as history (mutations allowed again).
 - Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note.
 - Four-eyes = different **username+role** (or staff UI), not merely a different model under the same role.

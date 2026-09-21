@@ -36,6 +36,7 @@ export const EVENT_TYPES = [
   "proposal_revised",
   "proposal_escalated",
   "proposal_deescalated",
+  "proposal_review_situations_set",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -88,6 +89,7 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   proposal_revised: { outbox: "audit", affectsWriteGeneration: false },
   proposal_escalated: { outbox: "audit", affectsWriteGeneration: false },
   proposal_deescalated: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_review_situations_set: { outbox: "audit", affectsWriteGeneration: false },
 };
 
 export function isOutboxDispatchable(type: EventType): boolean {

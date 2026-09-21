@@ -24,6 +24,16 @@ describe("proposalCardMeta", () => {
     const now = Date.parse("2026-09-09T20:00:00.000Z");
     expect(formatProposalRelativeUpdatedAt(now, now)).toBe("just now");
     expect(formatProposalRelativeUpdatedAt(now - 5 * 60_000, now)).toBe("5 minutes ago");
+    expect(formatProposalRelativeUpdatedAt(now - (2 * 60 + 15) * 60_000, now)).toBe(
+      "2 hours 15 minutes ago",
+    );
+    expect(formatProposalRelativeUpdatedAt(now - 3 * 60 * 60_000, now)).toBe("3 hours ago");
+    expect(
+      formatProposalRelativeUpdatedAt(now - ((1 * 24 + 5) * 60 + 23) * 60_000, now),
+    ).toBe("1 day 5 hours 23 minutes ago");
+    expect(
+      formatProposalRelativeUpdatedAt(now - ((2 * 24 + 0) * 60 + 10) * 60_000, now),
+    ).toBe("2 days 10 minutes ago");
   });
 
   it("builds entry progress with failed cue", () => {

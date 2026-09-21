@@ -221,6 +221,42 @@ describe("buildProposalDiscoveryPath", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("builds broken_url idea path with runtime issues and no keyword research", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i-404",
+        status: "open",
+        kind: "idea",
+        summary: "404 /en/old-path still requested.",
+        related_entries: [{ contentType: "blog", slug: "some-spoke", locale: "en" }],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm", "broken_url"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "broken_url",
+              title: "Broken URL strategy",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const names = tools.map((t) => (t.kind === "tool" ? t.tool : ""));
+    expect(names).toEqual(["explain_site", "get_runtime_issues", "test_redirect"]);
+    expect(names).not.toContain("get_organic_traffic");
+    expect(names).not.toContain("get_or_refresh_seo_research");
+    const explain = tools[0];
+    if (explain?.kind === "tool") {
+      expect(explain.args_hint).toMatchObject({ topic: "proposals", subtopic: "broken-url" });
+    }
+  });
+
   it("builds idea path with related tools; unavailable when caps empty", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: {

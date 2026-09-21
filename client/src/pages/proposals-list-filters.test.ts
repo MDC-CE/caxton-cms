@@ -38,6 +38,7 @@ describe("parseProposalListSearch", () => {
         escalatedOnly: false,
         attention: "all",
         stalledOnly: false,
+        needsReviewOnly: false,
       },
       q: "hero",
     });
@@ -68,6 +69,11 @@ describe("parseProposalListSearch", () => {
     expect(parseProposalListSearch("stalled=1").filters.stalledOnly).toBe(true);
     expect(parseProposalListSearch("stalled=true").filters.stalledOnly).toBe(true);
     expect(parseProposalListSearch("").filters.stalledOnly).toBe(false);
+  });
+
+  it("parses needs_review=1 as needsReviewOnly", () => {
+    expect(parseProposalListSearch("needs_review=1").filters.needsReviewOnly).toBe(true);
+    expect(parseProposalListSearch("").filters.needsReviewOnly).toBe(false);
   });
 
   it("coerces invalid values per field without wiping siblings", () => {
@@ -117,6 +123,7 @@ describe("serializeProposalListSearch", () => {
         escalatedOnly: true,
         attention: "blocked" as const,
         stalledOnly: false,
+        needsReviewOnly: false,
       },
       q: "pricing",
     };
@@ -192,6 +199,7 @@ describe("clearProposalListFilters", () => {
       escalatedOnly: false,
       attention: "all",
       stalledOnly: false,
+      needsReviewOnly: false,
     });
   });
 });

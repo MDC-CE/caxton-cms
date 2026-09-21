@@ -10,7 +10,7 @@ export type ProposalClaimLike = {
   actor?: IssueActorRef | Record<string, unknown> | null;
 };
 
-function asIssueActor(raw: unknown): IssueActorRef | null {
+export function asIssueActor(raw: unknown): IssueActorRef | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   const type = o.type;
@@ -38,18 +38,38 @@ export function shortProposalId(id: string, length = 6): string {
   return tail || id;
 }
 
+function pluralUnit(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Staff-facing relative time with day/hour/minute parts (no vague "about N hours").
+ * Examples: "just now", "5 minutes ago", "2 hours 15 minutes ago", "1 day 5 hours 23 minutes ago"
+ */
 export function formatProposalRelativeUpdatedAt(
   updatedAtMs: number,
   nowMs: number = Date.now(),
 ): string {
-  const diff = nowMs - updatedAtMs;
+  const diff = Math.max(0, nowMs - updatedAtMs);
   if (diff < 60_000) return "just now";
-  const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `about ${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+
+  const totalMins = Math.floor(diff / 60_000);
+  if (totalMins < 60) return `${pluralUnit(totalMins, "minute")} ago`;
+
+  const totalHours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (totalHours < 24) {
+    const parts = [pluralUnit(totalHours, "hour")];
+    if (mins > 0) parts.push(pluralUnit(mins, "minute"));
+    return `${parts.join(" ")} ago`;
+  }
+
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  const parts = [pluralUnit(days, "day")];
+  if (hours > 0) parts.push(pluralUnit(hours, "hour"));
+  if (mins > 0) parts.push(pluralUnit(mins, "minute"));
+  return `${parts.join(" ")} ago`;
 }
 
 export function proposalEntryProgress(entries: Array<{ status: string }>): {

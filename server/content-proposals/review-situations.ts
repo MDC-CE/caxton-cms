@@ -19,12 +19,31 @@ export const REVIEW_SITUATION_IDS = [
   "promote_draft",
   "locale_translation",
   "idea_opportunity_harm",
+  "anticipated_demand",
+  "fast_decay_news",
+  "broken_url",
 ] as const;
 
 export type ReviewSituationId = (typeof REVIEW_SITUATION_IDS)[number];
 
 /** Default-on for every open idea — not author-declared; not used on edits. */
 export const IDEA_DEFAULT_SITUATION_ID: ReviewSituationId = "idea_opportunity_harm";
+
+/**
+ * Author-declared demand labels allowed on ideas (at most one).
+ * idea_opportunity_harm stays default-on and is never filed by authors.
+ */
+export const IDEA_AUTHOR_SITUATION_IDS = [
+  "anticipated_demand",
+  "fast_decay_news",
+  "broken_url",
+] as const;
+
+export type IdeaAuthorSituationId = (typeof IDEA_AUTHOR_SITUATION_IDS)[number];
+
+export function isIdeaAuthorSituationId(value: string): value is IdeaAuthorSituationId {
+  return (IDEA_AUTHOR_SITUATION_IDS as readonly string[]).includes(value);
+}
 
 export type SituationSource = "author" | "inferred" | "merged";
 
@@ -150,12 +169,12 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     id: "new_public_content",
     label: "New public content",
     when_to_use:
-      "New or draft-backed public page — judge angle, facts, and funnel, not only whether apply is easy.",
+      "New public page — a draft promote, or an attached post whose files do not exist yet. Judge angle, facts, and funnel, not only whether apply is easy.",
     explain_topic: "proposals",
     explain_subtopic: "situations",
     checklist_ids: ["new_content_brand"],
     staff_note:
-      "New public content — clear the brand gate (angle, facts, real program CTA).",
+      "New public content — clear the brand gate (angle, facts, real program CTA). For an attached post with no file yet, applying creates that post and does not change the shared template.",
     discovery_content_look_for: [
       "defensible technical or educational angle",
       "facts checked against the product",
@@ -163,6 +182,7 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     ],
     author_summary_hints: [
       "New public page or draft promote path. Angle, facts, and funnel CTA must be defensible.",
+      "Attached post with no file: field updates only, no variant. Apply creates the post and leaves the shared template alone.",
     ],
   },
   promote_draft: {
@@ -214,13 +234,65 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
       "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site.",
     discovery_content_look_for: [
       "90-day goal cite/rank/assist — not fill a cluster hole",
-      "query evidence or SERP set in the brief",
+      "evidence follows declared demand label when present; with no label, score the summary (volume only for a search claim)",
       "named siblings / cannibal risk",
       "kill criterion; link budget; locale doubling",
       "wrong vehicle (funnel/SERP/links-only) → close and refile as edits",
     ],
     author_summary_hints: [
       "Pitch a new URL or structural brief with goal, evidence, cannibal check, kill line, and link budget. Accept is greenlight only — no YAML.",
+    ],
+  },
+  anticipated_demand: {
+    id: "anticipated_demand",
+    label: "Anticipated demand",
+    when_to_use:
+      "Idea: a new product or feature that will turn into searches after the launch fades — lasting query shapes, not today's volume.",
+    explain_topic: "proposals",
+    explain_subtopic: "idea-opportunity-harm",
+    checklist_ids: ["anticipated_demand"],
+    staff_note:
+      "Launch demand — judge lasting questions after the news fades, not today's search volume. Accepting does not publish.",
+    discovery_content_look_for: [
+      "announcement or changelog in the brief",
+      "lasting query shapes (What is X / How to use Z)",
+      "fade plan / kill criterion",
+    ],
+    author_summary_hints: [
+      "New product/feature will become search volume. Name announcement + lasting questions + fade plan. review_situations:[anticipated_demand]. Empty volume is expected.",
+    ],
+  },
+  fast_decay_news: {
+    id: "fast_decay_news",
+    label: "Fast-decay news",
+    when_to_use:
+      "Idea: announcement with no lasting question after the spike — expect a quick reject, not keyword research.",
+    explain_topic: "proposals",
+    explain_subtopic: "idea-opportunity-harm",
+    checklist_ids: ["fast_decay_news"],
+    staff_note:
+      "Announcement with no lasting question — reject quickly. Do not run keyword research.",
+    discovery_content_look_for: [],
+    author_summary_hints: [
+      "Announcement only; no durable how-to/what-is after the spike. review_situations:[fast_decay_news]. Expect reject.",
+    ],
+  },
+  broken_url: {
+    id: "broken_url",
+    label: "Broken URL",
+    when_to_use:
+      "Idea: a missing address people still request — redirect to a matching page, or one new attached entry when demand is high and nothing fits.",
+    explain_topic: "proposals",
+    explain_subtopic: "broken-url",
+    checklist_ids: ["broken_url"],
+    staff_note:
+      "Missing address — greenlight a redirect to a matching page, or one new page when the address is busy and nothing fits. Accepting does not change the site.",
+    discovery_content_look_for: [
+      "get_runtime_issues row pasted in the brief (path, count, sources, referrer, queryAttribution)",
+      "live page match = answers address + funnel product/persona",
+    ],
+    author_summary_hints: [
+      "Missing address still requested. Call get_runtime_issues first; paste path, count, sources, referrer, UTMs. review_situations:[broken_url]. Only roles with that tool may file.",
     ],
   },
 };
@@ -261,6 +333,36 @@ export function parseReviewSituationIds(
     };
   }
   return { ok: true, ids };
+}
+
+/**
+ * Idea authors may declare at most one of anticipated_demand | fast_decay_news | broken_url.
+ * idea_opportunity_harm is never author-filed (always injected on classify).
+ */
+export function parseIdeaAuthorSituationIds(
+  raw: unknown,
+): { ok: true; ids: IdeaAuthorSituationId[] } | { ok: false; error: string; code?: string } {
+  const parsed = parseReviewSituationIds(raw);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  if (parsed.ids.length === 0) return { ok: true, ids: [] };
+  const invalid = parsed.ids.filter((id) => !isIdeaAuthorSituationId(id));
+  if (invalid.length) {
+    return {
+      ok: false,
+      code: "review_situations_idea_labels_only",
+      error:
+        `Ideas may only declare demand labels: ${IDEA_AUTHOR_SITUATION_IDS.join(", ")}. ` +
+        `Got: ${invalid.join(", ")}. idea_opportunity_harm is always on — do not file it. Edit-only packs stay on edits.`,
+    };
+  }
+  if (parsed.ids.length > 1) {
+    return {
+      ok: false,
+      code: "review_situations_idea_one_label",
+      error: `Ideas may declare at most one demand label. Got: ${parsed.ids.join(", ")}.`,
+    };
+  }
+  return { ok: true, ids: parsed.ids as IdeaAuthorSituationId[] };
 }
 
 export type OpsEntryForSituation = {
@@ -369,6 +471,10 @@ export function situationsRelevantToOps(
       case "locale_translation":
         return translationShape;
       case "idea_opportunity_harm":
+        return false;
+      case "anticipated_demand":
+      case "fast_decay_news":
+      case "broken_url":
         return false;
       default:
         return false;

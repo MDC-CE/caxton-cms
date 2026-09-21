@@ -5,6 +5,50 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-21"
+    summary: "Idea demand labels + get_runtime_issues for broken_url briefs"
+    agent_impact:
+      - "Ideas may declare one review_situations demand label: anticipated_demand (lasting queries after launch; empty volume OK), fast_decay_news (quick reject), or broken_url (paste get_runtime_issues proof). idea_opportunity_harm stays always-on. set_review_situations works on open ideas for those labels."
+      - "New read tool get_runtime_issues (kind:404) — metrics_view or proposals_review. Filters match Diagnostics Runtime issues. broken_url authors must call it first; reviewers confirm on discovery/checklist."
+      - "explain_site proposals subtopic broken-url. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/runtime-issues.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/broken-url-proposals.md
+      - shared/mcp-tool-catalog.ts
+
+  - date: "2026-09-21"
+    summary: "Accepted idea can implement a new attached post before YAML exists"
+    agent_impact:
+      - "File-based attached posts (blog): after an accepted idea locks the slug, propose_change edits with implements_proposal_id, review_situations [new_public_content], and field updates only — no variant. Apply creates {slug}/_common.yml and {locale}.yml and does not touch the shared template."
+      - "Do not call create_entry or add a draft for that new post. attached_no_draft, entry_not_found, and a stalled idea’s next_actions resubmit the field-edits packet. A missing database row is refused (database_entry_required); the idea can stay."
+      - "New URL-param values on apply need confirm_new_values: true after principal approval. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/shared-layout.md
+
+  - date: "2026-09-21"
+    summary: "Author rewrites ask for a re-check; needs_review lists that edits queue"
+    agent_impact:
+      - "awaiting_rereview also means the author rewrote entries or marked a blocker fixed, and no open blockers remain. Open blockers still stay blocked. Past rewrites before this deploy do not flip the bucket until the next stamp."
+      - "list_proposals needs_review:true returns open|partial edits in awaiting_rereview or no_feedback (not blocked, not escalated). proposal_stats.needs_review_edits is that count. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/attention.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+
   - date: "2026-09-17"
     summary: "Field write router — funnel.* always _common.yml; strip locale orphans"
     agent_impact:

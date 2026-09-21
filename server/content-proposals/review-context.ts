@@ -14,6 +14,9 @@ import {
   FUNNEL_CLASSIFICATION_STAFF_NOTE,
   LOCALE_TRANSLATION_STAFF_NOTE,
   IDEA_OPPORTUNITY_HARM_STAFF_NOTE,
+  ANTICIPATED_DEMAND_STAFF_NOTE,
+  FAST_DECAY_NEWS_STAFF_NOTE,
+  BROKEN_URL_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
@@ -31,6 +34,7 @@ import {
   mergeSituations,
   staffNotesForSituations,
   IDEA_DEFAULT_SITUATION_ID,
+  isIdeaAuthorSituationId,
   type ReviewSituationId,
   type SituationSource,
 } from "./review-situations";
@@ -148,8 +152,10 @@ export function damageClassForTarget(opts: {
   contentType: string;
   category?: ProposalCategory;
   existence: ExistenceState;
-  /** Live missing but draft present → new content path. */
+  /** Live missing but draft present, or a reserved attached create → new content path. */
   draftExists?: boolean;
+  /** Edits that will create a file-based attached entry on apply. */
+  createsEntry?: boolean;
   /** For ideas: missing slug is new content when public type. */
   forIdea?: boolean;
 }): DamageClass {
@@ -157,7 +163,7 @@ export function damageClassForTarget(opts: {
   if (isSellingContentType(ct)) return "selling_page";
 
   if (opts.existence === "missing") {
-    if (opts.draftExists) return "new_public_content";
+    if (opts.draftExists || opts.createsEntry) return "new_public_content";
     if (opts.forIdea && (isPublicContentType(ct) || !ct)) return "new_public_content";
     if (opts.forIdea) return isSellingContentType(ct) ? "selling_page" : "existing_content";
     // Edits with missing live and no draft — caller marks target_missing; class stays content-type based for badge but never new_public
@@ -231,6 +237,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   let damage_class: DamageClass = "none";
+  let createsAttached = false;
 
   if (proposal.kind === "edits") {
     const workEntries = proposal.entries.filter(
@@ -243,14 +250,24 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       const existence: ExistenceState = lu?.existence ?? "unknown";
       const draftExists = Boolean(e.variant?.trim() && lu?.draftExists);
       const liveMissing = existence === "missing";
-      const target_missing = liveMissing && !draftExists;
+      const createsEntry =
+        e.baseline_context?.creates_entry === true && !e.variant?.trim();
+      if (createsEntry && liveMissing) createsAttached = true;
+      const target_missing = liveMissing && !draftExists && !createsEntry;
 
       let dc = damageClassForTarget({
         contentType: e.contentType,
         category: proposal.category,
         existence,
         draftExists,
+        createsEntry: createsEntry && liveMissing,
       });
+      if (createsEntry && liveMissing) {
+        warnings.push({
+          code: "creates_attached_entry",
+          message: `Applying creates ${e.contentType}/${e.slug} (${e.locale}). No draft. The shared template does not change.`,
+        });
+      }
       if (target_missing) {
         // Never label deleted target as new public content
         if (dc === "new_public_content") {
@@ -348,9 +365,11 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
     checklists.add("disposition");
   } else if (proposal.kind === "idea") {
-    liveSituations = [IDEA_DEFAULT_SITUATION_ID];
-    filedReviewSituations = [];
-    situationSource = "inferred";
+    const filedRaw = (proposal.review_situations ?? []) as string[];
+    const filedDemand = filedRaw.filter(isIdeaAuthorSituationId) as ReviewSituationId[];
+    liveSituations = [IDEA_DEFAULT_SITUATION_ID, ...filedDemand];
+    filedReviewSituations = filedDemand;
+    situationSource = filedDemand.length ? "author" : "inferred";
     for (const c of checklistIdsForSituations(liveSituations)) {
       checklists.add(c);
     }
@@ -445,7 +464,15 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   const summaryParts = [meta.situation_description];
   if (proposal.kind === "idea") {
-    summaryParts[0] = IDEA_OPPORTUNITY_HARM_STAFF_NOTE;
+    if (liveSituations.includes("broken_url")) {
+      summaryParts[0] = BROKEN_URL_STAFF_NOTE;
+    } else if (liveSituations.includes("anticipated_demand")) {
+      summaryParts[0] = ANTICIPATED_DEMAND_STAFF_NOTE;
+    } else if (liveSituations.includes("fast_decay_news")) {
+      summaryParts[0] = FAST_DECAY_NEWS_STAFF_NOTE;
+    } else {
+      summaryParts[0] = IDEA_OPPORTUNITY_HARM_STAFF_NOTE;
+    }
   }
   if (block_apply) summaryParts.push("Apply is blocked — target no longer exists.");
   if (situation_changed_since_filed) {
@@ -475,6 +502,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       note !== FUNNEL_CLASSIFICATION_STAFF_NOTE &&
       note !== LOCALE_TRANSLATION_STAFF_NOTE &&
       note !== IDEA_OPPORTUNITY_HARM_STAFF_NOTE &&
+      note !== ANTICIPATED_DEMAND_STAFF_NOTE &&
+      note !== FAST_DECAY_NEWS_STAFF_NOTE &&
+      note !== BROKEN_URL_STAFF_NOTE &&
       !summaryParts.includes(note)
     ) {
       summaryParts.push(note);
@@ -483,9 +513,17 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
-    : proposal.kind === "idea"
-      ? IDEA_OPPORTUNITY_HARM_STAFF_NOTE
-      : meta.situation_description;
+    : createsAttached
+      ? "Applying creates this post. The slug was reserved by the accepted idea. The shared template does not change."
+      : proposal.kind === "idea"
+        ? liveSituations.includes("broken_url")
+          ? BROKEN_URL_STAFF_NOTE
+          : liveSituations.includes("anticipated_demand")
+            ? ANTICIPATED_DEMAND_STAFF_NOTE
+            : liveSituations.includes("fast_decay_news")
+              ? FAST_DECAY_NEWS_STAFF_NOTE
+              : IDEA_OPPORTUNITY_HARM_STAFF_NOTE
+        : meta.situation_description;
   if (hasTitleDescChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
   }
@@ -552,6 +590,7 @@ export function collectDamageClassesForMixedCheck(
     existence: ExistenceState;
     draftExists?: boolean;
     forIdea?: boolean;
+    createsEntry?: boolean;
   }>,
 ): DamageClass[] {
   const set = new Set<DamageClass>();
@@ -560,7 +599,7 @@ export function collectDamageClassesForMixedCheck(
     if (t.forIdea && t.existence === "missing" && !isSellingContentType(t.contentType)) {
       dc = "new_public_content";
     }
-    if (t.existence === "missing" && t.draftExists) {
+    if (t.existence === "missing" && (t.draftExists || t.createsEntry) && !isSellingContentType(t.contentType)) {
       dc = "new_public_content";
     }
     set.add(dc);

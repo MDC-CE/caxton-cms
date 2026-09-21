@@ -10,6 +10,7 @@ export type ProposalsSubtopicId =
   | "serp-title-description"
   | "funnel-classification"
   | "idea-opportunity-harm"
+  | "broken-url"
   | "translations";
 
 export type ProposalsSubtopicDef = {
@@ -57,6 +58,11 @@ export const PROPOSALS_SUBTOPICS: readonly ProposalsSubtopicDef[] = [
     fileStem: "idea-opportunity-harm-proposals",
   },
   {
+    id: "broken-url",
+    description: "Broken URL idea: 404 proof, match vs create, accept writes nothing",
+    fileStem: "broken-url-proposals",
+  },
+  {
     id: "translations",
     description: "Locale translation draft→promote author + reviewer playbook",
     fileStem: "proposals-translations",
@@ -85,6 +91,10 @@ export const EXPLAIN_TOPIC_ALIASES: Record<
     topic: "proposals",
     subtopic: "idea-opportunity-harm",
   },
+  "broken-url-proposals": {
+    topic: "proposals",
+    subtopic: "broken-url",
+  },
 };
 
 export const PROPOSALS_INDEX_HUB = [
@@ -95,6 +105,7 @@ export const PROPOSALS_INDEX_HUB = [
   "Call again with `topic: \"proposals\"` and `subtopic` set to one of the ids below.",
   "",
   "Authors declare `review_situations` on edits when a pack applies; empty → infer from ops (and summary cues for some packs).",
+  "Ideas may declare one demand label (`anticipated_demand` | `fast_decay_news` | `broken_url`); `idea_opportunity_harm` is always on.",
 ].join("\n");
 
 export function isProposalsSubtopicId(value: string): value is ProposalsSubtopicId {

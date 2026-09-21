@@ -90,6 +90,7 @@ import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
 import {
   ProposalSituationCallout,
   ReviewSituationsEditor,
+  STAFF_IDEA_DEMAND_SITUATION_OPTIONS,
   type ReviewContextPayload,
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
@@ -115,11 +116,13 @@ import { ToastAction } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { proposalStatusUi } from "@/lib/proposalStatusUi";
 import {
+  asIssueActor,
   formatProposalRelativeUpdatedAt,
   proposalAttributionLines,
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
+import { formatIssueActorLine } from "@/lib/formatIssueActor";
 import { McpCopyButton } from "@/components/mcp/McpSetupUi";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
@@ -168,6 +171,8 @@ type BlockerRow = {
   created_at: number;
   resolve_note: string | null;
   resolved_by: string | null;
+  author_actor?: Record<string, unknown> | null;
+  resolved_by_actor?: Record<string, unknown> | null;
 };
 
 type RelatedEntryRef = {
@@ -269,8 +274,8 @@ function reviewModeExplain(p: Proposal): { title: string; body: string; advanced
     };
   }
   return {
-    title: "Suggested edits — not live until you Approve",
-    body: "Approving writes the remaining suggested field changes onto the live page for each open entry. Until then, visitors still see the current live content. There is usually no separate draft to preview unless an entry lists a variant.",
+    title: "Soft suggestion only",
+    body: "Nothing is live until you apply. Approving writes the suggested field changes onto the live page for each open entry. There is no separate draft page to preview unless an entry lists a variant.",
     advanced: [
       "Default soft path: no draft_backed promote and no variant target.",
       "Apply is still four-eyes — the proposer cannot approve their own edits.",
@@ -626,6 +631,7 @@ export function ProposalListPanel() {
         kindFilter={view.filters.kind}
         statusFilter={view.filters.status}
         stalledOnly={view.filters.stalledOnly}
+        needsReviewOnly={view.filters.needsReviewOnly}
         stats={data?.stats}
         headers={headers}
         onKindClick={(kind) =>
@@ -645,6 +651,7 @@ export function ProposalListPanel() {
             filters: {
               ...view.filters,
               stalledOnly: !view.filters.stalledOnly,
+              needsReviewOnly: false,
               kind: "idea",
               status: "finished",
               attention: "all",
@@ -652,6 +659,25 @@ export function ProposalListPanel() {
             q: view.q,
           })
         }
+        onNeedsReviewClick={() => {
+          const next = !view.filters.needsReviewOnly;
+          writeView({
+            filters: {
+              ...view.filters,
+              needsReviewOnly: next,
+              ...(next
+                ? {
+                    kind: "edits" as const,
+                    stalledOnly: false,
+                    attention: "all" as const,
+                    sort: "attention" as const,
+                    sortDir: "desc" as const,
+                  }
+                : {}),
+            },
+            q: view.q,
+          });
+        }}
         trailing={
           <EventWebhooksKpiButton onClick={() => setLocation("/private/webhooks/hooks")} />
         }
@@ -1273,9 +1299,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     kind={p.kind}
                   />
                 ) : null}
-                {p.kind === "edits" && !isTerminal ? (
+                {(p.kind === "edits" || p.kind === "idea") && !isTerminal ? (
                   <ReviewSituationsEditor
-                    filedSituations={p.review_situations ?? []}
+                    mode={p.kind === "idea" ? "idea" : "edits"}
+                    filedSituations={
+                      p.kind === "idea"
+                        ? (p.review_situations ?? []).filter((id) =>
+                            STAFF_IDEA_DEMAND_SITUATION_OPTIONS.some((o) => o.id === id),
+                          )
+                        : (p.review_situations ?? [])
+                    }
                     liveSituations={reviewContext?.review_situations}
                     situationSource={reviewContext?.situation_source}
                     saving={mut.isPending}
@@ -1723,7 +1756,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             </div>
           ) : null}
 
-          {!isTerminal ? (
+          {!isTerminal &&
+          (p.kind === "notes" ||
+            p.kind === "idea" ||
+            p.review_mode === "draft_backed" ||
+            p.promote_on_apply ||
+            p.review_mode === "soft_variant" ||
+            p.entries.some((e) => e.variant)) ? (
           <div className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm leading-6">
             <IconInfoCircle className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
             {p.kind === "notes" ? (
@@ -1753,15 +1792,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 items block approve; clearing them still requires a fresh preview — resolving means the
                 acceptance criteria were met, not “I disagree.”
               </p>
-            ) : p.review_mode === "soft_variant" || p.entries.some((e) => e.variant) ? (
+            ) : (
               <p>
                 Soft suggestion on a draft. Approving writes the proposed field changes into that draft —
                 it does not go live. Preview the draft before deciding.
-              </p>
-            ) : (
-              <p>
-                Soft suggestion only. Nothing is live until you apply. There is no separate draft page to
-                preview unless an entry lists a variant.
               </p>
             )}
           </div>
@@ -1981,18 +2015,23 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       <span aria-hidden className="text-muted-foreground/40">
                         ·
                       </span>
-                      <span>by {b.author}</span>
+                      <span>by {formatIssueActorLine(b.author, asIssueActor(b.author_actor))}</span>
                       <span aria-hidden className="text-muted-foreground/40">
                         ·
                       </span>
                       <span>{formatProposalRelativeUpdatedAt(b.created_at)}</span>
                     </div>
                     <p className="whitespace-pre-wrap leading-6">{b.body}</p>
-                    {b.resolve_note && (
-                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                        Resolved by {b.resolved_by}: {b.resolve_note}
+                    {b.resolved_by ? (
+                      <p className="text-xs text-muted-foreground">
+                        Resolved by {formatIssueActorLine(b.resolved_by, asIssueActor(b.resolved_by_actor))}
                       </p>
-                    )}
+                    ) : null}
+                    {b.resolve_note ? (
+                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                        {b.resolve_note}
+                      </p>
+                    ) : null}
                     {b.status === "open" && canResolveUi && (
                       <div className="space-y-2 pt-1">
                         <Textarea

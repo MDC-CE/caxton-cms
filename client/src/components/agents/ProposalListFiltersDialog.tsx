@@ -28,6 +28,7 @@ import {
   AGENTIC_SWARM_ROLE_IDS,
   AGENTIC_SWARM_ROLES_BY_ID,
 } from "@shared/agentic-swarm-roles";
+import { formatProposalRelativeUpdatedAt } from "@/lib/proposalCardMeta";
 import { apiFetch } from "@/lib/queryClient";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
@@ -70,17 +71,6 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
   };
 }
 
-function formatRelative(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "just now";
-  const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `about ${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
-}
-
 function sessionTriggerLabel(
   sessionId: string,
   sessions: AgentSessionPickerSummary[],
@@ -89,7 +79,7 @@ function sessionTriggerLabel(
   const s = sessions.find((x) => x.agent_session_id === sessionId);
   const short = sessionId.slice(0, 8);
   if (!s) return `${short}…`;
-  return `${short}… · ${s.write_count} write${s.write_count === 1 ? "" : "s"} · ${formatRelative(s.ended_at)}`;
+  return `${short}… · ${s.write_count} write${s.write_count === 1 ? "" : "s"} · ${formatProposalRelativeUpdatedAt(s.ended_at)}`;
 }
 
 export function ProposalListFiltersDialog({
@@ -251,6 +241,8 @@ export function ProposalListFiltersDialog({
               Narrow which proposals appear in the list by status, kind, attention, or who filed them.
               Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
               to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
+              Ready for re-check means reviewers should look again: blockers are cleared, or the author
+              rewrote the proposal or marked a blocker fixed, and nothing is still waiting on the author.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -487,7 +479,7 @@ export function ProposalListFiltersDialog({
         sessions={sessions}
         value={draft.agentSessionId}
         onSelect={(next) => patchDraft({ agentSessionId: next })}
-        formatRelative={formatRelative}
+        formatRelative={formatProposalRelativeUpdatedAt}
         includeUnscoped={false}
       />
     </>

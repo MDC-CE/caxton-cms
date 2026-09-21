@@ -3,6 +3,7 @@ import {
   inferSituationsFromOps,
   mergeSituations,
   parseReviewSituationIds,
+  parseIdeaAuthorSituationIds,
   refreshSituationsAfterRevise,
   checklistIdsForSituations,
 } from "./review-situations";
@@ -211,5 +212,32 @@ describe("review-situations", () => {
       ok: true,
       ids: ["locale_translation"],
     });
+  });
+
+  it("parseIdeaAuthorSituationIds accepts one demand label", () => {
+    expect(parseIdeaAuthorSituationIds(["broken_url"])).toEqual({
+      ok: true,
+      ids: ["broken_url"],
+    });
+    expect(parseIdeaAuthorSituationIds([])).toEqual({ ok: true, ids: [] });
+  });
+
+  it("parseIdeaAuthorSituationIds refuses edits-only and mixes", () => {
+    const editsOnly = parseIdeaAuthorSituationIds(["body_copy_edit"]);
+    expect(editsOnly.ok).toBe(false);
+    if (!editsOnly.ok) expect(editsOnly.code).toBe("review_situations_idea_labels_only");
+
+    const defaultOn = parseIdeaAuthorSituationIds(["idea_opportunity_harm"]);
+    expect(defaultOn.ok).toBe(false);
+
+    const mix = parseIdeaAuthorSituationIds(["anticipated_demand", "fast_decay_news"]);
+    expect(mix.ok).toBe(false);
+    if (!mix.ok) expect(mix.code).toBe("review_situations_idea_one_label");
+  });
+
+  it("checklist ids for demand labels", () => {
+    expect(checklistIdsForSituations(["anticipated_demand"])).toEqual(["anticipated_demand"]);
+    expect(checklistIdsForSituations(["fast_decay_news"])).toEqual(["fast_decay_news"]);
+    expect(checklistIdsForSituations(["broken_url"])).toEqual(["broken_url"]);
   });
 });

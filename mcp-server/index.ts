@@ -20,6 +20,7 @@ import { registerProposalTools } from "./tools/proposals.js";
 import { registerValidationIssuesTools } from "./tools/validation-issues.js";
 import { registerOrganicTrafficTools } from "./tools/organic-traffic.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
+import { registerRuntimeIssuesTools } from "./tools/runtime-issues.js";
 import {
   registerClient,
   lookupClient,
@@ -407,6 +408,7 @@ async function createMcpServer(
   registerValidationIssuesTools(mcp, mcpToken, grants);
   registerOrganicTrafficTools(mcp, mcpToken, grants);
   registerAnalyticsTools(mcp, mcpToken, grants);
+  registerRuntimeIssuesTools(mcp, mcpToken, grants);
   return mcp;
 }
 

@@ -208,6 +208,19 @@ export function registerProposalRoutes(app: Express): void {
       res.status(400).json({ error: "stalled must be 1/true or 0/false when set" });
       return;
     }
+    const needsReviewRaw = typeof req.query.needs_review === "string" ? req.query.needs_review : undefined;
+    const needsReview =
+      needsReviewRaw === "1" || needsReviewRaw === "true"
+        ? true
+        : needsReviewRaw === "0" || needsReviewRaw === "false"
+          ? false
+          : needsReviewRaw != null && needsReviewRaw !== ""
+            ? null
+            : undefined;
+    if (needsReview === null) {
+      res.status(400).json({ error: "needs_review must be 1/true or 0/false when set" });
+      return;
+    }
     const perspectiveRaw =
       typeof req.query.attention_perspective === "string"
         ? req.query.attention_perspective
@@ -255,6 +268,7 @@ export function registerProposalRoutes(app: Express): void {
       escalated: parsedEscalated.escalated,
       attention: parsedAttention.attention,
       stalled: stalled === true ? true : undefined,
+      needs_review: needsReview === true ? true : undefined,
       limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
       offset: Number.isFinite(offsetRaw) ? offsetRaw : undefined,
       sort: parsedSort.sort,
@@ -500,6 +514,7 @@ export function registerProposalRoutes(app: Express): void {
       variant: typeof req.body?.variant === "string" ? req.body.variant : undefined,
       confirm_end_experiment: req.body?.confirm_end_experiment === true,
       confirm_recent_activity: req.body?.confirm_recent_activity === true,
+      confirm_new_values: req.body?.confirm_new_values === true,
       promote_on_apply: req.body?.promote_on_apply === true,
       close_reason: typeof req.body?.close_reason === "string" ? req.body.close_reason : undefined,
       close_note: typeof req.body?.close_note === "string" ? req.body.close_note : undefined,

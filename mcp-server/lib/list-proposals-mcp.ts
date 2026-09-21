@@ -40,6 +40,8 @@ export type ListProposalsArgs = {
   attention?: ProposalAttention;
   /** Accepted ideas with no successful implements follow-up. */
   stalled?: boolean;
+  /** Open|partial edits that still need a reviewer. */
+  needs_review?: boolean;
   limit?: number;
   offset?: number;
   sort?: string;
@@ -61,7 +63,9 @@ export function isProposalsScoped(args: ListProposalsArgs): boolean {
       args.escalated === false ||
       args.attention ||
       args.stalled === true ||
-      args.stalled === false,
+      args.stalled === false ||
+      args.needs_review === true ||
+      args.needs_review === false,
   );
 }
 

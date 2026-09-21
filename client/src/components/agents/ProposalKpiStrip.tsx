@@ -328,23 +328,28 @@ export function ProposalKpiStrip({
   kindFilter,
   statusFilter,
   stalledOnly = false,
+  needsReviewOnly = false,
   stats,
   headers,
   onKindClick,
   onStatusClick,
   onStalledClick,
+  onNeedsReviewClick,
   trailing,
 }: {
   kindFilter: ProposalListKind;
   /** List status from the query string — drives spark focus when open|finished|rejected. */
   statusFilter: ProposalListStatus;
   stalledOnly?: boolean;
+  needsReviewOnly?: boolean;
   stats?: ProposalListStats | null;
   headers: () => Record<string, string>;
   onKindClick: (kind: ProposalKpiCardKind | "all") => void;
   onStatusClick: (status: ProposalListStatus) => void;
   /** Toggle stalled accepted ideas filter (Ideas card badge). */
   onStalledClick?: () => void;
+  /** Toggle open edits that still need a reviewer (Edits card badge). */
+  onNeedsReviewClick?: () => void;
   /** Extra KPI cell (e.g. webhooks) — shares the same row on large screens. */
   trailing?: ReactNode;
 }) {
@@ -500,7 +505,8 @@ export function ProposalKpiStrip({
               hour (UTC), cached up to 15 minutes and cleared when proposals change — use refresh to
               force a recompute. Daily is ~28 days through yesterday; Weekly is the last 7 completed
               days (not an ISO week). Open includes in-progress. Withdrawn is left out. Retention is
-              90 days. Stalled stays live.
+              90 days. Stalled stays live. Needs review on Edits is live too: open edits that still need a
+              reviewer (ready for re-check or no feedback yet).
             </p>
             <p>
               Hover a status chip to preview that line on that card. The list status filter isolates
@@ -598,6 +604,23 @@ export function ProposalKpiStrip({
                       data-testid="button-proposal-kpi-stalled-ideas"
                     >
                       {Number(stats?.stalled_ideas ?? 0)} stalled
+                    </button>
+                  ) : null}
+                  {card.kind === "edits" && onNeedsReviewClick ? (
+                    <button
+                      type="button"
+                      className={cn(
+                        "text-[11px] tabular-nums rounded-sm px-1.5 py-0.5 shrink-0",
+                        "outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                        needsReviewOnly
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                      onClick={onNeedsReviewClick}
+                      title="Open edits that still need a reviewer. Ready for re-check or no feedback yet. Waiting on the author and steward holds are not included."
+                      data-testid="button-proposal-kpi-needs-review"
+                    >
+                      {Number(stats?.needs_review_edits ?? 0)} needs review
                     </button>
                   ) : null}
                 </div>

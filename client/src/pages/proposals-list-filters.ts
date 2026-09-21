@@ -12,6 +12,7 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   escalatedOnly: "escalated",
   attention: "attention",
   stalledOnly: "stalled",
+  needsReviewOnly: "needs_review",
 } as const;
 
 export type ProposalListStatus =
@@ -55,6 +56,8 @@ export type ProposalListFilters = {
   attention: ProposalListAttention;
   /** Accepted ideas with no successful implements follow-up. */
   stalledOnly: boolean;
+  /** Open edits that still need a reviewer (re-check or no feedback). */
+  needsReviewOnly: boolean;
 };
 
 export type ProposalListViewState = {
@@ -74,6 +77,7 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   escalatedOnly: false,
   attention: "all",
   stalledOnly: false,
+  needsReviewOnly: false,
 };
 
 export const DEFAULT_PROPOSAL_LIST_VIEW: ProposalListViewState = {
@@ -145,6 +149,12 @@ function parseStalledOnly(raw: string | null): boolean {
   return v === "1" || v === "true";
 }
 
+function parseNeedsReviewOnly(raw: string | null): boolean {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.needsReviewOnly;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
 function parseAttention(raw: string | null): ProposalListAttention {
   if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.attention;
   return ATTENTION_VALUES.has(raw as ProposalListAttention)
@@ -167,6 +177,7 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       escalatedOnly: parseEscalatedOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly)),
       attention: parseAttention(params.get(PROPOSAL_LIST_SEARCH_KEYS.attention)),
       stalledOnly: parseStalledOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly)),
+      needsReviewOnly: parseNeedsReviewOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly)),
     },
     q: params.get(PROPOSAL_LIST_SEARCH_KEYS.q) ?? "",
   };
@@ -253,6 +264,12 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly, "1");
   }
 
+  if (!filters.needsReviewOnly) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly, "1");
+  }
+
   const trimmedQ = q.trim();
   if (!trimmedQ) {
     params.delete(PROPOSAL_LIST_SEARCH_KEYS.q);
@@ -276,6 +293,7 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   if (filters.escalatedOnly) n += 1;
   if (filters.attention !== d.attention) n += 1;
   if (filters.stalledOnly) n += 1;
+  if (filters.needsReviewOnly) n += 1;
   return n;
 }
 
@@ -292,6 +310,7 @@ export function clearProposalListFilters(filters: ProposalListFilters): Proposal
     escalatedOnly: DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly,
     attention: DEFAULT_PROPOSAL_LIST_FILTERS.attention,
     stalledOnly: DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly,
+    needsReviewOnly: DEFAULT_PROPOSAL_LIST_FILTERS.needsReviewOnly,
   };
 }
 
@@ -309,6 +328,7 @@ export type ProposalListApiQuery = {
   attention?: string;
   attention_perspective?: string;
   stalled?: string;
+  needs_review?: string;
 };
 
 /** Map UI filters to API query params. status/kind/actor type `all` → omit. */
@@ -334,6 +354,7 @@ export function toProposalListApiQuery(
   if (filters.escalatedOnly) out.escalated = "1";
   if (filters.attention !== "all") out.attention = filters.attention;
   if (filters.stalledOnly) out.stalled = "1";
+  if (filters.needsReviewOnly) out.needs_review = "1";
   if (filters.sort === "attention") out.attention_perspective = "reviewer";
   return out;
 }
@@ -353,6 +374,7 @@ export function proposalListApiSearchParams(query: ProposalListApiQuery): string
   if (query.attention) params.set("attention", query.attention);
   if (query.attention_perspective) params.set("attention_perspective", query.attention_perspective);
   if (query.stalled) params.set("stalled", query.stalled);
+  if (query.needs_review) params.set("needs_review", query.needs_review);
   return params.toString();
 }
 
@@ -367,6 +389,7 @@ export type ProposalListStats = {
     { open?: number; finished?: number; rejected?: number }
   >;
   stalled_ideas?: number;
+  needs_review_edits?: number;
 };
 
 export const PROPOSAL_KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;

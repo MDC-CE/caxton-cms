@@ -61,6 +61,47 @@ describe("deriveProposalAttention", () => {
       }),
     ).toBe("no_feedback");
   });
+
+  it("author content with no open blockers is awaiting_rereview", () => {
+    expect(
+      deriveProposalAttention({
+        status: "open",
+        escalated: false,
+        open_blocker_count: 0,
+        author_content_at: 20,
+        reviewer_action_at: null,
+      }),
+    ).toBe("awaiting_rereview");
+    expect(
+      deriveProposalAttention({
+        status: "open",
+        escalated: false,
+        open_blocker_count: 1,
+        author_content_at: 50,
+        reviewer_action_at: 10,
+      }),
+    ).toBe("blocked");
+    expect(
+      deriveProposalAttention({
+        status: "open",
+        escalated: false,
+        open_blocker_count: 0,
+        resolved_blocker_count: 0,
+        author_content_at: 10,
+        reviewer_action_at: 20,
+      }),
+    ).toBe("no_feedback");
+    expect(
+      deriveProposalAttention({
+        status: "open",
+        escalated: false,
+        open_blocker_count: 0,
+        resolved_blocker_count: 1,
+        author_content_at: 10,
+        reviewer_action_at: 20,
+      }),
+    ).toBe("awaiting_rereview");
+  });
 });
 
 describe("compareByAttention", () => {

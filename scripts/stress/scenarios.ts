@@ -440,6 +440,19 @@ export const SCENARIOS: Scenario[] = [
     buildArgs: (ctx) => withSite(ctx, { mode: "site" }),
   },
   {
+    id: "get_runtime_issues_404",
+    tool: "get_runtime_issues",
+    about:
+      "Public 404 log (kind=404) with pages_only and default 30-day window, limit 25. Read-only.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        kind: "404",
+        window_days: 30,
+        pages_only: true,
+        limit: 25,
+      }),
+  },
+  {
     id: "get_organic_traffic_leaderboard",
     tool: "get_organic_traffic",
     about:

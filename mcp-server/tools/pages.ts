@@ -9197,7 +9197,26 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       const createVia = createViaForConfig(config);
       const next_actions: NextAction[] = [];
-      if (createVia === "create_entry") {
+      if (createVia === "create_entry" && isSharedLayoutConfig(config) && !isDbBacked(config)) {
+        next_actions.push({
+          tool: "propose_change",
+          reason:
+            "New attached post: file kind idea with related_entries (slug required; the folder need not exist). After accept, field edits with implements_proposal_id, review_situations [\"new_public_content\"], and no variant. Apply creates the files and does not change the shared template.",
+          args_hint: {
+            kind: "idea",
+            related_entries: [{ contentType, slug: "new-slug", locale: "en" }],
+            site,
+          },
+          priority: "recommended",
+        });
+        next_actions.push({
+          tool: "create_entry",
+          reason:
+            "Staff/live path only. Writes the post immediately. Not available on specialist connectors — prefer the idea, then field edits.",
+          args_hint: { contentType, site },
+          priority: "optional",
+        });
+      } else if (createVia === "create_entry") {
         next_actions.push({
           tool: "create_entry",
           reason: "Create a new entry of this type (pass site in multi-site)",
@@ -9334,9 +9353,23 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             observed_values_note:
               "For URL pattern params, use observed_values_by_locale — pick a slug from the target locale list, not the flat union.",
             create_via: createVia,
-            create_via_note: createVia
-              ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
-              : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            create_via_note:
+              createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+                ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant. create_entry writes live immediately and is not on specialist connectors."
+                : createVia
+                  ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
+                  : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            ...(createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+              ? {
+                  warnings: [
+                    {
+                      code: "create_entry_writes_live",
+                      message:
+                        "create_entry writes this attached post live immediately and is not on specialist connectors. Prefer an accepted idea, then propose_change field edits with no variant.",
+                    },
+                  ],
+                }
+              : {}),
             body_model: bodyModelForConfig(config),
             template_vars_note: templateVarsNoteForBodyModel(bodyModelForConfig(config)),
             ecommerce: ecommerceManager.contentTypeHasEcommerce(contentType)
