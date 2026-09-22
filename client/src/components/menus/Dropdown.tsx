@@ -158,66 +158,78 @@ function renderCardsDropdownItem(
   opts: {
     onSelect?: (value: string) => void;
     onNavigate?: () => void;
-    /** Showcase lead card: icon beside title (always horizontal). */
+    /**
+     * Showcase lead: same stack as rest on mobile (icon+badge → title → desc).
+     * On md+, title sits beside the icon.
+     */
     showcaseLead?: boolean;
-    /** Showcase supporting cards: tighter icon→text spacing. */
+    /** Showcase supporting card (same stack at all breakpoints). */
     showcaseRest?: boolean;
   },
 ) {
   const { onSelect, onNavigate, showcaseLead, showcaseRest } = opts;
+  const isShowcase = !!showcaseLead || !!showcaseRest;
   const IconComponent = item.icon ? iconMap[item.icon] : null;
   const badgeText = item.badge?.trim() || "";
   const hasBadge = !!badgeText;
   const className = onSelect
-    ? showcaseLead
-      ? "relative flex w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:p-4"
-      : showcaseRest
-        ? "relative flex flex-row items-start gap-2.5 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:gap-0 md:p-4"
-        : "relative flex flex-row items-start gap-3 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:p-4"
+    ? isShowcase
+      ? "relative flex flex-col w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:h-full md:p-4"
+      : "relative flex flex-row items-start gap-3 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:p-4"
     : "relative block min-w-0 max-w-full hover-elevate rounded-lg p-2 -m-2 text-left w-full";
   const testId = `dropdown-card-${(item.title || "card").toLowerCase().replace(/\s+/g, "-")}`;
 
+  const titleClass =
+    "text-sm md:text-base font-semibold text-foreground mb-0.5 break-words";
+  const descriptionClass =
+    "text-xs md:text-sm text-muted-foreground mb-0 md:mb-3 md:line-clamp-4 text-left";
+  const ctaClass =
+    "hidden md:inline-flex self-start items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate";
+
   let body: React.ReactNode;
-  if (onSelect && showcaseLead) {
+  if (onSelect && isShowcase) {
     body = (
-      <div className="relative flex min-w-0 flex-1 flex-col gap-2 md:gap-3">
-        {hasBadge ? (
-          <div className="pointer-events-none absolute top-0 right-0 z-10">
-            <CardBadgePill badge={badgeText} />
+      <>
+        {IconComponent || hasBadge || showcaseLead ? (
+          <div
+            className={
+              showcaseLead
+                ? "mb-2 flex w-full shrink-0 items-start gap-2 md:items-center"
+                : "mb-2 flex w-full shrink-0 items-start gap-2"
+            }
+          >
+            {IconComponent ? (
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary md:h-12 md:w-12">
+                <IconComponent className="h-4 w-4 md:h-6 md:w-6" />
+              </div>
+            ) : null}
+            {showcaseLead ? (
+              <div className="hidden min-w-0 flex-1 md:block">
+                <CardTitle title={item.title} className={`${titleClass} mb-0`} />
+              </div>
+            ) : null}
+            {hasBadge ? (
+              <div className="ml-auto shrink-0">
+                <CardBadgePill badge={badgeText} />
+              </div>
+            ) : null}
           </div>
         ) : null}
-        <div className={`flex w-full items-center gap-3${hasBadge ? " pr-24" : ""}`}>
-          {IconComponent ? (
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary md:h-12 md:w-12">
-              <IconComponent className="h-4 w-4 md:h-6 md:w-6" />
-            </div>
-          ) : null}
-          <div className="min-w-0 flex-1">
-            <CardTitle
-              title={item.title}
-              className="text-sm md:text-base font-semibold text-foreground break-words mb-0"
-            />
-          </div>
+        <div className="min-w-0 w-full">
+          <CardTitle
+            title={item.title}
+            className={showcaseLead ? `${titleClass} md:hidden` : titleClass}
+          />
+          <p className={descriptionClass}>{item.description}</p>
+          <span className={ctaClass}>{item.cta}</span>
         </div>
-        <p className="text-xs md:text-sm text-muted-foreground line-clamp-2 md:line-clamp-4 text-left">
-          {item.description}
-        </p>
-        <span className="hidden md:inline-flex self-start items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
-          {item.cta}
-        </span>
-      </div>
+      </>
     );
   } else if (onSelect) {
     body = (
       <>
         {IconComponent || hasBadge ? (
-          <div
-            className={
-              showcaseRest
-                ? "flex w-auto shrink-0 items-start gap-2 md:mb-3 md:w-full"
-                : "flex w-auto shrink-0 items-start gap-2 md:mb-3 md:w-full"
-            }
-          >
+          <div className="flex w-auto shrink-0 items-start gap-2 md:mb-3 md:w-full">
             {IconComponent ? (
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary md:h-12 md:w-12">
                 <IconComponent className="h-4 w-4 md:h-6 md:w-6" />
@@ -231,21 +243,9 @@ function renderCardsDropdownItem(
           </div>
         ) : null}
         <div className="min-w-0 flex-1 md:flex-none md:w-full">
-          <CardTitle
-            title={item.title}
-            className={
-              showcaseRest
-                ? "text-sm md:text-base font-semibold text-foreground mb-0.5 break-words"
-                : undefined
-            }
-            compact={!showcaseRest}
-          />
-          <p className="text-xs md:text-sm text-muted-foreground mb-0 md:mb-3 line-clamp-2 md:line-clamp-4">
-            {item.description}
-          </p>
-          <span className="hidden md:inline-flex items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
-            {item.cta}
-          </span>
+          <CardTitle title={item.title} compact />
+          <p className={descriptionClass}>{item.description}</p>
+          <span className={ctaClass}>{item.cta}</span>
         </div>
       </>
     );
