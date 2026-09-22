@@ -28,7 +28,7 @@ required:
   - expected_ctr
   - window_label
   - mcp_url
-max_chars: 1200
+max_chars: 1300
 sections:
   - Goal
   - Target
