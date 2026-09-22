@@ -41,6 +41,47 @@ function suppressLayoutEffectWarnings(): () => void {
   };
 }
 
+function installSsrLocation(url: string): () => void {
+  const g = globalThis as typeof globalThis & { location?: unknown };
+  const previous = Object.getOwnPropertyDescriptor(g, "location");
+  const hashIdx = url.indexOf("#");
+  const withoutHash = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
+  const qIdx = withoutHash.indexOf("?");
+  const pathname = (qIdx >= 0 ? withoutHash.slice(0, qIdx) : withoutHash) || "/";
+  const search = qIdx >= 0 ? withoutHash.slice(qIdx) : "";
+  const href = `https://ssr.local${pathname}${search}`;
+
+  const shim = {
+    pathname,
+    search,
+    hash: hashIdx >= 0 ? url.slice(hashIdx) : "",
+    href,
+    origin: "https://ssr.local",
+    host: "ssr.local",
+    hostname: "ssr.local",
+    port: "",
+    protocol: "https:",
+    assign() {},
+    replace() {},
+    reload() {},
+  };
+
+  Object.defineProperty(g, "location", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: shim,
+  });
+
+  return () => {
+    if (previous) {
+      Object.defineProperty(g, "location", previous);
+    } else {
+      Reflect.deleteProperty(g, "location");
+    }
+  };
+}
+
 function seedQueryClient(
   client: QueryClient,
   payload: InitialDataPayload | null,
@@ -85,6 +126,7 @@ export async function render(
   url: string,
   initialDataPayload: InitialDataPayload | null,
 ): Promise<string> {
+  const restoreLocation = installSsrLocation(url);
   const ssrQueryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -96,7 +138,14 @@ export async function render(
 
   seedQueryClient(ssrQueryClient, initialDataPayload);
 
-  const cleanUrl = url.split("?")[0].split("#")[0];
+  const hashIdx = url.indexOf("#");
+  const withoutHash = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
+  const qIdx = withoutHash.indexOf("?");
+  const ssrPath = (qIdx >= 0 ? withoutHash.slice(0, qIdx) : withoutHash) || "/";
+  // Non-empty string so wouter's `props.ssrSearch || parent` does not drop it
+  // (empty string is falsy and falls through to undefined).
+  const ssrSearch = qIdx >= 0 ? withoutHash.slice(qIdx + 1) : "";
+  const cleanUrl = ssrPath;
   const t0 = Date.now();
 
   const restore = suppressLayoutEffectWarnings();
@@ -143,7 +192,9 @@ export async function render(
       passthrough.on("error", reject);
 
       const { pipe } = renderToPipeableStream(
-        <Router ssrPath={cleanUrl}>
+        // location shim above covers wouter's bare `location.search` snapshot.
+        // ssrPath/ssrSearch keep usePathname/useSearch server snapshots aligned.
+        <Router ssrPath={ssrPath} ssrSearch={ssrSearch}>
           <App ssrQueryClient={ssrQueryClient} />
         </Router>,
         {
@@ -182,5 +233,6 @@ export async function render(
     return html;
   } finally {
     restore();
+    restoreLocation();
   }
 }

@@ -67,8 +67,8 @@ function setDebugUiDismissed(dismissed: boolean): void {
  * Precedence: ?debug=false → dismiss → ?debug=true → DEV → debug_mode flag → staff token.
  */
 export function isDebugModeActive(): boolean {
-  if (typeof window === "undefined") return false;
-  const urlParams = new URLSearchParams(window.location.search);
+  if (typeof window === "undefined" || !window.location) return false;
+  const urlParams = new URLSearchParams(window.location.search ?? "");
   const debugParam = urlParams.get("debug");
 
   if (debugParam === "true") {
@@ -338,7 +338,8 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
   };
 
   const validateToken = async (skipCache = false) => {
-    const urlParams = new URLSearchParams(window.location.search);
+    if (typeof window === "undefined" || !window.location) return;
+    const urlParams = new URLSearchParams(window.location.search ?? "");
     const staffSessionCode = urlParams.get("staff_session_code");
     const staffAuthError = urlParams.get("staff_auth");
     const staffAuthMessage = urlParams.get("message");

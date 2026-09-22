@@ -40,11 +40,11 @@ function getStoredPreviewDeviceId(): PreviewDeviceId {
 }
 
 function getStoredEditMode(): boolean {
-  if (typeof localStorage === 'undefined') return false;
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return false;
   if (isDeviceEmbedPreview()) return false;
   // Persist only on the visual preview route — not settings, diagnostics, or other admin pages.
-  if (!window.location.pathname.startsWith('/private/preview/')) return false;
-  return localStorage.getItem(EDIT_MODE_KEY) === 'true';
+  if (!window.location?.pathname?.startsWith("/private/preview/")) return false;
+  return localStorage.getItem(EDIT_MODE_KEY) === "true";
 }
 
 function publicUrlToPreviewUrl(
@@ -116,8 +116,9 @@ interface EditModeProviderProps {
 
 // Check if edit_mode=true or edit=1 is in URL params
 function shouldAutoEnableEditMode(): boolean {
+  if (typeof window === "undefined" || !window.location) return false;
   if (isDeviceEmbedPreview()) return false;
-  const urlParams = new URLSearchParams(window.location.search);
+  const urlParams = new URLSearchParams(window.location.search ?? "");
   return urlParams.get('edit_mode') === 'true' || urlParams.get('edit') === '1';
 }
 

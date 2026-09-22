@@ -13,6 +13,26 @@ export type InitialDataPayload =
 
 export let isSSRHydration = false;
 
+/** Sticky for this document load: once we saw SSR hydrate, never flash Loader2. */
+let suppressLoaderForSsrSession = false;
+
+/** Suppress full-page Loader2 while SSR HTML must stay on screen. */
+export function shouldSuppressFullPageLoader(): boolean {
+  if (typeof document === "undefined") return false;
+  if (suppressLoaderForSsrSession) return true;
+  return document.documentElement.hasAttribute("data-ssr-hydrating");
+}
+
+/**
+ * True only while `data-ssr-hydrating` is set (cleared after hydrate settles).
+ * Use to avoid painting a fake 404 over SSR HTML — unlike shouldSuppressFullPageLoader,
+ * this is NOT sticky for the whole document lifetime (SPA 404s must still work).
+ */
+export function isSsrHydrateWindow(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.documentElement.hasAttribute("data-ssr-hydrating");
+}
+
 export function readInitialDataPayload(): InitialDataPayload | null {
   const script = document.getElementById("__INITIAL_DATA__");
   if (!script) return null;
@@ -44,6 +64,7 @@ export function hydrateInitialData() {
   }
 
   isSSRHydration = true;
+  suppressLoaderForSsrSession = true;
   document.documentElement.setAttribute("data-ssr-hydrating", "");
   script.remove();
 }

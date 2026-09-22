@@ -22,7 +22,10 @@ export default function Header({ menuId = "main-navbar", menuConfig: injectedMen
   const [isScrolled, setIsScrolled] = useState(false);
   const [isPastThreshold, setIsPastThreshold] = useState(false);
   const [isTopZone, setIsTopZone] = useState(true);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' ? window.innerWidth < NAV_MOBILE_MAX_WIDTH : false);
+  // Always start `false` so SSR HTML matches the first client hydrate pass.
+  // Reading window.innerWidth in useState caused hydration mismatch (desktop SSR
+  // vs mobile client) → React remount → full-page white flash.
+  const [isMobile, setIsMobile] = useState(false);
   const locale = i18n.language || 'en';
 
   const hasInjectedMenuState = injectedMenuConfig !== undefined || injectedIsLoading !== undefined;
@@ -54,6 +57,8 @@ export default function Header({ menuId = "main-navbar", menuConfig: injectedMen
       });
     };
     const handleResize = () => setIsMobile(window.innerWidth < NAV_MOBILE_MAX_WIDTH);
+    handleResize();
+    handleScroll();
     window.addEventListener('scroll', handleScroll);
     window.addEventListener('resize', handleResize);
     return () => {
