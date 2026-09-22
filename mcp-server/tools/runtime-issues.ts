@@ -100,9 +100,10 @@ export function registerRuntimeIssuesTools(
       if (denied) return denied;
 
       try {
-        const { siteConfig } = resolveSiteContext(args.site);
-        const siteName = siteConfig.contentRootName || "default";
-        const contentRoot = siteConfig.contentRoot;
+        const siteResult = resolveSiteContext(args.site);
+        if (!siteResult.ok) return fail(siteResult.error);
+        const siteName = siteResult.contentFolder || "default";
+        const contentRoot = siteResult.contentPath;
 
         const { listRuntimeIssues } = await import("../../server/runtime-issues-store.js");
         const {
