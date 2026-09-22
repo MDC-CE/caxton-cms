@@ -8,11 +8,11 @@ import fs from "fs";
 import path from "path";
 import type { Validator, ValidatorResult, ValidationContext, ValidationIssue } from "../shared/types";
 import { contentIndex } from "../../../server/content-index";
-import { createPublicUrlResolver } from "../../../server/redirects";
+import { createPublicUrlResolver, toPublicUrlPath } from "../../../server/redirects";
 import { isClusterRequired, isSeoMonitoringEnabled } from "../../../server/seo-monitoring";
 import { loadSeoIndex, seoEntryId } from "../../../server/seo-index";
 import { classifyClusterEntry } from "../../../server/seo-cluster-stats";
-import { yamlHasSeoKey } from "../../../server/seo-fields";
+import { canonicalizePillarPath, yamlHasSeoKey } from "../../../server/seo-fields";
 import { resolveKeywordMetrics } from "../../../server/openrush-keyword-cache";
 import { liveFilesForSeo } from "../shared/seoValidationScope";
 import { SEO_CLUSTER_ISSUE_CODES, KEYWORD_RESEARCH_SUGGESTION } from "./seo-cluster.issueCodes";
@@ -54,6 +54,12 @@ export const seoClusterValidator: Validator = {
     const seoIndex = loadSeoIndex(context.contentRoot);
     const orphanIds = new Set(seoIndex.orphans);
     const liveFiles = liveFilesForSeo(context);
+    const hubPaths = new Set<string>();
+    for (const row of Object.values(seoIndex.entries || {})) {
+      if (!row.is_pillar) continue;
+      const p = (row.path || row.pillar_path || "").trim();
+      if (p) hubPaths.add(toPublicUrlPath(p));
+    }
 
     const seen = new Set<string>();
     const pillarRefs = new Map<string, string[]>();
@@ -181,6 +187,28 @@ export const seoClusterValidator: Validator = {
 
       if (pillar) {
         const pillarLocale = file.locale === "_common" ? "en" : file.locale;
+        const pillarNorm = toPublicUrlPath(pillar);
+        let finalHub: string | null = null;
+        if (!hubPaths.has(pillarNorm)) {
+          try {
+            const canon = canonicalizePillarPath(pillarNorm, pillarLocale, contentIndex);
+            if (canon.path !== pillarNorm && hubPaths.has(toPublicUrlPath(canon.path))) {
+              finalHub = toPublicUrlPath(canon.path);
+            }
+          } catch {
+            /* fall through */
+          }
+        }
+        if (finalHub) {
+          errors.push({
+            type: "error",
+            code: "STALE_PILLAR_PATH",
+            message: `seo.pillar_path "${pillarNorm}" redirects to hub "${finalHub}" for "${file.slug}" (${file.locale}) — update the cluster field to the final hub URL`,
+            file: file.filePath,
+            suggestion: `Set seo.pillar_path to ${finalHub}`,
+          });
+          continue;
+        }
         if (!publicUrls.isLive(pillar, pillarLocale)) {
           const hubEntry = Object.values(seoIndex.entries).find(
             (e) => e.path === pillar || e.pillar_path === pillar,

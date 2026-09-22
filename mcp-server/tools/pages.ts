@@ -179,11 +179,11 @@ import { FUNNEL_STAGES } from "@shared/funnel";
 import {
   applyFunnelFieldUpdates,
   isFunnelFieldPath,
-  prepareAndWriteFunnelMerge,
   readFunnelBlockFromFile,
+  stripFunnelFromAllLocaleYamls,
   type FunnelFieldUpdate,
-  type FunnelMergePatch,
 } from "../../server/funnel-fields.js";
+import { applyFieldUpdates } from "../../server/field-write-router.js";
 import { assertFunnelAudienceGates } from "../../server/product/funnel-audience-gates.js";
 import {
   assertFunnelFilterConflict,
@@ -3489,9 +3489,7 @@ export function registerPageTools(
       }
 
       // Atomic funnel gate: validate merge before any YAML writes in this call.
-      let preparedFunnel:
-        | { patch: FunnelMergePatch; warnings: { code: string; message: string }[] }
-        | null = null;
+      let funnelValidated = false;
       if (funnelUpdates.length > 0) {
         const commonPath = path.join(
           contentPath,
@@ -3525,11 +3523,11 @@ export function registerPageTools(
             ],
           );
         }
-    const gates = assertFunnelAudienceGates(merged.coerced, {
-      contentType: resolved.contentType,
-      contentSlug: slug,
-      contentRoot: contentPath,
-    });
+        const gates = assertFunnelAudienceGates(merged.coerced, {
+          contentType: resolved.contentType,
+          contentSlug: slug,
+          contentRoot: contentPath,
+        });
         if (!gates.ok) {
           return actionRequired(
             {
@@ -3555,37 +3553,7 @@ export function registerPageTools(
             ],
           );
         }
-        const patch: FunnelMergePatch = {};
-        for (const u of funnelUpdates) {
-          if (u.field_path === "funnel.stage") {
-            patch.touchStage = true;
-            patch.stage = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel.products") {
-            patch.touchProducts = true;
-            patch.products = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel") {
-            if (u.reset) {
-              patch.touchStage = true;
-              patch.stage = null;
-              patch.touchProducts = true;
-              patch.products = null;
-            } else if (u.value && typeof u.value === "object" && !Array.isArray(u.value)) {
-              const b = u.value as Record<string, unknown>;
-              if ("stage" in b) {
-                patch.touchStage = true;
-                patch.stage = b.stage;
-              }
-              if ("products" in b) {
-                patch.touchProducts = true;
-                patch.products = b.products;
-              }
-            }
-          }
-        }
-        preparedFunnel = {
-          patch,
-          warnings: [...merged.warnings, ...gates.warnings],
-        };
+        funnelValidated = true;
       }
 
       const agenticGate = await runAgenticWriteGate({
@@ -3648,7 +3616,7 @@ export function registerPageTools(
           }
         }
 
-        if (setUpdates.length === 0 && !preparedFunnel) {
+        if (setUpdates.length === 0 && !funnelValidated) {
           const hasSeo = resetUpdates.some(
             (u) => u.field_path.startsWith("meta.") || isSeoPath(u.field_path),
           );
@@ -3998,7 +3966,7 @@ export function registerPageTools(
         ...variantWarningsIfNeeded(variant),
         ...clusterToggleWarnings,
       ];
-let renameResult: Record<string, unknown> | null = null;
+      let renameResult: Record<string, unknown> | null = null;
       if (touchesSections) {
         warnings.push({
           code: "section_index_no_create",
@@ -4012,6 +3980,64 @@ let renameResult: Record<string, unknown> | null = null;
           message:
             "Common meta (robots/priority/change_frequency or meta_target=common) writes _common.yml and ignores variant.",
         });
+      }
+
+      // Funnel writes live _common.yml first (journey kept if later locale writes fail).
+      if (funnelValidated) {
+        const funnelResult = await applyFieldUpdates({
+          contentType: resolved.contentType,
+          slug,
+          locale,
+          variant,
+          updates: funnelUpdates.map((u) => ({
+            field_path: u.field_path,
+            value: u.value,
+            reset: u.reset === true,
+          })),
+          author: "agent",
+          contentRoot: contentPath,
+          skipSharedLayoutFanOut: true,
+        });
+        if (!funnelResult.ok) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: funnelResult.code,
+              code: funnelResult.code,
+              message: funnelResult.error,
+              details: funnelResult.details,
+            },
+            [
+              {
+                tool: "update_fields",
+                priority: "required",
+                reason: "Retry funnel paths only",
+                args_hint: {
+                  slug,
+                  locale,
+                  contentType: resolved.contentType,
+                  confirm_live_edit: true,
+                  updates: funnelUpdates.map((u) =>
+                    u.reset === true
+                      ? { field_path: u.field_path, reset: true }
+                      : { field_path: u.field_path, value: u.value },
+                  ),
+                },
+              },
+            ],
+          );
+        }
+        for (const rel of funnelResult.wrote) {
+          if (rel.includes("/") || rel.endsWith(".yml") || rel.endsWith(".yaml")) {
+            notifyMcpContentWrite(rel, undefined, { agent_session_id });
+          }
+        }
+        results.push(`funnel → _common.yml`);
+        for (const w of funnelResult.warnings) {
+          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
+            warnings.push({ code: w.code, message: w.message });
+          }
+        }
       }
 
       if (localeEntries.length > 0) {
@@ -4132,79 +4158,6 @@ let renameResult: Record<string, unknown> | null = null;
         );
       }
 
-      if (preparedFunnel) {
-        const funnelWrite = prepareAndWriteFunnelMerge(
-          resolved.contentType,
-          slug,
-          preparedFunnel.patch,
-          contentPath,
-          assertFunnelAudienceGates,
-        );
-        if (!funnelWrite.ok) {
-          if (results.length > 0) {
-            return actionRequired(
-              {
-                success: false,
-                action_required: funnelWrite.code,
-                code: funnelWrite.code,
-                message:
-                  `Other fields were written but funnel update failed: ${funnelWrite.error}. ` +
-                  "Retry update_fields with only funnel.* paths.",
-                wrote: results,
-                details: funnelWrite.details,
-              },
-              [
-                {
-                  tool: "update_fields",
-                  priority: "required",
-                  reason: "Retry funnel paths only",
-                  args_hint: {
-                    slug,
-                    locale,
-                    contentType: resolved.contentType,
-                    confirm_live_edit: true,
-                    updates: funnelUpdates.map((u) =>
-                      u.reset === true
-                        ? { field_path: u.field_path, reset: true }
-                        : { field_path: u.field_path, value: u.value },
-                    ),
-                  },
-                },
-              ],
-            );
-          }
-          return actionRequired(
-            {
-              success: false,
-              action_required: funnelWrite.code,
-              code: funnelWrite.code,
-              message: funnelWrite.error,
-              details: funnelWrite.details,
-            },
-            [],
-          );
-        }
-        if (funnelWrite.relativePath) {
-          notifyMcpContentWrite(funnelWrite.relativePath, undefined, {
-            agent_session_id,
-          });
-        }
-        results.push(`funnel → _common.yml`);
-        for (const w of preparedFunnel.warnings) {
-          warnings.push({ code: w.code, message: w.message });
-        }
-        for (const w of funnelWrite.warnings) {
-          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
-            warnings.push({ code: w.code, message: w.message });
-          }
-        }
-        warnings.push({
-          code: "funnel_locale_agnostic",
-          message:
-            "funnel.stage / funnel.products are page-level on _common.yml (all languages). locale and variant do not scope this write.",
-        });
-      }
-
       if (results.length === 0) {
         return fail("No operations applied");
       }
@@ -4302,16 +4255,38 @@ let renameResult: Record<string, unknown> | null = null;
         warnings.push({
           code: "slug_rename_non_effects",
           message:
-            "Slug rename updates locale URL routing only. It does not rename the entry folder and does not create a 301 redirect.",
+            "Slug rename updates locale URL routing only. It does not rename the entry folder. Body/HTML links are not rewritten.",
         });
-        warnings.push({
-          code: "slug_rename_redirect_hint",
-          message: "Use update_redirect if you need the previous URL to 301 to the new URL.",
-        });
+        if (!create_redirect) {
+          warnings.push({
+            code: "slug_rename_redirect_hint",
+            message:
+              "Pass create_redirect: true (or use update_redirect) if the previous URL should 301 to the new URL.",
+          });
+        }
         side_effects.push({
           kind: "locale_yaml",
           summary: `Renamed live slug in ${pathInfo.relativeHint}.`,
         });
+        if (renameResult?.clusterRewireQueued) {
+          side_effects.push({
+            kind: "pipeline_event",
+            summary:
+              "Queued cluster_hub_path_rewrite — spokes whose seo.pillar_path still equals the old URL will be updated asynchronously.",
+          });
+          next_actions.push({
+            tool: "list_seo_cluster_entries",
+            priority: "optional",
+            reason: "After a short wait, confirm spokes rejoined the hub under the new URL.",
+            args_hint: { bucket: "clustered", q: slug, ...(site ? { site } : {}) },
+          });
+        } else {
+          warnings.push({
+            code: "slug_rename_no_cluster_rewire",
+            message:
+              "No cluster path rewrite was queued (no seo-index entries still pointed at the old URL).",
+          });
+        }
       }
 
       if (renameResult && renameResult.routed === false) {
@@ -9222,7 +9197,26 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       const createVia = createViaForConfig(config);
       const next_actions: NextAction[] = [];
-      if (createVia === "create_entry") {
+      if (createVia === "create_entry" && isSharedLayoutConfig(config) && !isDbBacked(config)) {
+        next_actions.push({
+          tool: "propose_change",
+          reason:
+            "New attached post: file kind idea with related_entries (slug required; the folder need not exist). After accept, field edits with implements_proposal_id, review_situations [\"new_public_content\"], and no variant. Apply creates the files and does not change the shared template.",
+          args_hint: {
+            kind: "idea",
+            related_entries: [{ contentType, slug: "new-slug", locale: "en" }],
+            site,
+          },
+          priority: "recommended",
+        });
+        next_actions.push({
+          tool: "create_entry",
+          reason:
+            "Staff/live path only. Writes the post immediately. Not available on specialist connectors — prefer the idea, then field edits.",
+          args_hint: { contentType, site },
+          priority: "optional",
+        });
+      } else if (createVia === "create_entry") {
         next_actions.push({
           tool: "create_entry",
           reason: "Create a new entry of this type (pass site in multi-site)",
@@ -9359,9 +9353,23 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             observed_values_note:
               "For URL pattern params, use observed_values_by_locale — pick a slug from the target locale list, not the flat union.",
             create_via: createVia,
-            create_via_note: createVia
-              ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
-              : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            create_via_note:
+              createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+                ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant. create_entry writes live immediately and is not on specialist connectors."
+                : createVia
+                  ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
+                  : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            ...(createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+              ? {
+                  warnings: [
+                    {
+                      code: "create_entry_writes_live",
+                      message:
+                        "create_entry writes this attached post live immediately and is not on specialist connectors. Prefer an accepted idea, then propose_change field edits with no variant.",
+                    },
+                  ],
+                }
+              : {}),
             body_model: bodyModelForConfig(config),
             template_vars_note: templateVarsNoteForBodyModel(bodyModelForConfig(config)),
             ecommerce: ecommerceManager.contentTypeHasEcommerce(contentType)

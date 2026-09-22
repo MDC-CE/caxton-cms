@@ -162,6 +162,38 @@ const IDEA_ORGANIC_TOOL = {
   ],
 } as const;
 
+const IDEA_RUNTIME_ISSUES_TOOL = {
+  id: "runtime_404",
+  tool: "get_runtime_issues",
+  why: "Confirm the missing address hit count, sources, referrer, and campaign tags against a fresh read.",
+  look_for: [
+    "path matches the brief",
+    "windowed count / sources / sampleReferrer / queryAttribution vs summary",
+    "higher count OK; different referrer, new campaign tag, or collapsed count → add_blocker",
+  ],
+} as const;
+
+const IDEA_TEST_REDIRECT_TOOL = {
+  id: "test_redirect_404",
+  tool: "test_redirect",
+  why: "Optional: see whether the missing address already resolves to a page or redirect.",
+  look_for: [
+    "winner / conflicts for the broken path",
+    "do not treat a soft match as a funnel product+persona fit",
+  ],
+} as const;
+
+const IDEA_BROKEN_URL_EXPLAIN_TOOL = {
+  id: "broken_url_playbook",
+  tool: "explain_site",
+  why: "Load the broken-url strategy (match vs create, accept writes nothing).",
+  look_for: [
+    "match = answers address + funnel product/persona",
+    "new page = attached creates_entry follow-up; 404 row is extra justification",
+    "accept never writes redirect or YAML",
+  ],
+} as const;
+
 const FUNNEL_ANALYTICS_TOOL = {
   id: "journey_metrics",
   tool: "get_product_funnel_analytics",
@@ -236,6 +268,9 @@ export function proposalDiscoveryToolNames(): string[] {
     IDEA_ENTRY_SEO_TOOL.tool,
     IDEA_CLUSTER_ENTRIES_TOOL.tool,
     IDEA_ORGANIC_TOOL.tool,
+    IDEA_RUNTIME_ISSUES_TOOL.tool,
+    IDEA_TEST_REDIRECT_TOOL.tool,
+    IDEA_BROKEN_URL_EXPLAIN_TOOL.tool,
   ];
 }
 
@@ -584,20 +619,33 @@ export function buildEditsDiscoveryToolItems(opts: {
 }
 
 /**
- * Idea discovery: playbook always; SEO/cluster/organic when related_entries exist.
+ * Idea discovery: playbook always; get_runtime_issues + test_redirect when broken_url is filed
+ * (no keyword research). SEO/cluster/organic when related_entries exist and not broken_url.
  * Unavailable tools stay listed with available:false — skip never blocks accept.
  */
 export function buildIdeaDiscoveryToolItems(opts: {
   allowed: Set<string> | null;
   related?: Array<{ contentType: string; slug: string; locale?: string }> | null;
+  situations?: ReviewSituationId[] | null;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
-  const { allowed, related } = opts;
+  const { allowed, related, situations } = opts;
+  const brokenUrl = (situations ?? []).includes("broken_url");
   const items: DiscoveryPathToolItem[] = [
-    toToolItem(IDEA_EXPLAIN_TOOL, allowed, {
-      topic: "proposals",
-      subtopic: "idea-opportunity-harm",
-    }),
+    toToolItem(
+      brokenUrl ? IDEA_BROKEN_URL_EXPLAIN_TOOL : IDEA_EXPLAIN_TOOL,
+      allowed,
+      brokenUrl
+        ? { topic: "proposals", subtopic: "broken-url" }
+        : { topic: "proposals", subtopic: "idea-opportunity-harm" },
+    ),
   ];
+
+  if (brokenUrl) {
+    items.push(toToolItem(IDEA_RUNTIME_ISSUES_TOOL, allowed, { kind: "404", pages_only: true, limit: 25 }));
+    items.push(toToolItem(IDEA_TEST_REDIRECT_TOOL, allowed, {}));
+    const anyCappedBroken = items.some((i) => !i.available);
+    return { items, anyCapped: anyCappedBroken };
+  }
 
   const first = related?.find((r) => r.contentType?.trim() && r.slug?.trim()) ?? null;
   if (first) {
@@ -618,7 +666,6 @@ export function buildIdeaDiscoveryToolItems(opts: {
     items.push(
       toToolItem(IDEA_ORGANIC_TOOL, allowed, {
         mode: "paths",
-        // Agent resolves public paths via get_entry_seo.urls when needed.
       }),
     );
   }
@@ -846,6 +893,7 @@ export function buildProposalDiscoveryPath(
     const built = buildIdeaDiscoveryToolItems({
       allowed,
       related: proposal.related_entries ?? null,
+      situations: (reviewContext?.review_situations ?? []) as ReviewSituationId[],
     });
     tools = built.items;
     if (built.anyCapped) {

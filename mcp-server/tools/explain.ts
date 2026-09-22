@@ -73,7 +73,7 @@ const TOPIC_DESC: Record<string, string> = {
   redirects:
     "CMS 301/302: two stores, first-match, test_redirect (read_redirects) + update_redirect (edit_redirects), before_from custom-only",
   proposals:
-    "Entry proposals hub — omit subtopic for index; subtopics: overview, reading, situations, internal-links, serp-title-description, funnel-classification, idea-opportunity-harm, translations",
+    "Entry proposals hub — omit subtopic for index; subtopics: overview, reading, situations, internal-links, serp-title-description, funnel-classification, idea-opportunity-harm, broken-url, translations",
   analytics:
     "GA4 BigQuery reports via get_analytics_report; vs get_organic_traffic (GSC) and get_product_funnel_analytics (journey)",
 };
@@ -438,7 +438,7 @@ export function registerExplainTools(
       "'local_databases', 'component-behaviors', 'seo', 'funnel', 'ecommerce'/'product', 'shared-layout', 'relation-fields', " +
       "'lead-forms', 'redirects', 'proposals' (hub — optional subtopic), 'analytics'. " +
       "For proposals: omit subtopic for a light index of playbooks; pass subtopic " +
-      "(overview|reading|situations|internal-links|serp-title-description|funnel-classification|idea-opportunity-harm|translations) for a pack. " +
+      "(overview|reading|situations|internal-links|serp-title-description|funnel-classification|idea-opportunity-harm|broken-url|translations) for a pack. " +
       "Legacy flat ids (e.g. internal-links-proposals) still resolve with a deprecation warning. " +
       "Passing subtopic on a topic that has no subtopics fails — omit subtopic and retry. " +
       "Requires content_view. Multi-site: always pass site. If unsure, call list_sites first.",
@@ -452,7 +452,7 @@ export function registerExplainTools(
         .string()
         .optional()
         .describe(
-          'Optional playbook under a hub topic. For topic "proposals": overview | reading | situations | internal-links | serp-title-description | funnel-classification | idea-opportunity-harm | translations. Omit for the proposals index. Do not pass on topics without subtopics.',
+          'Optional playbook under a hub topic. For topic "proposals": overview | reading | situations | internal-links | serp-title-description | funnel-classification | idea-opportunity-harm | broken-url | translations. Omit for the proposals index. Do not pass on topics without subtopics.',
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },

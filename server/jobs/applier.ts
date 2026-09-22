@@ -38,6 +38,8 @@ const lastAppliedSeoSnapshot = new Map<string, { generation: number; appliedAt: 
 const refreshEnqueuePending = new Set<string>();
 /** Max binding_propagation_done id already applied for CMS side-effects (mark/auto-commit). */
 const lastAppliedBindingDoneId = new Map<string, number>();
+/** Max cluster_hub_path_rewrite_done id already applied for markFileAsModified. */
+const lastAppliedClusterHubRewriteDoneId = new Map<string, number>();
 
 function recordLastApplied(site: string, generation: number): void {
   const prev = lastAppliedSnapshot.get(site);
@@ -281,6 +283,32 @@ async function applyPendingSnapshots(
     log.info(
       { site, eventId: event.id, files: updatedPaths.length },
       "[Applier] binding_propagation_done side-effects applied",
+    );
+  }
+
+  const clusterRewriteEvents = listEvents({ site, type: "cluster_hub_path_rewrite_done", limit: 5 });
+  const pendingClusterRewrite = clusterRewriteEvents
+    .filter((e) => e.id > (lastAppliedClusterHubRewriteDoneId.get(site) ?? 0))
+    .sort((a, b) => a.id - b.id);
+
+  for (const event of pendingClusterRewrite) {
+    const updatedPaths = (event.payload.updatedPaths as string[]) ?? [];
+    const author =
+      (typeof event.payload.author === "string" ? event.payload.author : undefined) ||
+      primaryAuthor(event);
+
+    runInSaveBatch({ suppressPipelineEmit: true, reason: "hub_seo_rewrite" }, () => {
+      for (const filePath of updatedPaths) {
+        if (typeof filePath === "string" && filePath.length > 0) {
+          markFileAsModified(filePath, author);
+        }
+      }
+    });
+
+    lastAppliedClusterHubRewriteDoneId.set(site, event.id);
+    log.info(
+      { site, eventId: event.id, files: updatedPaths.length },
+      "[Applier] cluster_hub_path_rewrite_done side-effects applied",
     );
   }
 

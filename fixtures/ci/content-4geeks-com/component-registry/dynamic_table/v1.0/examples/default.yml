@@ -1,25 +1,33 @@
 name: "Default"
-description: "A table displaying data from an external API with sortable columns and row actions"
+description: "Cohort overview table listing rows from the upcoming_cohorts private database"
 yaml: |
   - type: dynamic_table
     version: "1.0"
-    variant: default
-    endpoint: "https://breathecode.herokuapp.com/v1/admissions/public/cohort/all"
-    title: Available Cohorts
-    subtitle: Browse our upcoming cohorts and programs
+    variant: comparison
+    title: Cohort Overview
+    empty_text: No upcoming cohorts.
+    dynamic_entries:
+      database: upcoming_cohorts
+      sort: kickoff_date
+      limit: 50
+      item_template:
+        date: "{{ entry.date_label }}"
+        program: "{{ entry.program_label }}"
+        location: "{{ entry.location_label }}"
+        duration: "{{ entry.duration_label }}"
     columns:
-      - key: name
-        label: Cohort Name
+      - key: date
+        label: Date
         type: text
-      - key: slug
-        label: Slug
+      - key: program
+        label: Program
         type: text
-      - key: stage
-        label: Stage
+      - key: location
+        label: Location
         type: text
-      - key: language
-        label: Language
+      - key: duration
+        label: Duration
         type: text
     action:
-      label: View
-      href: "https://breathecode.herokuapp.com/v1/admissions/public/cohort/{slug}"
+      label: Apply
+      href: /en/apply

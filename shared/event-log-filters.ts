@@ -47,6 +47,8 @@ export const EVENT_KIND_TYPES: Record<EventKindId, readonly string[]> = {
     "validation_results_ready",
     "binding_propagation_started",
     "binding_propagation_done",
+    "cluster_hub_path_rewrite_started",
+    "cluster_hub_path_rewrite_done",
     "site_bulk_synced",
     "entry_locale_promoted",
     "entry_locale_unpublished",

@@ -42,6 +42,104 @@ entries:
       - mcp-server/explain/lead-forms.md
       - mcp-server/explain/sections.md
 
+summary: "MCP withdraw is same proposer username only"
+    agent_impact:
+      - "update_proposal action withdraw succeeds only when your author username matches proposer_username (case-insensitive). Model and role do not matter."
+      - "Another MCP author gets not_proposer. Staff UI editors may still withdraw any open proposal."
+      - "Reconnect MCP if you cache tool/docs text."
+    tools_changed: false
+    paths:
+      - server/routes/proposals.ts
+      - server/content-proposals/service.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+
+  - date: "2026-09-21"
+    summary: "Idea demand labels + get_runtime_issues for broken_url briefs"
+    agent_impact:
+      - "Ideas may declare one review_situations demand label: anticipated_demand (lasting queries after launch; empty volume OK), fast_decay_news (quick reject), or broken_url (paste get_runtime_issues proof). idea_opportunity_harm stays always-on. set_review_situations works on open ideas for those labels."
+      - "New read tool get_runtime_issues (kind:404) — metrics_view or proposals_review. Filters match Diagnostics Runtime issues. broken_url authors must call it first; reviewers confirm on discovery/checklist."
+      - "explain_site proposals subtopic broken-url. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/runtime-issues.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/broken-url-proposals.md
+      - shared/mcp-tool-catalog.ts
+
+  - date: "2026-09-21"
+    summary: "Accepted idea can implement a new attached post before YAML exists"
+    agent_impact:
+      - "File-based attached posts (blog): after an accepted idea locks the slug, propose_change edits with implements_proposal_id, review_situations [new_public_content], and field updates only — no variant. Apply creates {slug}/_common.yml and {locale}.yml and does not touch the shared template."
+      - "Do not call create_entry or add a draft for that new post. attached_no_draft, entry_not_found, and a stalled idea’s next_actions resubmit the field-edits packet. A missing database row is refused (database_entry_required); the idea can stay."
+      - "New URL-param values on apply need confirm_new_values: true after principal approval. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/shared-layout.md
+
+  - date: "2026-09-21"
+    summary: "Author rewrites ask for a re-check; needs_review lists that edits queue"
+    agent_impact:
+      - "awaiting_rereview also means the author rewrote entries or marked a blocker fixed, and no open blockers remain. Open blockers still stay blocked. Past rewrites before this deploy do not flip the bucket until the next stamp."
+      - "list_proposals needs_review:true returns open|partial edits in awaiting_rereview or no_feedback (not blocked, not escalated). proposal_stats.needs_review_edits is that count. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/attention.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-17"
+    summary: "Field write router — funnel.* always _common.yml; strip locale orphans"
+    agent_impact:
+      - "Proposal apply and update_fields funnel.* write live _common.yml (all languages), not locale YAML. locale/variant do not scope journey membership."
+      - "On funnel write, orphan top-level funnel: is stripped from every language file for that page. Warnings: funnel_locale_agnostic, funnel_stripped_from_locale_yamls, funnel_live_despite_variant."
+      - "editContent rejects funnel.* (use update_fields / Funnel tab). Reconnect MCP for updated apply behavior."
+    tools_changed: true
+    paths:
+      - server/field-write-router.ts
+      - server/funnel-fields.ts
+      - server/content-proposals/service.ts
+      - server/content-editor.ts
+      - mcp-server/tools/pages.ts
+      - server/bulk-update-entry-attributes.ts
+
+  - date: "2026-09-17"
+    summary: "Slug rename queues async cluster pillar_path rewire for spokes"
+    agent_impact:
+      - "After live slug rename, if seo-index still has entries with seo.pillar_path equal to the old URL, a background cluster_hub_path_rewrite job updates those fields to the new hub URL (exact match only; body links unchanged)."
+      - "update_fields slug rename warnings/side_effects report clusterRewireQueued; STALE_PILLAR_PATH diagnostics flag leftover old URLs that only reach the hub via redirect."
+      - "Reconnect MCP for updated slug-rename envelope."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/content-editor.ts
+      - server/seo-index.ts
+      - server/jobs/definitions/cluster-hub-path-rewrite.ts
+      - scripts/validation/validators/seo-cluster.ts
+
+  - date: "2026-09-17"
+    summary: "list_proposals kpi_granularity today + week = last 7 days"
+    agent_impact:
+      - "kpi_granularity accepts today | day | week. today = hourly UTC stock for the current day (computed, cached ≤15m, not written to proposal_kpi_daily)."
+      - "week is last 7 completed UTC days through yesterday (day keys) — not ISO week rollup. day remains ≈28 completed days."
+      - "by_kind_status on proposal_stats stays live site-wide stock. Reconnect MCP for updated enum."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - server/content-proposals/kpi-history.ts
+      - server/routes/proposals.ts
+      - client/src/components/agents/ProposalKpiStrip.tsx
+
   - date: "2026-09-17"
     summary: "locale_translation review situation + proposals explain hub/subtopic"
     agent_impact:

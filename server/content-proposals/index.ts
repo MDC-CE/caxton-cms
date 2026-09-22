@@ -42,11 +42,14 @@ export {
   KPI_CARD_STATUSES,
   KPI_CARD_KINDS,
   stockForDay,
+  stockAsOf,
   toCardBuckets,
   emptyKindStatusCounts,
+  invalidateTodayKpiCache,
   type KindStatusCardCounts,
   type KpiCardKind,
   type KpiCardStatus,
+  type KpiGranularity,
   type KpiHistoryResult,
 } from "./kpi-history";
 export {

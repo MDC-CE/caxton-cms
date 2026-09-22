@@ -85,11 +85,26 @@ export type AttentionDeriveInput = {
   open_blocker_count: number;
   blockers?: Array<{ status: string }> | null;
   resolved_blocker_count?: number;
+  /** Last author rewrite or author-marked blocker fix. Null until that happens after deploy. */
+  author_content_at?: number | null;
+  /** Last reviewer disposition that is not an author content stamp. */
+  reviewer_action_at?: number | null;
 };
+
+/** Author changed the packet and no later reviewer action has landed. */
+export function isAuthorContentPendingReview(
+  authorContentAt: number | null | undefined,
+  reviewerActionAt: number | null | undefined,
+): boolean {
+  if (authorContentAt == null || !Number.isFinite(authorContentAt)) return false;
+  if (reviewerActionAt == null || !Number.isFinite(reviewerActionAt)) return true;
+  return authorContentAt > reviewerActionAt;
+}
 
 /**
  * Returns null for finished/rejected/withdrawn (and any non open|partial).
- * Escalated wins over blocker-derived buckets.
+ * Escalated wins, then open blockers. Ready for re-check is a resolved blocker
+ * or an author content update with nothing still waiting on the author.
  */
 export function deriveProposalAttention(input: AttentionDeriveInput): ProposalAttention | null {
   if (input.status !== "open" && input.status !== "partial") {
@@ -100,7 +115,12 @@ export function deriveProposalAttention(input: AttentionDeriveInput): ProposalAt
   if (open > 0) return "blocked";
   const resolved =
     input.resolved_blocker_count ?? resolvedBlockerCount(input.blockers);
-  if (resolved > 0) return "awaiting_rereview";
+  if (
+    isAuthorContentPendingReview(input.author_content_at, input.reviewer_action_at) ||
+    resolved > 0
+  ) {
+    return "awaiting_rereview";
+  }
   return "no_feedback";
 }
 

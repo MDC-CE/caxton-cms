@@ -2,7 +2,7 @@
 
 Authors may declare **`review_situations`** on **edits** proposals so Proposal Reviewer runs the right checklist packs. Empty → the server **infers** from pending field ops (and summary keywords for hub links / locale translation). Multiple situations are allowed; each pack is reviewed independently.
 
-**Ideas** use one default-on situation: **`idea_opportunity_harm`** (opportunity vs site harm before accept). Authors do not declare it; `set_review_situations` is edits-only. Playbook: `explain_site` `topic: "proposals"` `subtopic: "idea-opportunity-harm"`.
+**Ideas** always get default-on **`idea_opportunity_harm`**. Authors may declare **at most one** demand label: **`anticipated_demand`**, **`fast_decay_news`**, or **`broken_url`**. Do not file `idea_opportunity_harm` (it is injected). `set_review_situations` works on open edits **and** open ideas (demand labels only on ideas). Playbooks: `idea-opportunity-harm`, `broken-url`.
 
 **Per-situation ship (edits):** Pass packs wait until failing packs’ ops are dropped or fixed via `revise_entries`, then **apply** (atomic — no partial-field apply).
 
@@ -10,11 +10,12 @@ Authors may declare **`review_situations`** on **edits** proposals so Proposal R
 
 | Action | Who |
 |---|---|
-| `propose_change` → optional `review_situations[]` | authors on **edits** (`proposals_create`) |
-| `update_proposal` → `set_review_situations` | proposer or staff on **edits** |
+| `propose_change` → optional `review_situations[]` | authors on **edits** or **ideas** (`proposals_create`) |
+| `update_proposal` → `set_review_situations` | proposer or staff on **edits** or **ideas** |
 | `list_proposals(proposal_id)` → live `review_context.review_situations` + `situation_source` | reviewers |
+| `get_runtime_issues` | metrics_view or proposals_review — required before filing `broken_url` |
 
-Notes do **not** use situations. Ideas always show `idea_opportunity_harm` on live classify (filed list stays empty).
+Notes do **not** use situations.
 
 ## Catalog
 
@@ -28,7 +29,10 @@ Notes do **not** use situations. Ideas always show `idea_opportunity_harm` on li
 | `new_public_content` | New or draft-backed public page (**edits** ship gate) | `situations` + `new_content_brand` |
 | `promote_draft` | Promote named draft with empty/minimal updates (not a translation packet) | `situations` — summary = why draft should go live |
 | `locale_translation` | Promote a **translated** locale variant (`variant` + `promote_on_apply`) | `translations` (+ checklist `locale_translation`) |
-| `idea_opportunity_harm` | Every **idea** brief — opportunity vs harm before accept (default-on) | `idea-opportunity-harm` (+ checklist `idea_opportunity_harm`); keep `idea_accept` for lock/next_step |
+| `idea_opportunity_harm` | Every **idea** brief — opportunity vs harm before accept (default-on; not author-filed) | `idea-opportunity-harm` |
+| `anticipated_demand` | Idea: launch → lasting queries after hype; empty volume OK | `idea-opportunity-harm` (+ checklist `anticipated_demand`) |
+| `fast_decay_news` | Idea: announcement only → quick reject; no keyword research | `idea-opportunity-harm` (+ checklist `fast_decay_news`) |
+| `broken_url` | Idea: missing address still requested — redirect or one new attached entry | `broken-url` (+ checklist `broken_url`) |
 
 Soft warning `situation_ops_mismatch` when the declared label and pending ops disagree — create still succeeds; live context **unions** declared ∪ inferred.
 
@@ -43,13 +47,13 @@ Legacy / empty filed list on edits → infer (often `body_copy_edit`) with warni
 - Funnel: `review_situations: ["funnel_classification"]` + `funnel.*` only (persona → product → stage; soft batch ≤10).
 - Locale translation: polish with `translate_entry` / `update_fields` on the variant; file `review_situations: ["locale_translation"]` + `promote_on_apply` when ready to go live. Summary: “Translated from en → es …” (no pasted body).
 - After `revise_entries`, author-declared tags that no longer own remaining ops are dropped; inferred packs refresh on the next `list_proposals`.
-- Ideas: put goal/evidence/kill line in summary/rationale; do not pass `review_situations`.
+- Ideas: put goal/evidence/kill line in summary/rationale. Demand labels: lasting launch queries → `anticipated_demand`; announcement only → `fast_decay_news`; 404 with `get_runtime_issues` proof → `broken_url` (only if you have that tool).
 
 ## Reviewer tips
 
 - Open `list_proposals(proposal_id)` — use `review_situations`, checklists, and `discovery_path`.
 - Edits: score each active pack on the ops it owns; do not reject a good link packet because SERP was weak — drop SERP ops first.
-- Ideas: score Goal → Evidence → Fit → Brand → dilution; incomplete brief → `add_blocker`; wrong vehicle → close/refile edits; discovery tools optional (unavailable ≠ block accept).
+- Ideas: score Goal → Evidence → Fit → Brand → dilution; Evidence follows the demand label when present; incomplete brief → `add_blocker`; wrong vehicle → close/refile edits; discovery tools optional (unavailable ≠ block accept).
 - Forced CTA for links → `add_blocker`, not reject-as-weaker-copy.
 - Funnel breadth-only disagreement → `add_blocker` citing cascade step, not reject.
 - Translation: fidelity to source locale, not punchier-than-live English; awkward forced phrasing → `add_blocker`.

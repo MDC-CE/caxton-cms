@@ -1,16 +1,19 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
   AlertTriangle,
+  ArrowDownRight,
   Bot,
   Copy,
   ExternalLink,
   Info,
   Link as LinkIcon,
   Loader2,
+  MousePointerClick,
   Pencil,
   RefreshCw,
+  TrendingUp,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +70,14 @@ import {
   formatOrganicSerpStatus,
 } from "@/lib/organicAskAgentPrompt";
 import { localeFromPath } from "@shared/runtime-issues";
+import {
+  summarizeDecay,
+  summarizeLinkGaps,
+  summarizeLowCtr,
+  summarizePage2,
+  type OrganicKpiKind,
+  type OrganicKpiSummary,
+} from "@/components/diagnostics/organic-opportunity-kpis";
 
 type AggRow = {
   query: string;
@@ -182,6 +193,31 @@ export function DiagnosticsOrganicPanel() {
     slug: string;
     locale: string;
   } | null>(null);
+  const [highlightKind, setHighlightKind] = useState<OrganicKpiKind | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const page2CardRef = useRef<HTMLDivElement>(null);
+  const lowCtrCardRef = useRef<HTMLDivElement>(null);
+  const linkGapsCardRef = useRef<HTMLDivElement>(null);
+  const decayCardRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
+
+  const focusOpportunityCard = useCallback((kind: OrganicKpiKind) => {
+    const refMap: Record<OrganicKpiKind, RefObject<HTMLDivElement | null>> = {
+      page2: page2CardRef,
+      low_ctr: lowCtrCardRef,
+      link_gaps: linkGapsCardRef,
+      decay: decayCardRef,
+    };
+    refMap[kind].current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    setHighlightKind(kind);
+    highlightTimerRef.current = setTimeout(() => setHighlightKind(null), 1500);
+  }, []);
 
   function openAskAgent(payload: SolveWithAiAgentSelectPayload) {
     setMcpRequiredAgentId(payload.agentId);
@@ -347,27 +383,14 @@ export function DiagnosticsOrganicPanel() {
   const needsLoad = data.days_present === 0;
   const progressValue = backfill ? (backfill.current / Math.max(1, backfill.total)) * 100 : 0;
   const d7Label = windowLabel(data.windows.d7, 7);
+  const kpiLowCtr = summarizeLowCtr(data.cards.low_ctr);
+  const kpiPage2 = summarizePage2(data.cards.page2);
+  const kpiDecay = summarizeDecay(data.cards.decay);
+  const kpiLinkGaps = summarizeLinkGaps(data.cards.link_gaps);
 
   return (
     <>
     <div className="space-y-4" data-testid="diagnostics-organic-panel">
-      <p className="text-sm text-muted-foreground">
-        Actions from Google Search performance, not total visits. Most cards use the last 7
-        complete days; cannibalization uses 28 days; decay compares 7 or 28 days to the period
-        before. Data lags about 2–3 days — use Search Console for yesterday and live queries.
-      </p>
-
-      <Alert data-testid="alert-organic-lag">
-        <Info className="h-4 w-4" />
-        <AlertTitle>Search Console data lags</AlertTitle>
-        <AlertDescription>
-          BigQuery is typically 2–3 days behind. Yesterday and live queries belong in Search Console,
-          not here.
-          {data.data_through ? ` Latest complete day on disk: ${data.data_through}.` : ""}
-          {data.latest_ingested ? " Just pulled the latest complete day." : ""}
-        </AlertDescription>
-      </Alert>
-
       {data.keep_rules_stale && (
         <Alert data-testid="alert-keep-rules-stale">
           <AlertTriangle className="h-4 w-4" />
@@ -388,17 +411,6 @@ export function DiagnosticsOrganicPanel() {
                 Rebuild 60 days
               </Button>
             )}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {data.openrush_configured && data.serp_incomplete && (
-        <Alert data-testid="alert-serp-incomplete">
-          <Info className="h-4 w-4" />
-          <AlertTitle>SERP snapshots may be missing</AlertTitle>
-          <AlertDescription>
-            Loading Search Console days does not call OpenRush. Refresh individual queries (credits
-            per inspect) when you need live SERP features.
           </AlertDescription>
         </Alert>
       )}
@@ -455,11 +467,53 @@ export function DiagnosticsOrganicPanel() {
       )}
 
       {!needsLoad && (
+        <div className="space-y-2" data-testid="organic-kpi-strip-wrap">
+          <div
+            className="grid w-full gap-3 grid-cols-2 lg:grid-cols-4"
+            data-testid="organic-kpi-strip"
+          >
+            <OrganicOpportunityKpiCard
+              summary={kpiLowCtr}
+              label="Low CTR"
+              icon={<MousePointerClick className="h-4 w-4" />}
+              onClick={() => focusOpportunityCard("low_ctr")}
+            />
+            <OrganicOpportunityKpiCard
+              summary={kpiPage2}
+              label="Page 2"
+              icon={<TrendingUp className="h-4 w-4" />}
+              onClick={() => focusOpportunityCard("page2")}
+            />
+            <OrganicOpportunityKpiCard
+              summary={kpiDecay}
+              label="Decay"
+              icon={<ArrowDownRight className="h-4 w-4" />}
+              onClick={() => focusOpportunityCard("decay")}
+            />
+            <OrganicOpportunityKpiCard
+              summary={kpiLinkGaps}
+              label="Link gaps"
+              icon={<LinkIcon className="h-4 w-4" />}
+              onClick={() => focusOpportunityCard("link_gaps")}
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Top opportunities · {d7Label}
+            {Number(decayWindow) !== 7
+              ? ` · decay ${windowLabel(data.windows.decay_current, Number(decayWindow))}`
+              : ""}
+          </p>
+        </div>
+      )}
+
+      {!needsLoad && (
         <div className="grid gap-4 lg:grid-cols-2">
           <OpportunityCard
             title="Page 2 (positions 11–20)"
             windowLabel={d7Label}
             testId="card-organic-page2"
+            cardRef={page2CardRef}
+            className={cn(highlightKind === "page2" && "ring-2 ring-ring bg-muted/40")}
             empty="No page-2 query × URL pairs in this window."
             help={
               <>
@@ -515,6 +569,8 @@ export function DiagnosticsOrganicPanel() {
             title="High impressions, low CTR"
             windowLabel={d7Label}
             testId="card-organic-low-ctr"
+            cardRef={lowCtrCardRef}
+            className={cn(highlightKind === "low_ctr" && "ring-2 ring-ring bg-muted/40")}
             empty="No CTR gaps vs the expected curve."
             help={
               <>
@@ -609,6 +665,8 @@ export function DiagnosticsOrganicPanel() {
             title="Internal linking gaps"
             windowLabel={d7Label}
             testId="card-organic-link-gaps"
+            cardRef={linkGapsCardRef}
+            className={cn(highlightKind === "link_gaps" && "ring-2 ring-ring bg-muted/40")}
             empty="No ranking URLs with fewer than 3 internal links."
             help={
               <>
@@ -654,7 +712,11 @@ export function DiagnosticsOrganicPanel() {
             )}
           </OpportunityCard>
 
-          <Card data-testid="card-organic-decay">
+          <Card
+            ref={decayCardRef}
+            data-testid="card-organic-decay"
+            className={cn(highlightKind === "decay" && "ring-2 ring-ring bg-muted/40")}
+          >
             <CardHeader className="pb-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
@@ -840,6 +902,52 @@ function CardInfoPopover({
   );
 }
 
+function OrganicOpportunityKpiCard({
+  summary,
+  label,
+  icon,
+  onClick,
+}: {
+  summary: OrganicKpiSummary;
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+}) {
+  const hero =
+    summary.count === 0
+      ? "—"
+      : summary.kind === "link_gaps"
+        ? fmtInt(summary.impact)
+        : `~${fmtInt(summary.impact)}`;
+
+  return (
+    <Card
+      role="button"
+      tabIndex={0}
+      className="min-w-0 cursor-pointer hover-elevate outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      data-testid={`kpi-organic-${summary.kind}`}
+    >
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-2xl font-bold text-foreground tabular-nums">{hero}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
+            <p className="text-[11px] text-muted-foreground mt-1 leading-snug">{summary.subline}</p>
+          </div>
+          <span className="text-muted-foreground shrink-0">{icon}</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function OpportunityCard({
   title,
   windowLabel: wLabel,
@@ -847,6 +955,8 @@ function OpportunityCard({
   empty,
   help,
   children,
+  className,
+  cardRef,
 }: {
   title: string;
   windowLabel: string;
@@ -854,10 +964,12 @@ function OpportunityCard({
   empty: string;
   help?: ReactNode;
   children?: ReactNode;
+  className?: string;
+  cardRef?: Ref<HTMLDivElement>;
 }) {
   const hasBody = Boolean(children);
   return (
-    <Card data-testid={testId}>
+    <Card ref={cardRef} data-testid={testId} className={className}>
       <CardHeader className="pb-3 space-y-1">
         <div className="flex items-center gap-1.5">
           <CardTitle className="text-sm font-semibold">{title}</CardTitle>

@@ -221,8 +221,9 @@ function ChoiceSelect({
       groups.set(key, list);
     }
     const hasNamedGroups = Array.from(groups.keys()).some((k) => k.length > 0);
+    const selectValue = value && options.some((o) => o.value === value) ? value : undefined;
     return (
-      <Select onValueChange={onChange} value={value} disabled={disabled}>
+      <Select onValueChange={onChange} value={selectValue} disabled={disabled}>
         <SelectTrigger data-testid={testId}>
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
@@ -256,8 +257,9 @@ function ChoiceSelect({
     );
   }
 
+  const selectValue = value && options.some((o) => o.value === value) ? value : undefined;
   return (
-    <Select onValueChange={onChange} value={value} disabled={disabled}>
+    <Select onValueChange={onChange} value={selectValue} disabled={disabled}>
       <SelectTrigger data-testid={testId}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>

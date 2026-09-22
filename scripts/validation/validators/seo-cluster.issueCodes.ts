@@ -86,6 +86,36 @@ export const SEO_CLUSTER_ISSUE_CODES: Record<string, IssueCodeDefinition> = {
   INVALID_PILLAR: {
     title: "Invalid pillar path",
   },
+  STALE_PILLAR_PATH: {
+    title: "Stale cluster hub URL",
+    summary:
+      "This page’s seo.pillar_path still names an old hub URL that only reaches the live hub via redirect. " +
+      "Cluster membership and SEO inventory use the exact path — update pillar_path to the final hub URL.",
+    suggestion:
+      "Set seo.pillar_path to the live hub URL after redirects (suggested in the issue message). Do not leave the pre-rename URL even when it 301s.",
+    next_actions: [
+      {
+        tool: "get_entry_seo",
+        reason: "Confirm current pillar_path vs the suggested hub URL.",
+        priority: "recommended",
+      },
+      {
+        tool: "update_fields",
+        reason: "Write seo.pillar_path to the final hub URL from the issue suggestion.",
+        priority: "recommended",
+      },
+      {
+        tool: "list_seo_cluster_entries",
+        reason: "Confirm the page rejoins the cluster after the write.",
+        priority: "optional",
+      },
+      {
+        tool: "run_entry_diagnostics",
+        reason: "Re-run SEO diagnostics so STALE_PILLAR_PATH can clear.",
+        priority: "optional",
+      },
+    ],
+  },
   DUPLICATE_PILLAR: {
     title: "Duplicate hub path",
   },

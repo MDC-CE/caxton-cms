@@ -3,14 +3,19 @@ version: "1.0"
 component: DynamicTable
 file: client/src/components/DynamicTable.tsx
 description: >-
-  A table component that fetches data from an external API endpoint and renders it with sortable columns, typed cell
-  rendering (text, number, date, image, link, boolean), optional row action buttons with templated URLs, AI-powered
-  global filtering, and configurable max row limits with expand/collapse. Each column uses a base64-encoded JavaScript
-  function to extract and transform cell values from row data.
+  A sortable table that lists rows from a private database or content type via dynamic_entries (same listing pipeline as
+  list_cards / FAQ). Keeps table layouts (default, striped, cards, comparison), typed columns, optional row actions, and
+  max_rows expand/collapse. Rows are SSR-resolved into items — not fetched from a client endpoint.
 when_to_use: >
-  Use when you need to display tabular data fetched live from an external API endpoint. Supports nested data paths,
-  column sorting, action buttons per row, global filtering using AI-generated JavaScript functions, and limiting visible
-  rows. Best for displaying lists of students, courses, events, or any structured API data.
+  Use for tabular listings over a database or content type (e.g. upcoming cohorts). Prefer this when staff need
+  filters/sort/limit via dynamic_entries and a table UI. Do not use for arbitrary live API URLs — connect a private
+  database instead.
+behaviors:
+  listing:
+    source: dynamic_entries
+    notes: >
+      Mapping fields + queries render table rows from a content type / DB. Author via dynamic_entries; items are
+      runtime-resolved. Empty lists still show the table chrome with empty_text.
 props:
   variant:
     type: string
@@ -22,15 +27,7 @@ props:
       - comparison
     description: >-
       Visual style of the table. Options: 'default' (classic bordered table), 'striped' (alternating row colors with a
-      colored header), 'cards' (responsive card layout on mobile, refined table on desktop)
-  endpoint:
-    type: string
-    required: true
-    description: The full URL of the API endpoint that returns the data (e.g., "https://api.example.com/items")
-  data_path:
-    type: string
-    required: false
-    description: If the array is nested inside the response object, specify the property name (e.g., "results")
+      colored header), 'cards' (responsive card layout on mobile, refined table on desktop), 'comparison'
   title:
     type: string
     required: false
@@ -43,6 +40,10 @@ props:
     type: string
     required: false
     description: Background color or gradient for the section
+  empty_text:
+    type: string
+    required: false
+    description: Message shown when there are no rows. Section chrome stays visible.
   columns:
     type: array
     required: true
@@ -50,7 +51,7 @@ props:
       key:
         type: string
         required: true
-        description: The primary data field path used for sorting. Supports dot notation for nested fields (e.g., 'academy.name').
+        description: Item property key (matches item_template output)
       label:
         type: string
         required: true
@@ -66,16 +67,6 @@ props:
           - link
           - boolean
         description: "Column type: text, number, date, image, link, or boolean"
-      function:
-        type: string
-        required: false
-        description: >-
-          Base64-encoded JavaScript arrow function that receives the row object and returns the cell value. Example
-          (before encoding): '(row) => row.academy?.name || ""'. The AI generates these functions automatically via the
-          Table Builder wizard.
-      template:
-        type: string
-        required: false
     description: Array of column definitions
   action:
     type: object
@@ -84,27 +75,50 @@ props:
       label:
         type: string
         required: true
-        description: Button text (e.g., "View", "Edit")
+        description: Button text (e.g., "Apply", "View")
       href:
         type: string
         required: true
-        description: URL template with {columnName} placeholders (e.g., 'https://example.com/item/{id}')
+        description: >-
+          URL per row. Use {columnKey} placeholders against resolved item fields (e.g. '{apply_url}'), or a fixed path
+          like '/en/apply'.
     description: Optional action button for each row
-  global_filter:
-    type: string
-    required: false
-    description: >-
-      Base64-encoded JavaScript arrow function that filters the data array before rendering. The function receives two
-      arguments: the full array of rows and a session context object (ctx) with the visitor's region, country_code,
-      city, language, and timezone. Signature: (rows, ctx) => rows.filter(row => ...). Use ctx for region-aware
-      filtering, e.g. '(rows, ctx) => rows.filter(row => !ctx.region || ctx.region === "latam" ? row.academy?.slug ===
-      "online" : true)'. Generated by AI via the Global Filter editor.
   max_rows:
     type: number
     required: false
     description: >-
       Maximum number of rows to display initially. When set, a 'Show all' button appears to expand the full list. Leave
       empty to show all rows.
+  items:
+    type: array
+    required: false
+    description: Runtime-resolved rows from dynamic_entries (not authored).
+  dynamic_entries:
+    type: object
+    required: false
+    description: Listing query — database or content_type plus filters, sort, limit, item_template
+    properties:
+      - name: content_type
+        type: string
+      - name: database
+        type: string
+        example: upcoming_cohorts
+      - name: limit
+        type: number
+      - name: sort
+        type: string
+      - name: search
+        type: string
+      - name: item_template
+        type: object
+      - name: permanent_filters
+        type: array
+      - name: user_filters
+        type: array
+      - name: hardcoded_entries
+        type: array
+      - name: ignored_entries
+        type: array
 variants:
   cards: {}
   comparison: {}

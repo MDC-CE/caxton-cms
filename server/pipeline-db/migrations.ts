@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 20;
+export const PIPELINE_SCHEMA_VERSION = 22;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -427,6 +427,32 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
           `CREATE INDEX idx_content_proposals_implements
            ON content_proposals(site, implements_proposal_id)`,
         );
+      }
+    },
+  },
+  {
+    version: 21,
+    name: "content_proposal_blockers_actor",
+    up(db) {
+      if (!tableExists(db, "content_proposal_blockers")) return;
+      if (!tableHasColumn(db, "content_proposal_blockers", "author_actor_json")) {
+        db.exec("ALTER TABLE content_proposal_blockers ADD COLUMN author_actor_json TEXT");
+      }
+      if (!tableHasColumn(db, "content_proposal_blockers", "resolved_by_actor_json")) {
+        db.exec("ALTER TABLE content_proposal_blockers ADD COLUMN resolved_by_actor_json TEXT");
+      }
+    },
+  },
+  {
+    version: 22,
+    name: "content_proposals_attention_stamps",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "author_content_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN author_content_at INTEGER");
+      }
+      if (!tableHasColumn(db, "content_proposals", "reviewer_action_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_at INTEGER");
       }
     },
   },

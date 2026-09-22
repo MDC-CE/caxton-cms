@@ -27,6 +27,7 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ attention: "blocked" })).toBe(true);
     expect(isProposalsScoped({ stalled: true })).toBe(true);
     expect(isProposalsScoped({ stalled: false })).toBe(true);
+    expect(isProposalsScoped({ needs_review: true })).toBe(true);
   });
 
   it("treats proposer filters as scoped", () => {

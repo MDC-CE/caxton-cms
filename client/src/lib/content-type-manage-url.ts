@@ -5,16 +5,21 @@ export const MANAGE_LIST_SEARCH_KEYS = {
   q: "q",
   page: "page",
   updated: "updated",
+  published: "published",
   tag: "t",
   locale: "locale",
   market: "market",
   sort: "sort",
   dir: "dir",
+  pub: "pub",
+  pubFrom: "pubFrom",
+  pubTo: "pubTo",
+  status: "status",
 } as const;
 
 export type ManageListPerspective = "default" | "seo" | "funnel" | "organic";
 export type ManageListViewMode = "static" | "db";
-export type ManageListUpdatedSortDir = "asc" | "desc" | null;
+export type ManageListDateSortDir = "asc" | "desc" | null;
 export type ManageListOrganicSortField =
   | "clicks"
   | "impressions"
@@ -22,18 +27,32 @@ export type ManageListOrganicSortField =
   | "position"
   | "title";
 
+export type ManageListPublishDatePreset = "today" | "7d" | "28d" | "custom" | null;
+export type ManageListStatusFilter =
+  | "published"
+  | "pending_drafts"
+  | "only_draft"
+  | null;
+
 export interface ManageListViewState {
   perspective: ManageListPerspective;
   /** null = follow app default (db when linked, else static) */
   view: ManageListViewMode | null;
   q: string;
   page: number;
-  updatedSortDir: ManageListUpdatedSortDir;
+  updatedSortDir: ManageListDateSortDir;
+  publishedSortDir: ManageListDateSortDir;
   tagFilters: Record<string, string[]>;
-  organicLocale: string;
+  /** Shared language filter (QS `locale`). Empty = UI falls back to site default. */
+  locale: string;
   organicMarket: string;
   organicSort: ManageListOrganicSortField;
   organicSortDir: "asc" | "desc";
+  publishDatePreset: ManageListPublishDatePreset;
+  /** YYYY-MM-DD when preset is custom */
+  publishDateFrom: string;
+  publishDateTo: string;
+  statusFilter: ManageListStatusFilter;
 }
 
 export const MANAGE_LIST_VIEW_DEFAULTS: ManageListViewState = {
@@ -42,11 +61,16 @@ export const MANAGE_LIST_VIEW_DEFAULTS: ManageListViewState = {
   q: "",
   page: 1,
   updatedSortDir: null,
+  publishedSortDir: null,
   tagFilters: {},
-  organicLocale: "",
+  locale: "",
   organicMarket: "worldwide",
   organicSort: "clicks",
   organicSortDir: "desc",
+  publishDatePreset: null,
+  publishDateFrom: "",
+  publishDateTo: "",
+  statusFilter: null,
 };
 
 const PERSPECTIVES = new Set<ManageListPerspective>([
@@ -62,6 +86,19 @@ const ORGANIC_SORTS = new Set<ManageListOrganicSortField>([
   "ctr",
   "position",
   "title",
+]);
+
+const PUB_PRESETS = new Set<Exclude<ManageListPublishDatePreset, null>>([
+  "today",
+  "7d",
+  "28d",
+  "custom",
+]);
+
+const STATUS_FILTERS = new Set<Exclude<ManageListStatusFilter, null>>([
+  "published",
+  "pending_drafts",
+  "only_draft",
 ]);
 
 function parsePerspective(raw: string | null): ManageListPerspective {
@@ -82,7 +119,7 @@ function parsePage(raw: string | null): number {
   return Math.floor(n);
 }
 
-function parseUpdatedSortDir(raw: string | null): ManageListUpdatedSortDir {
+function parseDateSortDir(raw: string | null): ManageListDateSortDir {
   if (raw === "asc" || raw === "desc") return raw;
   return null;
 }
@@ -100,6 +137,26 @@ function parseOrganicSortDir(raw: string | null): "asc" | "desc" {
     : MANAGE_LIST_VIEW_DEFAULTS.organicSortDir;
 }
 
+function parsePublishDatePreset(raw: string | null): ManageListPublishDatePreset {
+  if (raw && PUB_PRESETS.has(raw as Exclude<ManageListPublishDatePreset, null>)) {
+    return raw as Exclude<ManageListPublishDatePreset, null>;
+  }
+  return null;
+}
+
+function parseStatusFilter(raw: string | null): ManageListStatusFilter {
+  if (raw && STATUS_FILTERS.has(raw as Exclude<ManageListStatusFilter, null>)) {
+    return raw as Exclude<ManageListStatusFilter, null>;
+  }
+  return null;
+}
+
+/** Accept YYYY-MM-DD only. */
+function parseIsoDate(raw: string | null): string {
+  if (!raw) return "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : "";
+}
+
 function parseTagFilters(params: URLSearchParams): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const raw of params.getAll(MANAGE_LIST_SEARCH_KEYS.tag)) {
@@ -115,19 +172,40 @@ function parseTagFilters(params: URLSearchParams): Record<string, string[]> {
 
 export function parseManageListSearch(search: string): ManageListViewState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const updatedSortDir = parseDateSortDir(params.get(MANAGE_LIST_SEARCH_KEYS.updated));
+  const publishedSortDir = parseDateSortDir(params.get(MANAGE_LIST_SEARCH_KEYS.published));
+  // Prefer published when both are present (shouldn't happen via UI serialize).
+  const resolvedUpdated =
+    publishedSortDir != null ? null : updatedSortDir;
+  const publishDatePreset = parsePublishDatePreset(
+    params.get(MANAGE_LIST_SEARCH_KEYS.pub),
+  );
+  const publishDateFrom =
+    publishDatePreset === "custom"
+      ? parseIsoDate(params.get(MANAGE_LIST_SEARCH_KEYS.pubFrom))
+      : "";
+  const publishDateTo =
+    publishDatePreset === "custom"
+      ? parseIsoDate(params.get(MANAGE_LIST_SEARCH_KEYS.pubTo))
+      : "";
   return {
     perspective: parsePerspective(params.get(MANAGE_LIST_SEARCH_KEYS.perspective)),
     view: parseView(params.get(MANAGE_LIST_SEARCH_KEYS.view)),
     q: params.get(MANAGE_LIST_SEARCH_KEYS.q) ?? "",
     page: parsePage(params.get(MANAGE_LIST_SEARCH_KEYS.page)),
-    updatedSortDir: parseUpdatedSortDir(params.get(MANAGE_LIST_SEARCH_KEYS.updated)),
+    updatedSortDir: resolvedUpdated,
+    publishedSortDir,
     tagFilters: parseTagFilters(params),
-    organicLocale: params.get(MANAGE_LIST_SEARCH_KEYS.locale) ?? "",
+    locale: params.get(MANAGE_LIST_SEARCH_KEYS.locale) ?? "",
     organicMarket:
       params.get(MANAGE_LIST_SEARCH_KEYS.market) ||
       MANAGE_LIST_VIEW_DEFAULTS.organicMarket,
     organicSort: parseOrganicSort(params.get(MANAGE_LIST_SEARCH_KEYS.sort)),
     organicSortDir: parseOrganicSortDir(params.get(MANAGE_LIST_SEARCH_KEYS.dir)),
+    publishDatePreset,
+    publishDateFrom,
+    publishDateTo,
+    statusFilter: parseStatusFilter(params.get(MANAGE_LIST_SEARCH_KEYS.status)),
   };
 }
 
@@ -173,6 +251,9 @@ export function serializeManageListSearch(
   if (view.updatedSortDir == null) params.delete(MANAGE_LIST_SEARCH_KEYS.updated);
   else params.set(MANAGE_LIST_SEARCH_KEYS.updated, view.updatedSortDir);
 
+  if (view.publishedSortDir == null) params.delete(MANAGE_LIST_SEARCH_KEYS.published);
+  else params.set(MANAGE_LIST_SEARCH_KEYS.published, view.publishedSortDir);
+
   params.delete(MANAGE_LIST_SEARCH_KEYS.tag);
   for (const [field, values] of Object.entries(view.tagFilters)) {
     for (const value of values) {
@@ -180,7 +261,7 @@ export function serializeManageListSearch(
     }
   }
 
-  setOmitDefault(params, MANAGE_LIST_SEARCH_KEYS.locale, view.organicLocale.trim(), d.organicLocale);
+  setOmitDefault(params, MANAGE_LIST_SEARCH_KEYS.locale, view.locale.trim(), d.locale);
   setOmitDefault(
     params,
     MANAGE_LIST_SEARCH_KEYS.market,
@@ -189,6 +270,34 @@ export function serializeManageListSearch(
   );
   setOmitDefault(params, MANAGE_LIST_SEARCH_KEYS.sort, view.organicSort, d.organicSort);
   setOmitDefault(params, MANAGE_LIST_SEARCH_KEYS.dir, view.organicSortDir, d.organicSortDir);
+
+  if (view.publishDatePreset == null) {
+    params.delete(MANAGE_LIST_SEARCH_KEYS.pub);
+    params.delete(MANAGE_LIST_SEARCH_KEYS.pubFrom);
+    params.delete(MANAGE_LIST_SEARCH_KEYS.pubTo);
+  } else {
+    params.set(MANAGE_LIST_SEARCH_KEYS.pub, view.publishDatePreset);
+    if (view.publishDatePreset === "custom") {
+      setOmitDefault(
+        params,
+        MANAGE_LIST_SEARCH_KEYS.pubFrom,
+        view.publishDateFrom.trim(),
+        "",
+      );
+      setOmitDefault(
+        params,
+        MANAGE_LIST_SEARCH_KEYS.pubTo,
+        view.publishDateTo.trim(),
+        "",
+      );
+    } else {
+      params.delete(MANAGE_LIST_SEARCH_KEYS.pubFrom);
+      params.delete(MANAGE_LIST_SEARCH_KEYS.pubTo);
+    }
+  }
+
+  if (view.statusFilter == null) params.delete(MANAGE_LIST_SEARCH_KEYS.status);
+  else params.set(MANAGE_LIST_SEARCH_KEYS.status, view.statusFilter);
 
   return params.toString();
 }

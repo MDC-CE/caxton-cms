@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, Check, ChevronDown, ExternalLink, Image, X } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   Accordion,
@@ -8,10 +7,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import type { DynamicTableConfig } from "./TableBuilderWizard";
-import { useSession } from "@/contexts/SessionContext";
 import type { DynamicTableSection } from "@shared/schema";
-import { decodeUtf8Base64 } from "@shared/functionEncoding";
 
 interface DynamicTableProps {
   data: DynamicTableSection;
@@ -34,46 +30,16 @@ function formatValue(val: unknown): string {
   const str = String(val);
   if (/^\d{4}-\d{2}-\d{2}(T|\s)/.test(str)) {
     try {
-      return new Date(str).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    } catch { /* fall through */ }
+      return new Date(str).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+    } catch {
+      /* fall through */
+    }
   }
   return str;
-}
-
-function executeColumnFunction(fnBase64: string, row: Record<string, unknown>): unknown {
-  try {
-    const fnString = decodeUtf8Base64(fnBase64);
-    const fn = new Function("row", `return (${fnString})(row);`);
-    return fn(row);
-  } catch {
-    return null;
-  }
-}
-
-interface FilterContext {
-  region?: string;
-  country_code?: string;
-  city?: string;
-  language?: string;
-  timezone?: string;
-}
-
-function executeGlobalFilter(fnBase64: string, rows: Record<string, unknown>[], ctx?: FilterContext): Record<string, unknown>[] {
-  try {
-    const fnString = decodeUtf8Base64(fnBase64);
-    try {
-      const fn = new Function("rows", "ctx", `return (${fnString})(rows, ctx);`);
-      const result = fn(rows, ctx || {});
-      if (Array.isArray(result)) return result;
-    } catch {
-      const fn = new Function("rows", `return (${fnString})(rows);`);
-      const result = fn(rows);
-      if (Array.isArray(result)) return result;
-    }
-    return rows;
-  } catch {
-    return rows;
-  }
 }
 
 function resolveTemplate(template: string, row: Record<string, unknown>): string {
@@ -83,40 +49,13 @@ function resolveTemplate(template: string, row: Record<string, unknown>): string
   });
 }
 
-function getCellValue(row: Record<string, unknown>, col: { key: string; function?: string }): unknown {
-  if (col.function) {
-    return executeColumnFunction(col.function, row);
-  }
+function getCellValue(row: Record<string, unknown>, col: { key: string }): unknown {
   return getNestedValue(row, col.key);
 }
 
-function CellValue({ value, type, hasFunction }: { value: unknown; type: string; hasFunction?: boolean }) {
+function CellValue({ value, type }: { value: unknown; type: string }) {
   if (value === null || value === undefined) {
     return <span className="text-muted-foreground">-</span>;
-  }
-
-  if (hasFunction) {
-    const str = String(value).trim();
-    if (!str || str === "-") return <span className="text-muted-foreground">-</span>;
-    if (type === "image") {
-      return (
-        <div className="flex items-center justify-center">
-          <img src={str} alt="" className="w-8 h-8 rounded object-cover" loading="lazy" />
-        </div>
-      );
-    }
-    if (type === "link") {
-      return (
-        <a href={str} target="_blank" rel="noopener noreferrer" className="text-foreground underline inline-flex items-center gap-1 text-sm">
-          Link
-          <ExternalLink className="w-3 h-3" />
-        </a>
-      );
-    }
-    if (type === "boolean") {
-      return value ? <Check className="w-4 h-4 text-green-600" /> : <X className="w-4 h-4 text-muted-foreground" />;
-    }
-    return <span className={type === "number" ? "tabular-nums" : "line-clamp-2"}>{str}</span>;
   }
 
   switch (type) {
@@ -159,14 +98,47 @@ function CellValue({ value, type, hasFunction }: { value: unknown; type: string;
       if (isNaN(d.getTime())) return <span className="text-muted-foreground">-</span>;
       return <span>{d.toLocaleDateString()}</span>;
     }
-    default:
-      return <span className="line-clamp-2">{String(value)}</span>;
+    default: {
+      const str = String(value).trim();
+      if (!str) return <span className="text-muted-foreground">-</span>;
+      return <span className="whitespace-pre-line line-clamp-3">{str}</span>;
+    }
   }
 }
 
-function SortIcon({ sortKey, sortDir, colKey }: { sortKey: string | null; sortDir: "asc" | "desc"; colKey: string }) {
+function SortIcon({
+  sortKey,
+  sortDir,
+  colKey,
+}: {
+  sortKey: string | null;
+  sortDir: "asc" | "desc";
+  colKey: string;
+}) {
   if (sortKey !== colKey) return null;
   return sortDir === "asc" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />;
+}
+
+function EmptyCell({
+  columns,
+  action,
+  emptyText,
+  className,
+}: {
+  columns: DynamicTableSection["columns"];
+  action?: DynamicTableSection["action"];
+  emptyText: string;
+  className?: string;
+}) {
+  return (
+    <td
+      colSpan={columns.length + (action ? 1 : 0)}
+      className={className ?? "px-4 py-8 text-center text-muted-foreground"}
+      data-testid="text-dynamic-table-empty"
+    >
+      {emptyText}
+    </td>
+  );
 }
 
 function TableHeader({
@@ -184,9 +156,7 @@ function TableHeader({
   onSort: (key: string) => void;
   variant: TableVariant;
 }) {
-  const headerClass = variant === "striped"
-    ? "bg-primary text-primary-foreground"
-    : "bg-muted/50";
+  const headerClass = variant === "striped" ? "bg-primary text-primary-foreground" : "bg-muted/50";
 
   return (
     <thead>
@@ -207,9 +177,12 @@ function TableHeader({
           </th>
         ))}
         {action && (
-          <th className={`px-4 py-3 text-left font-semibold ${
-            variant === "striped" ? "text-primary-foreground" : "text-foreground"
-          }`} data-testid="th-action">
+          <th
+            className={`px-4 py-3 text-left font-semibold ${
+              variant === "striped" ? "text-primary-foreground" : "text-foreground"
+            }`}
+            data-testid="th-action"
+          >
             {action.label}
           </th>
         )}
@@ -223,19 +196,19 @@ function DefaultTableBody({
   columns,
   action,
   variant,
+  emptyText,
 }: {
   rows: Record<string, unknown>[];
   columns: DynamicTableSection["columns"];
   action?: DynamicTableSection["action"];
   variant: TableVariant;
+  emptyText: string;
 }) {
   if (rows.length === 0) {
     return (
       <tbody>
         <tr>
-          <td colSpan={columns.length + (action ? 1 : 0)} className="px-4 py-8 text-center text-muted-foreground">
-            No data available
-          </td>
+          <EmptyCell columns={columns} action={action} emptyText={emptyText} />
         </tr>
       </tbody>
     );
@@ -253,13 +226,13 @@ function DefaultTableBody({
         >
           {columns.map((col) => (
             <td key={col.key} className="px-4 py-3 text-foreground" data-testid={`cell-${col.key}-${idx}`}>
-              <CellValue value={getCellValue(row, col)} type={col.type} hasFunction={!!col.function} />
+              <CellValue value={getCellValue(row, col)} type={col.type} />
             </td>
           ))}
           {action && (
             <td className="px-4 py-3">
               <Button variant="outline" size="sm" asChild data-testid={`button-action-${idx}`}>
-                <a href={resolveTemplate(action.href, row)} target="_blank" rel="noopener noreferrer">
+                <a href={resolveTemplate(action.href, row)}>
                   {action.label}
                   <ExternalLink className="w-3 h-3 ml-1" />
                 </a>
@@ -279,6 +252,7 @@ function CardsLayout({
   sortKey,
   sortDir,
   onSort,
+  emptyText,
 }: {
   rows: Record<string, unknown>[];
   columns: DynamicTableSection["columns"];
@@ -286,35 +260,41 @@ function CardsLayout({
   sortKey: string | null;
   sortDir: "asc" | "desc";
   onSort: (key: string) => void;
+  emptyText: string;
 }) {
   return (
     <>
       <div className="hidden md:block overflow-x-auto rounded-[0.8rem] border">
         <table className="w-full text-sm" data-testid="dynamic-table">
-          <TableHeader columns={columns} action={action} sortKey={sortKey} sortDir={sortDir} onSort={onSort} variant="cards" />
+          <TableHeader
+            columns={columns}
+            action={action}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={onSort}
+            variant="cards"
+          />
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + (action ? 1 : 0)} className="px-4 py-8 text-center text-muted-foreground">
-                  No data available
-                </td>
+                <EmptyCell columns={columns} action={action} emptyText={emptyText} />
               </tr>
             ) : (
               rows.map((row, idx) => (
-                <tr
-                  key={idx}
-                  className="border-b last:border-0 hover-elevate"
-                  data-testid={`row-${idx}`}
-                >
+                <tr key={idx} className="border-b last:border-0 hover-elevate" data-testid={`row-${idx}`}>
                   {columns.map((col) => (
-                    <td key={col.key} className="px-4 py-3 text-foreground" data-testid={`cell-${col.key}-${idx}`}>
-                      <CellValue value={getCellValue(row, col)} type={col.type} hasFunction={!!col.function} />
+                    <td
+                      key={col.key}
+                      className="px-4 py-3 text-foreground"
+                      data-testid={`cell-${col.key}-${idx}`}
+                    >
+                      <CellValue value={getCellValue(row, col)} type={col.type} />
                     </td>
                   ))}
                   {action && (
                     <td className="px-4 py-3">
                       <Button variant="outline" size="sm" asChild data-testid={`button-action-${idx}`}>
-                        <a href={resolveTemplate(action.href, row)} target="_blank" rel="noopener noreferrer">
+                        <a href={resolveTemplate(action.href, row)}>
                           {action.label}
                           <ExternalLink className="w-3 h-3 ml-1" />
                         </a>
@@ -330,7 +310,12 @@ function CardsLayout({
 
       <div className="md:hidden flex flex-col gap-3" data-testid="dynamic-table-cards">
         {rows.length === 0 ? (
-          <div className="text-center text-muted-foreground py-8 text-sm">No data available</div>
+          <div
+            className="text-center text-muted-foreground py-8 text-sm"
+            data-testid="text-dynamic-table-empty"
+          >
+            {emptyText}
+          </div>
         ) : (
           rows.map((row, idx) => (
             <div
@@ -341,18 +326,29 @@ function CardsLayout({
               {columns.map((col, colIdx) => {
                 const val = getCellValue(row, col);
                 return (
-                  <div key={col.key} className={`flex items-start justify-between gap-2 ${colIdx === 0 ? "" : "pt-1"}`}>
-                    <span className="text-xs font-medium text-muted-foreground shrink-0 uppercase tracking-wide">{col.label}</span>
+                  <div
+                    key={col.key}
+                    className={`flex items-start justify-between gap-2 ${colIdx === 0 ? "" : "pt-1"}`}
+                  >
+                    <span className="text-xs font-medium text-muted-foreground shrink-0 uppercase tracking-wide">
+                      {col.label}
+                    </span>
                     <span className="text-sm text-foreground text-right">
-                      <CellValue value={val} type={col.type} hasFunction={!!col.function} />
+                      <CellValue value={val} type={col.type} />
                     </span>
                   </div>
                 );
               })}
               {action && (
                 <div className="pt-2 border-t">
-                  <Button variant="outline" size="sm" className="w-full" asChild data-testid={`button-action-${idx}`}>
-                    <a href={resolveTemplate(action.href, row)} target="_blank" rel="noopener noreferrer">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    asChild
+                    data-testid={`button-action-${idx}`}
+                  >
+                    <a href={resolveTemplate(action.href, row)}>
                       {action.label}
                       <ExternalLink className="w-3 h-3 ml-1" />
                     </a>
@@ -389,6 +385,7 @@ function ComparisonLayout({
   sortKey,
   sortDir,
   onSort,
+  emptyText,
 }: {
   rows: Record<string, unknown>[];
   columns: DynamicTableSection["columns"];
@@ -396,13 +393,18 @@ function ComparisonLayout({
   sortKey: string | null;
   sortDir: "asc" | "desc";
   onSort: (key: string) => void;
+  emptyText: string;
 }) {
   const colCount = columns.length + (action ? 1 : 0);
 
   return (
     <>
       <div className="hidden md:block overflow-x-auto">
-        <div className="rounded-xl overflow-hidden shadow-lg ring-1 ring-black/5" style={{ minWidth: `${colCount * 160}px` }} data-testid="dynamic-table">
+        <div
+          className="rounded-xl overflow-hidden shadow-lg ring-1 ring-black/5"
+          style={{ minWidth: `${colCount * 160}px` }}
+          data-testid="dynamic-table"
+        >
           <div
             className="grid"
             style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
@@ -410,7 +412,9 @@ function ComparisonLayout({
             {columns.map((col, colIdx) => (
               <div
                 key={col.key}
-                className={`py-5 px-6 font-semibold text-sm cursor-pointer select-none bg-primary text-primary-foreground text-center ${colIdx < colCount - 1 ? "border-r border-primary-foreground/20" : ""}`}
+                className={`py-5 px-6 font-semibold text-sm cursor-pointer select-none bg-primary text-primary-foreground text-center ${
+                  colIdx < colCount - 1 ? "border-r border-primary-foreground/20" : ""
+                }`}
                 onClick={() => onSort(col.key)}
                 data-testid={`th-${col.key}`}
               >
@@ -421,14 +425,22 @@ function ComparisonLayout({
               </div>
             ))}
             {action && (
-              <div className="py-5 px-6 font-semibold text-sm bg-primary text-primary-foreground text-center" data-testid="th-action">
+              <div
+                className="py-5 px-6 font-semibold text-sm bg-primary text-primary-foreground text-center"
+                data-testid="th-action"
+              >
                 {action.label}
               </div>
             )}
           </div>
 
           {rows.length === 0 ? (
-            <div className="py-8 text-center text-muted-foreground text-sm">No data available</div>
+            <div
+              className="py-8 text-center text-muted-foreground text-sm"
+              data-testid="text-dynamic-table-empty"
+            >
+              {emptyText}
+            </div>
           ) : (
             rows.map((row, idx) => (
               <div
@@ -439,21 +451,26 @@ function ComparisonLayout({
               >
                 {columns.map((col, colIdx) => {
                   const rowBg = idx % 2 === 0 ? "bg-card" : "bg-primary/5";
-
                   return (
                     <div
                       key={col.key}
-                      className={`py-4 px-6 text-sm flex items-center text-center justify-center ${rowBg} text-foreground ${colIdx < colCount - 1 ? "border-r border-border/50" : ""}`}
+                      className={`py-4 px-6 text-sm flex items-center text-center justify-center ${rowBg} text-foreground ${
+                        colIdx < colCount - 1 ? "border-r border-border/50" : ""
+                      }`}
                       data-testid={`cell-${col.key}-${idx}`}
                     >
-                      <CellValue value={getCellValue(row, col)} type={col.type} hasFunction={!!col.function} />
+                      <CellValue value={getCellValue(row, col)} type={col.type} />
                     </div>
                   );
                 })}
                 {action && (
-                  <div className={`py-4 px-6 flex items-center justify-center ${idx % 2 === 0 ? "bg-card" : "bg-primary/5"}`}>
+                  <div
+                    className={`py-4 px-6 flex items-center justify-center ${
+                      idx % 2 === 0 ? "bg-card" : "bg-primary/5"
+                    }`}
+                  >
                     <Button variant="outline" size="sm" asChild data-testid={`button-action-${idx}`}>
-                      <a href={resolveTemplate(action.href, row)} target="_blank" rel="noopener noreferrer">
+                      <a href={resolveTemplate(action.href, row)}>
                         {action.label}
                         <ExternalLink className="w-3 h-3 ml-1" />
                       </a>
@@ -469,7 +486,12 @@ function ComparisonLayout({
       <div className="md:hidden">
         <Accordion type="single" collapsible className="flex flex-col gap-2">
           {rows.length === 0 ? (
-            <div className="text-center text-muted-foreground py-8 text-sm">No data available</div>
+            <div
+              className="text-center text-muted-foreground py-8 text-sm"
+              data-testid="text-dynamic-table-empty"
+            >
+              {emptyText}
+            </div>
           ) : (
             rows.map((row, idx) => {
               const firstVal = getCellValue(row, columns[0]);
@@ -483,30 +505,35 @@ function ComparisonLayout({
                   data-testid={`accordion-row-${idx}`}
                 >
                   <AccordionTrigger className="hover:no-underline py-4 min-h-[48px] [&>svg]:w-5 [&>svg]:h-5">
-                    <span className="font-semibold text-foreground text-sm">{firstLabel}</span>
+                    <span className="font-semibold text-foreground text-sm whitespace-pre-line">
+                      {firstLabel}
+                    </span>
                   </AccordionTrigger>
                   <AccordionContent className="pt-3 pb-5">
                     <div className="flex flex-col gap-2">
                       {columns.slice(1).map((col) => {
                         const val = getCellValue(row, col);
                         return (
-                          <div
-                            key={col.key}
-                            className="rounded-[0.8rem] p-3 bg-muted/30"
-                          >
+                          <div key={col.key} className="rounded-[0.8rem] p-3 bg-muted/30">
                             <p className="text-xs font-semibold mb-0.5 text-muted-foreground uppercase tracking-wide">
                               {col.label}
                             </p>
                             <p className="text-sm text-foreground">
-                              <CellValue value={val} type={col.type} hasFunction={!!col.function} />
+                              <CellValue value={val} type={col.type} />
                             </p>
                           </div>
                         );
                       })}
                       {action && (
                         <div className="pt-2">
-                          <Button variant="outline" size="sm" className="w-full" asChild data-testid={`button-action-${idx}`}>
-                            <a href={resolveTemplate(action.href, row)} target="_blank" rel="noopener noreferrer">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full"
+                            asChild
+                            data-testid={`button-action-${idx}`}
+                          >
+                            <a href={resolveTemplate(action.href, row)}>
                               {action.label}
                               <ExternalLink className="w-3 h-3 ml-1" />
                             </a>
@@ -555,7 +582,9 @@ function TableFooter({
           data-testid="button-toggle-rows"
         >
           {expanded ? "Show less" : `Show all ${totalCount}`}
-          <ChevronDown className={`w-4 h-4 ml-1 transition-transform ${expanded ? "rotate-180" : ""}`} />
+          <ChevronDown
+            className={`w-4 h-4 ml-1 transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
         </Button>
       )}
     </div>
@@ -566,50 +595,13 @@ export function DynamicTable({ data }: DynamicTableProps) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [expanded, setExpanded] = useState(false);
-  const { session } = useSession();
   const variant: TableVariant = (data.variant as TableVariant) || "default";
-
-  const filterCtx: FilterContext = {
-    region: session.location?.region || undefined,
-    country_code: (session.geo?.country_code || session.location?.country_code || "").toLowerCase() || undefined,
-    city: session.geo?.city || session.location?.city || undefined,
-    language: session.language,
-    timezone: session.location?.timezone || session.geo?.timezone || undefined,
-  };
-
-  const { data: fetchedData, isLoading, error } = useQuery<unknown>({
-    queryKey: ["dynamic-table", data.endpoint],
-    queryFn: async () => {
-      const res = await fetch(data.endpoint);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    },
-    staleTime: 5 * 60 * 1000,
-    retry: 2,
-  });
+  const emptyText = data.empty_text?.trim() || "No data available";
 
   const allRows: Record<string, unknown>[] = (() => {
-    if (!fetchedData) return [];
-    let arr: unknown;
-    if (data.data_path) {
-      arr = (fetchedData as Record<string, unknown>)[data.data_path];
-    } else if (Array.isArray(fetchedData)) {
-      arr = fetchedData;
-    } else {
-      const obj = fetchedData as Record<string, unknown>;
-      const arrayKey = Object.keys(obj).find((k) => Array.isArray(obj[k]));
-      arr = arrayKey ? obj[arrayKey] : [];
-    }
-    if (!Array.isArray(arr)) return [];
-
-    let filtered = arr as Record<string, unknown>[];
-
-    if (data.global_filter) {
-      filtered = executeGlobalFilter(data.global_filter, filtered, filterCtx);
-    }
-
+    let rows = Array.isArray(data.items) ? [...(data.items as Record<string, unknown>[])] : [];
     if (sortKey) {
-      filtered = [...filtered].sort((a, b) => {
+      rows = [...rows].sort((a, b) => {
         const aVal = getNestedValue(a, sortKey);
         const bVal = getNestedValue(b, sortKey);
         if (aVal == null && bVal == null) return 0;
@@ -622,12 +614,12 @@ export function DynamicTable({ data }: DynamicTableProps) {
         return sortDir === "asc" ? cmp : -cmp;
       });
     }
-    return filtered;
+    return rows;
   })();
 
   const maxRows = data.max_rows && data.max_rows > 0 ? data.max_rows : null;
   const hasMore = maxRows !== null && allRows.length > maxRows;
-  const rows = (maxRows && !expanded) ? allRows.slice(0, maxRows) : allRows;
+  const rows = maxRows && !expanded ? allRows.slice(0, maxRows) : allRows;
 
   const handleSort = (key: string) => {
     if (sortKey === key) {
@@ -640,37 +632,14 @@ export function DynamicTable({ data }: DynamicTableProps) {
 
   const bgStyle: React.CSSProperties = {};
   if (data.background) {
-    if (data.background.startsWith("linear-gradient") || data.background.startsWith("radial-gradient")) {
+    if (
+      data.background.startsWith("linear-gradient") ||
+      data.background.startsWith("radial-gradient")
+    ) {
       bgStyle.backgroundImage = data.background;
     } else {
       bgStyle.backgroundColor = data.background;
     }
-  }
-
-  if (isLoading) {
-    return (
-      <section className="py-12" style={bgStyle} data-testid="section-dynamic-table">
-        <div className="max-w-7xl mx-auto px-4 md:px-6">
-          <div className="animate-pulse">
-            {data.title && <div className="h-8 w-64 bg-muted rounded mb-6" />}
-            <div className="h-10 w-full bg-muted rounded mb-2" />
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div key={i} className="h-12 w-full bg-muted/50 rounded mb-1" />
-            ))}
-          </div>
-        </div>
-      </section>
-    );
-  }
-
-  if (error) {
-    return (
-      <section className="py-12" style={bgStyle} data-testid="section-dynamic-table">
-        <div className="max-w-7xl mx-auto px-4 md:px-6 text-center">
-          <p className="text-sm text-destructive">Failed to load data from endpoint.</p>
-        </div>
-      </section>
-    );
   }
 
   return (
@@ -684,7 +653,10 @@ export function DynamicTable({ data }: DynamicTableProps) {
               </h2>
             )}
             {data.subtitle && (
-              <p className="text-body text-muted-foreground mt-1" data-testid="text-dynamic-table-subtitle">
+              <p
+                className="text-body text-muted-foreground mt-1"
+                data-testid="text-dynamic-table-subtitle"
+              >
                 {data.subtitle}
               </p>
             )}
@@ -699,6 +671,7 @@ export function DynamicTable({ data }: DynamicTableProps) {
             sortKey={sortKey}
             sortDir={sortDir}
             onSort={handleSort}
+            emptyText={emptyText}
           />
         ) : variant === "comparison" ? (
           <ComparisonLayout
@@ -708,6 +681,7 @@ export function DynamicTable({ data }: DynamicTableProps) {
             sortKey={sortKey}
             sortDir={sortDir}
             onSort={handleSort}
+            emptyText={emptyText}
           />
         ) : (
           <div className="overflow-x-auto rounded-[0.8rem] border">
@@ -720,7 +694,13 @@ export function DynamicTable({ data }: DynamicTableProps) {
                 onSort={handleSort}
                 variant={variant}
               />
-              <DefaultTableBody rows={rows} columns={data.columns} action={data.action} variant={variant} />
+              <DefaultTableBody
+                rows={rows}
+                columns={data.columns}
+                action={data.action}
+                variant={variant}
+                emptyText={emptyText}
+              />
             </table>
           </div>
         )}

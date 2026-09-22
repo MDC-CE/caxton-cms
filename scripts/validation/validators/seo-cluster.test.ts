@@ -22,8 +22,38 @@ vi.mock("../../../server/content-index", () => ({
 }));
 
 vi.mock("../../../server/redirects", () => ({
+  toPublicUrlPath: (raw: string) => {
+    let urlPath = raw;
+    try {
+      if (/^https?:\/\//i.test(urlPath)) urlPath = new URL(urlPath).pathname;
+    } catch {
+      /* keep */
+    }
+    urlPath = urlPath.split("?")[0].split("#")[0];
+    if (!urlPath.startsWith("/")) urlPath = `/${urlPath}`;
+    return urlPath;
+  },
   createPublicUrlResolver: () => ({
-    isLive: (url: string) => url === "/en/hub-live" || url === "/en/hub-a" || url === "/en/hub-b",
+    isLive: (url: string) =>
+      url === "/en/hub-live" ||
+      url === "/en/hub-a" ||
+      url === "/en/hub-b" ||
+      url === "/en/hub-old",
+    test: (url: string) => {
+      if (url === "/en/hub-old") {
+        return {
+          match: true,
+          resolvedTo: "/en/hub-live",
+          destinationExists: true,
+          pageExists: false,
+        };
+      }
+      return {
+        match: false,
+        pageExists:
+          url === "/en/hub-live" || url === "/en/hub-a" || url === "/en/hub-b" || url === "/en/hub-old",
+      };
+    },
   }),
 }));
 
@@ -211,6 +241,44 @@ describe("seoClusterValidator", () => {
     const issue = result.errors.find((e) => e.code === "INVALID_PILLAR");
     expect(issue).toBeDefined();
     expect(issue?.message).toContain("does not resolve to a known pillar hub");
+  });
+
+  it("reports STALE_PILLAR_PATH when pillar_path redirects to a live hub", async () => {
+    writeFixture(monitoredTypes, {
+      version: 1,
+      entries: {
+        "blog/hub/en": {
+          content_type: "blog",
+          slug: "hub",
+          locale: "en",
+          file: "blog/hub/en.yml",
+          path: "/en/hub-live",
+          main_keyword: "hub",
+          is_pillar: true,
+          pillar_path: "/en/hub-live",
+          pillar_live: true,
+          pillar_opted_out: false,
+        },
+      },
+      by_path: { "/en/hub-live": "blog/hub/en" },
+      clusters: { "blog/hub/en": { path: "/en/hub-live", members: [] } },
+      orphans: [],
+      warnings: [],
+    });
+    resetRegistry(contentRoot);
+
+    const result = await seoClusterValidator.run(
+      context(
+        baseFile({
+          filePath: path.join(contentRootAbs(), "blog/spoke/en.yml"),
+          seo: { pillar_path: "/en/hub-old" },
+        }),
+      ),
+    );
+    const issue = result.errors.find((e) => e.code === "STALE_PILLAR_PATH");
+    expect(issue).toBeDefined();
+    expect(issue?.suggestion).toContain("/en/hub-live");
+    expect(result.errors.some((e) => e.code === "INVALID_PILLAR")).toBe(false);
   });
 
   it("reports INVALID_PILLAR hub_not_pillar when live page is not a pillar", async () => {

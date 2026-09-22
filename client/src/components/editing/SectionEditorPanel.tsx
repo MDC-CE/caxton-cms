@@ -64,7 +64,6 @@ import {
   type TestimonialBankRow,
   type TestimonialsDynamicEntries,
 } from "@shared/testimonials-listing";
-import { TableContentEditor } from "./TableContentEditor";
 import { FaqItemsPicker } from "./FaqItemsPicker";
 import { FaqSectionEditorField } from "./FaqSectionEditorField";
 import { ListCardsSectionEditorField } from "./ListCardsSectionEditorField";
@@ -793,9 +792,6 @@ export function SectionEditorPanel({
   const [imagePickerTarget, setImagePickerTarget] = useState<ImagePickerTarget | null>(null);
   const [imageGallerySearch, setImageGallerySearch] = useState("");
   const [visibleImageCount, setVisibleImageCount] = useState(48);
-  const [tableEditorMode, setTableEditorMode] = useState<
-    "content" | "filter" | null
-  >(null);
   const [imagePickerMode, setImagePickerMode] = useState<"browse" | "upload">(
     "browse",
   );
@@ -2870,7 +2866,6 @@ export function SectionEditorPanel({
       );
       if (!confirmed) return;
     }
-    setTableEditorMode(null);
     if (onPreviewChange) {
       onPreviewChange(null);
     }
@@ -3514,7 +3509,7 @@ export function SectionEditorPanel({
                 data-testid="props-testimonials-section-editor"
               />
             )}
-            {sectionType === "list_cards" && (
+            {(sectionType === "list_cards" || sectionType === "dynamic_table") && (
               <ListCardsSectionEditorField
                 hasDynamicEntries={listCardsListing.hasDynamicEntries}
                 contentType={listCardsListing.contentType}
@@ -3575,8 +3570,32 @@ export function SectionEditorPanel({
                 ]}
               />
             )}
-            {sectionType === "dynamic_table" && parsedSection?.endpoint && (
+            {sectionType === "dynamic_table" && (
               <>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Empty message</Label>
+                  <Input
+                    placeholder="No upcoming cohorts."
+                    value={
+                      typeof parsedSection?.empty_text === "string"
+                        ? (parsedSection.empty_text as string)
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.trim() === "") {
+                        updatePropertyWithValue("empty_text", undefined);
+                      } else {
+                        updatePropertyWithValue("empty_text", val);
+                      }
+                    }}
+                    data-testid="input-empty-text"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Shown when the listing returns no rows. The table chrome stays visible.
+                  </p>
+                </div>
+
                 <div className="space-y-2">
                   <Label className="text-xs font-medium">Max Rows</Label>
                   <Input
@@ -3665,10 +3684,10 @@ export function SectionEditorPanel({
                           />
                         </div>
                         <div>
-                          <Label className="text-[10px] text-muted-foreground">URL Template</Label>
+                          <Label className="text-[10px] text-muted-foreground">URL</Label>
                           <Input
                             value={(parsedSection.action as { href?: string })?.href || ""}
-                            placeholder="e.g. https://example.com/item/{id}"
+                            placeholder="e.g. /en/apply or {apply_url}"
                             onChange={(e) => {
                               try {
                                 const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
@@ -3690,7 +3709,7 @@ export function SectionEditorPanel({
                             data-testid="input-action-href"
                           />
                           <p className="text-[10px] text-muted-foreground mt-0.5">
-                            Use {"{columnKey}"} for dynamic values, e.g. {"{id}"} or {"{slug}"}
+                            Fixed path or {"{columnKey}"} against resolved item fields
                           </p>
                         </div>
                       </div>
@@ -3704,7 +3723,7 @@ export function SectionEditorPanel({
                           const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
                           if (!parsed || typeof parsed !== "object") return;
                           pushUndoState(yamlContent);
-                          parsed.action = { label: "View", href: "" };
+                          parsed.action = { label: "Apply", href: "/en/apply" };
                           const newYaml = safeYamlDump(parsed, { lineWidth: -1, noRefs: true, quotingType: '"' });
                           setYamlContent(newYaml);
                           setHasChanges(true);
@@ -3724,181 +3743,6 @@ export function SectionEditorPanel({
                     Adds a button column to each row linking to a URL.
                   </p>
                 </div>
-
-                <div className="space-y-3 border-t pt-3 mt-3">
-                  <div
-                    className={`p-3 rounded-lg border cursor-pointer transition-colors ${tableEditorMode === "content" ? "border-primary bg-primary/5" : "hover-elevate"}`}
-                    onClick={() =>
-                      setTableEditorMode(
-                        tableEditorMode === "content" ? null : "content",
-                      )
-                    }
-                    data-testid="button-table-content-filter"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <Settings className="h-4 w-4 text-foreground flex-shrink-0" />
-                      <span className="text-sm font-medium text-foreground">
-                        Content Filter
-                      </span>
-                    </div>
-                    <p className="text-xs text-muted-foreground pl-6">
-                      {locale === "es"
-                        ? "Usa IA para elegir qué columnas mostrar, renombrarlas, reordenarlas o cambiar cómo se muestran los valores. Controla la apariencia de la tabla."
-                        : "Use AI to choose which columns to display, rename them, reorder, or change how values are shown. Controls the table's appearance."}
-                    </p>
-                  </div>
-                  <div
-                    className={`p-3 rounded-lg border cursor-pointer transition-colors ${tableEditorMode === "filter" ? "border-primary bg-primary/5" : "hover-elevate"}`}
-                    onClick={() =>
-                      setTableEditorMode(
-                        tableEditorMode === "filter" ? null : "filter",
-                      )
-                    }
-                    data-testid="button-table-global-filter"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <Code className="h-4 w-4 text-foreground flex-shrink-0" />
-                      <span className="text-sm font-medium text-foreground">
-                        Global Filter
-                      </span>
-                    </div>
-                    <p className="text-xs text-muted-foreground pl-6">
-                      {locale === "es"
-                        ? "Usa IA para filtrar qué filas se muestran en la tabla. Soporta filtrado por región del visitante (país, idioma, zona horaria). Controla qué datos son visibles, no cómo se ven."
-                        : "Use AI to filter which rows appear in the table. Supports visitor-aware filtering (country, language, timezone). Controls which data is visible — not how it looks."}
-                    </p>
-                  </div>
-                </div>
-
-                {tableEditorMode === "content" && (
-                  <TableContentEditor
-                    key={`content-${parsedSection.endpoint}`}
-                    mode="content"
-                    endpoint={parsedSection.endpoint as string}
-                    dataPath={parsedSection.data_path as string | undefined}
-                    currentColumns={
-                      (parsedSection.columns as Array<{
-                        key: string;
-                        label: string;
-                        type:
-                          | "text"
-                          | "number"
-                          | "date"
-                          | "image"
-                          | "link"
-                          | "boolean";
-                      }>) || []
-                    }
-                    currentTitle={parsedSection.title as string | undefined}
-                    currentFilter={
-                      parsedSection.global_filter as string | undefined
-                    }
-                    locale={locale}
-                    onApplyContent={(config) => {
-                      try {
-                        const parsed = safeYamlLoad(yamlContent) as Record<
-                          string,
-                          unknown
-                        >;
-                        if (!parsed || typeof parsed !== "object") return;
-                        pushUndoState(yamlContent);
-                        parsed.columns = config.columns;
-                        if (config.title) {
-                          parsed.title = config.title;
-                        } else {
-                          delete parsed.title;
-                        }
-                        const newYaml = safeYamlDump(parsed, {
-                          lineWidth: -1,
-                          noRefs: true,
-                          quotingType: '"',
-                        });
-                        setYamlContent(newYaml);
-                        setHasChanges(true);
-                        setParseError(null);
-                        if (onPreviewChange) onPreviewChange(parsed as Section);
-                      } catch (err) {
-                        console.error("Error applying table config:", err);
-                      }
-                    }}
-                    onApplyFilter={() => {}}
-                    onRemoveFilter={() => {}}
-                    onClose={() => setTableEditorMode(null)}
-                  />
-                )}
-
-                {tableEditorMode === "filter" && (
-                  <TableContentEditor
-                    key={`filter-${parsedSection.endpoint}`}
-                    mode="filter"
-                    endpoint={parsedSection.endpoint as string}
-                    dataPath={parsedSection.data_path as string | undefined}
-                    currentColumns={
-                      (parsedSection.columns as Array<{
-                        key: string;
-                        label: string;
-                        type:
-                          | "text"
-                          | "number"
-                          | "date"
-                          | "image"
-                          | "link"
-                          | "boolean";
-                      }>) || []
-                    }
-                    currentTitle={parsedSection.title as string | undefined}
-                    currentFilter={
-                      parsedSection.global_filter as string | undefined
-                    }
-                    locale={locale}
-                    onApplyContent={() => {}}
-                    onApplyFilter={(filterBase64) => {
-                      try {
-                        const parsed = safeYamlLoad(yamlContent) as Record<
-                          string,
-                          unknown
-                        >;
-                        if (!parsed || typeof parsed !== "object") return;
-                        pushUndoState(yamlContent);
-                        parsed.global_filter = filterBase64;
-                        const newYaml = safeYamlDump(parsed, {
-                          lineWidth: -1,
-                          noRefs: true,
-                          quotingType: '"',
-                        });
-                        setYamlContent(newYaml);
-                        setHasChanges(true);
-                        setParseError(null);
-                        if (onPreviewChange) onPreviewChange(parsed as Section);
-                      } catch (err) {
-                        console.error("Error applying global filter:", err);
-                      }
-                    }}
-                    onRemoveFilter={() => {
-                      try {
-                        const parsed = safeYamlLoad(yamlContent) as Record<
-                          string,
-                          unknown
-                        >;
-                        if (!parsed || typeof parsed !== "object") return;
-                        pushUndoState(yamlContent);
-                        delete parsed.global_filter;
-                        const newYaml = safeYamlDump(parsed, {
-                          lineWidth: -1,
-                          noRefs: true,
-                          quotingType: '"',
-                        });
-                        setYamlContent(newYaml);
-                        setHasChanges(true);
-                        setParseError(null);
-                        if (onPreviewChange) onPreviewChange(parsed as Section);
-                      } catch (err) {
-                        console.error("Error removing global filter:", err);
-                      }
-                    }}
-                    onClose={() => setTableEditorMode(null)}
-                  />
-                )}
               </>
             )}
 

@@ -168,6 +168,39 @@ describe("event dispatcher", () => {
     expect(jobNames()).toContain("entry_delete_cleanup");
   });
 
+  it("cluster_hub_path_rewrite_started enqueues delayed job unique by hub folder", async () => {
+    await dispatchEventForTest(
+      baseEvent("cluster_hub_path_rewrite_started", {
+        resource: { contentType: "blog", slug: "hub", locale: "en" },
+        payload: {
+          oldUrl: "/en/blog/old",
+          newUrl: "/en/blog/new",
+          contentType: "blog",
+          slug: "hub",
+          locale: "en",
+        },
+      }),
+    );
+    expect(jobNames()).toContain("cluster_hub_path_rewrite");
+    const call = mocks.enqueueJob.mock.calls.find((c) => c[0] === "cluster_hub_path_rewrite");
+    expect(call?.[1]).toEqual(
+      expect.objectContaining({
+        site: "site_test",
+        contentType: "blog",
+        slug: "hub",
+        locale: "en",
+        startedEventId: 0,
+      }),
+    );
+    expect(call?.[2]).toEqual(
+      expect.objectContaining({
+        delayMs: 1000,
+        uniqueWithArgs: true,
+        uniqueKey: "cluster-hub-path:site_test:blog/hub/en",
+      }),
+    );
+  });
+
   it("site_redirects_changed enqueues index and redirects validation", async () => {
     await dispatchEventForTest(
       baseEvent("site_redirects_changed", {
