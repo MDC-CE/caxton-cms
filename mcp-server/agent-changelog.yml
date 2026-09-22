@@ -5,6 +5,43 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-22"
+    summary: "LeadForm options[] title for cards heading"
+    agent_impact:
+      - "fields.*.options[].title overlays onto component_renderer: cards as the card heading. Closed input / select / lists keep using label. Omit title → falls back to label."
+      - "Same passthrough merge as label/description/icon/cta/badge via mergeLeadFormOptions; does not filter the pool."
+    tools_changed: false
+    paths:
+      - client/src/components/lead_form/LeadFormFieldControl.tsx
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - shared/component-registry/_common/schema.ts
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/sections.md
+
+  - date: "2026-09-22"
+    summary: "LeadForm cards layout: grid | showcase"
+    agent_impact:
+      - "fields.*.layout: grid (default) | showcase for component_renderer: cards. showcase = first option full-width, rest in a row below (array order)."
+      - "Does not filter options; pair with source/slugs + options[] overlays as before."
+    tools_changed: false
+    paths:
+      - shared/component-registry/_common/schema.ts
+      - client/src/components/menus/Dropdown.tsx
+      - client/src/components/lead_form/LeadFormFieldControl.tsx
+      - mcp-server/explain/lead-forms.md
+
+  - date: "2026-09-22"
+    summary: "LeadForm options[] badge on cards renderer"
+    agent_impact:
+      - "fields.*.options[].badge overlays onto component_renderer: cards (chip top-right). Does not filter the pool; select/simple-list/grouped-list ignore badge."
+      - "Same passthrough as label/description/icon/cta via mergeLeadFormOptions."
+    tools_changed: false
+    paths:
+      - client/src/components/lead_form/LeadFormFieldControl.tsx
+      - client/src/components/menus/Dropdown.tsx
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/sections.md
+
   - date: "2026-09-17"
     summary: "locale_translation review situation + proposals explain hub/subtopic"
     agent_impact:

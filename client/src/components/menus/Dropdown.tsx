@@ -114,39 +114,195 @@ export interface DropdownProps {
   dropdown: DropdownData;
 }
 
-function CardTitleWithBadge({ title, badge }: { title: string; badge?: string }) {
-  if (!badge?.trim()) {
-    return (
-      <h4 className="text-base font-semibold text-foreground mb-2 break-words">
-        {title}
-      </h4>
-    );
-  }
+function CardBadgePill({ badge }: { badge: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 mb-2">
-      <h4 className="text-base font-semibold text-foreground break-words">{title}</h4>
-      <Badge variant="secondary" className="text-[10px] font-semibold uppercase tracking-wide shrink-0">
-        {badge}
-      </Badge>
-    </div>
+    <Badge variant="default" className="rounded-full normal-case font-medium tracking-normal shrink-0">
+      {badge}
+    </Badge>
   );
 }
 
-function CardTitleWithBadgeCompact({ title, badge }: { title: string; badge?: string }) {
-  if (!badge?.trim()) {
+function CardTitle({
+  title,
+  compact,
+  className,
+}: {
+  title: string;
+  compact?: boolean;
+  className?: string;
+}) {
+  return (
+    <h4
+      className={
+        className ??
+        (compact
+          ? "text-sm md:text-base font-semibold text-foreground mb-0.5 md:mb-2 break-words"
+          : "text-base font-semibold text-foreground mb-2 break-words")
+      }
+    >
+      {title}
+    </h4>
+  );
+}
+
+function formCardsGridClass(count: number): string {
+  if (count <= 1) return "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1";
+  if (count === 2) return "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-2";
+  if (count === 3) return "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-3";
+  return "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-4";
+}
+
+function renderCardsDropdownItem(
+  item: CardItem,
+  index: number,
+  opts: {
+    onSelect?: (value: string) => void;
+    onNavigate?: () => void;
+    /** Showcase lead card: icon beside title (always horizontal). */
+    showcaseLead?: boolean;
+    /** Showcase supporting cards: tighter icon→text spacing. */
+    showcaseRest?: boolean;
+  },
+) {
+  const { onSelect, onNavigate, showcaseLead, showcaseRest } = opts;
+  const IconComponent = item.icon ? iconMap[item.icon] : null;
+  const badgeText = item.badge?.trim() || "";
+  const hasBadge = !!badgeText;
+  const className = onSelect
+    ? showcaseLead
+      ? "relative flex w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:p-4"
+      : showcaseRest
+        ? "relative flex flex-row items-start gap-2.5 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:gap-0 md:p-4"
+        : "relative flex flex-row items-start gap-3 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:p-4"
+    : "relative block min-w-0 max-w-full hover-elevate rounded-lg p-2 -m-2 text-left w-full";
+  const testId = `dropdown-card-${(item.title || "card").toLowerCase().replace(/\s+/g, "-")}`;
+
+  let body: React.ReactNode;
+  if (onSelect && showcaseLead) {
+    body = (
+      <div className="relative flex min-w-0 flex-1 flex-col gap-2 md:gap-3">
+        {hasBadge ? (
+          <div className="pointer-events-none absolute top-0 right-0 z-10">
+            <CardBadgePill badge={badgeText} />
+          </div>
+        ) : null}
+        <div className={`flex w-full items-center gap-3${hasBadge ? " pr-24" : ""}`}>
+          {IconComponent ? (
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary md:h-12 md:w-12">
+              <IconComponent className="h-4 w-4 md:h-6 md:w-6" />
+            </div>
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <CardTitle
+              title={item.title}
+              className="text-sm md:text-base font-semibold text-foreground break-words mb-0"
+            />
+          </div>
+        </div>
+        <p className="text-xs md:text-sm text-muted-foreground line-clamp-2 md:line-clamp-4 text-left">
+          {item.description}
+        </p>
+        <span className="hidden md:inline-flex self-start items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
+          {item.cta}
+        </span>
+      </div>
+    );
+  } else if (onSelect) {
+    body = (
+      <>
+        {IconComponent || hasBadge ? (
+          <div
+            className={
+              showcaseRest
+                ? "flex w-auto shrink-0 items-start gap-2 md:mb-3 md:w-full"
+                : "flex w-auto shrink-0 items-start gap-2 md:mb-3 md:w-full"
+            }
+          >
+            {IconComponent ? (
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary md:h-12 md:w-12">
+                <IconComponent className="h-4 w-4 md:h-6 md:w-6" />
+              </div>
+            ) : null}
+            {hasBadge ? (
+              <div className="ml-auto">
+                <CardBadgePill badge={badgeText} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="min-w-0 flex-1 md:flex-none md:w-full">
+          <CardTitle
+            title={item.title}
+            className={
+              showcaseRest
+                ? "text-sm md:text-base font-semibold text-foreground mb-0.5 break-words"
+                : undefined
+            }
+            compact={!showcaseRest}
+          />
+          <p className="text-xs md:text-sm text-muted-foreground mb-0 md:mb-3 line-clamp-2 md:line-clamp-4">
+            {item.description}
+          </p>
+          <span className="hidden md:inline-flex items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
+            {item.cta}
+          </span>
+        </div>
+      </>
+    );
+  } else {
+    body = (
+      <>
+        {IconComponent || hasBadge ? (
+          <div className="mb-3 flex w-full items-start gap-2">
+            {IconComponent ? (
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <IconComponent className="h-6 w-6" />
+              </div>
+            ) : null}
+            {hasBadge ? (
+              <div className="ml-auto">
+                <CardBadgePill badge={badgeText} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <CardTitle title={item.title} />
+        <p className="text-sm text-muted-foreground mb-3 line-clamp-4 break-words">
+          {item.description}
+        </p>
+        <span className="inline-flex items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
+          {item.cta}
+        </span>
+      </>
+    );
+  }
+
+  if (onSelect) {
     return (
-      <h4 className="text-sm md:text-base font-semibold text-foreground mb-0.5 md:mb-2">
-        {title}
-      </h4>
+      <button
+        key={index}
+        type="button"
+        className={className}
+        data-testid={testId}
+        onClick={() => {
+          onSelect(itemSelectValue(item));
+          onNavigate?.();
+        }}
+      >
+        {body}
+      </button>
     );
   }
   return (
-    <div className="flex flex-wrap items-center gap-1.5 mb-0.5 md:mb-2">
-      <h4 className="text-sm md:text-base font-semibold text-foreground">{title}</h4>
-      <Badge variant="secondary" className="text-[9px] md:text-[10px] font-semibold uppercase tracking-wide shrink-0">
-        {badge}
-      </Badge>
-    </div>
+    <InternalLink
+      key={index}
+      href={item.href}
+      onNavigate={onNavigate}
+      className={className}
+      data-testid={testId}
+    >
+      {body}
+    </InternalLink>
   );
 }
 
@@ -155,18 +311,20 @@ export function CardsDropdown({
   onNavigate,
   onSelect,
 }: { dropdown: CardsDropdownData } & DropdownLayoutSelectProps) {
-  const itemCount = dropdown.items?.length ?? 0;
+  const items = dropdown.items ?? [];
+  const itemCount = items.length;
   const { cols } = resolveCardsLayout(itemCount, dropdown.layout);
   const colsClass = cardsGridColsClass(cols);
-  // Form picker: 1 compact row until md; then multi-col vertical cards (skip awkward 2+1 for 3).
-  const formGridClass =
-    itemCount <= 1
-      ? "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1"
-      : itemCount === 2
-        ? "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-2"
-        : itemCount === 3
-          ? "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-3"
-          : "grid w-full max-w-full gap-2 md:gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-4";
+  const isShowcase = dropdown.layout?.arrangement === "showcase" && itemCount > 0;
+  const formGridClass = formCardsGridClass(itemCount);
+
+  const renderItem = (item: CardItem, index: number, opts?: { showcaseLead?: boolean; showcaseRest?: boolean }) =>
+    renderCardsDropdownItem(item, index, {
+      onSelect,
+      onNavigate,
+      showcaseLead: opts?.showcaseLead,
+      showcaseRest: opts?.showcaseRest,
+    });
 
   return (
     <div
@@ -202,78 +360,24 @@ export function CardsDropdown({
           )}
         </div>
       )}
-      
-      <div className={onSelect ? formGridClass : `grid w-full min-w-0 gap-4 md:gap-6 ${colsClass}`}>
-        {dropdown.items.map((item, index) => {
-          const IconComponent = item.icon ? iconMap[item.icon] : null;
-          const className = onSelect
-            ? // Mobile: compact horizontal row; md+: vertical card
-              "flex flex-row items-start gap-3 w-full max-w-full min-w-0 hover-elevate rounded-lg border border-border bg-background p-3 text-left md:flex-col md:h-full md:p-4"
-            : "block min-w-0 max-w-full overflow-hidden hover-elevate rounded-lg p-2 -m-2 text-left w-full";
-          const testId = `dropdown-card-${(item.title || "card").toLowerCase().replace(/\s+/g, "-")}`;
-          const body = onSelect ? (
-            <>
-              {IconComponent && (
-                <div className="shrink-0 w-9 h-9 md:w-12 md:h-12 md:mb-3 flex items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <IconComponent className="w-4 h-4 md:w-6 md:h-6" />
-                </div>
+
+      {isShowcase ? (
+        <div className="flex w-full max-w-full flex-col gap-2 md:gap-4">
+          {renderItem(items[0]!, 0, { showcaseLead: true })}
+          {itemCount > 1 ? (
+            <div className={formCardsGridClass(itemCount - 1)}>
+              {items.slice(1).map((item, i) =>
+                renderItem(item, i + 1, { showcaseRest: true }),
               )}
-              <div className="min-w-0 flex-1 md:flex-none md:w-full">
-                <CardTitleWithBadgeCompact title={item.title} badge={item.badge} />
-                <p className="text-xs md:text-sm text-muted-foreground mb-0 md:mb-3 line-clamp-2 md:line-clamp-4">
-                  {item.description}
-                </p>
-                <span className="hidden md:inline-flex items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
-                  {item.cta}
-                </span>
-              </div>
-            </>
-          ) : (
-            <>
-              {IconComponent && (
-                <div className="mb-3 w-12 h-12 flex items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <IconComponent className="w-6 h-6" />
-                </div>
-              )}
-              <CardTitleWithBadge title={item.title} badge={item.badge} />
-              <p className="text-sm text-muted-foreground mb-3 line-clamp-4 break-words">
-                {item.description}
-              </p>
-              <span className="inline-flex items-center text-sm font-medium border border-border rounded-md px-4 py-2 hover-elevate">
-                {item.cta}
-              </span>
-            </>
-          );
-          if (onSelect) {
-            return (
-              <button
-                key={index}
-                type="button"
-                className={className}
-                data-testid={testId}
-                onClick={() => {
-                  onSelect(itemSelectValue(item));
-                  onNavigate?.();
-                }}
-              >
-                {body}
-              </button>
-            );
-          }
-          return (
-            <InternalLink
-              key={index}
-              href={item.href}
-              onNavigate={onNavigate}
-              className={className}
-              data-testid={testId}
-            >
-              {body}
-            </InternalLink>
-          );
-        })}
-      </div>
-      
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className={onSelect ? formGridClass : `grid w-full min-w-0 gap-4 md:gap-6 ${colsClass}`}>
+          {items.map((item, index) => renderItem(item, index))}
+        </div>
+      )}
+
       {dropdown.footer?.text && (
         <div
           className="mt-6 pt-4 border-t text-center text-sm text-muted-foreground break-words [&_a]:text-primary [&_a]:no-underline [&_a:hover]:underline"

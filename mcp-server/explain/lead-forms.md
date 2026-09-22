@@ -37,7 +37,10 @@ source:
 - `value_path` and `label_path` are **required** whenever `source` is set. They are dot-paths on each catalog or related item — not the form field name, not `editor.<field>.value`, and not `routes[].conditions.value`.
 - Do not write `relation`, `value`, `label`, `name`, or string shorthand.
 - Runtime does not guess mapping. Omit paths → MCP `actionRequired` (`source_value_label_path_required`). Confirm both paths with the user after `get_content_type_info` / `get_entry_content`.
-- `options[]` overlays marketing labels — **does not filter**.
+- `options[]` overlays marketing labels / **title** / description / icon / cta / **badge** — **does not filter**.
+- `label` = closed input / select / list text. Optional `title` = card heading on `component_renderer: cards` (falls back to `label`).
+- `badge` on an option shows a chip on `component_renderer: cards` (ignored by select / simple-list / grouped-list).
+- `layout: grid | showcase` on the field (cards only). Omit / `grid` = equal columns. `showcase` = first option full-width, remaining options in a row below (order = array order).
 
 ## `ecommerce_product_field`
 

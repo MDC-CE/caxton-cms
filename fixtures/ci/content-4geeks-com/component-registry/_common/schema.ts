@@ -118,6 +118,9 @@ export const leadFormComponentRendererSchema = z.enum([
   "grouped-list",
 ]);
 
+/** Cards picker arrangement: equal grid vs first option full-width + rest below. */
+export const leadFormCardsLayoutSchema = z.enum(["grid", "showcase"]);
+
 /** Optional marketing overlays / extra choices merged by `value` over form-options pools. */
 export const leadFormFieldOptionSchema = z
   .object({
@@ -174,7 +177,12 @@ export const leadFormFieldConfigSchema = z.object({
   source: leadFormFieldSourceSchema.optional(),
   /** How the field is shown. Omitting uses LeadForm runtime defaults (email→text, program→select, …). */
   component_renderer: leadFormComponentRendererSchema.optional(),
-  /** Merge by `value` over pool options (programs/locations/source). Passthrough for label/description/group/cta/icon. */
+  /**
+   * Cards arrangement only (`component_renderer: cards`).
+   * `grid` (default) = equal columns; `showcase` = first option full-width, rest in a row below.
+   */
+  layout: leadFormCardsLayoutSchema.optional(),
+  /** Merge by `value` over pool options (programs/locations/source). Passthrough for label/title/description/group/cta/icon/badge. */
   options: z.array(leadFormFieldOptionSchema).optional(),
 });
 
