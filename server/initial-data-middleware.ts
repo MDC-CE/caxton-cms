@@ -890,21 +890,48 @@ function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
     if (!fs.existsSync(themePath)) return "";
     const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as {
       colors?: { light?: Record<string, string>; dark?: Record<string, string> };
+      typography?: { fontFamily?: string };
+      breakpoints?: Record<
+        string,
+        { margin?: number; columns?: number; gutter?: number }
+      >;
     };
     const colors = theme.colors;
-    if (!colors) return "";
     let css = "";
-    if (colors.light && Object.keys(colors.light).length > 0) {
+    if (colors?.light && Object.keys(colors.light).length > 0) {
       const vars = Object.entries(colors.light)
         .map(([k, v]) => `  ${k}: ${v};`)
         .join("\n");
       css += `:root {\n${vars}\n}\n`;
     }
-    if (colors.dark && Object.keys(colors.dark).length > 0) {
+    if (colors?.dark && Object.keys(colors.dark).length > 0) {
       const vars = Object.entries(colors.dark)
         .map(([k, v]) => `  ${k}: ${v};`)
         .join("\n");
       css += `.dark {\n${vars}\n}\n`;
+    }
+    const fontFamily = theme.typography?.fontFamily?.trim();
+    if (fontFamily) {
+      const stack = `'${fontFamily.replace(/'/g, "")}', 'Plus Jakarta Sans Fallback', "Noto Color Emoji", sans-serif`;
+      // Scoped to .site-theme so Caxton admin chrome keeps platform fonts (Lato/Archivo).
+      css += `.site-theme {\n  --font-heading: ${stack};\n  --font-sans: ${stack};\n}\n`;
+    }
+    const bp = theme.breakpoints;
+    if (bp) {
+      const order = ["sm", "md", "lg", "xl"] as const;
+      const widths: Record<string, number> = { sm: 332, md: 679, lg: 1132, xl: 1468 };
+      for (const key of order) {
+        const entry = bp[key];
+        if (!entry) continue;
+        const min = widths[key];
+        const rules: string[] = [];
+        if (typeof entry.margin === "number") rules.push(`  --page-margin: ${entry.margin}px;`);
+        if (typeof entry.gutter === "number") rules.push(`  --page-gutter: ${entry.gutter}px;`);
+        if (typeof entry.columns === "number") rules.push(`  --grid-columns: ${entry.columns};`);
+        if (rules.length) {
+          css += `@media (min-width: ${min}px) {\n.site-theme {\n${rules.join("\n")}\n}\n}\n`;
+        }
+      }
     }
     return css ? `<style id="__theme_overrides__">\n${css}</style>` : "";
   } catch {

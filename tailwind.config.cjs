@@ -1,5 +1,3 @@
-const path = require("path");
-
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   darkMode: ["class"],
@@ -13,11 +11,18 @@ module.exports = {
     ],
   },
   theme: {
+    // MDC Figma MediaQuery / Grid System v0.1
+    // Frame viewports: sm 332 · md 679 · lg 1132 · xl 1468
+    screens: {
+      sm: "332px",
+      md: "679px",
+      lg: "1132px",
+      xl: "1468px",
+      "2xl": "1536px",
+      // Navbar chrome (between tablet and desktop)
+      nav: "830px",
+    },
     extend: {
-      // Navbar desktop chrome only — keep global md at 768px
-      screens: {
-        nav: "830px",
-      },
       borderRadius: {
         lg: ".5625rem" /* 9px */,
         md: ".375rem" /* 6px */,
@@ -25,7 +30,9 @@ module.exports = {
         card: "0.75rem" /* 12px - brand standard */,
       },
       boxShadow: {
-        card: "0 2px 8px -2px hsl(0 0% 0% / 0.08)",
+        card: "0 2px 2px 0 #E5E7EB80",
+        elevation: "0 4px 4px 0 #E5E7EB80",
+        "elevation-blue": "0 6px 10px 0 #005EAA4D",
       },
       colors: {
         background: "hsl(var(--background) / <alpha-value>)",
@@ -92,10 +99,10 @@ module.exports = {
           border: "var(--sidebar-accent-border)",
         },
         status: {
-          online: "rgb(34 197 94)",
-          away: "rgb(245 158 11)",
-          busy: "rgb(239 68 68)",
-          offline: "rgb(156 163 175)",
+          online: "rgb(37 191 108)",
+          away: "rgb(255 212 0)",
+          busy: "rgb(234 18 57)",
+          offline: "rgb(118 118 118)",
         },
       },
       fontFamily: {
@@ -105,13 +112,20 @@ module.exports = {
         mono: ["var(--font-mono)"],
       },
       fontSize: {
-        h1: ["50px", { lineHeight: "1.1", fontWeight: "700", letterSpacing: "-0.02em" }],
-        h2: ["30px", { lineHeight: "1.2", fontWeight: "700", letterSpacing: "-0.01em" }],
-        body: ["16px", { lineHeight: "1.5", fontWeight: "400" }],
+        /* MDC typography roles (Figma) — L = desktop, S = mobile default */
+        h1: ["45px", { lineHeight: "45px", fontWeight: "700", letterSpacing: "0" }],
+        h2: ["35px", { lineHeight: "35px", fontWeight: "700", letterSpacing: "0" }],
+        h3: ["20px", { lineHeight: "22px", fontWeight: "700", letterSpacing: "0" }],
+        h4: ["20px", { lineHeight: "22px", fontWeight: "500", letterSpacing: "0" }],
+        body: ["16px", { lineHeight: "20px", fontWeight: "400" }],
+        "body-sm": ["14px", { lineHeight: "18px", fontWeight: "400" }],
+        link: ["16px", { lineHeight: "18px", fontWeight: "400" }],
       },
       spacing: {
         section: "64px",
         "card-padding": "24px",
+        gutter: "20px",
+        "page-margin": "var(--page-margin)",
       },
       transitionDuration: {
         brand: "150ms",

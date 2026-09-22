@@ -1743,7 +1743,7 @@ export default function ThemeEditor() {
         <ScrollArea className="flex-1">
           {activeSection === "atoms" && (
             <div
-              className={`p-6 min-h-full ${previewMode === "dark" ? "dark bg-[hsl(0_0%_8%)]" : "bg-[hsl(0_0%_97%)]"}`}
+              className={`site-theme p-6 min-h-full ${previewMode === "dark" ? "dark bg-[hsl(0_0%_8%)]" : "bg-[hsl(0_0%_97%)]"}`}
               style={previewStyle}
               data-testid="preview-atoms"
             >

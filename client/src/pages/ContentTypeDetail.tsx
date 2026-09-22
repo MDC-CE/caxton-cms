@@ -153,7 +153,7 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
   }
 
   return (
-    <div data-testid={`page-${type}`}>
+    <div data-testid={`page-${type}`} className="site-theme">
       <MenuVisualContextProvider
         value={{
           sectionBackgroundOverlapsMenu,

@@ -126,7 +126,7 @@ export default function BlogPostPage() {
   }
 
   return (
-    <div data-testid={`page-blog-post-${post.slug}`}>
+    <div data-testid={`page-blog-post-${post.slug}`} className="site-theme">
       <Header />
       <article className="max-w-3xl mx-auto px-6 py-12">
         <div className="flex items-center justify-between gap-4 mb-8">

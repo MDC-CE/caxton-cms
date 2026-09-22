@@ -174,8 +174,8 @@ export default function Page() {
     );
   }
 
-  return (
-    <div data-testid={`page-${slug}`}>
+    return (
+    <div data-testid={`page-${slug}`} className="site-theme">
       <MenuVisualContextProvider
         value={{
           sectionBackgroundOverlapsMenu,

@@ -201,7 +201,7 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
   }
 
   return (
-    <div data-testid={`page-${contentType}-${slug}`}>
+    <div data-testid={`page-${contentType}-${slug}`} className="site-theme">
       <MenuVisualContextProvider
         value={{
           sectionBackgroundOverlapsMenu,

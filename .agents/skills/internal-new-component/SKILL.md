@@ -237,12 +237,12 @@ All values below come from `client/src/index.css` and `tailwind.config.ts`. Comp
 | Token | CSS Variable | Hex | Usage |
 |---|---|---|---|
 | `bg-background` / `text-foreground` | `--background` / `--foreground` | `#FFFFFF` / `#00041A` | Page background, default text |
-| `bg-primary` / `text-primary-foreground` | `--primary` / `--primary-foreground` | `#0084FF` / `#FFFFFF` | Primary buttons, links, accents |
-| `bg-accent` / `text-accent-foreground` | `--accent` / `--accent-foreground` | `#FFB718` / `#00041A` | Secondary highlight, badges |
-| `bg-muted` / `text-muted-foreground` | `--muted` / `--muted-foreground` | `#FAFAFA` / `#737373` | Subtle backgrounds, secondary text |
-| `bg-card` / `text-card-foreground` | `--card` / `--card-foreground` | `#FFFFFF` / `#00041A` | Card surfaces |
-| `bg-secondary` / `text-secondary-foreground` | `--secondary` / `--secondary-foreground` | `#F5F5F5` / `#00041A` | Outline buttons, secondary actions |
-| `bg-destructive` | `--destructive` | red | Errors, destructive actions |
+| `bg-primary` / `text-primary-foreground` | `--primary` / `--primary-foreground` | `#005EAA` / `#FFFFFF` | Primary buttons, links, accents |
+| `bg-accent` / `text-accent-foreground` | `--accent` / `--accent-foreground` | `#FFD400` / `#232529` | Secondary highlight, badges |
+| `bg-muted` / `text-muted-foreground` | `--muted` / `--muted-foreground` | `#FBFBFB` / `#767676` | Subtle backgrounds, secondary text |
+| `bg-card` / `text-card-foreground` | `--card` / `--card-foreground` | `#FFFFFF` / `#232529` | Card surfaces |
+| `bg-secondary` / `text-secondary-foreground` | `--secondary` / `--secondary-foreground` | `#F3F3F3` / `#232529` | Outline buttons, secondary actions |
+| `bg-destructive` | `--destructive` | `#EA1239` | Errors, destructive actions |
 
 Dark mode tokens are defined in `.dark {}` — components automatically adapt via semantic classes.
 
@@ -250,10 +250,10 @@ Dark mode tokens are defined in `.dark {}` — components automatically adapt vi
 
 | Element | Font | Size | Weight | Line Height | Letter Spacing |
 |---|---|---|---|---|---|
-| H1 / `.text-h1` | Lato (`font-heading`) | 50px (36px mobile) | 700 | 1.1 | -0.02em |
-| H2 / `.text-h2` | Lato (`font-heading`) | 40px in CSS utility / 30px in Tailwind `text-h2` token (28px mobile) | 700 | 1.2 | -0.01em |
-| Body / `.text-body` | Archivo (`font-sans`) | 16px | 400 | 1.6 | normal |
-| Stats/Numbers | Inter Variable (`.font-inter`) | varies | varies | — | — |
+| H1 / `.text-h1` | Plus Jakarta Sans (`font-heading`) | 45px (35px mobile) | 700 | 45px (35px) | 0 |
+| H2 / `.text-h2` | Plus Jakarta Sans (`font-heading`) | 35px (30px mobile) | 700 | 35px (30px) | 0 |
+| Body / `.text-body` | Plus Jakarta Sans (`font-sans`) | 16px | 400 | 20px | 0 |
+| Stats/Numbers | Plus Jakarta Sans (`.font-inter` alias) | varies | varies | — | — |
 
 Tailwind shortcuts: `text-h1`, `text-h2`, `text-body`, `font-heading`, `font-sans`.
 
@@ -293,8 +293,8 @@ Use `shadow-card` for cards. Shadows are disabled in dark mode.
 | `muted` | `--muted` | `#FAFAFA` |
 | `card` | `--card` | `#FFFFFF` |
 | `secondary` | `--secondary` | `#F5F5F5` |
-| `accent` | `--accent` | `#FFB718` |
-| `primary` | `--primary` | `#0084FF` |
+| `accent` | `--accent` | `#FFD400` |
+| `primary` | `--primary` | `#005EAA` |
 | `sidebar` | `--sidebar-background` | matches sidebar token |
 | `light-blue-5` | `hsl(210 100% 50% / 0.05)` | ~`#F0F7FF` |
 | `light-blue-5-gradient` | gradient to transparent | — |
@@ -341,7 +341,7 @@ Do not invent new rgba levels (e.g., `rgba(0,132,255,0.15)`, `rgba(0,0,0,0.06)`)
 - Accents: `primary` (blue) — used for interactive elements, links, icons, thin highlights
 - Visual elevation/differentiation: use `primary/5` (a very subtle blue wash) rather than bold or dark backgrounds — this applies broadly, not just to "featured" cards. Use it whenever you want a section, card, or element to stand out slightly or to add background variety without making it feel like a highlighted call-to-action
 
-**Accent yellow (`--accent` / `#FFB718`):** Use very sparingly — one deliberate use per component at most, such as a badge or a single highlight. Never use it as a repeating element across multiple items in a list or grid.
+**Accent yellow (`--accent` / `#FFD400`):** Use very sparingly — one deliberate use per component at most, such as a badge or a single highlight. Never use it as a repeating element across multiple items in a list or grid.
 
 **Why restraint matters:** Too many colors in UI elements signals consumer/casual design. Mono-chromatic blue + muted tones communicates professionalism and focus, which aligns with 4Geeks as a serious tech education brand. When in doubt, reach for `primary/5` before reaching for any other color.
 
@@ -351,9 +351,9 @@ When a component renders the 4 academy **programs or courses as distinct side-by
 
 | Program | Color | Token | Hex (sandbox) |
 |---|---|---|---|
-| Full Stack Development with AI | Blue | `--primary` | `#0084FF` |
+| Full Stack Development with AI | Blue | `--primary` | `#005EAA` |
 | AI Engineering | Gray | `--muted-foreground` | `#737373` |
-| Data Science & ML | Yellow | `--accent` | `#FFB718` |
+| Data Science & ML | Yellow | `--accent` | `#FFD400` |
 | Cybersecurity | Red | `--destructive` | `hsl(0 75% 45%)` ≈ `#C0311B` |
 
 These color identities are used for: icon color, thin accent bars/lines, CTA link text color. They are **not** used as full card background colors (use `card` or `light-blue-5` for card backgrounds). The assignment above is flexible — the important thing is that each program consistently uses one distinct color across all components that reference it.

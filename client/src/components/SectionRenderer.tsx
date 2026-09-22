@@ -1693,7 +1693,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
   return (
     <PageFunnelProvider funnel={funnel}>
     <PageSectionsProvider value={pageSectionsContextValue}>
-      <>
+      <div className="site-theme">
         {content}
         {isEditMode && (
         <Suspense>
@@ -1991,7 +1991,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+      </div>
   </PageSectionsProvider>
   </PageFunnelProvider>
   );

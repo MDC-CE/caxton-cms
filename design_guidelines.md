@@ -1,15 +1,15 @@
-# Design Guidelines: The AI Reskilling Platform
+# Design Guidelines: MDC Learning (learning.mdc.edu)
 
 ## Design Approach
 
-**Reference-Based Approach**: Drawing inspiration from Coursera and Khan Academy's clean, content-focused educational interfaces. The platform prioritizes learning flow, content hierarchy, and minimal distractions while maintaining visual appeal through strategic use of cards, spacing, and accent colors.
+**Source of truth**: Figma MDC Design System (Color Palette, Typography, MediaQuery / Grid System v0.1). Tokens live in `site_learning-mdc-edu/theme.json` and are applied via CSS variables + Theme Editor.
 
 **Core Principles**:
 - Content-first hierarchy with clear learning paths
 - Card-based modular design for scalability
-- Minimal but purposeful use of color (blue primary, coral accents)
-- Clean, spacious layouts that reduce cognitive load
-- Progress visualization as a motivational element
+- Purposeful brand color (Primary blue `#005EAA`, Yellow accent `#FFD400`)
+- Clean layouts on the Figma grid (4 / 8 / 12 columns, 20px gutters)
+- Semantic tokens only — never raw Tailwind palette colors
 
 ---
 
@@ -17,12 +17,16 @@
 
 **IMPORTANT**: Only use the semantic color tokens defined below. NEVER use hardcoded colors like `bg-blue-500`, `text-[#ff0000]`, `text-red-600`, or any Tailwind color palette classes. All colors MUST come from CSS variables via semantic class names.
 
-### Brand Colors
+### Brand Colors (Figma)
 
-| Token | HSL Value | Hex Equivalent | Usage |
-|-------|-----------|----------------|-------|
-| `primary` | `212 85% 53%` | `#2563EB` | Primary buttons, links, focus rings, accents |
-| `destructive` | `0 75% 45%` | `#C41E1E` | Error states, delete actions, warnings |
+| Token | HSL Value | Hex | Usage |
+|-------|-----------|-----|-------|
+| `primary` | `207 100% 33%` | `#005EAA` | Primary buttons, links, focus rings |
+| `accent` | `50 100% 50%` | `#FFD400` | Highlights, badges (use sparingly) |
+| `destructive` | `349 86% 49%` | `#EA1239` | Errors, delete actions |
+| `foreground` | `220 8% 15%` | `#232529` | Body / headings (Dark Grey-500) |
+
+Full scales (Primary, Blue, Light Blue, Light/Dark Grey, Yellow, Green, Violet, Error) are in Theme Editor → Custom Theme and `theme.json` `palette_scales`.
 
 ### Semantic Color Tokens
 
@@ -35,7 +39,7 @@
 | `bg-muted` | Subtle backgrounds, disabled states |
 | `bg-primary` | Primary action buttons |
 | `bg-secondary` | Secondary buttons, tags |
-| `bg-accent` | Hover states, subtle highlights |
+| `bg-accent` | Yellow highlights |
 | `bg-destructive` | Error/danger buttons |
 | `bg-sidebar` | Sidebar background |
 
@@ -58,84 +62,67 @@
 | `border-primary` | Focus rings, active states |
 
 ### Chart/Data Visualization Colors
-Only for charts and graphs - use via `chart-1` through `chart-5`:
-| Token | Color | Purpose |
-|-------|-------|---------|
-| `chart-1` | Blue | Primary data series |
-| `chart-2` | Coral | Secondary data series |
-| `chart-3` | Teal | Tertiary data series |
-| `chart-4` | Purple | Quaternary data series |
-| `chart-5` | Gold | Quinary data series |
+Only for charts — `chart-1`…`chart-5` map to Primary / Yellow / Green / Error / Violet.
 
 ### Forbidden Practices
 
 **NEVER do this:**
 ```jsx
-// Hardcoded Tailwind colors
 <div className="bg-blue-500 text-white">  // WRONG
 <span className="text-red-600">Error</span>  // WRONG
-<div className="bg-gray-100">  // WRONG
-
-// Arbitrary values
-<div className="bg-[#2563EB]">  // WRONG
-<span className="text-[rgb(255,0,0)]">  // WRONG
+<div className="bg-[#005EAA]">  // WRONG
 ```
 
 **ALWAYS do this:**
 ```jsx
-// Semantic tokens
 <div className="bg-primary text-primary-foreground">  // CORRECT
 <span className="text-destructive">Error</span>  // CORRECT
-<div className="bg-muted">  // CORRECT
-
-// Using CSS variables if absolutely needed
-style={{ color: 'hsl(var(--primary))' }}  // CORRECT (rare cases only)
+style={{ color: 'hsl(var(--primary))' }}  // CORRECT (rare)
 ```
 
-### Special Cases
-
-**Status Colors** (already defined in Tailwind config):
-- `status-online` - Green for online/success indicators
-- `status-away` - Amber for away/warning indicators  
-- `status-busy` - Red for busy/error indicators
-- `status-offline` - Gray for offline/inactive indicators
-
-**Star Ratings**: Use `text-primary` for filled stars, `text-muted` for empty stars.
+### Status Colors
+- `status-online` — Green-500
+- `status-away` — Yellow-500
+- `status-busy` — Error-500
+- `status-offline` — Light Grey-800
 
 ---
 
 ## Typography System
 
-**Font Family**: Lato (via Google Fonts CDN)
+**Font Family**:
+- **Caxton admin** (`/private/*` chrome): Lato / Archivo
+- **Site + section components** (class `.site-theme`): Plus Jakarta Sans (Figma)
 
-**Hierarchy**:
-- **Page Titles**: 2.5rem (40px), font-weight 700, letter-spacing -0.02em
-- **Section Headers**: 2rem (32px), font-weight 600
-- **Card Titles/Course Names**: 1.25rem (20px), font-weight 600
-- **Subheadings**: 1.125rem (18px), font-weight 500
-- **Body Text**: 1rem (16px), font-weight 400, line-height 1.6
-- **Small Text/Metadata**: 0.875rem (14px), font-weight 400
-- **Labels/Badges**: 0.75rem (12px), font-weight 500, uppercase tracking
+**Roles (Figma)** — use `text-h1` / `text-h2` / `text-body` / `font-heading` / `font-sans`:
+
+| Role | Mobile (S) | Desktop (L, ≥ md) | Weight |
+|------|------------|-------------------|--------|
+| Display H1 | 35 / 35 | 45 / 45 | 300 or 700 |
+| Headline H2 | 30 / 30 | 35 / 35 | 300 or 700 |
+| Title H3 | 18 / 20 | 20 / 22 | 300 or 700 |
+| Title H4 | 18 / 20 | 20 / 22 | 500 or 700 |
+| Body P | 14 / 18 or 16 / 20 | same | 400 or 600 |
+| Links | 16 / 18 | same | 400 or 600 |
+
+Letter-spacing is `0%` across the system.
 
 ## Layout System
 
-**Spacing Scale**: Use 0.25rem (4px) increments: 0.5rem, 1rem, 1.5rem, 2rem, 3rem, 4rem
+**Breakpoints (Figma MediaQuery)**:
 
-**Common Spacing Patterns**:
-- Card padding: 1.5rem (24px)
-- Section spacing: 3rem to 4rem vertical
-- Grid gaps: 1.5rem between cards
-- Element margins: 0.5rem to 1rem
+| Token | Min width | Columns | Gutter | Page margin |
+|-------|-----------|---------|--------|-------------|
+| (base) / `sm` | 332px | 4 | 20px | 20px |
+| `md` | 679px | 8 | 20px | 20px |
+| `lg` | 1132px | 12 | 20px | 60px |
+| `xl` | 1468px | 12 | 20px | 120px |
 
-**Container Widths**:
-- Main content: max-width 1200px, centered
-- Dashboard layouts: max-width 1400px for multi-column views
-- Text content: max-width 800px for readability
+Use `page-shell` (or `px-page-margin`) for horizontal page padding. CSS vars: `--page-margin`, `--page-gutter`, `--grid-columns`.
 
-**Responsive Grid**:
-- Mobile (base): Single column
-- Tablet (md): 2 columns for course cards
-- Desktop (lg): 3 columns for course cards, 2 columns for dashboard widgets
+**Spacing Scale**: 0.25rem (4px) increments; section spacing ~4rem; card padding 1.5rem; grid gaps 1.25rem (20px gutter).
+
+**Elevations**: `shadow-card` / `shadow-elevation` / `shadow-elevation-blue` (Figma Elevation 1 / 2 / Blue).
 
 ## Component Library
 
@@ -144,110 +131,32 @@ style={{ color: 'hsl(var(--primary))' }}  // CORRECT (rare cases only)
 - Fixed header with white background, subtle bottom border
 - Logo left, primary navigation center, user profile/avatar right
 - Height: 4rem (64px)
-- Navigation links: 1rem font-size, 0.75rem spacing between items
-- Active state: coral underline (3px thick)
+- Navigation links: body size, primary for active states
 
 ### Cards
-**Course Cards**:
-- White background, 0.8rem border radius
-- Subtle shadow: 0 2px 8px rgba(0, 0, 0, 0.08)
-- Hover: subtle lift with increased shadow
-- Structure: Course thumbnail (16:9 ratio), title, brief description, progress bar, duration/difficulty badges
+- White background, 12px radius (`rounded-card`)
+- Shadow: `shadow-card`
 - Padding: 1.5rem
-- Thumbnail height: 180px
-
-**Learning Path Selection Cards**:
-- Larger cards (min-height: 200px)
-- Icon or illustration at top
-- Clear heading and description
-- Prominent CTA button
-- Hover: slight scale (1.02) and shadow increase
-
-**Dashboard Widgets**:
-- Consistent card styling
-- Headers with icon + title
-- Content area with metrics or lists
-- Minimum height: 250px to maintain visual balance
-
-### Progress Indicators
-**Progress Bars**:
-- Height: 0.5rem (8px)
-- Background: light grey (hsl(0deg 0% 81.18%))
-- Fill: blue gradient for completed, coral for current section
-- Fully rounded ends (border-radius: 9999px)
-
-**Completion Badges**:
-- Circular badges (48px diameter)
-- Green checkmark for completed
-- Blue outline for in-progress
-- Grey for not started
+- Hover: subtle lift with `shadow-elevation`
 
 ### Buttons
-**Primary Button**:
-- Blue background, white text
-- Padding: 0.75rem 2rem
-- Border-radius: 0.8rem
-- Font-weight: 600
-- Hover: slightly darker blue
+- Primary: `bg-primary text-primary-foreground`
+- Secondary/outline: `bg-secondary` or border + foreground
+- Destructive: `bg-destructive`
+- Accent yellow: rare — badges / one highlight per surface
 
-**Secondary Button**:
-- White background, blue border (2px), blue text
-- Same padding and border-radius as primary
+### Progress Indicators
+- Track: muted / light grey
+- Fill: `bg-primary` (or `bg-accent` for emphasis)
 
-**Accent/CTA Button**:
-- Coral background for high-priority actions
-- White text, same styling as primary
+## Accessibility
 
-### Forms & Inputs
-**Input Fields**:
-- Border: 2px solid light grey
-- Border-radius: 0.8rem
-- Padding: 0.75rem 1rem
-- Focus: blue border, subtle shadow
-- Error state: red border with error message below
+- Prefer White text on Primary-500 (AAA large) and Dark Grey on Yellow-500
+- Focus rings: `ring-ring` / `border-primary`
+- Do not reduce text opacity; use `text-muted-foreground` instead
 
-**Dropdowns/Selects**:
-- Consistent styling with input fields
-- Custom dropdown arrow in blue
+## Theme Editor
 
-### Dashboard Elements
-**Stats Display**:
-- Large number (2.5rem) in blue
-- Label below in grey (0.875rem)
-- Icon next to number
-- Arranged in grid (3-4 columns on desktop)
-
-**Recent Activity Feed**:
-- List of items with timestamps
-- Course icon/thumbnail on left
-- Activity description and time on right
-- Divider lines between items
-
-## Images
-
-**Hero Section** (Homepage/Landing):
-- Large hero image (height: 400-500px) showing diverse students learning/collaborating
-- Overlay with semi-transparent blue gradient (left to right)
-- Centered text overlay with platform tagline and primary CTA
-- CTA button with blurred background
-
-**Course Thumbnails**:
-- 16:9 ratio placeholder images for each course
-- Consistent illustration style or photos related to course topic
-- Subtle overlay on hover
-
-**Learning Path Icons**:
-- Custom illustrated icons for each path type (role, skill, tool)
-- Colorful, modern line-art style
-- Approximately 80px size within selection cards
-
-**Empty States**:
-- Friendly illustrations for "no courses yet", "no progress", etc.
-- Centered, with supportive copy below
-
-## Visual Enhancements
-
-**Shadows**: Use sparingly - cards only (0 2px 8px rgba(0,0,0,0.08)), slightly increased on hover
-**Borders**: Minimal use - primarily for input fields and card separators
-**Animations**: Subtle hover transitions (200ms ease), no scroll-based animations
-**Iconography**: Use Heroicons (outline style) via CDN for consistency - education, chart, user, check, clock icons throughout
+- **Base Theme**: semantic CSS variables (live site via `__theme_overrides__`)
+- **Custom Theme**: approved backgrounds / text / accents from Figma scales
+- Source file: `site_learning-mdc-edu/theme.json` (content GitHub)

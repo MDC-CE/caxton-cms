@@ -1,12 +1,128 @@
 /* =============================================================================
-   4GEEKS BRAND DESIGN SYSTEM
-   Typography: Lato (headings), Archivo (body)
-   Colors: #00041A (black), #0084FF (blue), #FFB718 (yellow), #1D1D1F (dark), #FAFAFA (light)
-   Spacing: 8px base, 64px sections, 24px card padding
-   Radius: 12px, Shadow: subtle single shadow
+   MDC BRAND DESIGN SYSTEM (from Figma Grid System / Color Palette / Typography v0.1)
+   Typography: Plus Jakarta Sans (Display → Body → Links)
+   Colors: Primary #005EAA | Accent Yellow #FFD400 | Error #EA1239 | Dark Grey #232529
+   Breakpoints: sm 332 / md 679 / lg 1132 / xl 1468
+   Spacing: 8px base, 20px gutters, radius 12px
    ============================================================================= */
 
 /* Metric-compatible system fallbacks reduce CLS while webfonts load. */
+@font-face {
+  font-family: 'Plus Jakarta Sans Fallback';
+  src: local('Arial'), local('Helvetica Neue'), local('Helvetica');
+  size-adjust: 105%;
+  ascent-override: 95%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+/* Plus Jakarta Sans — latin + latin-ext (EN/ES). Weights from Figma: 300–700. */
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-300.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-300-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-400.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-400-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-500-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-600-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-700.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/plus-jakarta-sans-700-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ─── Caxton platform UI fonts (admin /private) — Lato + Archivo ─── */
 @font-face {
   font-family: 'Archivo Fallback';
   src: local('Arial'), local('Helvetica Neue'), local('Helvetica');
@@ -25,7 +141,6 @@
   line-gap-override: 0%;
 }
 
-/* Lato - Headings (H1: 50px/700, H2: 30px/700) */
 @font-face {
   font-family: 'Lato';
   font-style: normal;
@@ -50,8 +165,6 @@
   src: url('/fonts/lato-bold.woff2') format('woff2');
 }
 
-/* Map Tailwind font-semibold (600) / medium (500) to real faces we ship —
-   no new files. Prevents browser faux-bold when those weights are missing. */
 @font-face {
   font-family: 'Lato';
   font-style: normal;
@@ -68,20 +181,6 @@
   src: url('/fonts/lato-bold.woff2') format('woff2');
 }
 
-/* Inter Variable - hero headlines + stats. Latin subset, wght 400-900 (~37KB),
-   preloaded in index.html so the LCP heading paints in the real font. */
-@font-face {
-  font-family: 'Inter Variable';
-  font-style: normal;
-  font-weight: 400 900;
-  font-display: optional;
-  src: url('/fonts/inter-variable-latin.woff2') format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
-    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
-    U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-/* Archivo - Body text (16px/400), latin subset ~15KB each */
 @font-face {
   font-family: 'Archivo';
   font-style: normal;
@@ -98,7 +197,6 @@
   src: url('/fonts/archivo-medium.woff2') format('woff2');
 }
 
-/* font-semibold (600) and font-bold (700) → Medium; we only ship 400/500. */
 @font-face {
   font-family: 'Archivo';
   font-style: normal;
@@ -127,17 +225,15 @@
   50% { opacity: 0; }
 }
 
-/* LIGHT MODE - 4Geeks Brand Colors */
+/* LIGHT MODE - MDC Brand Colors (Figma Color Palette v0.1) */
 :root {
-  /* Temporary colors for courses */
-  --color-green: 152 60% 56%;
-  --color-orange: 18 100% 71%;
-  --color-pink: 330 80% 80%;
-  --color-purple: 270 60% 72%;
-    
-  /* Brand Colors (from brandbook):
-     Black: #00041A | Blue: #0084FF | Yellow: #FFB718
-     Dark: #1D1D1F | Light: #FAFAFA | White: #FFFFFF */
+  /* Semantic accents from MDC scales */
+  --color-green: 148 68% 45%; /* Green-500 #25BF6C */
+  --color-orange: 50 100% 50%; /* Yellow-500 used as warm accent */
+  --color-pink: 349 86% 49%; /* Error-500 */
+  --color-purple: 239 54% 62%; /* Violet-500 #686AD2 */
+
+  /* Brand: Primary #005EAA | Yellow #FFD400 | Dark Grey #232529 | Light Grey #FBFBFB */
   
   --button-outline: rgba(0,0,0, .10);
   --badge-outline: rgba(0,0,0, .05);
@@ -145,68 +241,63 @@
   --elevate-1: rgba(0,0,0, .03);
   --elevate-2: rgba(0,0,0, .08);
   
-  /* Base colors - White background for marketing pages */
+  /* Base — White / Dark Grey-500 */
   --background: 0 0% 100%;
-  --foreground: 223 100% 5%;
-  --border: 0 0% 90%;
+  --foreground: 220 8% 15%;
+  --border: 0 0% 89%; /* Light Grey-300 */
   
-  /* Card - White with subtle border */
   --card: 0 0% 100%;
-  --card-foreground: 223 100% 5%;
-  --card-border: 0 0% 92%;
+  --card-foreground: 220 8% 15%;
+  --card-border: 0 0% 89%;
   
-  /* Sidebar */
-  --sidebar: 0 0% 98%;
-  --sidebar-foreground: 223 100% 5%;
-  --sidebar-border: 0 0% 92%;
-  --sidebar-primary: 210 100% 50%;
+  --sidebar: 0 0% 98%; /* Light Grey-50 */
+  --sidebar-foreground: 220 8% 15%;
+  --sidebar-border: 0 0% 89%;
+  --sidebar-primary: 207 100% 33%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 43 100% 55%;
-  --sidebar-accent-foreground: 223 100% 5%;
-  --sidebar-ring: 210 100% 50%;
+  --sidebar-accent: 50 100% 50%;
+  --sidebar-accent-foreground: 220 8% 15%;
+  --sidebar-ring: 207 100% 33%;
   
-  /* Popover */
   --popover: 0 0% 100%;
-  --popover-foreground: 223 100% 5%;
-  --popover-border: 0 0% 92%;
+  --popover-foreground: 220 8% 15%;
+  --popover-border: 0 0% 89%;
   
-  /* Primary - Brand Blue #0084FF */
-  --primary: 210 100% 50%;
+  /* Primary-500 #005EAA */
+  --primary: 207 100% 33%;
   --primary-foreground: 0 0% 100%;
   
-  /* Secondary - Light gray for outline buttons */
-  --secondary: 0 0% 96%;
-  --secondary-foreground: 223 100% 5%;
+  /* Light Grey-100 */
+  --secondary: 0 0% 95%;
+  --secondary-foreground: 220 8% 15%;
   
-  /* Muted - Light backgrounds */
+  /* Light Grey-50 / Light Grey-800 */
   --muted: 0 0% 98%;
-  --muted-foreground: 0 0% 45%;
+  --muted-foreground: 0 0% 46%;
   
-  /* Accent - Brand Yellow #FFB718 */
-  --accent: 43 100% 55%;
-  --accent-foreground: 223 100% 5%;
+  /* Yellow-500 #FFD400 */
+  --accent: 50 100% 50%;
+  --accent-foreground: 220 8% 15%;
   
-  /* Destructive */
-  --destructive: 0 75% 45%;
-  --destructive-foreground: 0 0% 98%;
+  /* Error-500 #EA1239 */
+  --destructive: 349 86% 49%;
+  --destructive-foreground: 0 0% 100%;
   
-  /* Input */
-  --input: 0 0% 80%;
-  --ring: 210 100% 50%;
+  --input: 0 0% 87%; /* Light Grey-400 */
+  --ring: 207 100% 33%;
   
-  /* Charts */
-  --chart-1: 210 100% 50%;
-  --chart-2: 43 100% 55%;
-  --chart-3: 142 71% 45%;
-  --chart-4: 0 75% 45%;
-  --chart-5: 40 80% 55%;
+  --chart-1: 207 100% 33%;
+  --chart-2: 50 100% 50%;
+  --chart-3: 148 68% 45%;
+  --chart-4: 349 86% 49%;
+  --chart-5: 239 54% 62%;
   
-  /* Typography - Lato for headings, Archivo for body */
+  /* Caxton platform defaults — site/marketing overrides under .site-theme */
   --font-heading: 'Lato', 'Lato Fallback', "Noto Color Emoji", sans-serif;
   --font-sans: 'Archivo', 'Archivo Fallback', 'Lato Fallback', "Noto Color Emoji", sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: Menlo, monospace;
-  
+
   /* Brand spacing (8px base) */
   --spacing: 0.5rem;
   --section-spacing: 4rem;
@@ -215,16 +306,16 @@
   /* Brand radius - 12px */
   --radius: 0.75rem;
   
-  /* Brand shadow - single subtle shadow */
+  /* Elevations from Figma (Elevation 1 / 2 / Blue) */
   --shadow-2xs: 0 1px 2px 0 hsl(0 0% 0% / 0.03);
   --shadow-xs: 0 1px 3px 0 hsl(0 0% 0% / 0.04);
-  --shadow-sm: 0 2px 4px -1px hsl(0 0% 0% / 0.06);
-  --shadow: 0 4px 6px -1px hsl(0 0% 0% / 0.07);
-  --shadow-md: 0 6px 10px -2px hsl(0 0% 0% / 0.08);
+  --shadow-sm: 0 2px 2px 0 #E5E7EB80;
+  --shadow: 0 4px 4px 0 #E5E7EB80;
+  --shadow-md: 0 6px 10px 0 #005EAA4D;
   --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.08);
   --shadow-xl: 0 15px 25px -5px hsl(0 0% 0% / 0.08);
   --shadow-2xl: 0 25px 50px -12px hsl(0 0% 0% / 0.15);
-  --shadow-card: 0 2px 8px -2px hsl(0 0% 0% / 0.08);
+  --shadow-card: 0 2px 2px 0 #E5E7EB80;
   
   --tracking-normal: 0em;
   
@@ -266,48 +357,49 @@
   --opaque-button-border-intensity: 9;
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
-  --background: 0 0% 8%;
-  --foreground: 0 0% 95%;
-  --border: 0 0% 16%;
-  --card: 0 0% 10%;
-  --card-foreground: 0 0% 95%;
-  --card-border: 0 0% 13%;
-  --sidebar: 0 0% 6%;
-  --sidebar-foreground: 0 0% 95%;
-  --sidebar-border: 0 0% 9%;
-  --sidebar-primary: 210 100% 50%;
+  /* Dark Grey scale */
+  --background: 210 6% 6%;
+  --foreground: 0 0% 98%;
+  --border: 216 7% 14%;
+  --card: 225 10% 8%;
+  --card-foreground: 0 0% 98%;
+  --card-border: 216 7% 14%;
+  --sidebar: 225 10% 8%;
+  --sidebar-foreground: 0 0% 98%;
+  --sidebar-border: 216 7% 14%;
+  --sidebar-primary: 207 57% 47%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 195 100% 40%;
-  --sidebar-accent-foreground: 0 0% 100%;
-  --sidebar-ring: 210 100% 50%;
-  --popover: 0 0% 12%;
-  --popover-foreground: 0 0% 95%;
-  --popover-border: 0 0% 15%;
-  --primary: 210 100% 50%;
+  --sidebar-accent: 50 100% 50%;
+  --sidebar-accent-foreground: 210 6% 6%;
+  --sidebar-ring: 207 57% 47%;
+  --popover: 225 10% 8%;
+  --popover-foreground: 0 0% 98%;
+  --popover-border: 216 7% 14%;
+  --primary: 207 57% 47%; /* Primary-400 for dark surfaces */
   --primary-foreground: 0 0% 100%;
-  --secondary: 0 0% 15%;
-  --secondary-foreground: 0 0% 95%;
-  --muted: 0 0% 14%;
-  --muted-foreground: 0 0% 65%;
-  --accent: 195 100% 35%;
-  --accent-foreground: 0 0% 100%;
-  --destructive: 0 75% 45%;
-  --destructive-foreground: 0 0% 98%;
-  --input: 0 0% 25%;
-  --ring: 210 100% 50%;
-  --chart-1: 210 100% 65%;
-  --chart-2: 9 75% 65%;
-  --chart-3: 190 70% 60%;
-  --chart-4: 280 65% 65%;
-  --chart-5: 40 80% 60%;
-  --shadow-2xs: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);
-  --shadow-xs: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);
-  --shadow-sm: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 1px 2px -1px hsl(0 0% 0% / 0.00);
-  --shadow: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 1px 2px -1px hsl(0 0% 0% / 0.00);
-  --shadow-md: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 2px 4px -1px hsl(0 0% 0% / 0.00);
-  --shadow-lg: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 4px 6px -1px hsl(0 0% 0% / 0.00);
-  --shadow-xl: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 8px 10px -1px hsl(0 0% 0% / 0.00);
-  --shadow-2xl: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);
+  --secondary: 225 7% 11%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 225 7% 11%;
+  --muted-foreground: 0 0% 77%;
+  --accent: 50 100% 50%;
+  --accent-foreground: 210 6% 6%;
+  --destructive: 349 84% 59%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 216 7% 14%;
+  --ring: 207 57% 47%;
+  --chart-1: 207 57% 47%;
+  --chart-2: 50 100% 60%;
+  --chart-3: 147 55% 56%;
+  --chart-4: 349 84% 59%;
+  --chart-5: 239 54% 69%;
+  --shadow-2xs: 0 1px 2px 0 hsl(0 0% 0% / 0.2);
+  --shadow-xs: 0 1px 3px 0 hsl(0 0% 0% / 0.25);
+  --shadow-sm: 0 2px 4px 0 hsl(0 0% 0% / 0.3);
+  --shadow: 0 4px 8px 0 hsl(0 0% 0% / 0.35);
+  --shadow-md: 0 6px 10px 0 #005EAA66;
+  --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.4);
+  --shadow-xl: 0 15px 25px -5px hsl(0 0% 0% / 0.45);
+  --shadow-2xl: 0 25px 50px -12px hsl(0 0% 0% / 0.5);
 
 /* Fallback for older browsers */
   --sidebar-primary-border: hsl(var(--sidebar-primary));
@@ -343,72 +435,163 @@
     @apply border-border;
   }
 
-  .font-inter {
-    font-family: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-  }
-
   body {
     @apply font-sans antialiased bg-background text-foreground;
     font-size: 16px;
-    line-height: 1.6;
-    /* Never synthesize missing weights — that causes the thick/overlapping look. */
+    line-height: 1.5;
     font-synthesis-weight: none;
   }
-  
-  /* 4Geeks Brand Typography - Lato headings, Archivo body */
-  h1, .heading-1 {
-    font-family: var(--font-heading);
-    font-size: 50px;
-    font-weight: 700;
-    line-height: 1.1;
-    letter-spacing: -0.02em;
-  }
-  
-  h2, .heading-2 {
-    font-family: var(--font-heading);
-    font-size: 40px;
-    font-weight: 700;
-    line-height: 1.2;
-    letter-spacing: -0.01em;
-  }
-  
-  /* Responsive heading sizes for mobile */
-  @media (max-width: 768px) {
-    h1, .heading-1, .text-h1 {
-      font-size: 36px;
-    }
-    h2, .heading-2, .text-h2 {
-      font-size: 28px;
-    }
-  }
-  
-  /* Typography utility classes for use with Tailwind */
-  .text-h1 {
-    font-family: var(--font-heading);
-    font-size: 50px;
-    font-weight: 700;
-    line-height: 1.1;
-    letter-spacing: -0.02em;
-  }
-  
-  .text-h2 {
-    font-family: var(--font-heading);
-    font-size: 40px;
-    font-weight: 700;
-    line-height: 1.2;
-    letter-spacing: -0.01em;
-  }
-  
-  .text-body {
-    font-family: var(--font-sans);
-    font-size: 16px;
-    font-weight: 400;
-    line-height: 1.6;
-  }
+}
 
-  /* Paragraph styling for better readability */
-  p {
-    line-height: 1.6;
+/* =============================================================================
+   .site-theme — MDC Figma typography for public site + section components only.
+   Caxton admin (/private/* chrome) keeps Lato/Archivo from :root above.
+   ============================================================================= */
+.site-theme {
+  --font-heading: 'Plus Jakarta Sans', 'Plus Jakarta Sans Fallback', "Noto Color Emoji", sans-serif;
+  --font-sans: 'Plus Jakarta Sans', 'Plus Jakarta Sans Fallback', "Noto Color Emoji", sans-serif;
+  font-family: var(--font-sans);
+}
+
+.site-theme .font-inter {
+  font-family: var(--font-heading);
+}
+
+.site-theme h1,
+.site-theme .heading-1,
+.site-theme .text-h1 {
+  font-family: var(--font-heading);
+  font-size: 35px;
+  font-weight: 700;
+  line-height: 35px;
+  letter-spacing: 0;
+}
+
+.site-theme h2,
+.site-theme .heading-2,
+.site-theme .text-h2 {
+  font-family: var(--font-heading);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 30px;
+  letter-spacing: 0;
+}
+
+.site-theme h3,
+.site-theme .heading-3,
+.site-theme .text-h3 {
+  font-family: var(--font-heading);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+.site-theme h4,
+.site-theme .heading-4,
+.site-theme .text-h4 {
+  font-family: var(--font-heading);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+@media (min-width: 679px) {
+  .site-theme h1,
+  .site-theme .heading-1,
+  .site-theme .text-h1 {
+    font-size: 45px;
+    line-height: 45px;
+  }
+  .site-theme h2,
+  .site-theme .heading-2,
+  .site-theme .text-h2 {
+    font-size: 35px;
+    line-height: 35px;
+  }
+  .site-theme h3,
+  .site-theme .heading-3,
+  .site-theme .text-h3 {
+    font-size: 20px;
+    line-height: 22px;
+  }
+  .site-theme h4,
+  .site-theme .heading-4,
+  .site-theme .text-h4 {
+    font-size: 20px;
+    line-height: 22px;
+  }
+}
+
+.site-theme .text-body {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.site-theme .text-body-sm {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.site-theme .text-link {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 18px;
+  color: hsl(var(--primary));
+}
+
+.site-theme .text-link-semibold {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 18px;
+  color: hsl(var(--primary));
+}
+
+.site-theme .page-shell {
+  width: 100%;
+  margin-inline: auto;
+  padding-inline: var(--page-margin);
+}
+
+.site-theme p {
+  line-height: 20px;
+}
+
+/* Figma MediaQuery breakpoints → page margin / columns (site pages) */
+.site-theme {
+  --page-margin: 20px;
+  --page-gutter: 20px;
+  --grid-columns: 4;
+}
+@media (min-width: 332px) {
+  .site-theme {
+    --page-margin: 20px;
+    --grid-columns: 4;
+  }
+}
+@media (min-width: 679px) {
+  .site-theme {
+    --page-margin: 20px;
+    --grid-columns: 8;
+  }
+}
+@media (min-width: 1132px) {
+  .site-theme {
+    --page-margin: 60px;
+    --grid-columns: 12;
+  }
+}
+@media (min-width: 1468px) {
+  .site-theme {
+    --page-margin: 120px;
+    --grid-columns: 12;
   }
 }
 
