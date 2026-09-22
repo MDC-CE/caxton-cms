@@ -2669,7 +2669,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     if (action === "withdraw") {
-      if (proposal.proposer_username !== caller.username && !caller.asStaff) {
+      const sameProposer =
+        proposal.proposer_username.trim().toLowerCase() === caller.username.trim().toLowerCase();
+      if (!sameProposer && !caller.asStaff) {
         return { ok: false, code: "not_proposer", error: "Only the proposer or an editor can withdraw" };
       }
       if (proposal.status === "finished") {

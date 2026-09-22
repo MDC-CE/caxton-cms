@@ -447,13 +447,16 @@ export function registerProposalRoutes(app: Express): void {
       asStaff = true;
     }
     if (action === "withdraw") {
-      const svcPeek = siteService(req, res);
-      if (!svcPeek) return;
-      const current = svcPeek.get(req.params.id);
-      if (current && current.proposer_username !== auth.actor) {
-        auth = await requireProposalWrite(req, res);
-        if (!auth) return;
-        asStaff = true;
+      // Staff UI may withdraw any open proposal; MCP authors must be the proposer (service).
+      asStaff = actor?.type !== "mcp";
+      if (asStaff) {
+        const svcPeek = siteService(req, res);
+        if (!svcPeek) return;
+        const current = svcPeek.get(req.params.id);
+        if (current && current.proposer_username !== auth.actor) {
+          auth = await requireProposalWrite(req, res);
+          if (!auth) return;
+        }
       }
     }
 

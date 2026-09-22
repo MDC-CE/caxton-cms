@@ -1654,6 +1654,68 @@ describe("content proposals", () => {
     }
   });
 
+  it("MCP withdraw requires same proposer username; staff may withdraw others", async () => {
+    const svc = makeService();
+    const summary =
+      "Author-only withdraw gate: same username may close even under a different MCP role. ".repeat(2);
+    const note = "Withdrawing after scope change; will file a corrected proposal next.";
+
+    const created = await svc.create(
+      {
+        title: "Author withdraw gate",
+        summary,
+        entries: [sampleEntry({ slug: "author-withdraw-gate" })],
+      },
+      { username: "alesanchezr", actor: { type: "mcp", role: "copy_editor", model: "xai/grok-4" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const otherMcp = await svc.update(created.proposal.id, "withdraw", {
+      username: "KrilinZ",
+      asStaff: false,
+      actor: { type: "mcp", role: "copy_editor", model: "anthropic/claude" },
+      close_note: note,
+    });
+    expect(otherMcp.ok).toBe(false);
+    if (!otherMcp.ok) expect(otherMcp.code).toBe("not_proposer");
+
+    const sameUserDifferentRole = await svc.update(created.proposal.id, "withdraw", {
+      username: "alesanchezr",
+      asStaff: false,
+      actor: { type: "mcp", role: "seo_specialist", model: "openai/gpt-5" },
+      close_note: note,
+    });
+    expect(sameUserDifferentRole.ok).toBe(true);
+    if (sameUserDifferentRole.ok) {
+      expect(sameUserDifferentRole.proposal.status).toBe("withdrawn");
+      expect(sameUserDifferentRole.proposal.closed_by).toBe("alesanchezr");
+    }
+
+    const forStaff = await svc.create(
+      {
+        title: "Staff withdraw gate",
+        summary,
+        entries: [sampleEntry({ slug: "staff-withdraw-gate" })],
+      },
+      { username: "alesanchezr", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(forStaff.ok).toBe(true);
+    if (!forStaff.ok) return;
+
+    const staffOther = await svc.update(forStaff.proposal.id, "withdraw", {
+      username: "editor@4geeks.com",
+      asStaff: true,
+      actor: { type: "ui" },
+      close_note: note,
+    });
+    expect(staffOther.ok).toBe(true);
+    if (staffOther.ok) {
+      expect(staffOther.proposal.status).toBe("withdrawn");
+      expect(staffOther.proposal.closed_by).toBe("editor@4geeks.com");
+    }
+  });
+
   it("escalates with note, clears claim, freezes MCP, keeps note after deescalate", async () => {
     const svc = makeService();
     const summary =

@@ -5,6 +5,19 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-22"
+    summary: "MCP withdraw is same proposer username only"
+    agent_impact:
+      - "update_proposal action withdraw succeeds only when your author username matches proposer_username (case-insensitive). Model and role do not matter."
+      - "Another MCP author gets not_proposer. Staff UI editors may still withdraw any open proposal."
+      - "Reconnect MCP if you cache tool/docs text."
+    tools_changed: false
+    paths:
+      - server/routes/proposals.ts
+      - server/content-proposals/service.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+
   - date: "2026-09-21"
     summary: "Idea demand labels + get_runtime_issues for broken_url briefs"
     agent_impact:

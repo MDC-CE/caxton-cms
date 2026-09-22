@@ -8,6 +8,8 @@ If instead you work through the **swarm proposal path** (specialists draft; some
 
 Words like draft, publish, language version, and shared template mean the same as in the [swarm guide glossary](what-the-agent-swarm-can-do.md#quick-glossary).
 
+Vendor services and rough costs (hosting, AI, BigQuery, storage): [Caxton integrations and costs](caxton-integrations-and-costs.md).
+
 ---
 
 ## Hard truths (read once)
@@ -474,6 +476,8 @@ Your role may include some of these. If an action fails, you likely lack that ar
 ---
 
 ## 12. Analytics-informed edits
+
+For ready-made questions and example answers (product vs marketing packs), see [Asking Caxton for reports](asking-caxton-for-reports.md).
 
 ### Prioritize from organic traffic, then edit
 

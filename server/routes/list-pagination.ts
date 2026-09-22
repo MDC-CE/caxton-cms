@@ -13,9 +13,152 @@ const RESERVED_LIST_QUERY_KEYS = new Set([
   "q",
   "sortDir",
   "errorsOnly",
+  "pub",
+  "pubFrom",
+  "pubTo",
+  "status",
+  "market",
   /** Dev site override injected on every /api fetch — never a row filter. */
   "__site",
 ]);
+
+export type ManageListPublishDatePreset = "today" | "7d" | "28d" | "custom";
+export type ManageListStatusFilter =
+  | "published"
+  | "pending_drafts"
+  | "only_draft";
+
+export type ManagePublishDateRange = { startMs: number; endMs: number };
+
+const PUB_PRESETS = new Set<ManageListPublishDatePreset>([
+  "today",
+  "7d",
+  "28d",
+  "custom",
+]);
+
+const STATUS_FILTERS = new Set<ManageListStatusFilter>([
+  "published",
+  "pending_drafts",
+  "only_draft",
+]);
+
+function parseIsoDateOnly(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/** UTC start of day for YYYY-MM-DD. */
+export function utcDayStartMs(isoDate: string): number {
+  return Date.parse(`${isoDate}T00:00:00.000Z`);
+}
+
+/** UTC end of day (inclusive) for YYYY-MM-DD. */
+export function utcDayEndMs(isoDate: string): number {
+  return Date.parse(`${isoDate}T23:59:59.999Z`);
+}
+
+function utcYmd(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Parse manage-list publish date filter from query.
+ * Rolling windows (today / 7d / 28d) end at `now` and start at UTC midnight
+ * of the window start day. Custom uses inclusive UTC calendar days.
+ */
+export function parseManagePublishDateRange(
+  query: Record<string, unknown>,
+  nowMs: number = Date.now(),
+): ManagePublishDateRange | null {
+  const raw = query.pub;
+  if (typeof raw !== "string" || !PUB_PRESETS.has(raw as ManageListPublishDatePreset)) {
+    return null;
+  }
+  const preset = raw as ManageListPublishDatePreset;
+  const now = new Date(nowMs);
+  const todayYmd = utcYmd(now);
+
+  if (preset === "today") {
+    return { startMs: utcDayStartMs(todayYmd), endMs: nowMs };
+  }
+  if (preset === "7d" || preset === "28d") {
+    const days = preset === "7d" ? 7 : 28;
+    const start = new Date(nowMs);
+    start.setUTCDate(start.getUTCDate() - (days - 1));
+    return { startMs: utcDayStartMs(utcYmd(start)), endMs: nowMs };
+  }
+  // custom
+  let from = parseIsoDateOnly(query.pubFrom);
+  let to = parseIsoDateOnly(query.pubTo);
+  if (!from && !to) return null;
+  if (from && to && from > to) {
+    const swap = from;
+    from = to;
+    to = swap;
+  }
+  return {
+    startMs: from ? utcDayStartMs(from) : Number.NEGATIVE_INFINITY,
+    endMs: to ? utcDayEndMs(to) : Number.POSITIVE_INFINITY,
+  };
+}
+
+export function parseManageStatusFilter(
+  raw: unknown,
+): ManageListStatusFilter | null {
+  if (typeof raw !== "string") return null;
+  return STATUS_FILTERS.has(raw as ManageListStatusFilter)
+    ? (raw as ManageListStatusFilter)
+    : null;
+}
+
+/** False when publishedAt is missing/invalid (date filter active ⇒ exclude). */
+export function matchesPublishedAtRange(
+  publishedAt: unknown,
+  range: ManagePublishDateRange | null,
+): boolean {
+  if (!range) return true;
+  if (publishedAt == null || publishedAt === "") return false;
+  const ms = Date.parse(String(publishedAt));
+  if (Number.isNaN(ms)) return false;
+  return ms >= range.startMs && ms <= range.endMs;
+}
+
+/** Any registered variant with allocation === 0 (incl. draft). */
+export function versioningHasUnallocatedVariant(
+  config: Record<string, { variants?: Array<{ slug?: string; allocation?: number }> }> | null | undefined,
+): boolean {
+  if (!config) return false;
+  for (const localeData of Object.values(config)) {
+    for (const v of localeData?.variants ?? []) {
+      if ((v.allocation ?? 0) === 0) return true;
+    }
+  }
+  return false;
+}
+
+export type ManageEntryStatusKind = "draft" | "published";
+
+/**
+ * Status filter for manage lists.
+ * - only_draft: draft-only folders (no live)
+ * - pending_drafts: live + ≥1 variant at 0% allocation
+ * - published: live with no 0%-allocation variants
+ */
+export function matchesManageStatusFilter(
+  entryStatus: ManageEntryStatusKind | undefined,
+  statusFilter: ManageListStatusFilter | null,
+  hasUnallocatedVariant: boolean,
+): boolean {
+  if (!statusFilter) return true;
+  const isDraftOnly = entryStatus === "draft";
+  if (statusFilter === "only_draft") return isDraftOnly;
+  if (isDraftOnly) return false;
+  if (statusFilter === "pending_drafts") return hasUnallocatedVariant;
+  // published
+  return !hasUnallocatedVariant;
+}
 
 export type ListPagination =
   | { paginate: false }
@@ -47,6 +190,16 @@ export function parseSortDir(
 ): "asc" | "desc" | null {
   if (raw === "asc" || raw === "desc") return raw;
   return null;
+}
+
+/** Date columns supported by manage list sort (`sort` + `sortDir`). */
+export type ManageListDateSortField = "updated_at" | "published_at";
+
+export function parseManageDateSortField(
+  raw: unknown,
+): ManageListDateSortField {
+  if (raw === "published_at") return "published_at";
+  return "updated_at";
 }
 
 export function paginateList<T>(

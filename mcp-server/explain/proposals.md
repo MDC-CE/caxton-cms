@@ -109,7 +109,7 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **Escalated:** steward UI hold (`escalated: true` + note). Status stays open|partial. MCP `update_proposal` fails (`code: escalated`) until release. Not an MCP action. Sibling create may warn `escalated_sibling`.
 - Cleared blockers ≠ approved — re-preview then four-eyes apply/accept.
 - Optional `supersedes_proposal_id` on `propose_change` links a replacement to a rejected/withdrawn predecessor (`replaced_by` on the old). Never required.
-- **Withdraw:** `close_note` min 20 (no reject-kind gate).
+- **Withdraw:** proposer username only over MCP (`close_note` min 20; no reject-kind gate). Staff UI editors may still withdraw others.
 
 ## Rules
 

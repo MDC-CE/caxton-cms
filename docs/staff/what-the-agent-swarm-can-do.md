@@ -6,6 +6,8 @@ Authors (Copy, SEO, Images, and so on) draft and file proposals. An **Approver**
 
 If your account instead has **direct edit** permission (change live or draft pages without an Approver inbox), see [What you can edit directly](what-you-can-edit-directly.md).
 
+Hosting, AI tokens, BigQuery, and other vendor costs: [Caxton integrations and costs](caxton-integrations-and-costs.md).
+
 ---
 
 ## Two ways to read this
@@ -552,9 +554,9 @@ Proposals are the shared inbox for change. Live content does not move when a pro
 
 **Situation:** Reviewer asked for fixes; the author needs to correct the proposal.
 
-**Agent can…** Pick up, revise the listed changes, resolve “needs fixes,” retag review type, attach a private draft, turn off auto-retry, or withdraw. Open “needs fixes” blocks Approve `(Apply)` and greenlight `(Accept)`.
+**Agent can…** Pick up, revise the listed changes, resolve “needs fixes,” retag review type, attach a private draft, turn off auto-retry, or withdraw **their own** filing. Open “needs fixes” blocks Approve `(Apply)` and greenlight `(Accept)`.
 
-**What you approve:** Staff can flip some flags (like don’t auto-retry) without the same pick-up steps. Hold / release hold is staff-only.
+**What you approve:** Staff can flip some flags (like don’t auto-retry) without the same pick-up steps. Hold / release hold is staff-only. Staff can still Withdraw someone else’s open proposal in the UI for cleanup; agents cannot withdraw another author’s proposal.
 
 **Who usually does this:** Original author for polish; Approver for quality of the fix request.
 
@@ -663,6 +665,8 @@ Empty labels on edits may be inferred from what the proposal changes (often body
 ---
 
 ## 11. Analytics-informed work
+
+For ready-made questions and example answers (product vs marketing packs), see [Asking Caxton for reports](asking-caxton-for-reports.md).
 
 ### Prioritize from organic traffic
 

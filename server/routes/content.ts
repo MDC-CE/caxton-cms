@@ -321,12 +321,20 @@ import { invalidateStaticListingCache } from "../static-listing-cache";
 import {
   collectQueryFieldFilters,
   matchesManageItemsSearch,
+  matchesManageStatusFilter,
   matchesManageTagFilter,
+  matchesPublishedAtRange,
   paginateList,
   parseListPagination,
+  parseManageDateSortField,
+  parseManagePublishDateRange,
+  parseManageStatusFilter,
   parseSortDir,
   sortByUpdatedAtField,
+  versioningHasUnallocatedVariant,
 } from "./list-pagination";
+import { readPublishedAt } from "../published-at";
+import { normalizeFlexibleDate } from "@shared/normalizeFlexibleDate";
 import {
   defaultOrganicSortDir,
   deriveOrganicCacheStatus,
@@ -2891,6 +2899,9 @@ export function registerContentRoutes(app: Express): void {
       const locale = req.query.locale as string | undefined;
       const sort = typeof req.query.sort === "string" ? req.query.sort : undefined;
       const sortDir = parseSortDir(req.query.sortDir);
+      const publishDateRange = parseManagePublishDateRange(
+        req.query as Record<string, unknown>,
+      );
       const q =
         typeof req.query.q === "string" && req.query.q.trim()
           ? req.query.q.trim()
@@ -2967,10 +2978,17 @@ export function registerContentRoutes(app: Express): void {
             matchesManageItemsSearch(item, q),
           );
         }
+        if (publishDateRange) {
+          workingItems = workingItems.filter((item) =>
+            matchesPublishedAtRange(item.published_at, publishDateRange),
+          );
+        }
+        // status filter intentionally ignored for DB-backed items (no A/B variants).
+        const dateSortField = parseManageDateSortField(sort);
         workingItems = sortByUpdatedAtField(
           workingItems,
           sortDir,
-          (item) => item.updated_at,
+          (item) => item[dateSortField],
         );
       }
 
@@ -3055,11 +3073,21 @@ export function registerContentRoutes(app: Express): void {
     try {
       const { type } = req.params;
       const pagination = parseListPagination(req.query as Record<string, unknown>);
+      const sort = typeof req.query.sort === "string" ? req.query.sort : undefined;
       const sortDir = parseSortDir(req.query.sortDir);
+      const dateSortField = parseManageDateSortField(sort);
       const q =
         typeof req.query.q === "string" && req.query.q.trim()
           ? req.query.q.trim().toLowerCase()
           : "";
+      const localeFilter =
+        typeof req.query.locale === "string" && req.query.locale.trim()
+          ? req.query.locale.trim()
+          : "";
+      const publishDateRange = parseManagePublishDateRange(
+        req.query as Record<string, unknown>,
+      );
+      const statusFilter = parseManageStatusFilter(req.query.status);
       const allEntries = getCI(res).findByType(type);
       const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
       const root = ctRoot(res);
@@ -3090,6 +3118,7 @@ export function registerContentRoutes(app: Express): void {
           urls,
           versionCounts,
           updated_at: resolveStaticEntryUpdatedAt(type, entry.slug, locales, root),
+          published_at: normalizeFlexibleDate(readPublishedAt(type, entry.slug, root)),
           status: "published" as const,
         };
       };
@@ -3132,6 +3161,7 @@ export function registerContentRoutes(app: Express): void {
             urls: {},
             versionCounts: versioningManager.getVersionCounts(type, slug),
             updated_at: resolveStaticEntryUpdatedAt(type, slug, draftLocales, root),
+            published_at: normalizeFlexibleDate(readPublishedAt(type, slug, root)),
             status: "draft" as const,
             draftVariant: primaryVariant,
             previewPath: `/private/preview/${type}/${slug}?variant=${encodeURIComponent(primaryVariant)}&locale=${primaryLocale}`,
@@ -3147,7 +3177,10 @@ export function registerContentRoutes(app: Express): void {
       let filtered = results as Array<{
         slug: string;
         title: string;
+        locales?: string[];
+        status?: "draft" | "published";
         updated_at?: string | null;
+        published_at?: string | null;
         [key: string]: unknown;
       }>;
       // q already applied when building `results`; keep a defensive pass for title/slug.
@@ -3158,7 +3191,29 @@ export function registerContentRoutes(app: Express): void {
             e.slug.toLowerCase().includes(q),
         );
       }
-      filtered = sortByUpdatedAtField(filtered, sortDir, (e) => e.updated_at);
+      if (localeFilter) {
+        filtered = filtered.filter((e) =>
+          Array.isArray(e.locales) ? e.locales.includes(localeFilter) : false,
+        );
+      }
+      if (publishDateRange) {
+        filtered = filtered.filter((e) =>
+          matchesPublishedAtRange(e.published_at, publishDateRange),
+        );
+      }
+      if (statusFilter) {
+        filtered = filtered.filter((e) => {
+          const hasUnallocated = versioningHasUnallocatedVariant(
+            versioningManager.getVersioningForContent(type, e.slug),
+          );
+          return matchesManageStatusFilter(
+            e.status === "draft" ? "draft" : "published",
+            statusFilter,
+            hasUnallocated,
+          );
+        });
+      }
+      filtered = sortByUpdatedAtField(filtered, sortDir, (e) => e[dateSortField]);
 
       const paged = paginateList(filtered, pagination.page, pagination.pageSize);
       res.json({
@@ -3205,6 +3260,10 @@ export function registerContentRoutes(app: Express): void {
       const { type } = req.params;
       const localeFilter = req.query.locale as string | undefined;
       const pagination = parseListPagination(req.query as Record<string, unknown>);
+      const publishDateRange = parseManagePublishDateRange(
+        req.query as Record<string, unknown>,
+      );
+      const statusFilter = parseManageStatusFilter(req.query.status);
       const q =
         typeof req.query.q === "string" && req.query.q.trim()
           ? req.query.q.trim().toLowerCase()
@@ -3215,6 +3274,9 @@ export function registerContentRoutes(app: Express): void {
         return;
       }
       const urlPattern = config.url_pattern as Record<string, string> | undefined;
+      const root = ctRoot(res);
+      const versioningManager =
+        (res.locals.site as any)?.versioningManager ?? getVersioningManager();
 
       const { loadSeoIndex, seoEntryId } = await import("../seo-index");
       const seoIndex = loadSeoIndex(getContentRoot(res));
@@ -3244,14 +3306,10 @@ export function registerContentRoutes(app: Express): void {
         };
       };
 
-      const finishSeoEntries = (
-        base: Record<string, unknown>,
+      const applySharedFilters = (
         entries: Array<Record<string, unknown>>,
+        source: "yaml" | "db",
       ) => {
-        if (!pagination.paginate) {
-          res.json({ ...base, count: entries.length, entries });
-          return;
-        }
         let filtered = entries;
         if (q) {
           filtered = filtered.filter((e) => {
@@ -3268,6 +3326,43 @@ export function registerContentRoutes(app: Express): void {
               mainKeyword.includes(q)
             );
           });
+        }
+        if (publishDateRange) {
+          filtered = filtered.filter((e) => {
+            const slug = typeof e.slug === "string" ? e.slug : null;
+            if (!slug) return false;
+            const publishedAt = normalizeFlexibleDate(
+              readPublishedAt(type, slug, root),
+            );
+            return matchesPublishedAtRange(publishedAt, publishDateRange);
+          });
+        }
+        if (statusFilter && source === "yaml") {
+          filtered = filtered.filter((e) => {
+            const slug = typeof e.slug === "string" ? e.slug : null;
+            if (!slug) return false;
+            const hasUnallocated = versioningHasUnallocatedVariant(
+              versioningManager.getVersioningForContent(type, slug),
+            );
+            return matchesManageStatusFilter(
+              "published",
+              statusFilter,
+              hasUnallocated,
+            );
+          });
+        }
+        return filtered;
+      };
+
+      const finishSeoEntries = (
+        base: Record<string, unknown>,
+        entries: Array<Record<string, unknown>>,
+        source: "yaml" | "db",
+      ) => {
+        const filtered = applySharedFilters(entries, source);
+        if (!pagination.paginate) {
+          res.json({ ...base, count: filtered.length, entries: filtered });
+          return;
         }
         const paged = paginateList(filtered, pagination.page, pagination.pageSize);
         res.json({
@@ -3296,6 +3391,7 @@ export function registerContentRoutes(app: Express): void {
           finishSeoEntries(
             { contentType: type, source: "db", cache_missing: true, cache_age_hours: null },
             [],
+            "db",
           );
           return;
         }
@@ -3373,6 +3469,7 @@ export function registerContentRoutes(app: Express): void {
         finishSeoEntries(
           { contentType: type, source: "db", cache_age_hours: cacheAgeHours },
           entries,
+          "db",
         );
         return;
       }
@@ -3472,6 +3569,7 @@ export function registerContentRoutes(app: Express): void {
       finishSeoEntries(
         { contentType: type, source: "yaml", cache_age_hours: null },
         entries,
+        "yaml",
       );
     } catch (err) {
       res.status(500).json({ error: String(err) });
@@ -3486,6 +3584,14 @@ export function registerContentRoutes(app: Express): void {
         typeof req.query.q === "string" && req.query.q.trim()
           ? req.query.q.trim().toLowerCase()
           : "";
+      const localeFilter =
+        typeof req.query.locale === "string" && req.query.locale.trim()
+          ? req.query.locale.trim()
+          : "";
+      const publishDateRange = parseManagePublishDateRange(
+        req.query as Record<string, unknown>,
+      );
+      const statusFilter = parseManageStatusFilter(req.query.status);
       const config = getContentTypeConfig(type, ctRoot(res));
       if (!config) {
         res.status(404).json({ error: `Content type "${type}" not found` });
@@ -3494,6 +3600,8 @@ export function registerContentRoutes(app: Express): void {
       const urlPattern = config.url_pattern as Record<string, string> | undefined;
       const contentRoot = getContentRoot(res);
       const root = ctRoot(res);
+      const versioningManager =
+        (res.locals.site as any)?.versioningManager ?? getVersioningManager();
 
       const pickPrimaryLocale = (locales: string[]): string =>
         locales.includes("en") ? "en" : (locales[0] ?? "en");
@@ -3556,10 +3664,35 @@ export function registerContentRoutes(app: Express): void {
         title: string;
         pageTitle: string;
         funnel: FunnelBlock;
+        /** Present for YAML draft-only rows */
+        status?: "draft" | "published";
       };
 
       const finish = (entries: FunnelEntryRow[], source: "yaml" | "db") => {
         let filtered = entries.filter(funnelMatchesQuery);
+        if (localeFilter) {
+          filtered = filtered.filter((e) => e.locale === localeFilter);
+        }
+        if (publishDateRange) {
+          filtered = filtered.filter((e) => {
+            const publishedAt = normalizeFlexibleDate(
+              readPublishedAt(type, e.slug, root),
+            );
+            return matchesPublishedAtRange(publishedAt, publishDateRange);
+          });
+        }
+        if (statusFilter && source === "yaml") {
+          filtered = filtered.filter((e) => {
+            const hasUnallocated = versioningHasUnallocatedVariant(
+              versioningManager.getVersioningForContent(type, e.slug),
+            );
+            return matchesManageStatusFilter(
+              e.status === "draft" ? "draft" : "published",
+              statusFilter,
+              hasUnallocated,
+            );
+          });
+        }
         if (!pagination.paginate) {
           res.json({ contentType: type, source, count: filtered.length, entries: filtered });
           return;
@@ -3686,11 +3819,13 @@ export function registerContentRoutes(app: Express): void {
         }
 
         // Draft-only folders: include when draft-first and _common / drafts exist
+        let entryStatus: "draft" | "published" = "published";
         if (locales.length === 0) {
           if (!usesDraftFirstCreate(type, root)) continue;
           const draftLocales = listDraftLocales(slugPath, false);
           if (draftLocales.length === 0 && !fs.existsSync(path.join(slugPath, "_common.yml"))) continue;
           locales = draftLocales.length > 0 ? draftLocales : ["en"];
+          entryStatus = "draft";
         }
 
         const locale = pickPrimaryLocale(locales);
@@ -3759,6 +3894,7 @@ export function registerContentRoutes(app: Express): void {
           title,
           pageTitle,
           funnel,
+          status: entryStatus,
         });
       }
 
@@ -3790,6 +3926,13 @@ export function registerContentRoutes(app: Express): void {
           : "worldwide";
       const sortField = parseOrganicSortField(req.query.sort);
       const sortDir = defaultOrganicSortDir(sortField, parseSortDir(req.query.sortDir));
+      const publishDateRange = parseManagePublishDateRange(
+        req.query as Record<string, unknown>,
+      );
+      const statusFilter = parseManageStatusFilter(req.query.status);
+      const root = ctRoot(res);
+      const versioningManager =
+        (res.locals.site as any)?.versioningManager ?? getVersioningManager();
 
       const config = getContentTypeConfig(type, ctRoot(res));
       if (!config) {
@@ -3869,7 +4012,28 @@ export function registerContentRoutes(app: Express): void {
       };
 
       const finish = (raw: OrganicEntryRow[], source: "yaml" | "db") => {
-        const filtered = raw.filter(matchesQuery);
+        let filtered = raw.filter(matchesQuery);
+        if (publishDateRange) {
+          filtered = filtered.filter((e) => {
+            const publishedAt = normalizeFlexibleDate(
+              readPublishedAt(type, e.slug, root),
+            );
+            return matchesPublishedAtRange(publishedAt, publishDateRange);
+          });
+        }
+        if (statusFilter && source === "yaml") {
+          filtered = filtered.filter((e) => {
+            const hasUnallocated = versioningHasUnallocatedVariant(
+              versioningManager.getVersioningForContent(type, e.slug),
+            );
+            // Organic YAML lists live locales only → never only_draft
+            return matchesManageStatusFilter(
+              "published",
+              statusFilter,
+              hasUnallocated,
+            );
+          });
+        }
         const sorted = sortOrganicEntries(filtered, sortField, sortDir);
         const base = {
           contentType: type,
