@@ -1,0 +1,53 @@
+---
+description: Code, comments, UI/navigation, and agent skills must be in English; UI copy must be plain product language for operators
+alwaysApply: true
+---
+
+# Repository Language: English for Code, UI, and Skills
+
+Apply across backend and frontend: symbols, comments, commit-facing strings, anything shown to users, and **agent skills** must use **English**.
+
+## Code and comments
+
+- **Identifiers**: variable, function, class, file, route, and API names in English.
+- **Comments and docstrings**: English only (including `//`, `/* */`, `#`, JSDoc, docblocks).
+- **Logs and developer messages**: English for consistency with ops and debugging.
+
+## Frontend: user-visible text and navigation
+
+- **Navigation**: menu labels, sidebar items, breadcrumbs, page titles in route config, and tab titles — **English**.
+- **UI copy**: buttons, placeholders, empty states, errors, toasts, aria-labels, and `title` attributes shown to users — **English**.
+- **Routes**: path segments and query keys should remain English-oriented unless an external contract forces otherwise.
+
+### Tone: operators, not engineers
+
+Default reader: a **backoffice operator** (marketing, sales, website, admin). Write for **what they can do in the product**, not how the stack implements it.
+
+Do **not** put development jargon in user-visible copy unless the screen’s audience is explicitly developers (Development section, AI Settings → MCP / connect Cursor, other “for developers” panels):
+
+| Ban | Prefer |
+| --- | --- |
+| React, Vue, SPA, component tree | areas / sections of the app |
+| API, v2, endpoint, payload, JWT | (omit) — describe the action |
+| MCP, OAuth, Streamable HTTP | AI assistant / connect Cursor (dev screens only) |
+| Redis, Celery, Postgres, GCS blob | (omit) or “saved in the background” |
+| permission bypass, capability, pack-based | override Access packs / can use every area |
+| person-of-interest, role-wide broadcast (jargon) | notifications for everyone in that role |
+| raw permission keys (`leads:read`) as primary help | short plain outcome (“View and edit leads”) |
+
+Comments, logs, skills, OpenAPI for engineers, and **code identifiers** stay technical. Even on developer screens, prefer product wording first; keep protocol names only where the user must paste or configure them.
+
+## Backend
+
+- **Error messages** returned to clients or logs that operators read: prefer English **and** the same plain-language tone as UI copy above (no stack jargon for operators).
+- **OpenAPI / schema descriptions** and validation messages exposed to API consumers: English when user-facing.
+
+## Agent skills
+
+- **Skill documents**: All project-authored `SKILL.md` files (e.g. under `.agents/skills/`) — headings, procedures, checklists, troubleshooting, and narrative — **English**.
+- **Frontmatter**: Skill `description` and trigger-oriented text should be English so agents and tooling route consistently.
+- **Examples inside skills**: Code blocks and inline identifiers/comments follow the same English rules as the rest of the repo.
+
+## Conversation language
+
+- Chat with the team may be in another language; **new or updated agent skills and repository code** stay English per this rule. (User-local rules may override language for personal preference.)
