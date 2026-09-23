@@ -299,10 +299,10 @@ export function registerVersioningRoutes(app: Express): void {
   app.get("/api/variants/:contentType/:slug", (req, res) => {
     const { contentType, slug: requestSlug } = req.params;
 
-    if (!isValidType(contentType)) {
+    if (!isValidType(contentType, getContentRoot(res))) {
       res
         .status(400)
-        .json({ error: "Invalid content type", validTypes: getAllFolders() });
+        .json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
@@ -322,10 +322,10 @@ export function registerVersioningRoutes(app: Express): void {
   app.get("/api/versioning/:contentType/:contentSlug", (req, res) => {
     const { contentType, contentSlug: requestSlug } = req.params;
 
-    if (!isValidType(contentType)) {
+    if (!isValidType(contentType, getContentRoot(res))) {
       res.status(400).json({
         error: "Invalid content type",
-        validTypes: getAllFolders(),
+        validTypes: getAllFolders(getContentRoot(res)),
       });
       return;
     }
@@ -412,10 +412,10 @@ export function registerVersioningRoutes(app: Express): void {
     async (req, res) => {
       const { contentType, contentSlug, locale } = req.params;
 
-      if (!isValidType(contentType)) {
+      if (!isValidType(contentType, getContentRoot(res))) {
         res
           .status(400)
-          .json({ error: "Invalid content type", validTypes: getAllFolders() });
+          .json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
 
@@ -603,8 +603,8 @@ export function registerVersioningRoutes(app: Express): void {
   app.post("/api/versioning/:contentType/:contentSlug", async (req, res) => {
     const { contentType, contentSlug } = req.params;
 
-    if (!isValidType(contentType)) {
-      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+    if (!isValidType(contentType, getContentRoot(res))) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
@@ -751,8 +751,8 @@ export function registerVersioningRoutes(app: Express): void {
   app.post("/api/versioning/:contentType/:contentSlug/publish", async (req, res) => {
     const { contentType, contentSlug } = req.params;
 
-    if (!isValidType(contentType)) {
-      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+    if (!isValidType(contentType, getContentRoot(res))) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
@@ -976,8 +976,8 @@ export function registerVersioningRoutes(app: Express): void {
   app.post("/api/versioning/:contentType/:contentSlug/:locale/promote/:variantSlug", async (req, res) => {
     const { contentType, contentSlug, locale, variantSlug } = req.params;
 
-    if (!isValidType(contentType)) {
-      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+    if (!isValidType(contentType, getContentRoot(res))) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
@@ -1051,8 +1051,8 @@ export function registerVersioningRoutes(app: Express): void {
     async (req, res) => {
       const { contentType, contentSlug, locale } = req.params;
 
-      if (!isValidType(contentType)) {
-        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      if (!isValidType(contentType, getContentRoot(res))) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
 
@@ -1144,8 +1144,8 @@ export function registerVersioningRoutes(app: Express): void {
   app.delete("/api/versioning/:contentType/:contentSlug/:locale/:variantSlug", async (req, res) => {
     const { contentType, contentSlug, locale, variantSlug } = req.params;
 
-    if (!isValidType(contentType)) {
-      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+    if (!isValidType(contentType, getContentRoot(res))) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
