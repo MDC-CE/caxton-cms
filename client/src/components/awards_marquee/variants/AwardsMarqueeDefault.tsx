@@ -29,12 +29,13 @@ export function AwardsMarquee({ data }: { data: any }) {
     title_above_carousel = false,
   } = data;
 
-  const [isDesktop, setIsDesktop] = useState(
-    () => typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches
-  );
+  // SSR-safe: window may exist under the location shim without matchMedia.
+  const [isDesktop, setIsDesktop] = useState(false);
 
   useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
     const mediaQuery = window.matchMedia("(min-width: 768px)");
+    setIsDesktop(mediaQuery.matches);
     const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
     mediaQuery.addEventListener("change", handler);
     return () => mediaQuery.removeEventListener("change", handler);
