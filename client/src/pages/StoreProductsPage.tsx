@@ -1,10 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { IconShoppingBag, IconCheck, IconX } from "@tabler/icons-react";
 import { Link } from "wouter";
-import { ArrowLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { isActivelySelling } from "@/lib/ecommerceProductMap";
 
 interface EcommerceProduct {
@@ -50,15 +50,7 @@ export default function StoreProductsPage() {
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3 mb-6">
-          <Link href="/private/diagnostics">
-            <button
-              className="p-1.5 rounded-md hover-elevate"
-              data-testid="button-back"
-              title="Back"
-            >
-              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-            </button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back" iconClassName="h-4 w-4 text-muted-foreground" />
           <div className="flex items-center gap-2">
             <IconShoppingBag className="h-5 w-5 text-muted-foreground" />
             <h1 className="text-xl font-semibold" data-testid="heading-products">

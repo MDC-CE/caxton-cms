@@ -21,16 +21,35 @@ export type ChecklistId =
   | "dedup_coordinate"
   | "dedup_competing_edits"
   | "dedup_fix_pending"
+  | "idea_opportunity_harm"
+  | "anticipated_demand"
+  | "fast_decay_news"
+  | "broken_url"
   | "idea_accept"
   | "notes_close"
   | "review_mode_inert"
   | "title_description_ctr"
   | "internal_links"
+  | "funnel_persona_product_stage"
+  | "locale_translation"
   | "verify_copy"
   | "adjacent_findings"
   | "disposition"
   | "existence_unknown"
   | "target_missing";
+
+/** Staff always-visible line when idea_opportunity_harm is active. */
+export const IDEA_OPPORTUNITY_HARM_STAFF_NOTE =
+  "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site.";
+
+export const ANTICIPATED_DEMAND_STAFF_NOTE =
+  "Launch demand — judge lasting questions after the news fades, not today's search volume. Accepting does not publish.";
+
+export const FAST_DECAY_NEWS_STAFF_NOTE =
+  "Announcement with no lasting question — reject quickly. Do not run keyword research.";
+
+export const BROKEN_URL_STAFF_NOTE =
+  "Missing address — greenlight a redirect to a matching page, or one new page when the address is busy and nothing fits. Accepting does not change the site.";
 
 /** SERP title/description field paths that attach the title_description_ctr checklist. */
 export const TITLE_DESCRIPTION_FIELD_PATHS = new Set([
@@ -47,6 +66,14 @@ export const TITLE_DESCRIPTION_STAFF_NOTE =
 /** Staff always-visible line when internal_links checklist is active. */
 export const INTERNAL_LINKS_STAFF_NOTE =
   "Also check hub links — facts and locale targets intact, not punchier prose.";
+
+/** Staff always-visible line when funnel_persona_product_stage is active. */
+export const FUNNEL_CLASSIFICATION_STAFF_NOTE =
+  "Also check funnel — who the buyer is, which product owns them, then how ready they are (not whether the article feels broad).";
+
+/** Staff always-visible line when locale_translation is active. */
+export const LOCALE_TRANSLATION_STAFF_NOTE =
+  "Also check locale translation — draft matches source meaning and facts before go-live, not punchier copy vs live.";
 
 /** v1 stopgap — extend until strategy.selling (or similar) exists. */
 export const SELLING_CONTENT_TYPES = new Set([
@@ -98,7 +125,7 @@ export const DAMAGE_CLASS_META: Record<DamageClass, DamageClassMeta> = {
     id: "new_public_content",
     badge_label: "New public content",
     situation_description:
-      "New or proposed public page. Judge angle, facts, and funnel — not only whether apply is easy.",
+      "New public page. Judge angle, facts, and funnel — not only whether apply is easy. For an attached post with no file yet, apply creates that post and does not change the shared template.",
     risk: "High — brand and spam risk for new public content.",
   },
 };
@@ -168,12 +195,71 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     ],
     priority: 20,
   },
+  idea_opportunity_harm: {
+    id: "idea_opportunity_harm",
+    title: "Score opportunity vs site harm",
+    why: "Accept greenlights a brief only. A weak idea that later ships becomes a lasting URL — stop dilution, thin pages, and unjustified locks here.",
+    look_for: [
+      "Goal: one 90-day outcome — cite, rank, or assist a real program (not fill a cluster hole)",
+      "Evidence: follow declared demand label when present (anticipated_demand / fast_decay_news / broken_url); with no label, score the summary — demand keyword volume only for a search claim; launch or 404 cues without a label → add_blocker naming the label",
+      "Fit: not a dupe of a sibling; locale justified; wrong vehicle (funnel/SERP/hub-links-only) → close and refile as edits",
+      "Brand: educational angle, checkable facts, real program CTA — invent/endorsement without source → reject or close",
+      "Dilution: if this ships and gets ~0 visits, would we still tax hubs, crawl, freshness, inventory?",
+      "Kill criterion named; refresh_tier:fast needs owner + recrawl trigger; default zero new hub links",
+      "Dilution improvement alone ≠ pass (e.g. hub deletion still needs visit/redirect evidence)",
+      "Disposition: accept | add_blocker | close | reject — never apply or revise_entries",
+    ],
+    priority: 3,
+  },
+  anticipated_demand: {
+    id: "anticipated_demand",
+    title: "Anticipated demand (post-hype queries)",
+    why: "Empty keyword volume is expected for a new product or feature — score lasting questions and the fade plan, not today's OpenRush numbers.",
+    look_for: [
+      "Announcement or changelog named in the brief",
+      "At least one lasting query shape (What is X by Y / How to use Z) — missing → add_blocker or switch label to fast_decay_news",
+      "Fade plan: kill criterion and/or refresh_tier:fast owner",
+      "Feature on a known product: parent product volume is a ceiling only — never a pass by itself",
+      "Empty feature keyword_metrics is expected — do not block for no volume",
+      "Disposition: accept | add_blocker | close | reject — never apply",
+    ],
+    priority: 2,
+  },
+  fast_decay_news: {
+    id: "fast_decay_news",
+    title: "Fast-decay news — quick no",
+    why: "Announcement with no lasting question after the spike — reject without keyword research.",
+    look_for: [
+      "No durable how-to / what-is angle after the news fades",
+      "Do not call get_or_refresh_seo_research or demand volume",
+      "Disposition: reject (or close park) — prefer reject when the brief itself is the harm",
+    ],
+    priority: 2,
+  },
+  broken_url: {
+    id: "broken_url",
+    title: "Broken URL strategy",
+    why: "Missing address still requested — greenlight redirect or one new page; accept writes nothing; apply on the follow-up edit writes the redirect.",
+    look_for: [
+      "Brief cites get_runtime_issues row: path, windowed count, first/last seen, sources, sampleReferrer, queryAttribution (UTMs) — omit → add_blocker",
+      "When tool available: confirm path/count/sources/referrer/queryAttribution against a fresh read; higher count OK; different referrer, new campaign tag, or collapsed count → add_blocker",
+      "Match = answers the address (path+referrer) AND funnel product+persona fit; topical mention or missing funnel ≠ match",
+      "Match → accept existing page as accepted_entry; next_step = follow-up edit adds redirect only (no creates_entry)",
+      "No match + high traffic → accept new attached slug (not the broken path); brief must describe the entry (what/who/why); 404 row is extra justification — 404-only brief → add_blocker; follow-up is creates_entry + new_public_content then redirect after files exist",
+      "No match + low traffic → close; do not invent a page",
+      "Accept never writes YAML or redirects; apply on the implementing edit does",
+      "Disposition: accept | add_blocker | close | reject — never apply or revise_entries on the idea",
+    ],
+    priority: 2,
+  },
   idea_accept: {
     id: "idea_accept",
     title: "Accept greenlights a brief only",
-    why: "Accept does not create pages or write YAML. The build is a later step.",
+    why: "Accept does not create pages or write YAML. The build is a later edits proposal.",
     look_for: [
+      "accepted_entry required (contentType, slug, locale) — locks that page+locale",
       "next_step is concrete (min 20 characters)",
+      "follow-up edits use implements_proposal_id matching this idea",
       "do not report the page as live after accept",
       "close/park means no — not yes",
     ],
@@ -234,6 +320,43 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "per-situation ship: failing packs' ops must be dropped or fixed via revise_entries before apply (apply is atomic)",
     ],
     priority: 28,
+  },
+  funnel_persona_product_stage: {
+    id: "funnel_persona_product_stage",
+    title: "Check persona → product → stage",
+    why: "Funnel targeting is buyer fit, not topical breadth. Wrong product or stage misroutes journey membership.",
+    look_for: [
+      "score Persona / Product / Stage then Ship: pass|fail|warn / pass|fail / pass|fail / yes|no — in that order",
+      "Persona: content intent matches a real persona id on a product (list_products → get_product); missing audience → product-only OK with warn (do not invent persona ids); wrong/invented persona → block",
+      "Product: proposed bindings follow from that fit; multiple { product, persona? } OK when two+ personas truly fit; products:all only when no single product's personas fit better; breadth/company-report alone ≠ all; all never carries personas",
+      "Stage: awareness|consideration|decision|post-enrollment matches readiness — re-check full cascade even if only stage or only products moved",
+      "ops vs live funnel + product audience — ignore staff summary / Titulo/Meta blurb; never block because blurb ≠ ops",
+      "batch: score each entry row independently; soft prefer ≤10 related posts (no create refuse for larger)",
+      "same-field funnel churn + live not broken + no real cascade change → leave live or reject duplicate_weaker; unrelated body writes alone ≠ reject",
+      "body/SERP also pending → score packs independently; revise_entries to drop/fix failing pack then apply (atomic)",
+      "topical breadth disagreement alone is not reject — add_blocker citing which cascade step fails and what correct binding looks like",
+      "out-of-scope live body defects → adjacent_findings notes; do not block funnel apply",
+      "optional: get_entry_activity for funnel.* recent writes; get_product_funnel_analytics for journey context",
+    ],
+    priority: 26,
+  },
+  locale_translation: {
+    id: "locale_translation",
+    title: "Locale draft vs source before promote",
+    why: "Go-live promotes a translated variant — score fidelity and readiness, not punchier copy vs live English.",
+    look_for: [
+      "score Fidelity / Completeness / Slug / Shell / Promote honesty then Ship: pass|fail / pass|fail / pass|fail / pass|warn / yes|no",
+      "Fidelity: draft meaning and facts match source locale (same years, employers, sources) — invented stats or unsupported claims → block/reject",
+      "Completeness: required fields for this content type are ready on the variant; empty required → add_blocker",
+      "Slug: url_slug on the variant is locale-fitting (not an English slug left on /es/ by accident)",
+      "Shell: attached shared-layout still comes from template.{locale}.yml — detach only if intentional",
+      "Promote honesty: apply promotes the named variant — it does not run AI translation or invent sibling locales",
+      "Forced awkward phrasing that breaks meaning → add_blocker (fix draft), not reject-as-weaker-copy",
+      "Wrong-locale internal links → block; out-of-scope live defects on other pages → adjacent_findings notes",
+      "ops/draft vs source locale — ignore staff summary paste; never block because summary ≠ full body",
+      "optional: get_entry_content on source locale then target with variant; list_variants; explain_site topic proposals subtopic translations",
+    ],
+    priority: 27,
   },
   verify_copy: {
     id: "verify_copy",

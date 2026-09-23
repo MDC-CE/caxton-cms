@@ -4459,7 +4459,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
         <Link href="/private/databases">
           <Button variant="ghost" size="sm" data-testid="button-back-databases">
             <ArrowLeft className="h-4 w-4 mr-1" />
-            Back
+            All databases
           </Button>
         </Link>
         <div className="flex-1 min-w-0">

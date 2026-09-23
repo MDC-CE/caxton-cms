@@ -56,6 +56,10 @@ function sampleSnapshot(overrides: Partial<ProposalRecord> = {}): ProposalRecord
     decision_debug: null,
     supersedes_proposal_id: null,
     replaced_by_proposal_id: null,
+    accepted_entry: null,
+    implements_proposal_id: null,
+    author_content_at: null,
+    reviewer_action_at: null,
     entries: [
       {
         id: 42,
@@ -87,6 +91,8 @@ function sampleSnapshot(overrides: Partial<ProposalRecord> = {}): ProposalRecord
         resolved_by: null,
         resolve_note: null,
         agent_session_id: null,
+        author_actor: {},
+        resolved_by_actor: {},
       },
     ],
     ...overrides,
@@ -141,6 +147,48 @@ describe("replaceProposalsFromSnapshot", () => {
     expect(dumped[0]!.entries[0]!.id).toBe(42);
     expect(dumped[0]!.blockers[0]!.id).toBe(7);
     expect(dumped[0]!.open_blocker_count).toBe(1);
+    expect(dumped[0]!.blockers[0]!.author_actor).toEqual({});
+    expect(dumped[0]!.blockers[0]!.resolved_by_actor).toEqual({});
+
+    const { getSiteSqlite } = await import("../db");
+    const db = getSiteSqlite(SITE);
+    const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const kpi = db
+      .prepare(
+        `SELECT count FROM proposal_kpi_daily WHERE site = ? AND day = ? AND kind = 'edits' AND status = 'open'`,
+      )
+      .get(SITE, y) as { count: number } | undefined;
+    expect(kpi?.count).toBe(1);
+  });
+
+  it("imports blockers that omit actor fields as empty actors and round-trips when present", () => {
+    const omitted = sampleSnapshot();
+    const blocker = omitted.blockers[0]!;
+    delete (blocker as { author_actor?: Record<string, unknown> }).author_actor;
+    delete (blocker as { resolved_by_actor?: Record<string, unknown> }).resolved_by_actor;
+
+    expect(replaceProposalsFromSnapshot(SITE, [omitted])).toBe(1);
+    const missing = exportAllProposals(SITE)[0]!.blockers[0]!;
+    expect(missing.author).toBe("reviewer");
+    expect(missing.author_actor).toEqual({});
+    expect(missing.resolved_by_actor).toEqual({});
+
+    const author = { type: "mcp", model: "xai/grok-4", role: "copy_editor", client: "Cursor" };
+    const resolver = { type: "mcp", model: "claude/sonnet-4.5", role: "copy_editor", client: "Cursor" };
+    const withActors = sampleSnapshot();
+    withActors.blockers[0] = {
+      ...withActors.blockers[0]!,
+      status: "resolved",
+      resolved_by: "alesanchezr",
+      resolve_note: "Updated the CTA so it names the bootcamp.",
+      author_actor: author,
+      resolved_by_actor: resolver,
+    };
+    expect(replaceProposalsFromSnapshot(SITE, [withActors])).toBe(1);
+    const kept = exportAllProposals(SITE)[0]!.blockers[0]!;
+    expect(kept.author_actor).toEqual(author);
+    expect(kept.resolved_by_actor).toEqual(resolver);
+    expect(kept.resolved_by).toBe("alesanchezr");
   });
 });
 

@@ -567,8 +567,10 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setAuthError(null);
     try {
-      // Path only — do not round-trip prior staff_auth/github error query params.
-      const returnTo = window.location.pathname || "/";
+      // Absolute origin so multi-site OAuth (callback on SITE_URL) can return
+      // to this host with staff_session_code (e.g. fl.4geeksacademy.com).
+      // Path only for the path portion — do not round-trip prior error params.
+      const returnTo = `${window.location.origin}${window.location.pathname || "/"}`;
       const res = await fetch(
         `/api/staff/oauth/github/start?format=json&return_to=${encodeURIComponent(returnTo)}`,
         { headers: { Accept: "application/json" } },

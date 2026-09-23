@@ -1,9 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconExternalLink } from "@tabler/icons-react";
+import { IconExternalLink, IconSearch } from "@tabler/icons-react";
 import { deslugifyLabel } from "@shared/relation-field";
 import { formatSitePath } from "@shared/formatSitePath";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
+import {
+  ManagedSeoModal,
+  type ManagedSeoModalTarget,
+} from "@/components/editing/ManagedSeoModal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -58,6 +62,8 @@ export function RelatedEntryPopover({
   testId?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [seoModalOpen, setSeoModalOpen] = useState(false);
+  const [seoModalTarget, setSeoModalTarget] = useState<ManagedSeoModalTarget | null>(null);
   const { data, isLoading, isError, error } = useQuery<RelatedEntryInfo>({
     queryKey: ["/api/seo/entry", contentType, slug, locale, "related-entry"],
     enabled: open && !!contentType && !!slug,
@@ -82,6 +88,7 @@ export function RelatedEntryPopover({
   const manageHref = `/private/type/${encodeURIComponent(contentType)}`;
 
   return (
+    <>
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
@@ -121,7 +128,16 @@ export function RelatedEntryPopover({
             </div>
             <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs">
               <dt className="text-muted-foreground">Type</dt>
-              <dd className="text-foreground truncate">{data?.contentType || contentType}</dd>
+              <dd className="truncate">
+                <a
+                  href={manageHref}
+                  className="text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+                  title={`Manage ${data?.contentType || contentType}`}
+                  data-testid={`link-related-entry-manage-type-${slug}`}
+                >
+                  {data?.contentType || contentType}
+                </a>
+              </dd>
               <dt className="text-muted-foreground">Slug</dt>
               <dd className="text-foreground font-mono truncate" title={data?.slug || slug}>
                 {data?.slug || slug}
@@ -171,29 +187,50 @@ export function RelatedEntryPopover({
           </div>
         )}
         <div className="flex flex-col gap-2">
-          {href ? (
-            <Button
-              asChild
-              size="sm"
-              className="w-full"
-              data-testid={`button-related-entry-url-${slug}`}
-            >
-              <a href={href} target="_blank" rel="noopener noreferrer">
+          <div className="flex gap-2">
+            {href ? (
+              <Button
+                asChild
+                size="sm"
+                className="min-w-0 flex-1"
+                data-testid={`button-related-entry-url-${slug}`}
+              >
+                <a href={href} target="_blank" rel="noopener noreferrer">
+                  <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
+                  Open page
+                </a>
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                className="min-w-0 flex-1"
+                disabled
+                data-testid={`button-related-entry-url-${slug}`}
+              >
                 <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
                 Open page
-              </a>
-            </Button>
-          ) : (
+              </Button>
+            )}
             <Button
               size="sm"
-              className="w-full"
-              disabled
-              data-testid={`button-related-entry-url-${slug}`}
+              variant="outline"
+              className="min-w-0 flex-1"
+              data-testid={`button-related-entry-meta-${slug}`}
+              onClick={() => {
+                setSeoModalTarget({
+                  contentType: data?.contentType || contentType,
+                  slug: data?.slug || slug,
+                  locale: data?.locale || locale,
+                  variant: variant || undefined,
+                });
+                setSeoModalOpen(true);
+                setOpen(false);
+              }}
             >
-              <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
-              Open page
+              <IconSearch className="h-3.5 w-3.5" aria-hidden />
+              Open meta
             </Button>
-          )}
+          </div>
           {previewHref ? (
             <Button asChild size="sm" variant="outline" className="w-full">
               <a href={previewHref} target="_blank" rel="noopener noreferrer">
@@ -201,11 +238,17 @@ export function RelatedEntryPopover({
               </a>
             </Button>
           ) : null}
-          <Button asChild size="sm" variant="ghost" className="w-full">
-            <a href={manageHref}>Manage {contentType}</a>
-          </Button>
         </div>
       </PopoverContent>
     </Popover>
+    <ManagedSeoModal
+      open={seoModalOpen}
+      onOpenChange={(next) => {
+        setSeoModalOpen(next);
+        if (!next) setSeoModalTarget(null);
+      }}
+      target={seoModalTarget}
+    />
+    </>
   );
 }

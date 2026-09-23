@@ -6,6 +6,11 @@ import {
   overlayHasLabeledButton,
   validateOverlaysConfig,
   isPrivateStaffPath,
+  matchesGeoForOverlay,
+  overlayUsesAutoRedirect,
+  resolveOverlayRedirectUrl,
+  type Overlay,
+  type OverlayContent,
 } from "./useOverlays";
 
 describe("pathnameMatchesEntry", () => {
@@ -119,5 +124,100 @@ describe("overlay blocking save validation", () => {
       }),
     ).toBeNull();
     expect(validateOverlaysConfig({ overlays: [] })).toBeNull();
+  });
+});
+
+const autoContent = (partial: Partial<OverlayContent> = {}): OverlayContent => ({
+  title: "Redirecting",
+  body: "…",
+  auto_redirect_after_ms: 1500,
+  auto_redirect_base_host: "https://fl.4geeksacademy.com",
+  buttons: [{ label: "Continue", variant: "default", href: "https://fl.4geeksacademy.com" }],
+  ...partial,
+});
+
+const autoOverlay = (geoTargeting?: Overlay["targeting"]["geo"]): Overlay => ({
+  id: "temp-fl",
+  enabled: true,
+  dismissible: false,
+  trigger: { event: "time_delay", delay: 500 },
+  targeting: {
+    pages: ["/en/apply"],
+    geo: geoTargeting ?? { countries: ["US"], regions: ["Florida"] },
+  },
+  frequency: "session",
+  component: "modal",
+  content: autoContent(),
+});
+
+describe("overlayUsesAutoRedirect / resolveOverlayRedirectUrl", () => {
+  it("detects auto-redirect when ms + base host are set", () => {
+    expect(overlayUsesAutoRedirect(autoContent())).toBe(true);
+    expect(overlayUsesAutoRedirect({ title: "x", body: "" })).toBe(false);
+    expect(
+      overlayUsesAutoRedirect({
+        title: "x",
+        body: "",
+        auto_redirect_after_ms: 1500,
+      }),
+    ).toBe(false);
+  });
+
+  it("path-preserves onto the FL host", () => {
+    expect(resolveOverlayRedirectUrl(autoContent(), "/en/apply", "?x=1")).toBe(
+      "https://fl.4geeksacademy.com/en/apply?x=1",
+    );
+    expect(resolveOverlayRedirectUrl(autoContent(), "/en/location/miami-usa")).toBe(
+      "https://fl.4geeksacademy.com/en/location/miami-usa",
+    );
+  });
+
+  it("rewrites AI Engineering paths to FL Full Stack", () => {
+    expect(
+      resolveOverlayRedirectUrl(autoContent(), "/en/career-programs/ai-engineering"),
+    ).toBe("https://fl.4geeksacademy.com/en/programs/full-stack");
+    expect(
+      resolveOverlayRedirectUrl(autoContent(), "/es/programas/ai-engineering"),
+    ).toBe("https://fl.4geeksacademy.com/es/programas/full-stack");
+    expect(
+      resolveOverlayRedirectUrl(
+        autoContent(),
+        "/en/landing/ai-engineering-coding-florida",
+      ),
+    ).toBe("https://fl.4geeksacademy.com/en/programs/full-stack");
+  });
+});
+
+describe("matchesGeoForOverlay", () => {
+  it("fail-closes auto-redirect when geo is missing or failed", () => {
+    const o = autoOverlay();
+    expect(matchesGeoForOverlay(o, null)).toBe(false);
+    expect(matchesGeoForOverlay(o, { status: "fail" })).toBe(false);
+  });
+
+  it("requires Florida for auto-redirect when regions are set", () => {
+    const o = autoOverlay();
+    expect(
+      matchesGeoForOverlay(o, {
+        status: "success",
+        countryCode: "US",
+        regionName: "Florida",
+      }),
+    ).toBe(true);
+    expect(
+      matchesGeoForOverlay(o, {
+        status: "success",
+        countryCode: "US",
+        regionName: "Texas",
+      }),
+    ).toBe(false);
+  });
+
+  it("fail-opens soft overlays when geo is missing", () => {
+    const soft: Overlay = {
+      ...autoOverlay(),
+      content: { title: "Hi", body: "soft" },
+    };
+    expect(matchesGeoForOverlay(soft, null)).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { ArrowLeft, Check, Loader2, Plus, Trash2 } from "lucide-react";
+import { Check, Loader2, Plus, Trash2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Link } from "wouter";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 
 interface KnowledgeData {
@@ -81,11 +81,7 @@ export default function AIKnowledgeBlocks() {
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto p-6 space-y-6">
         <div className="flex items-center gap-3">
-          <Link href="/private/ai-knowledge">
-            <Button size="icon" variant="ghost" data-testid="button-back-knowledge-blocks">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back-knowledge-blocks" iconClassName="h-4 w-4" />
           <div className="flex-1">
             <h1 className="text-2xl font-bold" data-testid="text-knowledge-blocks-title">Knowledge Blocks</h1>
             <p className="text-sm text-muted-foreground">Freeform text the agent can reference when answering questions</p>

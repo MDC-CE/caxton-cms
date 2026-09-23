@@ -14,14 +14,17 @@ import {
   IconLayersIntersect,
   IconChartBar,
   IconClick,
+  IconCurrencyDollar,
 } from "@tabler/icons-react";
 import { Link, useParams } from "wouter";
-import { ArrowLeft, ChevronDown, Plus } from "lucide-react";
-import { useState } from "react";
+import { ChevronDown, Plus } from "lucide-react";
+import { useState, createContext, useContext } from "react";
 import { Badge } from "@/components/ui/badge";
 import { isActivelySelling } from "@/lib/ecommerceProductMap";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -87,6 +90,8 @@ interface JourneyAnalyticsResponse {
   window_days?: number;
   as_of?: string;
   warnings?: Array<{ code: string; message: string }>;
+  lead_event_names?: string[];
+  counts_as_lead_configured?: boolean;
   message?: string;
   pages?: Record<
     string,
@@ -104,13 +109,12 @@ interface JourneyAnalyticsResponse {
   product?: {
     conversions: number;
     ecommerce_intent: number;
+    purchases: number;
     item_id?: string;
     content_slug: string;
   };
 }
 
-/** Must match server/ecommerce/journey-analytics.ts lead + ecommerce event lists. */
-const PAGE_CONVERSION_EVENTS = ["student_application", "request_more_info"] as const;
 const PAGE_ECOMMERCE_EVENTS = [
   "view_item",
   "add_to_cart",
@@ -136,9 +140,9 @@ const METRIC_HELP = {
     note: undefined as string | undefined,
   },
   conversions: {
-    title: "Conversions",
-    body: "Form submits for this product that fired while the visitor was on this page’s URLs (not product-wide). Soft and hard leads are both included — stage does not filter the list.",
-    events: PAGE_CONVERSION_EVENTS,
+    title: "Lead conversions",
+    body: "Form submits for this product that fired while the visitor was on this page’s URLs (not product-wide). Only events with Count as lead on are included — stage does not filter the list.",
+    events: [] as readonly string[],
     note: STAGE_SIGNAL_NOTE,
   },
   ecommerce_intent: {
@@ -388,6 +392,8 @@ function KpiCard({
   );
 }
 
+const LeadEventNamesContext = createContext<readonly string[]>([]);
+
 function MetricHint({
   metricKey,
   value,
@@ -399,7 +405,14 @@ function MetricHint({
   label: string;
   testId: string;
 }) {
+  const leadEventNames = useContext(LeadEventNamesContext);
   const help = METRIC_HELP[metricKey];
+  const events =
+    metricKey === "conversions"
+      ? leadEventNames.length > 0
+        ? leadEventNames
+        : ["(none — Count as lead off for all events)"]
+      : help.events;
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -416,7 +429,7 @@ function MetricHint({
         <p className="font-medium text-foreground">{help.title}</p>
         <p className="text-xs text-muted-foreground leading-relaxed">{help.body}</p>
         <p className="text-[11px] font-mono text-muted-foreground break-all">
-          Events: {help.events.join(" · ")}
+          Events: {events.join(" · ")}
         </p>
         {help.note ? (
           <p className="text-[11px] text-muted-foreground leading-relaxed border-t border-border pt-2">
@@ -824,14 +837,11 @@ export default function StoreProductDetailPage() {
   };
 
   return (
+    <LeadEventNamesContext.Provider value={analytics?.lead_event_names ?? []}>
     <div className="min-h-screen bg-background text-foreground">
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-[300px] space-y-6">
         <div className="flex items-center gap-3">
-          <Link href="/private/store/ecommerce">
-            <button className="p-1.5 rounded-md hover-elevate" data-testid="button-back">
-              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-            </button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back" iconClassName="h-4 w-4 text-muted-foreground" />
           <IconShoppingBag className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold" data-testid="heading-product-funnel">
             {data?.product.name ?? slug}
@@ -840,6 +850,7 @@ export default function StoreProductDetailPage() {
 
         {isLoading && (
           <div className="grid w-full gap-3 grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+            <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
@@ -971,7 +982,7 @@ export default function StoreProductDetailPage() {
                 valueClassName="tabular-nums"
               />
               <KpiCard
-                label="Product conversions (28d)"
+                label="Lead conversions (28d)"
                 value={
                   analyticsLoading ? (
                     <MetricsLoadingDots testId="kpi-conversions-loading" />
@@ -979,9 +990,23 @@ export default function StoreProductDetailPage() {
                     (analytics?.product?.conversions ?? "—")
                   )
                 }
-                hint="Tagged with this product item_id — not everything on a URL"
+                hint="Lead events with Count as lead — tagged with this product"
                 icon={IconChartBar}
                 testId="card-kpi-conversions"
+                valueClassName="tabular-nums"
+              />
+              <KpiCard
+                label="Purchases (28d)"
+                value={
+                  analyticsLoading ? (
+                    <MetricsLoadingDots testId="kpi-purchases-loading" />
+                  ) : (
+                    (analytics?.product?.purchases ?? "—")
+                  )
+                }
+                hint="Completed checkout purchase for this product (off-site)"
+                icon={IconCurrencyDollar}
+                testId="card-kpi-purchases"
                 valueClassName="tabular-nums"
               />
               <KpiCard
@@ -1000,6 +1025,36 @@ export default function StoreProductDetailPage() {
               />
             </div>
 
+            {!analyticsLoading &&
+              analytics?.counts_as_lead_configured === false && (
+                <Alert variant="destructive" data-testid="alert-counts-as-lead-not-configured">
+                  <AlertTitle>Count as lead not configured yet</AlertTitle>
+                  <AlertDescription>
+                    Conversion events do not have Count as lead set. Lead conversion metrics may be
+                    incomplete until you open each event under{" "}
+                    <Link href="/private/store/conversions" className="underline text-primary">
+                      Conversions
+                    </Link>{" "}
+                    and choose Include or Don&apos;t include. Purchases and ecommerce intent still
+                    show when available.
+                  </AlertDescription>
+                </Alert>
+              )}
+            {!analyticsLoading &&
+              analytics?.counts_as_lead_configured === true &&
+              (analytics.lead_event_names?.length ?? 0) === 0 && (
+                <Alert variant="destructive" data-testid="alert-no-lead-events">
+                  <AlertTitle>Lead conversions are not being measured</AlertTitle>
+                  <AlertDescription>
+                    No conversion events have Count as lead turned on, so lead totals stay at zero.
+                    Turn Count as lead on for the events that should count under{" "}
+                    <Link href="/private/store/conversions" className="underline text-primary">
+                      Conversions
+                    </Link>
+                    . Purchases and ecommerce intent are unaffected.
+                  </AlertDescription>
+                </Alert>
+              )}
             <section className="space-y-1">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -1207,5 +1262,6 @@ export default function StoreProductDetailPage() {
         )}
       </div>
     </div>
+    </LeadEventNamesContext.Provider>
   );
 }

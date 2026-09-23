@@ -22,6 +22,7 @@ import {
   loadEventWebhookConfigSafe,
   loadEventsForDelivery,
   parseEventWebhookConfig,
+  previewDeliveryPayload,
   recordDelivery,
   saveEventWebhookConfig,
   type EventWebhookConfig,
@@ -62,6 +63,7 @@ function summarizeConfig(site: string, contentRoot: string) {
       allowlist: [...EVENT_WEBHOOK_ALLOWLIST],
       enabled_hook_count: 0,
       last_delivery: null as ReturnType<typeof listDeliveries>[number] | null,
+      site,
     };
   }
   const pending = getAllPendingCounts(site);
@@ -79,6 +81,7 @@ function summarizeConfig(site: string, contentRoot: string) {
     enabled_hook_count: enabled,
     last_delivery: deliveries[0] ?? null,
     file: EVENT_WEBHOOK_FILE,
+    site,
   };
 }
 
@@ -117,7 +120,7 @@ export function registerEventWebhookRoutes(app: Express): void {
       return;
     }
 
-    // Flush hooks that kept URL and are already due after events_per_call change
+    // Re-check waiting piles under new timing (edge 1a): flush if now due / immediate.
     for (const type of EVENT_WEBHOOK_ALLOWLIST) {
       for (const hook of next.subscriptions[type] ?? []) {
         if (!hook.enabled || !hook.url) continue;
@@ -246,20 +249,93 @@ export function registerEventWebhookRoutes(app: Express): void {
     if (!auth) return;
     const site = siteCtx(res);
     if (!site) return;
+
+    const retentionFloor = Date.now() - EVENT_WEBHOOK_DELIVERY_RETENTION_MS;
+    const retentionCeil = Date.now();
+
+    const parseIsoMs = (raw: unknown): number | undefined => {
+      if (typeof raw !== "string" || !raw.trim()) return undefined;
+      const ms = Date.parse(raw.trim());
+      return Number.isFinite(ms) ? ms : undefined;
+    };
+
+    const fromRaw = parseIsoMs(req.query.from);
+    const toRaw = parseIsoMs(req.query.to);
     const hoursRaw = Number(req.query.hours ?? 48);
     const hours = Number.isFinite(hoursRaw) ? Math.min(Math.max(hoursRaw, 1), 48) : 48;
-    const sinceMs = Date.now() - hours * 60 * 60 * 1000;
-    const eventType =
-      typeof req.query.eventType === "string" && req.query.eventType.trim()
-        ? req.query.eventType.trim()
+
+    let sinceMs =
+      fromRaw !== undefined ? fromRaw : Date.now() - hours * 60 * 60 * 1000;
+    let untilMs = toRaw;
+
+    sinceMs = Math.max(sinceMs, retentionFloor);
+    if (untilMs !== undefined) {
+      untilMs = Math.min(Math.max(untilMs, retentionFloor), retentionCeil);
+    }
+    if (untilMs !== undefined && untilMs < sinceMs) {
+      untilMs = sinceMs;
+    }
+
+    const typeParam =
+      typeof req.query.type === "string" && req.query.type.trim()
+        ? req.query.type.trim()
+        : typeof req.query.eventType === "string" && req.query.eventType.trim()
+          ? req.query.eventType.trim()
+          : undefined;
+    const hookId =
+      typeof req.query.hook === "string" && req.query.hook.trim()
+        ? req.query.hook.trim()
         : undefined;
+    const statusRaw =
+      typeof req.query.status === "string" ? req.query.status.trim() : "";
+    const status =
+      statusRaw === "success" || statusRaw === "failure" || statusRaw === "skipped"
+        ? statusRaw
+        : undefined;
+    const order =
+      typeof req.query.order === "string" && req.query.order.trim().toLowerCase() === "asc"
+        ? ("asc" as const)
+        : ("desc" as const);
+
     const deliveries = listDeliveries(site.contentRootName, {
-      sinceMs: Math.max(sinceMs, Date.now() - EVENT_WEBHOOK_DELIVERY_RETENTION_MS),
-      eventType,
+      sinceMs,
+      untilMs,
+      eventType: typeParam,
+      hookId,
+      status,
+      order,
       limit: 300,
     });
-    res.json({ deliveries, since_ms: sinceMs });
+    res.json({
+      deliveries,
+      since_ms: sinceMs,
+      until_ms: untilMs ?? null,
+      order,
+    });
   });
+
+  api.get(
+    app,
+    "/api/admin/event-webhooks/deliveries/:id/preview",
+    { rate: "staffWrite" },
+    async (req, res) => {
+      const auth = await requireWebhookStaff(req, res);
+      if (!auth) return;
+      const site = siteCtx(res);
+      if (!site) return;
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: "invalid delivery id" });
+        return;
+      }
+      const preview = previewDeliveryPayload(site.contentRootName, site.contentRoot, id);
+      if (!preview) {
+        res.status(404).json({ error: "delivery not found" });
+        return;
+      }
+      res.json(preview);
+    },
+  );
 
   api.post(
     app,

@@ -11,6 +11,12 @@ import {
   MIXED_SERP_AND_BODY,
   TITLE_DESCRIPTION_STAFF_NOTE,
   INTERNAL_LINKS_STAFF_NOTE,
+  FUNNEL_CLASSIFICATION_STAFF_NOTE,
+  LOCALE_TRANSLATION_STAFF_NOTE,
+  IDEA_OPPORTUNITY_HARM_STAFF_NOTE,
+  ANTICIPATED_DEMAND_STAFF_NOTE,
+  FAST_DECAY_NEWS_STAFF_NOTE,
+  BROKEN_URL_STAFF_NOTE,
   worseDamageClass,
   isSellingContentType,
   isPublicContentType,
@@ -27,6 +33,8 @@ import {
   inferSituationsFromOps,
   mergeSituations,
   staffNotesForSituations,
+  IDEA_DEFAULT_SITUATION_ID,
+  isIdeaAuthorSituationId,
   type ReviewSituationId,
   type SituationSource,
 } from "./review-situations";
@@ -144,8 +152,10 @@ export function damageClassForTarget(opts: {
   contentType: string;
   category?: ProposalCategory;
   existence: ExistenceState;
-  /** Live missing but draft present → new content path. */
+  /** Live missing but draft present, or a reserved attached create → new content path. */
   draftExists?: boolean;
+  /** Edits that will create a file-based attached entry on apply. */
+  createsEntry?: boolean;
   /** For ideas: missing slug is new content when public type. */
   forIdea?: boolean;
 }): DamageClass {
@@ -153,7 +163,7 @@ export function damageClassForTarget(opts: {
   if (isSellingContentType(ct)) return "selling_page";
 
   if (opts.existence === "missing") {
-    if (opts.draftExists) return "new_public_content";
+    if (opts.draftExists || opts.createsEntry) return "new_public_content";
     if (opts.forIdea && (isPublicContentType(ct) || !ct)) return "new_public_content";
     if (opts.forIdea) return isSellingContentType(ct) ? "selling_page" : "existing_content";
     // Edits with missing live and no draft — caller marks target_missing; class stays content-type based for badge but never new_public
@@ -227,6 +237,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   let damage_class: DamageClass = "none";
+  let createsAttached = false;
 
   if (proposal.kind === "edits") {
     const workEntries = proposal.entries.filter(
@@ -239,14 +250,24 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       const existence: ExistenceState = lu?.existence ?? "unknown";
       const draftExists = Boolean(e.variant?.trim() && lu?.draftExists);
       const liveMissing = existence === "missing";
-      const target_missing = liveMissing && !draftExists;
+      const createsEntry =
+        e.baseline_context?.creates_entry === true && !e.variant?.trim();
+      if (createsEntry && liveMissing) createsAttached = true;
+      const target_missing = liveMissing && !draftExists && !createsEntry;
 
       let dc = damageClassForTarget({
         contentType: e.contentType,
         category: proposal.category,
         existence,
         draftExists,
+        createsEntry: createsEntry && liveMissing,
       });
+      if (createsEntry && liveMissing) {
+        warnings.push({
+          code: "creates_attached_entry",
+          message: `Applying creates ${e.contentType}/${e.slug} (${e.locale}). No draft. The shared template does not change.`,
+        });
+      }
       if (target_missing) {
         // Never label deleted target as new public content
         if (dc === "new_public_content") {
@@ -311,18 +332,26 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     const linkOnly =
       mergedSit.situations.includes("internal_links") &&
       !mergedSit.situations.includes("body_copy_edit");
+    const funnelOnly =
+      mergedSit.situations.includes("funnel_classification") &&
+      !mergedSit.situations.includes("body_copy_edit") &&
+      !mergedSit.situations.includes("internal_links");
+    const translationOnly =
+      mergedSit.situations.includes("locale_translation") &&
+      !mergedSit.situations.includes("body_copy_edit") &&
+      !mergedSit.situations.includes("internal_links");
 
     if (hasSerp) {
       checklists.add("title_description_ctr");
       if (!serpOnly) {
-        if (!linkOnly) checklists.add("verify_copy");
+        if (!linkOnly && !funnelOnly && !translationOnly) checklists.add("verify_copy");
         warnings.push({
           code: MIXED_SERP_AND_BODY,
           message:
             "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and body packs. Create still succeeds. Per-situation ship: drop failing SERP ops via revise_entries before apply.",
         });
       }
-    } else if (!linkOnly) {
+    } else if (!linkOnly && !funnelOnly && !translationOnly) {
       checklists.add("verify_copy");
     }
 
@@ -336,6 +365,15 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
     checklists.add("disposition");
   } else if (proposal.kind === "idea") {
+    const filedRaw = (proposal.review_situations ?? []) as string[];
+    const filedDemand = filedRaw.filter(isIdeaAuthorSituationId) as ReviewSituationId[];
+    liveSituations = [IDEA_DEFAULT_SITUATION_ID, ...filedDemand];
+    filedReviewSituations = filedDemand;
+    situationSource = filedDemand.length ? "author" : "inferred";
+    for (const c of checklistIdsForSituations(liveSituations)) {
+      checklists.add(c);
+    }
+
     const related = proposal.related_entries ?? [];
     if (related.length === 0) {
       damage_class = "none";
@@ -369,8 +407,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           checklists.add("existence_unknown");
         }
       }
-      if (damage_class === "selling_page") checklists.add("selling_page_figures");
-      if (damage_class === "new_public_content") checklists.add("new_content_brand");
+      // Brand / selling-figure ship gates stay on follow-up edits — not on idea accept.
     }
   }
 
@@ -426,23 +463,48 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   const summaryParts = [meta.situation_description];
+  if (proposal.kind === "idea") {
+    if (liveSituations.includes("broken_url")) {
+      summaryParts[0] = BROKEN_URL_STAFF_NOTE;
+    } else if (liveSituations.includes("anticipated_demand")) {
+      summaryParts[0] = ANTICIPATED_DEMAND_STAFF_NOTE;
+    } else if (liveSituations.includes("fast_decay_news")) {
+      summaryParts[0] = FAST_DECAY_NEWS_STAFF_NOTE;
+    } else {
+      summaryParts[0] = IDEA_OPPORTUNITY_HARM_STAFF_NOTE;
+    }
+  }
   if (block_apply) summaryParts.push("Apply is blocked — target no longer exists.");
   if (situation_changed_since_filed) {
     summaryParts.push(`Changed since filed (was ${snapshot!.damage_class}).`);
   }
   const hasTitleDescChecklist = orderedIds.some((t) => t.id === "title_description_ctr");
   const hasInternalLinksChecklist = orderedIds.some((t) => t.id === "internal_links");
+  const hasFunnelChecklist = orderedIds.some((t) => t.id === "funnel_persona_product_stage");
+  const hasLocaleTranslationChecklist = orderedIds.some((t) => t.id === "locale_translation");
   if (hasTitleDescChecklist && !block_apply) {
     summaryParts.push(TITLE_DESCRIPTION_STAFF_NOTE);
   }
   if (hasInternalLinksChecklist && !block_apply) {
     summaryParts.push(INTERNAL_LINKS_STAFF_NOTE);
   }
+  if (hasFunnelChecklist && !block_apply) {
+    summaryParts.push(FUNNEL_CLASSIFICATION_STAFF_NOTE);
+  }
+  if (hasLocaleTranslationChecklist && !block_apply) {
+    summaryParts.push(LOCALE_TRANSLATION_STAFF_NOTE);
+  }
   for (const note of staffNotesForSituations(liveSituations)) {
     if (
       !block_apply &&
       note !== TITLE_DESCRIPTION_STAFF_NOTE &&
       note !== INTERNAL_LINKS_STAFF_NOTE &&
+      note !== FUNNEL_CLASSIFICATION_STAFF_NOTE &&
+      note !== LOCALE_TRANSLATION_STAFF_NOTE &&
+      note !== IDEA_OPPORTUNITY_HARM_STAFF_NOTE &&
+      note !== ANTICIPATED_DEMAND_STAFF_NOTE &&
+      note !== FAST_DECAY_NEWS_STAFF_NOTE &&
+      note !== BROKEN_URL_STAFF_NOTE &&
       !summaryParts.includes(note)
     ) {
       summaryParts.push(note);
@@ -451,12 +513,28 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
-    : meta.situation_description;
+    : createsAttached
+      ? "Applying creates this post. The slug was reserved by the accepted idea. The shared template does not change."
+      : proposal.kind === "idea"
+        ? liveSituations.includes("broken_url")
+          ? BROKEN_URL_STAFF_NOTE
+          : liveSituations.includes("anticipated_demand")
+            ? ANTICIPATED_DEMAND_STAFF_NOTE
+            : liveSituations.includes("fast_decay_news")
+              ? FAST_DECAY_NEWS_STAFF_NOTE
+              : IDEA_OPPORTUNITY_HARM_STAFF_NOTE
+        : meta.situation_description;
   if (hasTitleDescChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
   }
   if (hasInternalLinksChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${INTERNAL_LINKS_STAFF_NOTE}`;
+  }
+  if (hasFunnelChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${FUNNEL_CLASSIFICATION_STAFF_NOTE}`;
+  }
+  if (hasLocaleTranslationChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${LOCALE_TRANSLATION_STAFF_NOTE}`;
   }
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
@@ -474,9 +552,17 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     ...(siblings.length ? { related_open_proposals: siblings } : {}),
     summary: summaryParts.join(" "),
     staff_summary: {
-      badge_label: block_apply ? "Target missing" : meta.badge_label,
+      badge_label: block_apply
+        ? "Target missing"
+        : proposal.kind === "idea"
+          ? "Idea brief"
+          : meta.badge_label,
       situation_description: staffSituation,
-      risk: block_apply ? "Apply blocked — target gone." : meta.risk,
+      risk: block_apply
+        ? "Apply blocked — target gone."
+        : proposal.kind === "idea"
+          ? "Accept locks a brief only — no live YAML until a later edits proposal."
+          : meta.risk,
       undo: UNDO_COPY[undo_cost],
       ...(relatedStaff ? { related: relatedStaff } : {}),
     },
@@ -504,6 +590,7 @@ export function collectDamageClassesForMixedCheck(
     existence: ExistenceState;
     draftExists?: boolean;
     forIdea?: boolean;
+    createsEntry?: boolean;
   }>,
 ): DamageClass[] {
   const set = new Set<DamageClass>();
@@ -512,7 +599,7 @@ export function collectDamageClassesForMixedCheck(
     if (t.forIdea && t.existence === "missing" && !isSellingContentType(t.contentType)) {
       dc = "new_public_content";
     }
-    if (t.existence === "missing" && t.draftExists) {
+    if (t.existence === "missing" && (t.draftExists || t.createsEntry) && !isSellingContentType(t.contentType)) {
       dc = "new_public_content";
     }
     set.add(dc);

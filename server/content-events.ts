@@ -9,6 +9,7 @@ export {
   emitSiteBulkSynced,
   emitEntryLocalePromoted,
   emitEntryLocaleUnpublished,
+  emitClusterHubPathRewriteStarted,
 } from "./events/emit-entry-events";
 
 import { emitEvent } from "./events/event-store";

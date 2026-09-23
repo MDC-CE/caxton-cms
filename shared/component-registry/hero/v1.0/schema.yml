@@ -5,7 +5,7 @@ file: client/src/components/hero/Hero.tsx
 description: Main banner at the top of the page with title, subtitle, and call-to-action. Supports multiple layout variants.
 when_to_use: |
   Every page should start with a hero section. Choose the variant that best fits your content:
-  - singleColumn: Centered content with optional trust bar and award badges (best for program pages)
+  - singleColumn: Centered content with optional trust bar, award badges, image, or video (best for program pages)
   - showcase: 3-column layout with images on sides (best for landing pages)
   - productShowcase: Text on left with video on right (best for product/service introductions)
   - simpleTwoColumn: Image on left or right (media_at_right), text with CTAs (best for promotions, announcements)
@@ -69,7 +69,7 @@ variants:
     description: Two column layout with brand mark, text on left and video on right
     best_for: Product/service introductions, feature pages
   singleColumn:
-    description: Centered single column with badge, title, subtitle, CTAs, trust bar, and award badges
+    description: Centered single column with badge, title, subtitle, CTAs, trust bar, and optional image or video
     best_for: Program pages, course pages
   showcase:
     description: 3-column layout with images on left/right, centered content with trust bar
@@ -958,7 +958,7 @@ variant_props:
                     - contains
                 value:
                   type: string
-                  required: false
+                  required: true
             conversion_name:
               type: string
               required: false
@@ -1191,6 +1191,25 @@ variant_props:
         with_shadow_border:
           type: boolean
           required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
     image:
       type: string
       required: false
@@ -1407,6 +1426,25 @@ variant_props:
         with_shadow_border:
           type: boolean
           required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
     media:
       type: object
       required: false
@@ -2279,7 +2317,7 @@ variant_props:
                         - contains
                     value:
                       type: string
-                      required: false
+                      required: true
                 conversion_name:
                   type: string
                   required: false
@@ -2901,6 +2939,25 @@ variant_props:
         with_shadow_border:
           type: boolean
           required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
     video_id:
       type: string
       required: false
@@ -3099,6 +3156,9 @@ variant_props:
           type: boolean
           required: false
       description: "Call-to-action buttons (recommended: 2 buttons max)"
+    cta_below_media:
+      type: boolean
+      required: false
     trust_bar:
       type: object
       required: false
@@ -3156,6 +3216,56 @@ variant_props:
     image_width:
       type: string
       required: false
+    video:
+      type: object
+      required: false
+      properties:
+        url:
+          type: string
+          required: false
+        ratio:
+          type: string
+          required: false
+        mobile_ratio:
+          type: string
+          required: false
+        width:
+          type: string
+          required: false
+        muted:
+          type: boolean
+          required: false
+        autoplay:
+          type: boolean
+          required: false
+        loop:
+          type: boolean
+          required: false
+        preview_image_url:
+          type: string
+          required: false
+        with_shadow_border:
+          type: boolean
+          required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
   showcase:
     subtitle:
       type: string
@@ -3298,6 +3408,25 @@ variant_props:
         with_shadow_border:
           type: boolean
           required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
     cta_buttons:
       type: array
       required: false

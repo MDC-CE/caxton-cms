@@ -18,6 +18,7 @@ import {
   isFunnelFieldPath,
   prepareAndWriteFunnelMerge,
   readFunnelBlockFromFile,
+  stripFunnelFromAllLocaleYamls,
   type FunnelFieldUpdate,
   type FunnelMergePatch,
 } from "./funnel-fields";
@@ -354,6 +355,17 @@ export async function bulkUpdateEntryAttributes(request: BulkEntryAttrRequest): 
 
     if (funnelWrite.relativePath) {
       markFileAsModified(funnelWrite.relativePath, request.author ?? "staff", undefined, request.contentRoot);
+    }
+    const stripped = stripFunnelFromAllLocaleYamls(
+      contentType,
+      slug,
+      contentRoot,
+      request.author ?? "staff",
+    );
+    if (stripped.strippedRelativePaths.length > 0) {
+      warnings.push(
+        `funnel_stripped_from_locale_yamls: Removed orphan funnel: from ${stripped.strippedRelativePaths.join(", ")}`,
+      );
     }
 
     const wrote = [...(metaRow?.wrote ?? []), "funnel"];

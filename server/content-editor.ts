@@ -51,7 +51,7 @@ function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
 import type { EditOperation } from "@shared/schema";
 import { normalizeLocale, getSupportedLocales, getDefaultLocale } from "./settings";
 import { markFileAsModified } from "./sync-state";
-import { emitEntryDeleted } from "./content-events";
+import { emitClusterHubPathRewriteStarted, emitEntryDeleted } from "./content-events";
 import { getContentWriteContext } from "./write-context";
 import { buildEntryKey } from "../scripts/validation/shared/entryKey";
 import { contentIndex, ContentIndex } from "./content-index";
@@ -74,7 +74,7 @@ import {
   isAllowlistedSectionFieldPath,
 } from "./shared-layout-sync";
 import { extractSeoUpdatesFromOps } from "./seo-fields";
-import { writeSeoFields } from "./seo-index";
+import { writeSeoFields, clusterHasPillarPathPointers } from "./seo-index";
 import {
   validateTouchedJsonFieldsInDocument,
 } from "./json-field-validate";
@@ -687,12 +687,45 @@ export async function editContent(request: ContentEditRequest): Promise<{
           "Locale URL slug cannot be changed via update_field. Use POST /api/content/rename-slug instead.",
       };
     }
+    if (
+      op.action === "update_field" &&
+      typeof op.path === "string" &&
+      (op.path === "funnel" || op.path.startsWith("funnel."))
+    ) {
+      return {
+        success: false,
+        error:
+          "funnel.* must write _common.yml via the Funnel API or applyFieldUpdates — not editContent (locale YAML).",
+      };
+    }
   }
   
   try {
     // Attached shared-layout: reject entry structural overlays and layout/menu writes
     const attachedStructuralErr = rejectAttachedStructuralEdit(contentType, slug, contentRoot);
     if (attachedStructuralErr) {
+      const hasTopologySectionOps = operations.some((op) => {
+        if (
+          op.action === "add_section" ||
+          op.action === "remove_section" ||
+          op.action === "reorder_sections" ||
+          op.action === "duplicate_section" ||
+          op.action === "replace_all_sections"
+        ) {
+          return true;
+        }
+        if (
+          (op.action === "add_item" || op.action === "remove_item") &&
+          (op as { path?: string }).path === "sections"
+        ) {
+          return true;
+        }
+        return false;
+      });
+      // Topology changes must target the type shell — never the attached overlay.
+      if (hasTopologySectionOps && !isTypeLayoutTarget(request.layoutTarget)) {
+        return { success: false, error: attachedStructuralErr };
+      }
       const hasSectionOps = operations.some((op) => {
         if (
           op.action === "reorder_sections" ||
@@ -711,27 +744,6 @@ export async function editContent(request: ContentEditRequest): Promise<{
       });
       if (request.layoutTarget === "entry" && hasSectionOps) {
         return { success: false, error: attachedStructuralErr };
-      }
-      if (hasSectionOps && !isTypeLayoutTarget(request.layoutTarget)) {
-        // Per-entry file writes of sections/layout are forbidden when attached
-        const onlyEntryLayer =
-          request.layoutTarget === "entry" ||
-          operations.every((op) => {
-            if (op.action === "update_field") {
-              const p = (op as { path?: string }).path || "";
-              return p === "layout" || p.startsWith("layout.") || p.startsWith("sections");
-            }
-            return (
-              op.action === "reorder_sections" ||
-              op.action === "update_section" ||
-              op.action === "replace_all_sections" ||
-              op.action === "add_item" ||
-              op.action === "remove_item"
-            );
-          });
-        if (onlyEntryLayer && request.layoutTarget === "entry") {
-          return { success: false, error: attachedStructuralErr };
-        }
       }
       // Always reject layout field updates on attached entries (even without layoutTarget)
       const hasLayoutWrite = operations.some(
@@ -2710,10 +2722,12 @@ export async function renameContentSlug(
 ): Promise<ContentLifecycleResult<{
   success: boolean; folderSlug: string; oldSlug: string; newSlug: string;
   oldUrl: string; newUrl: string; locale: string; redirectCreated: boolean; routed: boolean;
+  clusterRewireQueued: boolean;
 }>> {
   const { contentType, folderSlug, locale, newSlug, createRedirect = false, enforceRedirectPolicy = false, author } = input;
   const ci = input.ci ?? contentIndex;
   const rootName = input.contentRootName ?? ci.contentRootName ?? getDefaultContentRootName();
+  let clusterRewireQueued = false;
 
   if (!contentType || !folderSlug || !locale || !newSlug) {
     return { success: false, statusCode: 400, error: "Missing required fields: contentType, folderSlug, locale, newSlug" };
@@ -2823,11 +2837,34 @@ export async function renameContentSlug(
   clearRedirectCache();
   invalidateContentCaches(contentType);
 
+  if (
+    oldUrl !== newUrl &&
+    clusterHasPillarPathPointers({
+      contentRoot: rootName,
+      oldPath: oldUrl,
+      hubContentType: contentType,
+      hubSlug: resolvedFolderSlug,
+      hubLocale: effectiveLocale,
+    })
+  ) {
+    emitClusterHubPathRewriteStarted({
+      site: rootName,
+      contentType,
+      slug: resolvedFolderSlug,
+      locale: effectiveLocale,
+      oldUrl,
+      newUrl,
+      author,
+    });
+    clusterRewireQueued = true;
+  }
+
   return {
     success: true,
     data: {
       success: true, folderSlug: resolvedFolderSlug, oldSlug: currentSlug,
       newSlug, oldUrl, newUrl, locale: effectiveLocale, redirectCreated: !!createRedirect, routed,
+      clusterRewireQueued,
     },
   };
 }

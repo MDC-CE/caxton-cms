@@ -5,6 +5,330 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-22"
+    summary: "MCP withdraw is same proposer username only"
+    agent_impact:
+      - "update_proposal action withdraw succeeds only when your author username matches proposer_username (case-insensitive). Model and role do not matter."
+      - "Another MCP author gets not_proposer. Staff UI editors may still withdraw any open proposal."
+      - "Reconnect MCP if you cache tool/docs text."
+    tools_changed: false
+    paths:
+      - server/routes/proposals.ts
+      - server/content-proposals/service.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+
+  - date: "2026-09-21"
+    summary: "Idea demand labels + get_runtime_issues for broken_url briefs"
+    agent_impact:
+      - "Ideas may declare one review_situations demand label: anticipated_demand (lasting queries after launch; empty volume OK), fast_decay_news (quick reject), or broken_url (paste get_runtime_issues proof). idea_opportunity_harm stays always-on. set_review_situations works on open ideas for those labels."
+      - "New read tool get_runtime_issues (kind:404) — metrics_view or proposals_review. Filters match Diagnostics Runtime issues. broken_url authors must call it first; reviewers confirm on discovery/checklist."
+      - "explain_site proposals subtopic broken-url. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/runtime-issues.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/broken-url-proposals.md
+      - shared/mcp-tool-catalog.ts
+
+  - date: "2026-09-21"
+    summary: "Accepted idea can implement a new attached post before YAML exists"
+    agent_impact:
+      - "File-based attached posts (blog): after an accepted idea locks the slug, propose_change edits with implements_proposal_id, review_situations [new_public_content], and field updates only — no variant. Apply creates {slug}/_common.yml and {locale}.yml and does not touch the shared template."
+      - "Do not call create_entry or add a draft for that new post. attached_no_draft, entry_not_found, and a stalled idea’s next_actions resubmit the field-edits packet. A missing database row is refused (database_entry_required); the idea can stay."
+      - "New URL-param values on apply need confirm_new_values: true after principal approval. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/shared-layout.md
+
+  - date: "2026-09-21"
+    summary: "Author rewrites ask for a re-check; needs_review lists that edits queue"
+    agent_impact:
+      - "awaiting_rereview also means the author rewrote entries or marked a blocker fixed, and no open blockers remain. Open blockers still stay blocked. Past rewrites before this deploy do not flip the bucket until the next stamp."
+      - "list_proposals needs_review:true returns open|partial edits in awaiting_rereview or no_feedback (not blocked, not escalated). proposal_stats.needs_review_edits is that count. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - server/content-proposals/attention.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-17"
+    summary: "Field write router — funnel.* always _common.yml; strip locale orphans"
+    agent_impact:
+      - "Proposal apply and update_fields funnel.* write live _common.yml (all languages), not locale YAML. locale/variant do not scope journey membership."
+      - "On funnel write, orphan top-level funnel: is stripped from every language file for that page. Warnings: funnel_locale_agnostic, funnel_stripped_from_locale_yamls, funnel_live_despite_variant."
+      - "editContent rejects funnel.* (use update_fields / Funnel tab). Reconnect MCP for updated apply behavior."
+    tools_changed: true
+    paths:
+      - server/field-write-router.ts
+      - server/funnel-fields.ts
+      - server/content-proposals/service.ts
+      - server/content-editor.ts
+      - mcp-server/tools/pages.ts
+      - server/bulk-update-entry-attributes.ts
+
+  - date: "2026-09-17"
+    summary: "Slug rename queues async cluster pillar_path rewire for spokes"
+    agent_impact:
+      - "After live slug rename, if seo-index still has entries with seo.pillar_path equal to the old URL, a background cluster_hub_path_rewrite job updates those fields to the new hub URL (exact match only; body links unchanged)."
+      - "update_fields slug rename warnings/side_effects report clusterRewireQueued; STALE_PILLAR_PATH diagnostics flag leftover old URLs that only reach the hub via redirect."
+      - "Reconnect MCP for updated slug-rename envelope."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/content-editor.ts
+      - server/seo-index.ts
+      - server/jobs/definitions/cluster-hub-path-rewrite.ts
+      - scripts/validation/validators/seo-cluster.ts
+
+  - date: "2026-09-17"
+    summary: "list_proposals kpi_granularity today + week = last 7 days"
+    agent_impact:
+      - "kpi_granularity accepts today | day | week. today = hourly UTC stock for the current day (computed, cached ≤15m, not written to proposal_kpi_daily)."
+      - "week is last 7 completed UTC days through yesterday (day keys) — not ISO week rollup. day remains ≈28 completed days."
+      - "by_kind_status on proposal_stats stays live site-wide stock. Reconnect MCP for updated enum."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - server/content-proposals/kpi-history.ts
+      - server/routes/proposals.ts
+      - client/src/components/agents/ProposalKpiStrip.tsx
+
+  - date: "2026-09-17"
+    summary: "locale_translation review situation + proposals explain hub/subtopic"
+    agent_impact:
+      - "New review_situations id locale_translation (checklist locale_translation). Prefer declare on propose_change with variant + promote_on_apply. Soft-only polish without promote is not this pack."
+      - "Empty declaration + promote + variant + summary translation cues → infer locale_translation (warning locale_translation_undeclared). Declared without promote+variant → soft situation_ops_mismatch."
+      - "explain_site topic proposals is a hub: omit subtopic for index; pass subtopic (overview|reading|situations|internal-links|serp-title-description|funnel-classification|idea-opportunity-harm|translations). Legacy flat *-proposals ids still resolve with deprecation warning."
+      - "Conventions v27: §2c locale translation draft→promote. Reconnect MCP / re-bootstrap_agent."
+    tools_changed: true
+    paths:
+      - mcp-server/lib/explain-proposals.ts
+      - mcp-server/tools/explain.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals-translations.md
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/overview.md
+      - mcp-server/agent-conventions.md
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-discovery-path.ts
+
+  - date: "2026-09-17"
+    summary: "translate_entry always writes a non-public variant — never live YAML"
+    agent_impact:
+      - "translate_entry never merges into live {locale}.yml. Pass variant (default draft) or create_variant:true for a new named layer; url_slug is allowed on the variant (checked at promote)."
+      - "Merge refused when that variant has traffic > 0% (variant_has_traffic). Missing custom variant without create_variant → variant_missing. Rejects variant names live/template/single."
+      - "Go live via promote_variant / publish_draft or propose_change promote_on_apply. Reconnect MCP for updated tool schema."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/translate-entry.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/README.md
+
+  - date: "2026-09-17"
+    summary: "Idea review situation idea_opportunity_harm — opportunity vs site harm before accept"
+    agent_impact:
+      - "Open ideas always get review_situations:[idea_opportunity_harm] + checklist idea_opportunity_harm (Goal→Evidence→Fit→Brand→dilution) stacked with idea_accept. Do not pass review_situations on ideas."
+      - "list_proposals(idea) discovery_path: explain_site topic idea-opportunity-harm-proposals; with related_entries also get_entry_seo / list_seo_cluster_entries / get_organic_traffic (optional; available:false if uncapped; skip never blocks accept)."
+      - "new_content_brand / selling_page_figures no longer attach on ideas — ship gates stay on follow-up edits. Reconnect MCP for explain_site topic list."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-discovery-path.ts
+
+  - date: "2026-09-17"
+    summary: "SEO research visibility — discovery_path, get_entry_seo next_actions, organic prompts"
+    agent_impact:
+      - "get_entry_seo may return next_actions → get_or_refresh_seo_research action keyword_metrics when research is on and metrics are weak/stale."
+      - "SERP title/description proposal discovery_path adds optional seo_research_serp + seo_research_ideas (seo_edit). get_seo_cluster may attach discovery_path for thin/empty hubs."
+      - "Conventions v26: SEO research toolkit. Organic Ask Agent prompts mention action:serp. Reconnect MCP / re-bootstrap for explain + conventions."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/seo-clusters.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - mcp-server/lib/organic-traffic-mcp.ts
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/overview.md
+      - mcp-server/agent-conventions.md
+      - shared/ask-agent-prompts/organic-missing-serp.md
+
+  - date: "2026-09-17"
+    summary: "get_or_refresh_seo_research replaces refresh_keyword_metrics — multi-action cache + budgets"
+    agent_impact:
+      - "Hard rename: refresh_keyword_metrics → get_or_refresh_seo_research. Reconnect MCP so tools/list updates."
+      - "Actions: keyword_metrics | serp | keyword_ideas | competitors | keyword_gaps. Cache-first (7d/14d); force skips TTL only. Session+daily budgets; warn% → confirm_seo_research_budget; 100% → seo_research_budget_exhausted. No YAML kw_* writes."
+      - "Conventions v25: SEO_KEYWORD_RESEARCH_INCOMPLETE uses action keyword_metrics. Agent codes avoid vendor names (seo_research_inactive)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/seo-clusters.ts
+      - mcp-server/lib/seo-research-mcp.ts
+      - mcp-server/lib/seo-research-gate.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/seo.md
+      - shared/mcp-tool-catalog.ts
+      - server/seo-research-budget.ts
+      - server/seo-research-cache.ts
+
+  - date: "2026-09-16"
+    summary: "Idea follow-through agent visibility — conventions, explain blurbs, idea_accept"
+    agent_impact:
+      - "agent-conventions v24: accept needs accepted_entry; implements_proposal_id follow-up; list_proposals stalled / stalled_ideas."
+      - "explain_site proposals + reading-proposals catalog blurbs mention follow-through and implements_* refuses; idea_accept checklist/discovery think items require accepted_entry."
+      - "Reconnect MCP so explain_site tool description refreshes; re-bootstrap_agent for conventions + changelog."
+    tools_changed: true
+    paths:
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/tools/explain.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+
+  - date: "2026-09-16"
+    summary: "list_proposals KPI strip contract — site-wide by_kind_status, history opt-in"
+    agent_impact:
+      - "Unscoped list_proposals by_kind_status = staff KPI strip live counts (full nine buckets, zeros filled). kpi_history stays opt-in; Event Webhooks never on this tool."
+      - "Scoped/filtered list_proposals still returns site-wide by_kind_status with warning proposal_stats_site_wide — not the filtered page size."
+      - "Reconnect MCP so the updated list_proposals description is visible."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-16"
+    summary: "Idea follow-through — accepted_entry, implements_proposal_id, stalled_ideas"
+    agent_impact:
+      - "accept on ideas requires accepted_entry {contentType,slug,locale} (locks that page+locale) plus next_step. No YAML on accept."
+      - "Edits may pass implements_proposal_id; required when an accepted idea reserved that entry. One open implements per idea (idea_already_in_progress). Rejected follow-ups resurface stalled."
+      - "list_proposals stalled:true + proposal_stats.stalled_ideas for accepted ideas with no successful implements child. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
+    summary: "proposal_stats.by_kind_status + opt-in kpi_history stock series"
+    agent_impact:
+      - "proposal_stats now includes by_kind_status (live open/finished/rejected per kind; open includes partial; withdrawn omitted)."
+      - "list_proposals kpi_history=true attaches end-of-day stock through yesterday (kpi_granularity day|week, kpi_from/kpi_to). Warning kpi_history_stock explains stock vs flow."
+      - "Reconnect MCP so list_proposals schema refreshes. History is back-calculated from create/close dates (closed_at with updated_at fallback)."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/kpi-history.ts
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
+    summary: "funnel_classification review situation — persona → product → stage"
+    agent_impact:
+      - "New review_situations id funnel_classification (checklist funnel_persona_product_stage). Pure funnel.* ops infer this pack instead of body_copy_edit. Prefer declare on propose_change; explain_site topic funnel-classification-proposals."
+      - "Reviewer discovery_path adds list_products + get_product; score buyer persona → product binding → stage. products:all only when no better single-product persona fit. Soft batch ≤10. Reconnect MCP for enum/topic."
+      - "Funnel blockers: cite which cascade step fails (persona/product/stage) and the correct binding — breadth-only disagreement is not a reject."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/explain.ts
+      - mcp-server/explain/funnel-classification-proposals.md
+      - mcp-server/explain/review-situations.md
+      - mcp-server/explain/reading-proposals.md
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - server/content-proposals/review-context.ts
+      - client/src/components/agents/SituationReviewBadge.tsx
+
+  - date: "2026-09-16"
+    summary: "list_proposals attention filter + role-aware default sort"
+    agent_impact:
+      - "Scoped list_proposals defaults to sort=attention (reviewers: escalated → awaiting_rereview → no_feedback → blocked; create-only: blocked earlier) and open|partial when status omitted. Pass sort updated_at|created_at for chronology."
+      - "New filter attention + summary fields attention / resolved_blocker_count; stats.by_attention. Create-only may get attention_author_scope_hint without proposer_username/agent_session_id. Reconnect MCP."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/proposals.md
+      - server/content-proposals/attention.ts
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+
+  - date: "2026-09-16"
+    summary: "get_analytics_report traffic_source_conversions — leads by source/medium/campaign"
+    agent_impact:
+      - "New report traffic_source_conversions: sessions + Count-as-lead event counts by source/medium/campaign; default attribution session_last_click; first_user for TOFU; optional item_id filters leads only."
+      - "Warnings: no_lead_events_configured, leads_unattributed, leads_missing_item_id, attribution_fallback_traffic_source, lead_rate_channel_sessions. Reconnect MCP for new enum/args."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/analytics.ts
+      - mcp-server/explain/analytics.md
+      - server/analytics/reports.ts
+      - server/routes/analytics.ts
+
+  - date: "2026-09-16"
+    summary: "counts_as_lead on conversion events; product Purchases KPI in journey analytics"
+    agent_impact:
+      - "explain_site conversion_events catalog shows counts_as_lead (yes/no); unset shown as unset."
+      - "get_product_funnel_analytics returns lead_event_names, counts_as_lead_configured, and product.purchases (purchase is product-scoped only)."
+      - "Lead KPIs use tracking.conversion_events counts_as_lead (signup always on). Re-bootstrap after reconnect if catalog text looked stale."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/explain.ts
+      - mcp-server/tools/ecommerce.ts
+      - server/ecommerce/journey-analytics.ts
+      - server/settings.ts
+
+  - date: "2026-09-16"
+    summary: "Production plain /mcp teach + hard-deny; mcp_write_disabled guide"
+    agent_impact:
+      - "Production plain /mcp: mutates return role_connector_required with connector_guide.role_connectors + swarm_setup (one connection per role). bootstrap_agent / get_current_user expose primary_blocker. OAuth consent warns humans."
+      - "MCP write off (Security → Users): mcp_write_disabled + mcp_write_guide.course_of_action on bootstrap/get_current_user and direct mutates; propose-only remains. Precedence: unscoped prod > write-off > session/caps."
+      - "Reconnect MCP after role/write changes. Re-bootstrap_agent for playbook/conventions."
+    tools_changed: true
+    paths:
+      - mcp-server/lib/role-connector-guide.ts
+      - mcp-server/lib/tool-catalog.ts
+      - mcp-server/index.ts
+      - mcp-server/tools/user.ts
+      - mcp-server/tools/explain.ts
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/agent-conventions.md
+
+  - date: "2026-09-16"
+    summary: "Staff GitHub login returns to the multi-site host you started from"
+    agent_impact:
+      - "OAuth callback still uses SITE_URL (e.g. 4geeks.com); return_to may be absolute to another sites.yml domain (e.g. fl.4geeksacademy.com) so the staff session is minted there."
+      - "No GitHub App callback change required for sibling sites. Reconnect not required (no MCP tool change)."
+    paths:
+      - server/routes/staff-auth.ts
+      - client/src/hooks/useDebugAuth.ts
+      - server/private-html-auth.ts
+    tools_changed: false
+
   - date: "2026-09-16"
     summary: "Weblify split-root: MCP reads sites.yml from WEBLIFY_PROJECT_ROOT"
     agent_impact:

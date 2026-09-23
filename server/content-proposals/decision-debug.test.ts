@@ -45,6 +45,10 @@ function baseProposal(
     escalated_at: null,
     escalated_by: null,
     escalated_note: null,
+    accepted_entry: null,
+    implements_proposal_id: null,
+    author_content_at: null,
+    reviewer_action_at: null,
     ...overrides,
   };
 }

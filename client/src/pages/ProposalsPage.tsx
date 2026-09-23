@@ -79,6 +79,7 @@ import {
 } from "@/lib/proposalRejectKind";
 import { minLengthHint } from "@/lib/minLengthHint";
 import { ProposalListFiltersDialog } from "@/components/agents/ProposalListFiltersDialog";
+import { ProposalKpiStrip } from "@/components/agents/ProposalKpiStrip";
 import {
   ProposalListCard,
   ProposalListCardSkeleton,
@@ -89,11 +90,18 @@ import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
 import {
   ProposalSituationCallout,
   ReviewSituationsEditor,
+  STAFF_IDEA_DEMAND_SITUATION_OPTIONS,
   type ReviewContextPayload,
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { BlockersBadge } from "@/components/agents/BlockersBadge";
+import {
+  ProposalKindBadge,
+  ProposalProgressLabel,
+  ProposalStatusLabel,
+} from "@/components/agents/ProposalExplainBadges";
 import { EventWebhooksKpiButton } from "@/components/pipeline/EventWebhooksDialog";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { AskActivityGateCopy } from "@/components/DebugBubble/SolveWithAiAgentDropdown";
@@ -108,14 +116,17 @@ import { ToastAction } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { proposalStatusUi } from "@/lib/proposalStatusUi";
 import {
+  asIssueActor,
   formatProposalRelativeUpdatedAt,
   proposalAttributionLines,
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
+import { formatIssueActorLine } from "@/lib/formatIssueActor";
 import { McpCopyButton } from "@/components/mcp/McpSetupUi";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
+  PROPOSAL_ATTENTION_OPTIONS,
   PROPOSAL_KIND_OPTIONS,
   PROPOSAL_SORT_PRESETS,
   PROPOSAL_STATUS_OPTIONS,
@@ -160,6 +171,8 @@ type BlockerRow = {
   created_at: number;
   resolve_note: string | null;
   resolved_by: string | null;
+  author_actor?: Record<string, unknown> | null;
+  resolved_by_actor?: Record<string, unknown> | null;
 };
 
 type RelatedEntryRef = {
@@ -179,6 +192,8 @@ type Proposal = {
   review_mode?: string;
   promote_on_apply?: boolean;
   open_blocker_count?: number;
+  resolved_blocker_count?: number;
+  attention?: string | null;
   no_auto_retry?: boolean;
   escalated?: boolean;
   escalated_at?: number | null;
@@ -190,6 +205,8 @@ type Proposal = {
   closed_at?: number | null;
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
+  accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  implements_proposal_id?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
   related_issue_ids: string[];
@@ -257,8 +274,8 @@ function reviewModeExplain(p: Proposal): { title: string; body: string; advanced
     };
   }
   return {
-    title: "Suggested edits — not live until you Approve",
-    body: "Approving writes the remaining suggested field changes onto the live page for each open entry. Until then, visitors still see the current live content. There is usually no separate draft to preview unless an entry lists a variant.",
+    title: "Soft suggestion only",
+    body: "Nothing is live until you apply. Approving writes the suggested field changes onto the live page for each open entry. There is no separate draft page to preview unless an entry lists a variant.",
     advanced: [
       "Default soft path: no draft_backed promote and no variant target.",
       "Apply is still four-eyes — the proposer cannot approve their own edits.",
@@ -396,305 +413,6 @@ function previewHref(entry: EntryRow): string | null {
   return `/private/preview/${encodeURIComponent(entry.contentType)}/${encodeURIComponent(entry.slug)}?locale=${encodeURIComponent(entry.locale)}&force_variant=${encodeURIComponent(entry.variant)}`;
 }
 
-function proposalStatusExplain(
-  status: string,
-  kind: string,
-): { title: string; body: string; advanced: string[] } {
-  if (status === "open" && kind === "notes") {
-    return {
-      title: "Still being tracked",
-      body: "This handoff is on the open list as a reminder. Leave it open if work still needs doing, Claim if you are working it, or Close with a reason when you stop tracking it. Open does not change the live site.",
-      advanced: [
-        "Status stays open until Close, Withdraw, or Reject finishes the proposal.",
-        "No auto-retry (if on) only applies while the handoff stays open.",
-      ],
-    };
-  }
-  if (status === "open" && kind === "idea") {
-    return {
-      title: "Waiting for a greenlight",
-      body: "This is a brief, not a publish. Accept greenlights the idea with a next step; park it if you are stopping tracking. Open by itself does not change the live site.",
-      advanced: [
-        "Needs-change notes block Accept until they are cleared.",
-        "Accept is four-eyes for MCP roles; staff UI can always Accept.",
-      ],
-    };
-  }
-  if (status === "open") {
-    return {
-      title: "Waiting for review",
-      body: "Suggested changes are not live yet. Someone else with edit access can Approve to apply them, or Reject. Open by itself does not change the live site.",
-      advanced: [
-        "Needs-change notes block Approve until the claimant marks them done.",
-        "Apply/Reject are four-eyes: the proposer cannot approve their own edits.",
-      ],
-    };
-  }
-  if (status === "partial") {
-    return {
-      title: "Partly applied",
-      body: "Some suggested entries from this proposal are already live; others still need Approve. The live site only changed for the entries that were applied.",
-      advanced: ["Remaining open entries can still be applied or the proposal can be rejected/withdrawn."],
-    };
-  }
-  if (status === "finished" && kind === "notes") {
-    return {
-      title: "Closed",
-      body: "This handoff is finished and off the open list. Closing did not change the live site or complete linked issues by itself.",
-      advanced: ["Close reason and note are stored on the proposal for later context."],
-    };
-  }
-  if (status === "finished" && kind === "idea") {
-    return {
-      title: "Finished",
-      body: "This idea is off the open list — either accepted with a next step, or parked with a reason. Nothing on the live site changed from this card alone.",
-      advanced: ["Accept stores close_reason accepted plus the next-step note; park uses wont_fix, tracked_elsewhere, or other."],
-    };
-  }
-  if (status === "finished") {
-    return {
-      title: "Finished",
-      body: "This proposal’s remaining work is done. Applied entries are live for their locales; nothing else is waiting on this card.",
-      advanced: ["Finished clears any active claim on the proposal."],
-    };
-  }
-  if (status === "rejected") {
-    return {
-      title: "Rejected",
-      body: "A reviewer rejected this proposal. It is no longer waiting for Approve. Reject does not undo entries that were already applied earlier. The reason and note stay on this card for the next agent.",
-      advanced: [
-        "Reject is for bad/impossible/illegal/harmful ideas — not polish (use Needs changes).",
-        "A later proposal may link here as a replacement.",
-      ],
-    };
-  }
-  if (status === "withdrawn") {
-    return {
-      title: "Withdrawn",
-      body: "The proposer pulled this back. It is no longer waiting for review or tracking as an open handoff.",
-      advanced: ["Withdraw does not change the live site."],
-    };
-  }
-  return {
-    title: status || "Unknown status",
-    body: "This status is not one of the usual proposal states.",
-    advanced: [],
-  };
-}
-
-function ProposalStatusLabel({
-  status,
-  kind,
-  label,
-  className,
-}: {
-  status: string;
-  kind: string;
-  label: string;
-  className?: string;
-}) {
-  const [advanced, setAdvanced] = useState(false);
-  const explain = proposalStatusExplain(status, kind);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex shrink-0 text-xs font-medium hover-elevate rounded-sm px-0.5 -mx-0.5",
-            className,
-          )}
-          data-testid="badge-proposal-status"
-          aria-label={`${label} — what this means`}
-        >
-          {label}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-proposal-status">
-        <p className="font-medium text-foreground">{explain.title}</p>
-        <p className="text-muted-foreground leading-5">{explain.body}</p>
-        {explain.advanced.length > 0 ? (
-          <>
-            <button
-              type="button"
-              className="text-xs text-primary hover:underline"
-              data-testid="button-proposal-status-advanced"
-              onClick={() => setAdvanced((v) => !v)}
-            >
-              {advanced ? "Hide advanced" : "Read more (advanced)"}
-            </button>
-            {advanced ? (
-              <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-                {explain.advanced.map((line) => (
-                  <p key={line}>{line}</p>
-                ))}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function HandoffKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-handoff"
-          aria-label="Handoff — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Handoff
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-handoff-kind">
-        <p className="font-medium text-foreground">A reminder note, not a content change</p>
-        <p className="text-muted-foreground leading-5">
-          Someone (often a coding agent) hit a wall and left this open so the next person can pick it
-          up. There is nothing to Approve — leave it open as a reminder, Claim if you are working it,
-          or Close with a reason when you stop tracking it. Closing does not change the live site.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-handoff-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">notes</code> — no field
-              updates or draft promote on apply.
-            </p>
-            <p>
-              Close is not four-eyes (unlike Approve/Reject on Edits). Prefer an Edits proposal when
-              there is a concrete fix to review.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function EditsKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-edits"
-          aria-label="Edits — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Edits
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-edits-kind">
-        <p className="font-medium text-foreground">Proposed content changes to review</p>
-        <p className="text-muted-foreground leading-5">
-          Someone suggested field updates on the linked pages. Nothing on the live site changes until
-          a different person Approves. Reject leaves live unchanged. Use a Handoff when there is no
-          concrete fix to apply — only a reminder for the next person.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-edits-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">edits</code> — Approve
-              applies field updates and/or promotes a prepared draft; Reject does not write YAML.
-            </p>
-            <p>
-              Approve and Reject are four-eyes: the proposer cannot finish their own proposal. The
-              review-mode badge next to this one explains draft vs soft vs go-live.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function IdeaKindBadge() {
-  const [advanced, setAdvanced] = useState(false);
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex shrink-0"
-          data-testid="badge-proposal-kind-idea"
-          aria-label="Idea — what this means"
-        >
-          <Badge variant="outline" className="cursor-pointer font-normal hover-elevate">
-            Idea
-          </Badge>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 space-y-3 text-sm" align="start" data-testid="popover-idea-kind">
-        <p className="font-medium text-foreground">A brief to greenlight — not a publish</p>
-        <p className="text-muted-foreground leading-5">
-          This pitches work before any YAML change. Accept greenlights it with a next step. Needs-change
-          notes block Accept until cleared. A different agent role — or this staff UI — can Accept.
-          Agents pick a role under MCP Server → Connection.
-        </p>
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline"
-          data-testid="button-idea-kind-advanced"
-          onClick={() => setAdvanced((v) => !v)}
-        >
-          {advanced ? "Hide advanced" : "Read more (advanced)"}
-        </button>
-        {advanced ? (
-          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
-            <p>
-              Stored as proposal kind <code className="text-foreground">idea</code> — Accept finishes
-              with <code className="text-foreground">close_reason: accepted</code> and a next-step note;
-              it does not write content.
-            </p>
-            <p>
-              Park (Close) uses wont_fix, tracked_elsewhere, or other — not fixed_elsewhere. Staff UI
-              is always a different identity from MCP roles, so Accept stays available here.
-            </p>
-            <p>
-              Role connectors: Private → MCP Server → Connection → choose one or more roles → Choose this Role / Choose these Roles.
-            </p>
-          </div>
-        ) : null}
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function ProposalKindBadge({ kind }: { kind: string }) {
-  if (kind === "notes") return <HandoffKindBadge />;
-  if (kind === "idea") return <IdeaKindBadge />;
-  return <EditsKindBadge />;
-}
-
 function NoAutoRetryBadge({
   noAutoRetry,
   disabled,
@@ -776,7 +494,6 @@ export function ProposalListPanel() {
   const searchString = useSearch();
   const view = useMemo(() => parseProposalListSearch(searchString), [searchString]);
   const [qInput, setQInput] = useState(view.q);
-  const [advanced, setAdvanced] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pullProductionOpen, setPullProductionOpen] = useState(false);
   const [pullingProduction, setPullingProduction] = useState(false);
@@ -844,6 +561,12 @@ export function ProposalListPanel() {
       parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
     }
     if (view.filters.escalatedOnly) parts.push("Escalated");
+    if (view.filters.attention !== "all") {
+      parts.push(
+        PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === view.filters.attention)?.label ??
+          view.filters.attention,
+      );
+    }
     return parts.join(" · ");
   }, [
     view.filters.status,
@@ -853,6 +576,7 @@ export function ProposalListPanel() {
     view.filters.proposerActorRole,
     view.filters.agentSessionId,
     view.filters.escalatedOnly,
+    view.filters.attention,
   ]);
 
   const { data, isLoading } = useQuery({
@@ -885,6 +609,7 @@ export function ProposalListPanel() {
         error?: string;
       };
       await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals/kpis"] });
       toast({
         title: "Production proposals loaded",
         description: `Imported ${body.imported ?? 0} proposals from ${body.productionOrigin ?? "production"}.`,
@@ -902,32 +627,61 @@ export function ProposalListPanel() {
 
   return (
     <div className="space-y-5" data-testid="panel-agents-proposals">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="max-w-3xl min-w-0 flex-1">
-          <p className="text-sm leading-6 text-muted-foreground">
-            Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
-            open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
-            does not change the live site). Needs changes mean not ready to approve — use that for polish;
-            Reject only when the idea must not ship.
-          </p>
-          <Collapsible open={advanced} onOpenChange={setAdvanced}>
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" size="sm" className="h-auto px-0 mt-1 text-xs text-muted-foreground">
-                {advanced ? "Hide advanced" : "Read more (advanced)"}
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="text-xs text-muted-foreground space-y-1 mt-1">
-              <p>Stored in per-site SQLite (data/&lt;site&gt;/app.db). Exact fingerprint blocks clones; similar open proposals need confirm_distinct. One open proposal per draft variant.</p>
-              <p>Notes default to no auto-retry on linked issues. Close reasons: wont_fix, fixed_elsewhere, tracked_elsewhere, other. Apply/Reject are four-eyes; Close is not. MCP must claim before clearing no_auto_retry.</p>
-              <p>Issue panels only list proposals linked to that issue. This page lists everything.</p>
-            </CollapsibleContent>
-          </Collapsible>
-        </div>
-        <EventWebhooksKpiButton
-          className="w-full shrink-0 lg:w-64"
-          onClick={() => setLocation("/private/webhooks")}
-        />
-      </div>
+      <ProposalKpiStrip
+        kindFilter={view.filters.kind}
+        statusFilter={view.filters.status}
+        stalledOnly={view.filters.stalledOnly}
+        needsReviewOnly={view.filters.needsReviewOnly}
+        stats={data?.stats}
+        headers={headers}
+        onKindClick={(kind) =>
+          writeView({
+            filters: { ...view.filters, kind },
+            q: view.q,
+          })
+        }
+        onStatusClick={(status) =>
+          writeView({
+            filters: { ...view.filters, status },
+            q: view.q,
+          })
+        }
+        onStalledClick={() =>
+          writeView({
+            filters: {
+              ...view.filters,
+              stalledOnly: !view.filters.stalledOnly,
+              needsReviewOnly: false,
+              kind: "idea",
+              status: "finished",
+              attention: "all",
+            },
+            q: view.q,
+          })
+        }
+        onNeedsReviewClick={() => {
+          const next = !view.filters.needsReviewOnly;
+          writeView({
+            filters: {
+              ...view.filters,
+              needsReviewOnly: next,
+              ...(next
+                ? {
+                    kind: "edits" as const,
+                    stalledOnly: false,
+                    attention: "all" as const,
+                    sort: "attention" as const,
+                    sortDir: "desc" as const,
+                  }
+                : {}),
+            },
+            q: view.q,
+          });
+        }}
+        trailing={
+          <EventWebhooksKpiButton onClick={() => setLocation("/private/webhooks/hooks")} />
+        }
+      />
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <IconSearch
@@ -1171,6 +925,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [closeNote, setCloseNote] = useState("");
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [acceptNextStep, setAcceptNextStep] = useState("");
+  const [acceptContentType, setAcceptContentType] = useState("");
+  const [acceptSlug, setAcceptSlug] = useState("");
+  const [acceptLocale, setAcceptLocale] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectPending, setRejectPending] = useState(false);
   const [rejectKind, setRejectKind] = useState<ProposalRejectKindValue>("bad_idea");
@@ -1377,6 +1134,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     ? minLengthHint(closeNote, CLOSE_NOTE_MIN)
     : null;
   const acceptNextStepOk = acceptNextStep.trim().length >= ACCEPT_NEXT_STEP_MIN;
+  const acceptEntryOk =
+    acceptContentType.trim().length > 0 &&
+    acceptSlug.trim().length > 0 &&
+    acceptLocale.trim().length > 0;
   const acceptNextStepHint =
     acceptNextStep.trim().length > 0 ? minLengthHint(acceptNextStep, ACCEPT_NEXT_STEP_MIN) : null;
   const blockerHint =
@@ -1410,11 +1171,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     if (progress) {
       detailMeta.push({
         key: "progress",
-        node: (
-          <span className={progress.failed > 0 ? "font-medium text-destructive" : undefined}>
-            {progress.label}
-          </span>
-        ),
+        node: <ProposalProgressLabel progress={progress} className="text-xs" />,
       });
     }
     detailMeta.push({
@@ -1463,7 +1220,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     status={p.status}
                     kind={p.kind}
                     label={ui.label}
-                    className={ui.className}
+                    className={cn("text-xs", ui.className)}
                   />
                   <ProposalKindBadge kind={p.kind} />
                   {p.kind === "edits" ? (
@@ -1479,10 +1236,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     />
                   ) : null}
                   {blockersOpen ? (
-                    <Badge variant="destructive" className="gap-1 font-normal">
-                      <IconAlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
-                      {p.open_blocker_count} needs changes
-                    </Badge>
+                    <BlockersBadge
+                      count={p.open_blocker_count ?? 0}
+                      labelMode="needs_changes"
+                    />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}
                 </div>
@@ -1542,9 +1299,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     kind={p.kind}
                   />
                 ) : null}
-                {p.kind === "edits" && !isTerminal ? (
+                {(p.kind === "edits" || p.kind === "idea") && !isTerminal ? (
                   <ReviewSituationsEditor
-                    filedSituations={p.review_situations ?? []}
+                    mode={p.kind === "idea" ? "idea" : "edits"}
+                    filedSituations={
+                      p.kind === "idea"
+                        ? (p.review_situations ?? []).filter((id) =>
+                            STAFF_IDEA_DEMAND_SITUATION_OPTIONS.some((o) => o.id === id),
+                          )
+                        : (p.review_situations ?? [])
+                    }
                     liveSituations={reviewContext?.review_situations}
                     situationSource={reviewContext?.situation_source}
                     saving={mut.isPending}
@@ -1686,6 +1450,37 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     ))}
                   </div>
                 ) : null}
+                {p.kind === "idea" && p.accepted_entry ? (
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    data-testid="proposal-idea-accepted-entry"
+                  >
+                    <span className="text-xs text-muted-foreground">Locked page</span>
+                    <Badge
+                      variant="secondary"
+                      className="gap-1 font-mono font-normal max-w-full truncate"
+                      data-testid="badge-idea-accepted-entry"
+                    >
+                      {p.accepted_entry.contentType}/{p.accepted_entry.slug}
+                      <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
+                    </Badge>
+                  </div>
+                ) : null}
+                {p.kind === "edits" && p.implements_proposal_id ? (
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    data-testid="proposal-implements-idea"
+                  >
+                    <span className="text-xs text-muted-foreground">Implements idea</span>
+                    <Badge
+                      variant="outline"
+                      className="font-mono font-normal"
+                      data-testid="badge-implements-proposal"
+                    >
+                      {p.implements_proposal_id.slice(0, 8)}…
+                    </Badge>
+                  </div>
+                ) : null}
                 <ProposalMetaRow items={detailMeta} className="text-xs" />
               </div>
             </div>
@@ -1706,7 +1501,14 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 ) : null}
                 {showPrimaryIdeas ? (
                   <Button
-                    onClick={() => setAcceptOpen(true)}
+                    onClick={() => {
+                      const rel = p?.related_entries?.[0];
+                      setAcceptContentType(rel?.contentType ?? "");
+                      setAcceptSlug(rel?.slug ?? "");
+                      setAcceptLocale(rel?.locale ?? "");
+                      setAcceptNextStep("");
+                      setAcceptOpen(true);
+                    }}
                     disabled={mut.isPending || rejectPending || blockersOpen}
                     data-testid="button-accept-idea"
                   >
@@ -1954,7 +1756,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             </div>
           ) : null}
 
-          {!isTerminal ? (
+          {!isTerminal &&
+          (p.kind === "notes" ||
+            p.kind === "idea" ||
+            p.review_mode === "draft_backed" ||
+            p.promote_on_apply ||
+            p.review_mode === "soft_variant" ||
+            p.entries.some((e) => e.variant)) ? (
           <div className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm leading-6">
             <IconInfoCircle className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
             {p.kind === "notes" ? (
@@ -1984,15 +1792,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 items block approve; clearing them still requires a fresh preview — resolving means the
                 acceptance criteria were met, not “I disagree.”
               </p>
-            ) : p.review_mode === "soft_variant" || p.entries.some((e) => e.variant) ? (
+            ) : (
               <p>
                 Soft suggestion on a draft. Approving writes the proposed field changes into that draft —
                 it does not go live. Preview the draft before deciding.
-              </p>
-            ) : (
-              <p>
-                Soft suggestion only. Nothing is live until you apply. There is no separate draft page to
-                preview unless an entry lists a variant.
               </p>
             )}
           </div>
@@ -2212,18 +2015,23 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       <span aria-hidden className="text-muted-foreground/40">
                         ·
                       </span>
-                      <span>by {b.author}</span>
+                      <span>by {formatIssueActorLine(b.author, asIssueActor(b.author_actor))}</span>
                       <span aria-hidden className="text-muted-foreground/40">
                         ·
                       </span>
                       <span>{formatProposalRelativeUpdatedAt(b.created_at)}</span>
                     </div>
                     <p className="whitespace-pre-wrap leading-6">{b.body}</p>
-                    {b.resolve_note && (
-                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                        Resolved by {b.resolved_by}: {b.resolve_note}
+                    {b.resolved_by ? (
+                      <p className="text-xs text-muted-foreground">
+                        Resolved by {formatIssueActorLine(b.resolved_by, asIssueActor(b.resolved_by_actor))}
                       </p>
-                    )}
+                    ) : null}
+                    {b.resolve_note ? (
+                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                        {b.resolve_note}
+                      </p>
+                    ) : null}
                     {b.status === "open" && canResolveUi && (
                       <div className="space-y-2 pt-1">
                         <Textarea
@@ -2858,7 +2666,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             open={acceptOpen}
             onOpenChange={(open) => {
               setAcceptOpen(open);
-              if (!open) setAcceptNextStep("");
+              if (!open) {
+                setAcceptNextStep("");
+                setAcceptContentType("");
+                setAcceptSlug("");
+                setAcceptLocale("");
+              }
             }}
           >
             <DialogContent data-testid="dialog-accept-idea">
@@ -2867,13 +2680,45 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 <DialogDescription asChild>
                   <div className="space-y-2 text-sm text-muted-foreground">
                     <p>
-                      Accepting greenlights the brief and finishes this proposal. It does not publish
-                      or write YAML — record what should happen next.
+                      You’re greenlighting this brief and locking the page (and locale) this work
+                      will use. Accepting finishes the idea — it does not publish or write YAML.
                     </p>
                     <p>Open needs-change notes must be cleared first.</p>
                   </div>
                 </DialogDescription>
               </DialogHeader>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-accept-content-type">Content type</Label>
+                  <Input
+                    id="proposal-accept-content-type"
+                    value={acceptContentType}
+                    onChange={(e) => setAcceptContentType(e.target.value)}
+                    placeholder="blog"
+                    data-testid="input-accept-content-type"
+                  />
+                </div>
+                <div className="space-y-1 sm:col-span-1">
+                  <Label htmlFor="proposal-accept-slug">Slug</Label>
+                  <Input
+                    id="proposal-accept-slug"
+                    value={acceptSlug}
+                    onChange={(e) => setAcceptSlug(e.target.value)}
+                    placeholder="what-is-grok"
+                    data-testid="input-accept-slug"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-accept-locale">Locale</Label>
+                  <Input
+                    id="proposal-accept-locale"
+                    value={acceptLocale}
+                    onChange={(e) => setAcceptLocale(e.target.value)}
+                    placeholder="en"
+                    data-testid="input-accept-locale"
+                  />
+                </div>
+              </div>
               <div className="space-y-1">
                 <Label htmlFor="proposal-accept-next-step">Next step</Label>
                 <Textarea
@@ -2895,17 +2740,27 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 </Button>
                 <Button
                   type="button"
-                  disabled={mut.isPending || blockersOpen || !acceptNextStepOk}
+                  disabled={mut.isPending || blockersOpen || !acceptNextStepOk || !acceptEntryOk}
                   onClick={() => {
                     mut.mutate(
                       {
                         action: "accept",
-                        body: { next_step: acceptNextStep.trim() },
+                        body: {
+                          next_step: acceptNextStep.trim(),
+                          accepted_entry: {
+                            contentType: acceptContentType.trim(),
+                            slug: acceptSlug.trim(),
+                            locale: acceptLocale.trim(),
+                          },
+                        },
                       },
                       {
                         onSuccess: () => {
                           setAcceptOpen(false);
                           setAcceptNextStep("");
+                          setAcceptContentType("");
+                          setAcceptSlug("");
+                          setAcceptLocale("");
                         },
                       },
                     );

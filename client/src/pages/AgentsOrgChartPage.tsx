@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { Link, useLocation, useParams } from "wouter";
+import { useLocation, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
-import { IconArrowLeft, IconClipboardList, IconInfoCircle, IconLoader2, IconSearch } from "@tabler/icons-react";
+import { IconClipboardList, IconInfoCircle, IconLoader2, IconSearch } from "@tabler/icons-react";
 import { Geekchart } from "geekchart";
 import "geekchart/fonts.css";
 import { allowedToolNames } from "@shared/mcp-tool-catalog";
@@ -12,13 +12,14 @@ import {
   type AgenticSwarmRoleId,
 } from "@shared/agentic-swarm-roles";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { AgentIcon } from "@/components/pipeline/AgentIcon";
-import type { AgentId } from "@/components/pipeline/agentIcons";
+import { formatAgentLabel, type AgentId } from "@/components/pipeline/agentIcons";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import {
   AGENTS_PROPOSALS_BASE,
@@ -85,26 +86,91 @@ function escapeMermaidLabel(text: string): string {
     .trim();
 }
 
+/**
+ * Live role labels + tool counts; hierarchy from AGENTIC_SWARM_*.
+ * Short captions only (geekchart authoring): full descriptions live in the
+ * toolkit cards below. Orchestrator/publisher get DESIGN 5.1 path/accent roles.
+ */
 function buildSwarmMermaid(roles: Record<string, RoleDefinition>): string {
-  const lines: string[] = ["flowchart TD"];
+  // LR: hub → specialists → publisher reads left-to-right (TD stacked as one tall column).
+  const lines: string[] = ["flowchart LR"];
+  const present = new Set<AgenticSwarmRoleId>();
   for (const id of AGENTIC_SWARM_ROLE_IDS) {
     const role = roles[id];
     if (!role?.agentic) continue;
+    present.add(id);
     const tools = allowedToolNames(role.capabilities ?? []);
     const count = tools.length;
     const label = escapeMermaidLabel(role.label || id);
-    const desc = escapeMermaidLabel(role.description || "");
     const countLine = `${count} tool${count === 1 ? "" : "s"}`;
-    const nodeText = desc
-      ? `${label}<br/>${desc}<br/>${countLine}`
-      : `${label}<br/>${countLine}`;
-    lines.push(`  ${id}["${nodeText}"]`);
+    const roleClass =
+      id === "swarm_orchestrator" ? ":::path" : id === "publisher" ? ":::accent" : "";
+    lines.push(`  ${id}["${label}<br/>${countLine}"]${roleClass}`);
   }
   for (const { parent, child } of AGENTIC_SWARM_EDGES) {
-    if (!roles[parent]?.agentic || !roles[child]?.agentic) continue;
+    if (!present.has(parent) || !present.has(child)) continue;
     lines.push(`  ${parent} --> ${child}`);
   }
   return lines.join("\n");
+}
+
+function AgentsProposalsInfoPopover() {
+  const [advanced, setAdvanced] = useState(false);
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          aria-label="How proposals work"
+          data-testid="button-agents-proposals-info"
+        >
+          <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[min(24rem,calc(100vw-2rem))] max-h-[min(28rem,70vh)] overflow-y-auto space-y-2 text-sm text-muted-foreground leading-relaxed"
+      >
+        <p className="font-medium text-foreground">How proposals work</p>
+        <p>
+          Suggested entry changes wait for Approve or Reject (preview drafts first). Handoff notes stay
+          open when an agent hits a wall — leave them open as a reminder, or Close with a reason (that
+          does not change the live site). Needs changes mean not ready to approve — use that for polish;
+          Reject only when the idea must not ship.
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-auto px-0 text-xs text-muted-foreground"
+          data-testid="button-agents-proposals-info-advanced"
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          {advanced ? "Hide advanced" : "Read more (advanced)"}
+        </Button>
+        {advanced ? (
+          <div
+            className="space-y-1 text-xs text-muted-foreground"
+            data-testid="panel-agents-proposals-info-advanced"
+          >
+            <p>
+              Stored in per-site SQLite (data/&lt;site&gt;/app.db). Exact fingerprint blocks clones;
+              similar open proposals need confirm_distinct. One open proposal per draft variant.
+            </p>
+            <p>
+              Notes default to no auto-retry on linked issues. Close reasons: wont_fix, fixed_elsewhere,
+              tracked_elsewhere, other. Apply/Reject are four-eyes; Close is not. MCP must claim before
+              clearing no_auto_retry.
+            </p>
+            <p>Issue panels only list proposals linked to that issue. This page lists everything.</p>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function SwarmOrchestratorLogos() {
@@ -118,16 +184,22 @@ function SwarmOrchestratorLogos() {
   const agentId = ORCHESTRATOR_LOGO_CYCLE[index]!;
   return (
     <div
-      className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+      className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-lg border border-border bg-card px-4 py-3"
       data-testid="swarm-orchestrator-logos"
     >
-      <div className="relative flex h-10 w-10 items-center justify-center rounded-md bg-muted">
-        <AgentIcon agentId={agentId} size="lg" className="h-7 w-7 transition-opacity duration-300" />
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
+          <AgentIcon agentId={agentId} size="lg" className="h-7 w-7 transition-opacity duration-300" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">Swarm Orchestrator</p>
+          <p className="text-xs text-muted-foreground">{formatAgentLabel(agentId)}</p>
+        </div>
       </div>
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-foreground">Swarm Orchestrator</p>
-        <p className="text-xs text-muted-foreground capitalize">{agentId.replace(/-/g, " ")}</p>
-      </div>
+      <p className="max-w-xl text-xs leading-relaxed text-muted-foreground sm:text-right">
+        Any frontier agent can be your orchestrator — ChatGPT, Claude, Claude Code, Grok, Grok bot, and
+        most other popular labs. Pick the one you already use.
+      </p>
     </div>
   );
 }
@@ -196,8 +268,14 @@ function OrgChartPanel() {
             </p>
           ) : (
             <div className="overflow-x-auto" data-testid="agents-geekchart">
-              <figure className="geekchart mx-auto max-w-4xl">
-                <Geekchart source={mermaidSource} play="once" duration={1.2} />
+              <figure className="geekchart mx-auto w-full max-w-5xl">
+                <Geekchart
+                  source={mermaidSource}
+                  scene="geeks"
+                  play="once"
+                  duration={1.2}
+                  display={1024}
+                />
               </figure>
             </div>
           )}
@@ -297,18 +375,14 @@ export default function AgentsOrgChartPage() {
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
           <div className="flex items-start gap-4 min-w-0 flex-1">
-            <Button variant="ghost" size="icon" asChild data-testid="button-agents-back">
-              <Link href="/private/mcp-server">
-                <IconArrowLeft className="h-5 w-5" />
-              </Link>
-            </Button>
+            <PrivateHistoryBackButton data-testid="button-agents-back" />
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2">
                 <Bot className="h-5 w-5 text-muted-foreground" />
                 <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-agents-title">
                   Agents
                 </h1>
-                {activeTab === "orgchart" && (
+                {activeTab === "orgchart" ? (
                   <Popover>
                     <PopoverTrigger asChild>
                       <Button
@@ -342,6 +416,8 @@ export default function AgentsOrgChartPage() {
                       </p>
                     </PopoverContent>
                   </Popover>
+                ) : (
+                  <AgentsProposalsInfoPopover />
                 )}
               </div>
               <p className="text-sm text-muted-foreground">

@@ -2,6 +2,7 @@ import React from "react";
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  buildSlugRenamePreviewUrls,
   hijackDestination,
   isLiveUrlRedirectHijack,
   LiveUrlRedirectHijackBanner,
@@ -29,6 +30,61 @@ describe("resolveSeoLiveProbePath", () => {
   it("returns null when nothing usable", () => {
     expect(resolveSeoLiveProbePath({}, "")).toBeNull();
     expect(resolveSeoLiveProbePath({ livePath: "not-a-path" }, "relative")).toBeNull();
+  });
+});
+
+describe("buildSlugRenamePreviewUrls", () => {
+  const blogPattern = {
+    en: "/en/blog/:category/:slug",
+    es: "/es/blog/:category/:slug",
+  };
+
+  it("uses livePath and swaps trailing slug (resolves :category)", () => {
+    expect(
+      buildSlugRenamePreviewUrls({
+        seoData: { livePath: "/en/blog/trends-and-tech/4geeks-in-the-ai-era" },
+        canonicalUrl: "",
+        oldSlug: "4geeks-in-the-ai-era",
+        newSlug: "4geeks-in-the-ai-eraa",
+        urlPattern: blogPattern,
+        locale: "en",
+      }),
+    ).toEqual({
+      oldUrl: "/en/blog/trends-and-tech/4geeks-in-the-ai-era",
+      newUrl: "/en/blog/trends-and-tech/4geeks-in-the-ai-eraa",
+    });
+  });
+
+  it("works for simple /:locale/:slug live paths", () => {
+    expect(
+      buildSlugRenamePreviewUrls({
+        seoData: { livePath: "/en/coding-bootcamp" },
+        canonicalUrl: null,
+        oldSlug: "coding-bootcamp",
+        newSlug: "coding-bootcamps",
+        urlPattern: { en: "/en/:slug", es: "/es/:slug" },
+        locale: "en",
+      }),
+    ).toEqual({
+      oldUrl: "/en/coding-bootcamp",
+      newUrl: "/en/coding-bootcamps",
+    });
+  });
+
+  it("falls back to pattern when livePath and canonical are missing", () => {
+    expect(
+      buildSlugRenamePreviewUrls({
+        seoData: null,
+        canonicalUrl: "",
+        oldSlug: "old-post",
+        newSlug: "new-post",
+        urlPattern: blogPattern,
+        locale: "en",
+      }),
+    ).toEqual({
+      oldUrl: "/en/blog/:category/old-post",
+      newUrl: "/en/blog/:category/new-post",
+    });
   });
 });
 

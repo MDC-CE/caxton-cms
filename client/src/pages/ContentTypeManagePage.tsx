@@ -17,6 +17,8 @@ import {
   MANAGE_LIST_VIEW_DEFAULTS,
   parseManageListSearch,
   serializeManageListSearch,
+  type ManageListPublishDatePreset,
+  type ManageListStatusFilter,
   type ManageListViewMode,
   type ManageListViewState,
 } from "@/lib/content-type-manage-url";
@@ -24,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
@@ -138,6 +141,7 @@ interface StaticEntry {
   urls: Record<string, string>;
   versionCounts?: Record<string, number>;
   updated_at?: string | null;
+  published_at?: string | null;
   status?: "draft" | "published";
   draftVariant?: string;
   previewPath?: string;
@@ -397,24 +401,24 @@ function formatDate(dateStr: string | null | undefined): string {
   }
 }
 
-type UpdatedSortDir = "asc" | "desc" | null;
+type DateSortDir = "asc" | "desc" | null;
 
-function updatedAtSortMs(value: unknown): number {
+function dateSortMs(value: unknown): number {
   if (value == null || value === "") return Number.NaN;
   const ms = Date.parse(String(value));
   return Number.isNaN(ms) ? Number.NaN : ms;
 }
 
-function sortByUpdatedAt<T>(
+function sortByDateField<T>(
   list: T[],
-  dir: UpdatedSortDir,
+  dir: DateSortDir,
   getValue: (item: T) => unknown,
 ): T[] {
   if (!dir) return list;
   const factor = dir === "asc" ? 1 : -1;
   return [...list].sort((a, b) => {
-    const am = updatedAtSortMs(getValue(a));
-    const bm = updatedAtSortMs(getValue(b));
+    const am = dateSortMs(getValue(a));
+    const bm = dateSortMs(getValue(b));
     const aMissing = Number.isNaN(am);
     const bMissing = Number.isNaN(bm);
     if (aMissing && bMissing) return 0;
@@ -424,14 +428,18 @@ function sortByUpdatedAt<T>(
   });
 }
 
-function UpdatedAtSortHeader({
+function DateSortHeader({
+  label,
   dir,
   onToggle,
   className,
+  testId,
 }: {
-  dir: UpdatedSortDir;
+  label: string;
+  dir: DateSortDir;
   onToggle: () => void;
   className?: string;
+  testId: string;
 }) {
   const Icon = dir === "asc" ? ArrowUp : dir === "desc" ? ArrowDown : ArrowUpDown;
   return (
@@ -440,10 +448,10 @@ function UpdatedAtSortHeader({
         type="button"
         className="inline-flex items-center gap-1 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 rounded-sm"
         onClick={onToggle}
-        data-testid="button-sort-updated-at"
-        title="Sort by Updated"
+        data-testid={testId}
+        title={`Sort by ${label}`}
       >
-        Updated
+        {label}
         <Icon className="h-3.5 w-3.5 opacity-70" />
       </button>
     </th>
@@ -5917,11 +5925,16 @@ export default function ContentTypeManagePage() {
   const debouncedSearch = listView.q;
   const listPage = listView.page;
   const updatedSortDir = listView.updatedSortDir;
+  const publishedSortDir = listView.publishedSortDir;
   const tagFilters = listView.tagFilters;
-  const organicLocale = listView.organicLocale;
+  const listLocale = listView.locale;
   const organicMarket = listView.organicMarket;
   const organicSort = listView.organicSort;
   const organicSortDir = listView.organicSortDir;
+  const publishDatePreset = listView.publishDatePreset;
+  const publishDateFrom = listView.publishDateFrom;
+  const publishDateTo = listView.publishDateTo;
+  const statusFilter = listView.statusFilter;
 
   const writeListView = useCallback(
     (next: ManageListViewState) => {
@@ -6082,6 +6095,41 @@ export default function ContentTypeManagePage() {
   } | null>(null);
   const [openingDbEdit, setOpeningDbEdit] = useState(false);
 
+  const { data: localeSettings } = useQuery<LocaleSettings>({
+    queryKey: ["/api/settings/locales"],
+    staleTime: Infinity,
+  });
+
+  const localeDefault = localeSettings?.default_locale || "en";
+  /** Organic always needs a concrete locale; other perspectives omit locale when unset (all languages). */
+  const listLocaleEffective = listLocale || localeDefault;
+
+  const appendSharedListFilters = (params: URLSearchParams, opts?: { forceLocale?: string }) => {
+    if (opts?.forceLocale) {
+      params.set("locale", opts.forceLocale);
+    } else if (listLocale.trim()) {
+      params.set("locale", listLocale.trim());
+    }
+    if (publishDatePreset) {
+      params.set("pub", publishDatePreset);
+      if (publishDatePreset === "custom") {
+        if (publishDateFrom) params.set("pubFrom", publishDateFrom);
+        if (publishDateTo) params.set("pubTo", publishDateTo);
+      }
+    }
+    if (statusFilter && !(listPerspective === "default" && viewMode === "db")) {
+      params.set("status", statusFilter);
+    }
+  };
+
+  const sharedFilterQueryKey = [
+    listLocale,
+    publishDatePreset,
+    publishDateFrom,
+    publishDateTo,
+    statusFilter,
+  ] as const;
+
   const { data: allItemsData, isLoading: allLoading } = useQuery<ItemsResponse>({
     queryKey: [
       "/api/content-types",
@@ -6090,7 +6138,9 @@ export default function ContentTypeManagePage() {
       listPage,
       debouncedSearch,
       updatedSortDir,
+      publishedSortDir,
       tagFilters,
+      ...sharedFilterQueryKey,
     ],
     queryFn: () => {
       const params = new URLSearchParams({
@@ -6098,7 +6148,10 @@ export default function ContentTypeManagePage() {
         pageSize: String(MANAGE_LIST_PAGE_SIZE),
       });
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
-      if (updatedSortDir) {
+      if (publishedSortDir) {
+        params.set("sort", "published_at");
+        params.set("sortDir", publishedSortDir);
+      } else if (updatedSortDir) {
         params.set("sort", "updated_at");
         params.set("sortDir", updatedSortDir);
       }
@@ -6107,6 +6160,7 @@ export default function ContentTypeManagePage() {
           params.append(field, value);
         }
       }
+      appendSharedListFilters(params);
       return fetch(
         `/api/content-types/${contentType}/items?${params.toString()}`,
       ).then((r) => r.json());
@@ -6124,6 +6178,8 @@ export default function ContentTypeManagePage() {
       listPage,
       debouncedSearch,
       updatedSortDir,
+      publishedSortDir,
+      ...sharedFilterQueryKey,
     ],
     queryFn: () => {
       const params = new URLSearchParams({
@@ -6131,10 +6187,14 @@ export default function ContentTypeManagePage() {
         pageSize: String(MANAGE_LIST_PAGE_SIZE),
       });
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
-      if (updatedSortDir) {
+      if (publishedSortDir) {
+        params.set("sort", "published_at");
+        params.set("sortDir", publishedSortDir);
+      } else if (updatedSortDir) {
         params.set("sort", "updated_at");
         params.set("sortDir", updatedSortDir);
       }
+      appendSharedListFilters(params);
       return fetch(
         `/api/content-types/${contentType}/static-entries?${params.toString()}`,
       ).then((r) => r.json());
@@ -6150,6 +6210,7 @@ export default function ContentTypeManagePage() {
       "seo-entries",
       listPage,
       debouncedSearch,
+      ...sharedFilterQueryKey,
     ],
     queryFn: () => {
       const params = new URLSearchParams({
@@ -6157,6 +6218,7 @@ export default function ContentTypeManagePage() {
         pageSize: String(MANAGE_LIST_PAGE_SIZE),
       });
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
+      appendSharedListFilters(params);
       return fetch(
         `/api/content-types/${contentType}/seo-entries?${params.toString()}`,
       ).then((r) => r.json());
@@ -6178,6 +6240,7 @@ export default function ContentTypeManagePage() {
       "funnel-entries",
       listPage,
       debouncedSearch,
+      ...sharedFilterQueryKey,
     ],
     queryFn: () => {
       const params = new URLSearchParams({
@@ -6185,6 +6248,7 @@ export default function ContentTypeManagePage() {
         pageSize: String(MANAGE_LIST_PAGE_SIZE),
       });
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
+      appendSharedListFilters(params);
       return fetch(
         `/api/content-types/${contentType}/funnel-entries?${params.toString()}`,
       ).then((r) => r.json());
@@ -6194,14 +6258,6 @@ export default function ContentTypeManagePage() {
     refetchOnMount: "always",
     placeholderData: (prev) => prev,
   });
-
-  const { data: organicLocaleSettings } = useQuery<LocaleSettings>({
-    queryKey: ["/api/settings/locales"],
-    staleTime: Infinity,
-  });
-
-  const organicLocaleEffective =
-    organicLocale || organicLocaleSettings?.default_locale || "en";
 
   const {
     data: organicEntriesData,
@@ -6214,26 +6270,27 @@ export default function ContentTypeManagePage() {
       "organic-entries",
       listPage,
       debouncedSearch,
-      organicLocaleEffective,
+      listLocaleEffective,
       organicMarket,
       organicSort,
       organicSortDir,
+      ...sharedFilterQueryKey,
     ],
     queryFn: () => {
       const params = new URLSearchParams({
         page: String(listPage),
         pageSize: String(MANAGE_LIST_PAGE_SIZE),
-        locale: organicLocaleEffective,
         market: organicMarket,
         sort: organicSort,
         sortDir: organicSortDir,
       });
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
+      appendSharedListFilters(params, { forceLocale: listLocaleEffective });
       return fetch(
         `/api/content-types/${contentType}/organic-entries?${params.toString()}`,
       ).then((r) => r.json());
     },
-    enabled: listPerspective === "organic" && !!organicLocaleEffective,
+    enabled: listPerspective === "organic" && !!listLocaleEffective,
     staleTime: 0,
     refetchOnMount: "always",
     placeholderData: (prev) => prev,
@@ -6664,7 +6721,11 @@ export default function ContentTypeManagePage() {
         result = result.filter((p) => matchesFilter(p, field, value));
       }
     }
-    return sortByUpdatedAt(result, updatedSortDir, (p) => p.updated_at);
+    return sortByDateField(
+      result,
+      publishedSortDir ?? updatedSortDir,
+      (p) => (publishedSortDir ? p.published_at : p.updated_at),
+    );
   })();
 
   const semanticTotal = semanticFiltered.length;
@@ -6690,7 +6751,7 @@ export default function ContentTypeManagePage() {
     search !== debouncedSearch ||
     organicEntriesLoading ||
     (organicEntriesFetching && !organicEntriesData) ||
-    (listPerspective === "organic" && !organicLocaleEffective);
+    (listPerspective === "organic" && !listLocaleEffective);
 
   // Drop filter keys that aren't facets on this type (e.g. leftover from another content type).
   useEffect(() => {
@@ -7677,23 +7738,33 @@ export default function ContentTypeManagePage() {
   };
 
   const hasAuthorField = metaItems.some(p => p.author_name || p.author);
-  const hasPublishedAt = metaItems.some(p => p.published_at);
+
+  const cycleDateSortDir = (current: DateSortDir): DateSortDir =>
+    current === null ? "desc" : current === "desc" ? "asc" : null;
 
   const toggleUpdatedSort = () => {
-    const next =
-      updatedSortDir === null ? "desc" : updatedSortDir === "desc" ? "asc" : null;
-    writeListView({ ...listView, updatedSortDir: next, page: 1 });
+    writeListView({
+      ...listView,
+      updatedSortDir: cycleDateSortDir(updatedSortDir),
+      publishedSortDir: null,
+      page: 1,
+    });
+  };
+
+  const togglePublishedSort = () => {
+    writeListView({
+      ...listView,
+      publishedSortDir: cycleDateSortDir(publishedSortDir),
+      updatedSortDir: null,
+      page: 1,
+    });
   };
 
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         <div className="flex items-center gap-3 flex-wrap">
-          <Link href="/" className="inline-flex">
-            <Button variant="ghost" size="icon" data-testid="button-back-home">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back-home" iconClassName="h-4 w-4" />
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold" data-testid="text-page-title">{label} Management</h1>
             <p className="text-sm text-muted-foreground">
@@ -8385,13 +8456,26 @@ export default function ContentTypeManagePage() {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              {listPerspective === "organic" && (() => {
-                const organicLocaleDefault =
-                  organicLocaleSettings?.default_locale || "en";
+              {(() => {
                 const organicMarketDefault = "worldwide";
-                const organicFilterCount =
-                  (organicLocaleEffective !== organicLocaleDefault ? 1 : 0) +
-                  (organicMarket !== organicMarketDefault ? 1 : 0);
+                const showStatusFilter = !(listPerspective === "default" && viewMode === "db");
+                const languageActive =
+                  listPerspective === "organic"
+                    ? listLocaleEffective !== localeDefault
+                    : !!listLocale.trim();
+                const publishDateActive = publishDatePreset != null;
+                const statusActive = showStatusFilter && statusFilter != null;
+                const marketActive =
+                  listPerspective === "organic" && organicMarket !== organicMarketDefault;
+                const listFilterCount =
+                  (languageActive ? 1 : 0) +
+                  (publishDateActive ? 1 : 0) +
+                  (statusActive ? 1 : 0) +
+                  (marketActive ? 1 : 0);
+                const localeSelectValue =
+                  listPerspective === "organic"
+                    ? listLocaleEffective
+                    : listLocale.trim() || "__all__";
                 return (
                   <Popover>
                     <PopoverTrigger asChild>
@@ -8399,13 +8483,13 @@ export default function ContentTypeManagePage() {
                         variant="outline"
                         size="icon"
                         className="shrink-0 relative"
-                        title="Organic filters"
-                        data-testid="button-organic-filters"
+                        title="Filters"
+                        data-testid="button-list-filters"
                       >
                         <SlidersHorizontal className="h-4 w-4" />
-                        {organicFilterCount > 0 && (
+                        {listFilterCount > 0 && (
                           <span className="absolute -top-1 -right-1 h-3.5 w-3.5 rounded-full bg-primary text-primary-foreground text-[9px] flex items-center justify-center font-medium leading-none">
-                            {organicFilterCount}
+                            {listFilterCount}
                           </span>
                         )}
                       </Button>
@@ -8413,48 +8497,79 @@ export default function ContentTypeManagePage() {
                     <PopoverContent
                       side="bottom"
                       align="end"
-                      className="p-3 w-64"
-                      data-testid="organic-filter-bar"
+                      className="p-3 w-72"
+                      data-testid="list-filter-bar"
                     >
                       <div className="space-y-3">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-medium">Filters</p>
-                          {organicFilterCount > 0 && (
+                          {listFilterCount > 0 && (
                             <button
+                              type="button"
                               className="text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer underline underline-offset-2"
                               onClick={() => {
                                 writeListView({
                                   ...listView,
-                                  organicLocale: "",
-                                  organicMarket: organicMarketDefault,
+                                  locale: "",
+                                  publishDatePreset: null,
+                                  publishDateFrom: "",
+                                  publishDateTo: "",
+                                  statusFilter: showStatusFilter ? null : listView.statusFilter,
+                                  ...(listPerspective === "organic"
+                                    ? { organicMarket: organicMarketDefault }
+                                    : {}),
                                   page: 1,
                                 });
                               }}
-                              data-testid="button-clear-organic-filters"
+                              data-testid="button-clear-list-filters"
                             >
                               Clear all
                             </button>
                           )}
                         </div>
+                        <p className="text-[11px] text-muted-foreground leading-snug">
+                          Filters apply to this content type&apos;s list.
+                          {listPerspective === "organic"
+                            ? " Market only applies in Organic."
+                            : ""}
+                          {!showStatusFilter
+                            ? " Status is hidden on Database view — those rows do not use draft or variant traffic."
+                            : ""}
+                        </p>
                         <div className="space-y-1.5">
                           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
                             Language
                           </p>
                           <Select
-                            value={organicLocaleEffective}
+                            value={localeSelectValue}
                             onValueChange={(v) => {
-                              writeListView({ ...listView, organicLocale: v, page: 1 });
+                              if (listPerspective === "organic") {
+                                writeListView({
+                                  ...listView,
+                                  locale: v === localeDefault ? "" : v,
+                                  page: 1,
+                                });
+                              } else {
+                                writeListView({
+                                  ...listView,
+                                  locale: v === "__all__" ? "" : v,
+                                  page: 1,
+                                });
+                              }
                             }}
                           >
                             <SelectTrigger
                               className="h-8"
                               aria-label="Language"
-                              data-testid="select-organic-locale"
+                              data-testid="select-list-locale"
                             >
                               <SelectValue placeholder="Language" />
                             </SelectTrigger>
                             <SelectContent>
-                              {(organicLocaleSettings?.supported_locales ?? [
+                              {listPerspective !== "organic" && (
+                                <SelectItem value="__all__">All languages</SelectItem>
+                              )}
+                              {(localeSettings?.supported_locales ?? [
                                 { code: "en", label: "English" },
                                 { code: "es", label: "Spanish" },
                               ]).map((loc) => (
@@ -8477,39 +8592,170 @@ export default function ContentTypeManagePage() {
                         </div>
                         <div className="space-y-1.5">
                           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                            Market
+                            Publish date
                           </p>
                           <Select
-                            value={organicMarket}
+                            value={publishDatePreset ?? "__any__"}
                             onValueChange={(v) => {
-                              writeListView({ ...listView, organicMarket: v, page: 1 });
+                              const preset =
+                                v === "__any__"
+                                  ? null
+                                  : (v as Exclude<ManageListPublishDatePreset, null>);
+                              writeListView({
+                                ...listView,
+                                publishDatePreset: preset,
+                                publishDateFrom:
+                                  preset === "custom" ? publishDateFrom : "",
+                                publishDateTo: preset === "custom" ? publishDateTo : "",
+                                page: 1,
+                              });
                             }}
                           >
                             <SelectTrigger
                               className="h-8"
-                              data-testid="select-organic-market"
+                              aria-label="Publish date"
+                              data-testid="select-list-publish-date"
                             >
-                              <SelectValue placeholder="Market" />
+                              <SelectValue placeholder="Any time" />
                             </SelectTrigger>
                             <SelectContent>
-                              {(organicEntriesData?.markets?.length
-                                ? organicEntriesData.markets
-                                : [
-                                    {
-                                      id: "worldwide",
-                                      label: "Worldwide",
-                                      kind: "rollup" as const,
-                                      countries: [],
-                                    },
-                                  ]
-                              ).map((m) => (
-                                <SelectItem key={m.id} value={m.id}>
-                                  {m.label || m.id}
-                                </SelectItem>
-                              ))}
+                              <SelectItem value="__any__">Any time</SelectItem>
+                              <SelectItem value="today">Today</SelectItem>
+                              <SelectItem value="7d">Last 7d</SelectItem>
+                              <SelectItem value="28d">Last 28d</SelectItem>
+                              <SelectItem value="custom">Custom</SelectItem>
                             </SelectContent>
                           </Select>
+                          {publishDatePreset === "custom" && (
+                            <div className="grid grid-cols-2 gap-2 pt-1">
+                              <div className="space-y-1">
+                                <Label className="text-[10px] text-muted-foreground">Start</Label>
+                                <Input
+                                  type="date"
+                                  className="h-8"
+                                  value={publishDateFrom}
+                                  onChange={(e) => {
+                                    writeListView({
+                                      ...listView,
+                                      publishDateFrom: e.target.value,
+                                      page: 1,
+                                    });
+                                  }}
+                                  data-testid="input-list-pub-from"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-[10px] text-muted-foreground">End</Label>
+                                <Input
+                                  type="date"
+                                  className="h-8"
+                                  value={publishDateTo}
+                                  onChange={(e) => {
+                                    writeListView({
+                                      ...listView,
+                                      publishDateTo: e.target.value,
+                                      page: 1,
+                                    });
+                                  }}
+                                  data-testid="input-list-pub-to"
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
+                        {showStatusFilter && (
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                              Status
+                            </p>
+                            <Select
+                              value={statusFilter ?? "__any__"}
+                              onValueChange={(v) => {
+                                writeListView({
+                                  ...listView,
+                                  statusFilter:
+                                    v === "__any__"
+                                      ? null
+                                      : (v as Exclude<ManageListStatusFilter, null>),
+                                  page: 1,
+                                });
+                              }}
+                            >
+                              <SelectTrigger
+                                className="h-8"
+                                aria-label="Status"
+                                data-testid="select-list-status"
+                              >
+                                <SelectValue placeholder="Any status" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__any__">Any status</SelectItem>
+                                <SelectItem value="published">Published</SelectItem>
+                                <SelectItem value="pending_drafts">Pending Drafts</SelectItem>
+                                <SelectItem value="only_draft">Only Draft</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        {listPerspective === "organic" && (
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                              Market
+                            </p>
+                            <Select
+                              value={organicMarket}
+                              onValueChange={(v) => {
+                                writeListView({ ...listView, organicMarket: v, page: 1 });
+                              }}
+                            >
+                              <SelectTrigger
+                                className="h-8"
+                                data-testid="select-organic-market"
+                              >
+                                <SelectValue placeholder="Market" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {(organicEntriesData?.markets?.length
+                                  ? organicEntriesData.markets
+                                  : [
+                                      {
+                                        id: "worldwide",
+                                        label: "Worldwide",
+                                        kind: "rollup" as const,
+                                        countries: [],
+                                      },
+                                    ]
+                                ).map((m) => (
+                                  <SelectItem key={m.id} value={m.id}>
+                                    {m.label || m.id}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        <details className="pt-1">
+                          <summary
+                            className="text-[11px] text-violet-600 dark:text-violet-400 cursor-pointer hover:underline list-none"
+                            data-testid="button-list-filters-advanced"
+                          >
+                            Read more (advanced)
+                          </summary>
+                          <div className="mt-2 rounded-md border border-border bg-muted/40 p-2 space-y-1.5 text-[10px] text-muted-foreground">
+                            <p>
+                              Query keys: <code className="text-[10px]">locale</code>,{" "}
+                              <code className="text-[10px]">pub</code> /{" "}
+                              <code className="text-[10px]">pubFrom</code> /{" "}
+                              <code className="text-[10px]">pubTo</code>,{" "}
+                              <code className="text-[10px]">status</code>,{" "}
+                              <code className="text-[10px]">market</code> (Organic).
+                            </p>
+                            <p>
+                              Pending Drafts = live entries with at least one variant (including{" "}
+                              <code className="text-[10px]">draft</code>) at 0% traffic allocation.
+                            </p>
+                          </div>
+                        </details>
                       </div>
                     </PopoverContent>
                   </Popover>
@@ -9259,7 +9505,7 @@ export default function ContentTypeManagePage() {
                                         <OrganicShowQueriesPopover
                                           contentType={contentType}
                                           slug={entry.slug}
-                                          locale={organicLocaleEffective}
+                                          locale={listLocaleEffective}
                                           market={organicMarket}
                                           rowKey={rowKey}
                                         />
@@ -9350,7 +9596,18 @@ export default function ContentTypeManagePage() {
                         </th>
                         <th className="text-left px-4 py-3 font-medium text-muted-foreground">Title</th>
                         <th className="text-left px-4 py-3 font-medium text-muted-foreground">Locales</th>
-                        <UpdatedAtSortHeader dir={updatedSortDir} onToggle={toggleUpdatedSort} />
+                        <DateSortHeader
+                          label="Published"
+                          dir={publishedSortDir}
+                          onToggle={togglePublishedSort}
+                          testId="button-sort-published-at"
+                        />
+                        <DateSortHeader
+                          label="Updated"
+                          dir={updatedSortDir}
+                          onToggle={toggleUpdatedSort}
+                          testId="button-sort-updated-at"
+                        />
                         <th className="text-right px-4 py-3 font-medium text-muted-foreground">Link</th>
                       </tr>
                     </thead>
@@ -9425,6 +9682,9 @@ export default function ContentTypeManagePage() {
                                   })
                                 )}
                               </div>
+                            </td>
+                            <td className="px-4 py-3 text-muted-foreground" data-testid={`text-published-${entry.slug}`}>
+                              {formatDate(entry.published_at)}
                             </td>
                             <td className="px-4 py-3 text-muted-foreground" data-testid={`text-updated-${entry.slug}`}>
                               {formatDate(entry.updated_at)}
@@ -9737,11 +9997,19 @@ export default function ContentTypeManagePage() {
                             {idx === localeKey ? "Locales" : idx.charAt(0).toUpperCase() + idx.slice(1)}
                           </th>
                         ))}
-                        {hasPublishedAt && <th className="text-left px-4 py-3 font-medium text-muted-foreground hidden lg:table-cell">Published</th>}
-                        <UpdatedAtSortHeader
+                        <DateSortHeader
+                          label="Published"
+                          dir={publishedSortDir}
+                          onToggle={togglePublishedSort}
+                          className="text-left px-4 py-3 font-medium text-muted-foreground hidden lg:table-cell"
+                          testId="button-sort-published-at"
+                        />
+                        <DateSortHeader
+                          label="Updated"
                           dir={updatedSortDir}
                           onToggle={toggleUpdatedSort}
                           className="text-left px-4 py-3 font-medium text-muted-foreground hidden lg:table-cell"
+                          testId="button-sort-updated-at"
                         />
                         <th className="text-right px-4 py-3 font-medium text-muted-foreground">Link</th>
                       </tr>
@@ -9907,11 +10175,12 @@ export default function ContentTypeManagePage() {
                                 </td>
                               );
                             })}
-                            {hasPublishedAt && (
-                              <td className="px-4 py-3 text-muted-foreground hidden lg:table-cell">
-                                {formatDate(item.published_at)}
-                              </td>
-                            )}
+                            <td
+                              className="px-4 py-3 text-muted-foreground hidden lg:table-cell"
+                              data-testid={`text-published-${item.id || item.slug}`}
+                            >
+                              {formatDate(item.published_at as string | undefined)}
+                            </td>
                             <td className="px-4 py-3 text-muted-foreground hidden lg:table-cell" data-testid={`text-updated-${item.id || item.slug}`}>
                               {formatDate(item.updated_at as string | undefined)}
                             </td>

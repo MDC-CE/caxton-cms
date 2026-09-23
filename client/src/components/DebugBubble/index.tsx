@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useSearch } from "wouter";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { useSession } from "@/contexts/SessionContext";
-import { normalizeLocale, buildContentUrlFromPattern } from "@/lib/locale";
+import { normalizeLocale } from "@/lib/locale";
+import { buildSlugRenamePreviewUrls } from "@/components/DebugBubble/components/seoRedirectHijack";
 import { useContentTypes, getFolderFromType, useContentTypesRaw } from "@/hooks/useContentTypes";
 import { consensusSitemapContentType, contentTypeForSitemapFolder } from "@/lib/content-type-routes";
 import { isSharedLayoutType } from "@/lib/sharedLayoutEntry";
@@ -338,6 +339,7 @@ export function DebugBubble() {
     schemaOrg: Record<string, unknown>[];
     title: string;
     slug?: string;
+    livePath?: string;
   } | null>(null);
   const [seoMeta, setSeoMeta] = useState<SeoMeta>({
     page_title: "",
@@ -1244,7 +1246,11 @@ export function DebugBubble() {
       const result = await res.json();
       toast({
         title: "Slug renamed",
-        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}`,
+        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}${
+          result.clusterRewireQueued
+            ? ". Cluster membership for pages that pointed at the old URL updates in the background."
+            : ""
+        }`,
       });
       setSeoModalOpen(false);
       setNewSlugValue("");
@@ -1273,8 +1279,16 @@ export function DebugBubble() {
     const apiType = contentInfo.type;
     const urlLocale = getEffectiveLocale() || "en";
     const pattern = contentTypesMap?.[apiType]?.url_pattern;
-    setSlugOldUrl(buildContentUrlFromPattern(pattern, currentLocaleSlug, urlLocale));
-    setSlugNewUrl(buildContentUrlFromPattern(pattern, newSlugValue, urlLocale));
+    const { oldUrl, newUrl } = buildSlugRenamePreviewUrls({
+      seoData,
+      canonicalUrl: seoMeta.canonical_url,
+      oldSlug: currentLocaleSlug,
+      newSlug: newSlugValue,
+      urlPattern: pattern,
+      locale: urlLocale,
+    });
+    setSlugOldUrl(oldUrl);
+    setSlugNewUrl(newUrl);
     setSlugRedirectPrompt(true);
   };
 

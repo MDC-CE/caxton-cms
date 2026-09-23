@@ -227,7 +227,7 @@ export async function denyUnlessContentViewOrSeo(
   return null;
 }
 
-/** metrics_view only â€” GA BigQuery analytics reports. */
+/** metrics_view only — GA BigQuery analytics reports. */
 export async function denyUnlessMetricsView(
   mcpToken: string | undefined,
   grants: CatalogGrant[] | undefined,
@@ -241,7 +241,7 @@ export async function denyUnlessMetricsView(
   return denyResponse("metrics_view");
 }
 
-/** metrics_view or seo_edit (any scope) â€” organic traffic / SEO metrics reads. */
+/** metrics_view or seo_edit (any scope) — organic traffic / SEO metrics reads. */
 export async function denyUnlessMetricsViewOrSeo(
   mcpToken: string | undefined,
   grants: CatalogGrant[] | undefined,
@@ -254,6 +254,23 @@ export async function denyUnlessMetricsViewOrSeo(
   if (await checkCap(mcpToken, "metrics_view")) return null;
   if (await checkCap(mcpToken, "seo_edit")) return null;
   return denyResponse("metrics_view|seo_edit");
+}
+
+/** metrics_view or proposals_review — runtime 404 log for briefs and reviewers. */
+export async function denyUnlessMetricsViewOrProposalsReview(
+  mcpToken: string | undefined,
+  grants: CatalogGrant[] | undefined,
+) {
+  if (!mcpToken) return null;
+  if (grants) {
+    if (hasCapAnyScope(grants, "metrics_view") || hasCapAnyScope(grants, "proposals_review")) {
+      return null;
+    }
+    return denyResponse("metrics_view|proposals_review");
+  }
+  if (await checkCap(mcpToken, "metrics_view")) return null;
+  if (await checkCap(mcpToken, "proposals_review")) return null;
+  return denyResponse("metrics_view|proposals_review");
 }
 
 import type { McpTextResult } from "./respond.js";

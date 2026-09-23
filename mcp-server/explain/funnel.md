@@ -75,4 +75,5 @@ Do not treat those two answers as the same list. Tag programs as `decision` so i
 ## Related
 
 - Edit membership via Funnel tab / `update_fields` / `update_entry_attributes` — not `update_product` / not retired `update_product_funnel`.
+- Proposal review for funnel-only packets → `explain_site` topic **`funnel-classification-proposals`** (`review_situations: ["funnel_classification"]`).
 - `funnel.products` also scopes analytics `item_id` on forms when set — see topic `lead-forms` / `product`.

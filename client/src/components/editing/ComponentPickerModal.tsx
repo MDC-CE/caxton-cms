@@ -42,7 +42,6 @@ import {
 import { schemaOrgInsertIndex } from "@shared/schema-org-sections";
 import { DbTemplateWarningDialog } from "@/components/editing/DbTemplateWarningDialog";
 import { RelatedFeaturesPicker } from "./RelatedFeaturesPicker";
-import { TableBuilderWizard, type DynamicTableConfig } from "@/components/TableBuilderWizard";
 
 interface ComponentPickerModalProps {
   isOpen: boolean;
@@ -250,7 +249,7 @@ export default function ComponentPickerModal({
 }: ComponentPickerModalProps) {
   const effectiveAddScope =
     addScope === "entry" && !allowEntryStructuralOverrides ? "template" : addScope;
-  const [step, setStep] = useState<"select" | "configure" | "wizard">("select");
+  const [step, setStep] = useState<"select" | "configure">("select");
   const [selectedComponent, setSelectedComponent] = useState<ComponentInfo | null>(null);
   const [versions, setVersions] = useState<string[]>([]);
   const [selectedVersion, setSelectedVersion] = useState<string>("");
@@ -481,11 +480,7 @@ export default function ComponentPickerModal({
 
   const handleSelectComponent = (component: ComponentInfo) => {
     setSelectedComponent(component);
-    if (component.type === "dynamic_table") {
-      setStep("wizard");
-    } else {
-      setStep("configure");
-    }
+    setStep("configure");
     setVersions([]);
     setExamples([]);
     setSelectedVersion("");
@@ -502,125 +497,6 @@ export default function ComponentPickerModal({
     setSelectedExample("");
     setSelectedRelatedFeatures([]);
     setComponentSearch("");
-  };
-
-  const executeWizardComplete = async (config: DynamicTableConfig) => {
-    if (!contentType || !slug || !locale) return;
-
-    setIsAdding(true);
-    try {
-      const sectionToAdd = {
-        type: "dynamic_table",
-        version: "1.0",
-        endpoint: config.endpoint,
-        ...(config.data_path ? { data_path: config.data_path } : {}),
-        ...(config.title ? { title: config.title } : {}),
-        columns: config.columns,
-        ...(config.action ? { action: config.action } : {}),
-      };
-
-      const token = getDebugToken();
-      const author = await resolveAuthorName();
-      const response = await fetch("/api/content/edit-sections", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Token ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          contentType,
-          slug,
-          locale,
-          variant,
-          version,
-          author,
-          operations: [{
-            action: "add_item",
-            path: "sections",
-            item: sectionToAdd,
-            index: insertIndex,
-          }],
-        }),
-      });
-
-      if (response.ok) {
-        onClose();
-        emitContentUpdated({ contentType: contentType!, slug: slug!, locale: locale! });
-        toast({
-          title: "Dynamic table added",
-          description: config.title || "Table section inserted successfully",
-        });
-      } else {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-        console.error("Failed to add dynamic table:", errorData);
-        toast({
-          title: "Failed to add table",
-          description: errorData.error || "Unknown error occurred",
-          variant: "destructive",
-        });
-      }
-    } catch (error) {
-      console.error("Error adding dynamic table:", error);
-      toast({
-        title: "Error",
-        description: "Failed to add the table section",
-        variant: "destructive",
-      });
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  /** Per-entry variant of wizard add — sends the wizard section to /api/per-entry-section-add */
-  const executePerEntryWizardComplete = async (config: DynamicTableConfig) => {
-    if (!contentType || !slug || !locale) return;
-    setIsAdding(true);
-    try {
-      const sectionData = {
-        type: "dynamic_table",
-        version: "1.0",
-        endpoint: config.endpoint,
-        ...(config.data_path ? { data_path: config.data_path } : {}),
-        ...(config.title ? { title: config.title } : {}),
-        columns: config.columns,
-        ...(config.action ? { action: config.action } : {}),
-      };
-      const token = getDebugToken();
-      const resp = await fetch("/api/per-entry-section-add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Token ${token}` } : {}) },
-        body: JSON.stringify({ contentType, slug, locale, sectionData, insertIndex }),
-      });
-      if (resp.ok) {
-        onClose();
-        emitContentUpdated({ contentType, slug, locale });
-        toast({ title: "Table added", description: "Dynamic table added to this entry only." });
-      } else {
-        const err = await resp.json().catch(() => ({}));
-        toast({ title: "Failed to add table", description: err.error || "Unknown error", variant: "destructive" });
-      }
-    } catch {
-      toast({ title: "Error adding table", variant: "destructive" });
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  const handleWizardComplete = async (config: DynamicTableConfig) => {
-    if (effectiveAddScope === "entry") {
-      await executePerEntryWizardComplete(config);
-      return;
-    }
-    if (effectiveAddScope === "template") {
-      await executeWizardComplete(config);
-      return;
-    }
-    if (isSharedTemplate && !variant) {
-      pendingAddFn.current = () => executeWizardComplete(config);
-      setAddWarnOpen(true);
-      return;
-    }
-    await executeWizardComplete(config);
   };
 
   const executeAddSection = async (opts?: { shareToc?: boolean }) => {
@@ -673,6 +549,12 @@ export default function ComponentPickerModal({
         index: effectiveInsertIndex,
       });
 
+      // Template-scoped adds must hit template.{locale}.yml — not the entry overlay.
+      // Attached entry files exist for data fields; without layoutTarget the server
+      // resolves to {slug}/{locale}.yml and merge then strips sections (silent miss).
+      const writeSharedTemplate =
+        isSharedTemplate && effectiveAddScope !== "entry";
+
       const token = getDebugToken();
       const author = await resolveAuthorName();
       const response = await fetch("/api/content/edit-sections", {
@@ -688,12 +570,13 @@ export default function ComponentPickerModal({
           variant,
           version,
           author,
-          ...(isSharedTemplate && variant ? { layoutTarget: "type_template" } : {}),
+          ...(writeSharedTemplate ? { layoutTarget: "type_template" } : {}),
           operations,
         }),
       });
 
-      if (response.ok) {
+      const result = await response.json().catch(() => ({} as { success?: boolean; error?: string }));
+      if (response.ok && result.success !== false) {
         onClose();
         emitContentUpdated({ contentType: contentType!, slug: slug!, locale: locale! });
         scrollAfterSchemaOrgAdd(selectedComponent.type);
@@ -704,11 +587,10 @@ export default function ComponentPickerModal({
             : `${selectedComponent?.label || "Section"} added to the page.`,
         });
       } else {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-        console.error("Failed to add section:", errorData);
+        console.error("Failed to add section:", result);
         toast({
           title: "Failed to add section",
-          description: errorData.error || "Unknown error occurred",
+          description: result.error || "Unknown error occurred",
           variant: "destructive",
         });
       }
@@ -807,11 +689,12 @@ export default function ComponentPickerModal({
       await executePerEntryAddSection(opts);
       return;
     }
-    if (effectiveAddScope === "template") {
-      await executeAddSection(opts);
-      return;
-    }
-    if (isSharedTemplate && !variant) {
+    // Any shared-template write (forced template scope, chosen "all entries", or
+    // legacy shared shell without variant) confirms blast radius first.
+    const writesSharedTemplate =
+      effectiveAddScope === "template" ||
+      (isSharedTemplate && effectiveAddScope !== "entry");
+    if (writesSharedTemplate) {
       pendingAddFn.current = () => executeAddSection(opts);
       setAddWarnOpen(true);
       return;
@@ -891,10 +774,10 @@ export default function ComponentPickerModal({
       <DialogContent className="max-w-4xl h-[80vh] flex flex-col p-0">
         <DialogHeader className="p-4 border-b flex-shrink-0">
           <DialogTitle>
-            {step === "select" ? "Choose a Component" : step === "wizard" ? "Dynamic Table Builder" : `Configure ${selectedComponent?.label}`}
+            {step === "select" ? "Choose a Component" : `Configure ${selectedComponent?.label}`}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            {step === "select" ? "Select a component type to add to the page" : step === "wizard" ? "Build a dynamic table step by step" : "Configure the component version and example"}
+            {step === "select" ? "Select a component type to add to the page" : "Configure the component version and example"}
           </DialogDescription>
         </DialogHeader>
         
@@ -902,11 +785,8 @@ export default function ComponentPickerModal({
           <div className="mx-4 mt-3 flex items-start gap-2.5 rounded-md border bg-muted p-3" data-testid="text-shared-template-notice">
             <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
             <p className="text-sm text-foreground leading-snug">
-              {effectiveAddScope === "template" ? (
-                <><strong>Shared template:</strong> the section you add will appear on{" "}<strong>every {contentType} page</strong>.</>
-              ) : (
-                <><strong>Shared template:</strong> the section you add will appear on{" "}<strong>every {contentType} page</strong>, not just this one.</>
-              )}
+              <strong>Shared layout:</strong> you will confirm before this section is
+              added for every {singularLabel} of this type.
             </p>
           </div>
         )}
@@ -1082,14 +962,6 @@ export default function ComponentPickerModal({
               </TabsContent>
             </Tabs>
           </div>
-        ) : step === "wizard" ? (
-          <div className="flex-1 flex flex-col overflow-auto p-4">
-            <TableBuilderWizard
-              onComplete={handleWizardComplete}
-              onCancel={handleBack}
-              locale={locale || "en"}
-            />
-          </div>
         ) : (
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center gap-4 flex-shrink-0 flex-wrap">
@@ -1179,7 +1051,11 @@ export default function ComponentPickerModal({
     </Dialog>
     <DbTemplateWarningDialog
       open={addWarnOpen}
-      onClose={() => { setAddWarnOpen(false); pendingAddFn.current = null; }}
+      onClose={() => {
+        // Cancel only the confirm — keep the picker open on configure (3a).
+        setAddWarnOpen(false);
+        pendingAddFn.current = null;
+      }}
       onConfirm={async () => {
         if (pendingAddFn.current) {
           await pendingAddFn.current();

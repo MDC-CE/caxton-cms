@@ -67,4 +67,18 @@ describe("ResolvedIssueRow", () => {
     const html = renderRow({ defaultOpen: true });
     expect(html).toContain("No agent run attached.");
   });
+
+  it("does not render Ask Agent without prompt wiring", () => {
+    const html = renderRow();
+    expect(html).not.toContain('data-testid="button-ask-resolved-issue-0"');
+  });
+
+  it("renders Ask Agent when prompt and onAgentSelect are provided", () => {
+    const html = renderRow({
+      askAgentPrompt: "Locate this resolved issue.\n\n",
+      onAgentSelect: () => {},
+    });
+    expect(html).toContain('data-testid="button-ask-resolved-issue-0"');
+    expect(html).toContain('aria-label="Agent"');
+  });
 });

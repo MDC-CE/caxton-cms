@@ -1,6 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isMcpMutatingTool } from "../../shared/agent-identity.js";
+import { getActiveMcpToken } from "./auth.js";
 import { assertMutatingAgentIdentity, extractToolArgs } from "./loopback.js";
+import {
+  denyMcpWriteDisabledMutate,
+  denyUnscopedProductionMutate,
+  shouldDenyUnscopedMutating,
+  shouldStripUnscopedMutating,
+} from "./role-connector-guide.js";
 
 export {
   IDENTITY_TOOLS,
@@ -13,23 +20,21 @@ export {
   type ToolGate,
 } from "../../shared/mcp-tool-catalog.js";
 
+export {
+  shouldDenyUnscopedMutating,
+  shouldStripUnscopedMutating,
+} from "./role-connector-guide.js";
+
 type CatalogFilterOpts = {
-  /** Unscoped /mcp: do not register mutating tools. */
+  /** Unscoped /mcp: do not register mutating tools (legacy; prefer denyUnscopedMutating). */
   stripMutating?: boolean;
   /** Role connector: wrap mutates to require session + exact model. */
   requireIdentityOnMutate?: boolean;
+  /** Production plain /mcp: register mutates but always deny with role_connector guide. */
+  denyUnscopedMutating?: boolean;
+  /** Fallback when ALS has no token (plain /mcp before runInMcpSession). */
+  mcpToken?: string;
 };
-
-/**
- * Production strips mutating tools on plain `/mcp` (no active role).
- * Non-production keeps mutates registered for local freestyle (no role/session gate).
- */
-export function shouldStripUnscopedMutating(opts: {
-  isRoleScoped: boolean;
-  nodeEnv?: string;
-}): boolean {
-  return !opts.isRoleScoped && opts.nodeEnv === "production";
-}
 
 const DISABLED_TOOL = {
   enabled: false,
@@ -53,14 +58,22 @@ export function applyToolCatalogFilter(
     if (allowed && !allowed.has(name)) {
       return DISABLED_TOOL;
     }
-    if (opts?.requireIdentityOnMutate && isMcpMutatingTool(name) && rest.length > 0) {
+    if (isMcpMutatingTool(name) && rest.length > 0) {
       const handlerIdx = rest.length - 1;
       const handler = rest[handlerIdx];
       if (typeof handler === "function") {
         const wrapped = async (...args: unknown[]) => {
           const toolArgs = extractToolArgs(args);
-          const denied = await assertMutatingAgentIdentity(name, toolArgs);
-          if (denied) return denied;
+          const token = getActiveMcpToken() || opts?.mcpToken;
+          if (opts?.denyUnscopedMutating) {
+            return denyUnscopedProductionMutate(name, token);
+          }
+          if (opts?.requireIdentityOnMutate) {
+            const denied = await assertMutatingAgentIdentity(name, toolArgs);
+            if (denied) return denied;
+          }
+          const writeDenied = await denyMcpWriteDisabledMutate(name, token);
+          if (writeDenied) return writeDenied;
           return (handler as (...a: unknown[]) => unknown)(...args);
         };
         const next = [...rest];

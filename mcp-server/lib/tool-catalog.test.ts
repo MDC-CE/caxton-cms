@@ -3,7 +3,6 @@ import {
   allowedToolNames,
   grantsCanMutateMetrics,
   hasCapAnyScope,
-  shouldStripUnscopedMutating,
   visibleContentTypes,
   type CatalogGrant,
 } from "./tool-catalog";
@@ -71,12 +70,13 @@ describe("allowedToolNames", () => {
     expect(admin.has("update_proposal")).toBe(false);
   });
 
-  it("Metrics Viewer sees identity tools plus get_validation_issues, get_organic_traffic, and get_analytics_report", () => {
+  it("Metrics Viewer sees identity tools plus get_validation_issues, get_organic_traffic, get_analytics_report, and get_runtime_issues", () => {
     const names = new Set(allowedToolNames(metricsViewer));
     expect(names.has("get_current_user")).toBe(true);
     expect(names.has("get_validation_issues")).toBe(true);
     expect(names.has("get_organic_traffic")).toBe(true);
     expect(names.has("get_analytics_report")).toBe(true);
+    expect(names.has("get_runtime_issues")).toBe(true);
     expect(names.has("list_media")).toBe(false);
     expect(names.has("list_entries")).toBe(false);
     expect(names.has("run_entry_diagnostics")).toBe(false);
@@ -107,6 +107,7 @@ describe("allowedToolNames", () => {
     expect(names.has("list_media")).toBe(true);
     expect(names.has("get_organic_traffic")).toBe(false);
     expect(names.has("get_analytics_report")).toBe(false);
+    expect(names.has("get_runtime_issues")).toBe(false);
     expect(names.has("update_fields")).toBe(false);
     expect(names.has("create_entry")).toBe(false);
     expect(names.has("test_redirect")).toBe(false);
@@ -158,6 +159,7 @@ describe("allowedToolNames", () => {
     expect(names.has("propose_change")).toBe(false);
     expect(names.has("update_fields")).toBe(false);
     expect(names.has("add_section")).toBe(false);
+    expect(names.has("get_runtime_issues")).toBe(true);
   });
 
   it("platform_steward sees writes and diagnostics", () => {
@@ -226,7 +228,7 @@ describe("allowedToolNames", () => {
     expect(names.has("list_seo_clusters")).toBe(true);
     expect(names.has("list_seo_cluster_entries")).toBe(true);
     expect(names.has("get_seo_cluster")).toBe(true);
-    expect(names.has("refresh_keyword_metrics")).toBe(true);
+    expect(names.has("get_or_refresh_seo_research")).toBe(true);
     expect(names.has("get_organic_traffic")).toBe(true);
     expect(names.has("run_entry_diagnostics")).toBe(true);
     expect(names.has("get_diagnostics_job")).toBe(true);
@@ -304,31 +306,5 @@ describe("hasCapAnyScope", () => {
   it("treats a scoped grant as present without requiring *", () => {
     expect(hasCapAnyScope(blogEditor, "content_view")).toBe(true);
     expect(hasCapAnyScope(blogEditor, "seo_edit")).toBe(false);
-  });
-});
-
-describe("shouldStripUnscopedMutating", () => {
-  it("strips on plain /mcp in production", () => {
-    expect(
-      shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: "production" }),
-    ).toBe(true);
-  });
-
-  it("does not strip on role connectors in production", () => {
-    expect(
-      shouldStripUnscopedMutating({ isRoleScoped: true, nodeEnv: "production" }),
-    ).toBe(false);
-  });
-
-  it("does not strip on plain /mcp in development", () => {
-    expect(
-      shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: "development" }),
-    ).toBe(false);
-  });
-
-  it("does not strip on plain /mcp when NODE_ENV is unset", () => {
-    expect(shouldStripUnscopedMutating({ isRoleScoped: false, nodeEnv: undefined })).toBe(
-      false,
-    );
   });
 });

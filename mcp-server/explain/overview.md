@@ -48,13 +48,11 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `relation-fields` | Relation editor, authors hubs, listing vs hydrate, delete reassign |
 | `lead-forms` | Catalog `source` (`content_type` / `database` / `related_field`), required `value_path`/`label_path`, required `query` on ecommerce catalogs, `purchasable` vs `actively_selling` |
 | `redirects` | CMS 301/302: two stores, first-match, `test_redirect` (`read_redirects`) + `update_redirect` (`edit_redirects`) |
-| `proposals` | Entry change proposals + issue handoff notes: 4 tools incl. `get_entry_activity`, four-eyes apply; `list_proposals` is stats-first |
-| `reading-proposals` | Live `review_context` axes, checklist IDs, create refuses, apply block when target missing |
-| `review-situations` | Catalog of `review_situations` ids; infer-when-empty; per-situation ship |
-| `internal-links-proposals` | Hub/internal link author + reviewer playbook |
-| `serp-title-description-proposals` | SERP title/description author + reviewer playbook |
+| `proposals` | **Hub** — omit `subtopic` for index; playbooks: `overview`, `reading`, `situations`, `internal-links`, `serp-title-description`, `funnel-classification`, `idea-opportunity-harm`, `broken-url`, `translations` |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 
-**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries / leaderboard), and `get_analytics_report` for GA4 behavioral reports (site summary / top pages / page detail / events / traffic sources). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
+Legacy flat proposal topics (`reading-proposals`, `review-situations`, `*-proposals`) still resolve as aliases with a deprecation warning — prefer `topic: "proposals"` + `subtopic`.
+
+**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for measured GSC clicks, `get_or_refresh_seo_research` for planning keyword/SERP research (not GSC), and `get_analytics_report` for GA4 behavioral reports. Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see organic + research tools. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
 
 **Before making any structural change to this codebase, call `explain_site` with the relevant topic.**

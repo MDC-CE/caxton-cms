@@ -31,6 +31,7 @@ import { loadGscInspectionStoresFromBucket } from "./gsc-url-inspection";
 import { emitEntryEventsFromFileChange } from "./content-events";
 import { startEventPruneTimer, wipeAllSiteEventStores } from "./events/event-store";
 import { startEventDispatcher } from "./events/dispatcher";
+import { startEventWebhookDueScan } from "./events/event-webhooks";
 import { registerAllJobs } from "./jobs/register";
 import { configureJobQueue } from "./jobs/queue";
 import { ensurePipelineDbForSites } from "./pipeline-db/runner";
@@ -516,6 +517,7 @@ app.use((req, res, next) => {
     // ─────────────────────────────────────────────────────────────────────────
 
     // All deferred background tasks fire here — server is already ready to handle requests.
+    startEventWebhookDueScan();
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();
     }
@@ -735,6 +737,14 @@ app.use((req, res, next) => {
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");
     try {
       flushAllPendingSyncStateWrites();
+      const { isAutoCommitEnabled, flushPendingChanges } = await import("./auto-commit");
+      if (isAutoCommitEnabled()) {
+        logger.info("[Shutdown] flushing pending auto-commit…");
+        const flushResult = await flushPendingChanges();
+        if (!flushResult.success) {
+          logger.warn({ error: flushResult.error }, "[Shutdown] auto-commit flush failed");
+        }
+      }
       stopJobApplier();
       await getVersioningManager().shutdown();
       await shutdownValidationCaches();

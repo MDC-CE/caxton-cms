@@ -28,12 +28,15 @@ import {
   AGENTIC_SWARM_ROLE_IDS,
   AGENTIC_SWARM_ROLES_BY_ID,
 } from "@shared/agentic-swarm-roles";
+import { formatProposalRelativeUpdatedAt } from "@/lib/proposalCardMeta";
 import { apiFetch } from "@/lib/queryClient";
 import {
   PROPOSAL_ACTOR_TYPE_OPTIONS,
+  PROPOSAL_ATTENTION_OPTIONS,
   PROPOSAL_KIND_OPTIONS,
   PROPOSAL_STATUS_OPTIONS,
   type ProposalListActorType,
+  type ProposalListAttention,
   type ProposalListFilters,
   type ProposalListKind,
   type ProposalListStats,
@@ -49,6 +52,7 @@ export type ProposalListFilterDims = Pick<
   | "proposerActorRole"
   | "agentSessionId"
   | "escalatedOnly"
+  | "attention"
 >;
 
 const ROLE_ANY = "__any__";
@@ -63,18 +67,8 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     proposerActorRole: filters.proposerActorRole,
     agentSessionId: filters.agentSessionId,
     escalatedOnly: filters.escalatedOnly,
+    attention: filters.attention,
   };
-}
-
-function formatRelative(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "just now";
-  const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `about ${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function sessionTriggerLabel(
@@ -85,7 +79,7 @@ function sessionTriggerLabel(
   const s = sessions.find((x) => x.agent_session_id === sessionId);
   const short = sessionId.slice(0, 8);
   if (!s) return `${short}…`;
-  return `${short}… · ${s.write_count} write${s.write_count === 1 ? "" : "s"} · ${formatRelative(s.ended_at)}`;
+  return `${short}… · ${s.write_count} write${s.write_count === 1 ? "" : "s"} · ${formatProposalRelativeUpdatedAt(s.ended_at)}`;
 }
 
 export function ProposalListFiltersDialog({
@@ -120,6 +114,7 @@ export function ProposalListFiltersDialog({
     filters.proposerActorRole,
     filters.agentSessionId,
     filters.escalatedOnly,
+    filters.attention,
   ]);
 
   const { data: siteInfo } = useQuery<{ contentFolder: string }>({
@@ -183,6 +178,12 @@ export function ProposalListFiltersDialog({
     return n != null ? `${label} (${n})` : label;
   }
 
+  function attentionLabel(value: ProposalListAttention, label: string): string {
+    if (value === "all") return label;
+    const n = stats?.by_attention?.[value];
+    return n != null ? `${label} (${n})` : label;
+  }
+
   const roleSelectValue = draft.proposerActorRole.trim() || ROLE_ANY;
 
   return (
@@ -237,8 +238,11 @@ export function ProposalListFiltersDialog({
           <DialogHeader>
             <DialogTitle>Filters</DialogTitle>
             <DialogDescription>
-              Narrow which proposals appear in the list by status, kind, or who filed them. Nothing is
-              written until someone acts on a proposal. Sort stays on the Sort control next to Filters.
+              Narrow which proposals appear in the list by status, kind, attention, or who filed them.
+              Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
+              to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
+              Ready for re-check means reviewers should look again: blockers are cleared, or the author
+              rewrote the proposal or marked a blocker fixed, and nothing is still waiting on the author.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -299,6 +303,36 @@ export function ProposalListFiltersDialog({
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="proposal-attention-filter" className="text-xs text-muted-foreground">
+                Attention
+              </Label>
+              <Select
+                value={draft.attention}
+                onValueChange={(attention) =>
+                  patchDraft({ attention: attention as ProposalListAttention })
+                }
+              >
+                <SelectTrigger
+                  id="proposal-attention-filter"
+                  className="h-8 text-sm"
+                  data-testid="select-proposal-attention-filter"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PROPOSAL_ATTENTION_OPTIONS.map((opt) => (
+                    <SelectItem
+                      key={opt.value}
+                      value={opt.value}
+                      data-testid={`option-proposal-attention-${opt.value}`}
+                    >
+                      {attentionLabel(opt.value, opt.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1">
               <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">
@@ -445,7 +479,7 @@ export function ProposalListFiltersDialog({
         sessions={sessions}
         value={draft.agentSessionId}
         onSelect={(next) => patchDraft({ agentSessionId: next })}
-        formatRelative={formatRelative}
+        formatRelative={formatProposalRelativeUpdatedAt}
         includeUnscoped={false}
       />
     </>

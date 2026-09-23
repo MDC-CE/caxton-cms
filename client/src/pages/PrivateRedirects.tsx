@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense, type ReactNode, type CSSProperties } from "react";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, ChevronRight, CircleCheck, ExternalLink, FileText, GripVertical, Info, Pencil, Plus, Route, Search, ShieldCheck, TestTube, Trash2, Wrench, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronRight, CircleCheck, ExternalLink, FileText, GripVertical, Info, Pencil, Plus, Route, Search, ShieldCheck, TestTube, Trash2, Wrench, X } from "lucide-react";
 import { getDebugUserName, useDebugAuth } from "@/hooks/useDebugAuth";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -7,6 +7,7 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -652,15 +653,7 @@ export default function PrivateRedirects() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-4">
-              <Link href="/">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  data-testid="link-back-home"
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                </Button>
-              </Link>
+              <PrivateHistoryBackButton fallbackHref="/" data-testid="link-back-home" iconClassName="w-4 h-4" />
               <div>
                 <h1 className="text-xl font-bold flex items-center gap-2">
                   <Route className="w-5 h-5" />

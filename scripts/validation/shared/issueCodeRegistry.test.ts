@@ -23,8 +23,8 @@ describe("issueCodeRegistry", () => {
   it("looks up SEO_KEYWORD_RESEARCH_INCOMPLETE with next_actions", () => {
     const def = getIssueCodeDefinition("seo-cluster", "SEO_KEYWORD_RESEARCH_INCOMPLETE");
     expect(def?.title).toBe("Incomplete keyword research");
-    expect(def?.suggestion).toMatch(/refresh_keyword_metrics/);
-    expect(def?.next_actions?.some((a) => a.tool === "refresh_keyword_metrics")).toBe(true);
+    expect(def?.suggestion).toMatch(/get_or_refresh_seo_research/);
+    expect(def?.next_actions?.some((a) => a.tool === "get_or_refresh_seo_research")).toBe(true);
     expect(isIssueCodeAgentGuidanceComplete(def)).toBe(true);
   });
 

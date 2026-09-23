@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import {
   IconAlertTriangle,
-  IconArrowLeft,
   IconArrowRight,
   IconBraces,
   IconChevronDown,
@@ -20,6 +19,7 @@ import {
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -56,6 +56,11 @@ import { ConsentCard } from "@/components/editing/ConsentCard";
 import type { ConsentValues } from "@/components/editing/ConsentCard";
 import { WebhookCard, headersRecordToText, parseHeadersText } from "@/components/editing/WebhookCard";
 import { SuccessCard } from "@/components/editing/SuccessCard";
+import { ConversionIntentCard } from "@/components/editing/ConversionIntentCard";
+import {
+  CountsAsLeadCard,
+  type CountsAsLeadChoice,
+} from "@/components/editing/CountsAsLeadCard";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
@@ -73,6 +78,11 @@ import {
   CONVERSION_INTENT_MIN_CHARS,
   isConversionIntentFieldValid,
 } from "@shared/conversionEventIntent";
+import {
+  isLoginConversionName,
+  isSignupConversionName,
+  parseAuthConversionEventConfig,
+} from "@shared/authConversionEvents";
 import { buildWebhookSamplePayload } from "@/lib/webhookPayload";
 import { useSession } from "@/contexts/SessionContext";
 import { Textarea } from "@/components/ui/textarea";
@@ -87,6 +97,9 @@ interface EditingEventState {
   description: string;
   when_to_use: string;
   when_not_to_use: string;
+  /** null = undecided (legacy / new) — blocks save for non-auth events */
+  countsAsLead: CountsAsLeadChoice;
+  intentEditing: boolean;
   automations: string;
   tags: string[];
   consent: ConsentValues;
@@ -107,6 +120,8 @@ function makeEditingState(entry: ConversionEventEntry): EditingEventState {
     description: entry.description ?? "",
     when_to_use: entry.when_to_use ?? "",
     when_not_to_use: entry.when_not_to_use ?? "",
+    countsAsLead: typeof entry.counts_as_lead === "boolean" ? entry.counts_as_lead : null,
+    intentEditing: false,
     automations: entry.automations ?? "",
     tags: entry.tags ?? [],
     consent: eventConsentToCardValues(entry.consent),
@@ -285,6 +300,7 @@ function ConversionsPageInner() {
   const [newEventDesc, setNewEventDesc] = useState("");
   const [newEventWhenToUse, setNewEventWhenToUse] = useState("");
   const [newEventWhenNotToUse, setNewEventWhenNotToUse] = useState("");
+  const [newEventCountsAsLead, setNewEventCountsAsLead] = useState<CountsAsLeadChoice>(null);
   const [deleteConfirmEvent, setDeleteConfirmEvent] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<EditingEventState | null>(null);
   const [mergeTarget, setMergeTarget] = useState("");
@@ -308,6 +324,18 @@ function ConversionsPageInner() {
     queryKey: ["/api/settings/tracking"],
   });
   const conversionEventEntries = trackingSettings?.conversion_events ?? [];
+  const authConversionCfg = parseAuthConversionEventConfig({
+    signup_event_name: trackingSettings?.signup_event_name,
+    login_event_name: trackingSettings?.login_event_name,
+    signup_event_aliases: trackingSettings?.signup_event_aliases,
+    login_event_aliases: trackingSettings?.login_event_aliases,
+  });
+
+  function authModeForEventName(name: string): "signup" | "login" | null {
+    if (isSignupConversionName(name, authConversionCfg)) return "signup";
+    if (isLoginConversionName(name, authConversionCfg)) return "login";
+    return null;
+  }
 
   useEffect(() => {
     if (trackingSettings?.webhook) {
@@ -404,11 +432,13 @@ function ConversionsPageInner() {
       description,
       when_to_use,
       when_not_to_use,
+      counts_as_lead,
     }: {
       name: string;
       description: string;
       when_to_use: string;
       when_not_to_use: string;
+      counts_as_lead: boolean;
     }) => {
       const updated: ConversionEventEntry[] = [
         ...conversionEventEntries,
@@ -417,6 +447,7 @@ function ConversionsPageInner() {
           ...(description.trim() ? { description: description.trim() } : {}),
           when_to_use: when_to_use.trim(),
           when_not_to_use: when_not_to_use.trim(),
+          counts_as_lead,
         },
       ];
       const res = await apiRequest("PUT", "/api/settings/tracking", { conversion_events: updated });
@@ -433,6 +464,7 @@ function ConversionsPageInner() {
       setNewEventDesc("");
       setNewEventWhenToUse("");
       setNewEventWhenNotToUse("");
+      setNewEventCountsAsLead(null);
       toast({ title: "Event added", description: `"${newEventName.trim()}" added to conversion events.` });
     },
     onError: (err: Error) => {
@@ -659,6 +691,12 @@ function ConversionsPageInner() {
               ...(event.description.trim() ? { description: event.description.trim() } : {}),
               when_to_use: event.when_to_use.trim(),
               when_not_to_use: event.when_not_to_use.trim(),
+              counts_as_lead:
+                authModeForEventName(effectiveName) === "signup"
+                  ? true
+                  : authModeForEventName(effectiveName) === "login"
+                    ? false
+                    : event.countsAsLead === true,
               ...(event.automations.trim() ? { automations: event.automations.trim() } : {}),
               ...(event.tags.length > 0 ? { tags: event.tags } : {}),
               ...(Object.keys(consent).length > 0 ? { consent } : {}),
@@ -733,11 +771,7 @@ function ConversionsPageInner() {
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto px-4 py-8 space-y-8">
         <div className="flex items-center gap-3">
-          <Link href="/private/store/ecommerce">
-            <Button variant="ghost" size="icon" data-testid="button-back-conversions">
-              <IconArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back-conversions" iconClassName="h-4 w-4" />
           <div className="flex items-center gap-2">
             <IconTargetArrow className="h-6 w-6 text-muted-foreground" />
             <div>
@@ -1774,74 +1808,36 @@ function ConversionsPageInner() {
               </div>
 
               {editingEvent && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="edit-event-desc" className="text-sm font-medium">
-                    Description{" "}
-                    <span className="text-muted-foreground font-normal">(optional)</span>
-                  </Label>
-                  <Input
-                    id="edit-event-desc"
-                    placeholder="Short staff label"
-                    value={editingEvent.description}
-                    onChange={(e) =>
-                      setEditingEvent({ ...editingEvent, description: e.target.value })
-                    }
-                    data-testid="input-edit-event-desc"
-                  />
-                </div>
+                <CountsAsLeadCard
+                  value={
+                    authModeForEventName(editingEvent.name) === "signup"
+                      ? true
+                      : authModeForEventName(editingEvent.name) === "login"
+                        ? false
+                        : editingEvent.countsAsLead
+                  }
+                  authMode={authModeForEventName(editingEvent.name)}
+                  onChange={(val) =>
+                    setEditingEvent({ ...editingEvent, countsAsLead: val })
+                  }
+                  testIdPrefix="event-counts-as-lead"
+                />
               )}
 
               {editingEvent && (
-                <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
-                  <p className="text-xs text-muted-foreground leading-snug">{INTENT_FIELD_HINT}</p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Advanced:{" "}
-                    <code className="text-[10px]">site_*/settings.yml</code> →{" "}
-                    <code className="text-[10px]">tracking.conversion_events</code>; agents read via
-                    MCP <code className="text-[10px]">explain_site</code> topic{" "}
-                    <code className="text-[10px]">component-behaviors</code>.
-                  </p>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor="edit-when-to-use" className="text-sm font-medium">
-                        When to use
-                      </Label>
-                      <IntentCharCount value={editingEvent.when_to_use} />
-                    </div>
-                    <Textarea
-                      id="edit-when-to-use"
-                      rows={3}
-                      maxLength={CONVERSION_INTENT_MAX_CHARS}
-                      placeholder="Visitor is applying / enrolling…"
-                      value={editingEvent.when_to_use}
-                      onChange={(e) =>
-                        setEditingEvent({ ...editingEvent, when_to_use: e.target.value })
-                      }
-                      data-testid="input-edit-when-to-use"
-                      className="text-sm"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor="edit-when-not-to-use" className="text-sm font-medium">
-                        When not to use
-                      </Label>
-                      <IntentCharCount value={editingEvent.when_not_to_use} />
-                    </div>
-                    <Textarea
-                      id="edit-when-not-to-use"
-                      rows={3}
-                      maxLength={CONVERSION_INTENT_MAX_CHARS}
-                      placeholder="Soft info-only, downloads, newsletter…"
-                      value={editingEvent.when_not_to_use}
-                      onChange={(e) =>
-                        setEditingEvent({ ...editingEvent, when_not_to_use: e.target.value })
-                      }
-                      data-testid="input-edit-when-not-to-use"
-                      className="text-sm"
-                    />
-                  </div>
-                </div>
+                <ConversionIntentCard
+                  description={editingEvent.description}
+                  whenToUse={editingEvent.when_to_use}
+                  whenNotToUse={editingEvent.when_not_to_use}
+                  editing={editingEvent.intentEditing}
+                  onEditingChange={(val) =>
+                    setEditingEvent({ ...editingEvent, intentEditing: val })
+                  }
+                  onChange={(field, value) =>
+                    setEditingEvent({ ...editingEvent, [field]: value })
+                  }
+                  testIdPrefix="event-intent"
+                />
               )}
 
               {/* Automations & Tags */}
@@ -1967,6 +1963,8 @@ function ConversionsPageInner() {
                 !editingEvent?.name.trim() ||
                 !isConversionIntentFieldValid(editingEvent?.when_to_use) ||
                 !isConversionIntentFieldValid(editingEvent?.when_not_to_use) ||
+                (authModeForEventName(editingEvent?.name ?? "") == null &&
+                  editingEvent?.countsAsLead === null) ||
                 saveEventMutation.isPending
               }
               data-testid="button-save-edit-event"
@@ -2033,6 +2031,7 @@ function ConversionsPageInner() {
             setNewEventDesc("");
             setNewEventWhenToUse("");
             setNewEventWhenNotToUse("");
+            setNewEventCountsAsLead(null);
           }
         }}
       >
@@ -2042,6 +2041,7 @@ function ConversionsPageInner() {
             <DialogDescription>
               Event name is the GTM trigger key. When to use / when not to use are required so
               agents can match visitor CTA intent (not a duplicated page&apos;s old conversion_name).
+              You must also choose whether the event counts as a lead.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-1">
@@ -2059,6 +2059,18 @@ function ConversionsPageInner() {
                 Use snake_case. This becomes the GTM event name.
               </p>
             </div>
+            <CountsAsLeadCard
+              value={
+                authModeForEventName(newEventName.trim()) === "signup"
+                  ? true
+                  : authModeForEventName(newEventName.trim()) === "login"
+                    ? false
+                    : newEventCountsAsLead
+              }
+              authMode={authModeForEventName(newEventName.trim())}
+              onChange={setNewEventCountsAsLead}
+              testIdPrefix="new-counts-as-lead"
+            />
             <div className="space-y-1.5">
               <Label htmlFor="new-event-desc">
                 Description{" "}
@@ -2117,24 +2129,36 @@ function ConversionsPageInner() {
                 setNewEventDesc("");
                 setNewEventWhenToUse("");
                 setNewEventWhenNotToUse("");
+                setNewEventCountsAsLead(null);
               }}
               data-testid="button-cancel-add-event"
             >
               Cancel
             </Button>
             <Button
-              onClick={() =>
+              onClick={() => {
+                const authMode = authModeForEventName(newEventName.trim());
+                const counts =
+                  authMode === "signup"
+                    ? true
+                    : authMode === "login"
+                      ? false
+                      : newEventCountsAsLead;
+                if (typeof counts !== "boolean") return;
                 addEventMutation.mutate({
                   name: newEventName,
                   description: newEventDesc,
                   when_to_use: newEventWhenToUse,
                   when_not_to_use: newEventWhenNotToUse,
-                })
-              }
+                  counts_as_lead: counts,
+                });
+              }}
               disabled={
                 !newEventName.trim() ||
                 !isConversionIntentFieldValid(newEventWhenToUse) ||
                 !isConversionIntentFieldValid(newEventWhenNotToUse) ||
+                (authModeForEventName(newEventName.trim()) == null &&
+                  newEventCountsAsLead === null) ||
                 addEventMutation.isPending
               }
               data-testid="button-confirm-add-event"

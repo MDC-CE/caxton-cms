@@ -17,6 +17,7 @@ import {
 import { findTopLevelKeySpan, surgicalRemoveTopLevelKey } from "./seo-fields";
 import { getFolder } from "./content-types";
 import { getDefaultContentRoot } from "./site-config";
+import { markFileAsModified } from "./sync-state";
 
 export { FUNNEL_YAML_KEY };
 export type { FunnelBlock, FunnelProducts, FunnelStage };
@@ -278,6 +279,47 @@ export function clearFunnelBlock(contentType: string, slug: string, contentRoot?
   if (!fs.existsSync(filePath)) return;
   const content = fs.readFileSync(filePath, "utf-8");
   fs.writeFileSync(filePath, surgicalRemoveTopLevelKey(content, FUNNEL_YAML_KEY), "utf-8");
+}
+
+/**
+ * Remove top-level `funnel:` from every non-_common YAML under the entry folder
+ * (live locales + variant locale files). Journey membership is `_common.yml` only.
+ */
+export function stripFunnelFromAllLocaleYamls(
+  contentType: string,
+  slug: string,
+  contentRoot?: string,
+  author?: string,
+): { strippedRelativePaths: string[] } {
+  const commonPath = commonYmlPath(contentType, slug, contentRoot);
+  const dir = path.dirname(commonPath);
+  const root = contentRootAbs(contentRoot);
+  const strippedRelativePaths: string[] = [];
+  if (!fs.existsSync(dir)) return { strippedRelativePaths };
+
+  for (const name of fs.readdirSync(dir)) {
+    if (!/\.ya?ml$/i.test(name)) continue;
+    if (name === "_common.yml" || name === "_common.yaml") continue;
+    const abs = path.join(dir, name);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(abs);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    const raw = fs.readFileSync(abs, "utf-8");
+    if (!findTopLevelKeySpan(raw, FUNNEL_YAML_KEY)) continue;
+    const next = surgicalRemoveTopLevelKey(raw, FUNNEL_YAML_KEY);
+    if (next === raw) continue;
+    fs.writeFileSync(abs, next, "utf-8");
+    const relativePath = path.relative(root, abs).split(path.sep).join("/");
+    strippedRelativePaths.push(relativePath);
+    if (author) {
+      markFileAsModified(relativePath, author, undefined, contentRoot);
+    }
+  }
+  return { strippedRelativePaths };
 }
 
 export function isFunnelBlockEmpty(funnel: FunnelBlock): boolean {

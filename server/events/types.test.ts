@@ -20,6 +20,7 @@ const DISPATCHER_HANDLED_TYPES = new Set([
   "entry_deleted",
   "entry_locale_unpublished",
   "binding_propagation_started",
+  "cluster_hub_path_rewrite_started",
 ]);
 
 describe("EVENT_TYPE_META", () => {

@@ -11,6 +11,11 @@ import {
 } from "../ecommerce/bigquery-client";
 import { normalizeAnalyticsPath } from "../ecommerce/journey-analytics";
 import { contentIndex } from "../content-index";
+import {
+  getLeadConversionEventNames,
+  getTrackingSettings,
+  isCountsAsLeadConfigured,
+} from "../settings";
 import { child } from "../logger";
 
 const log = child({ module: "analytics-reports" });
@@ -28,9 +33,13 @@ export const ANALYTICS_REPORTS = [
   "page_detail",
   "events_by_name",
   "traffic_sources",
+  "traffic_source_conversions",
 ] as const;
 
 export type AnalyticsReportName = (typeof ANALYTICS_REPORTS)[number];
+
+export const ANALYTICS_ATTRIBUTIONS = ["session_last_click", "first_user"] as const;
+export type AnalyticsAttribution = (typeof ANALYTICS_ATTRIBUTIONS)[number];
 
 export type AnalyticsWarning = { code: string; message: string };
 
@@ -59,6 +68,10 @@ export type GetAnalyticsReportOpts = {
   contentRoot?: string;
   /** Optional event name filter for events_by_name */
   event_names?: string[];
+  /** traffic_source_conversions only — default session_last_click */
+  attribution?: AnalyticsAttribution;
+  /** traffic_source_conversions only — filter lead events by ecommerce item_id */
+  item_id?: string;
 };
 
 function windowBounds(days: number): { start: string; end: string; asOf: string } {
@@ -669,6 +682,335 @@ async function runTrafficSources(
   };
 }
 
+/** First-user / user-acquisition channel (same family as traffic_sources). */
+function bqFirstUserChannelSql(): { source: string; medium: string; campaign: string } {
+  return {
+    source: `COALESCE(NULLIF(traffic_source.source, ''), '(direct)')`,
+    medium: `COALESCE(NULLIF(traffic_source.medium, ''), '(none)')`,
+    campaign: `COALESCE(NULLIF(traffic_source.name, ''), '(not set)')`,
+  };
+}
+
+/**
+ * Session last-click with collected → traffic_source fallback.
+ * Prefer session_traffic_source_last_click when the export has it.
+ */
+function bqSessionLastClickChannelSql(opts: {
+  includeSessionLastClick: boolean;
+}): { source: string; medium: string; campaign: string; usedFallback: string } {
+  const sessionSource = opts.includeSessionLastClick
+    ? `NULLIF(session_traffic_source_last_click.manual_campaign.source, ''),
+            NULLIF(session_traffic_source_last_click.cross_channel_campaign.source, ''),`
+    : "";
+  const sessionMedium = opts.includeSessionLastClick
+    ? `NULLIF(session_traffic_source_last_click.manual_campaign.medium, ''),
+            NULLIF(session_traffic_source_last_click.cross_channel_campaign.medium, ''),`
+    : "";
+  const sessionCampaign = opts.includeSessionLastClick
+    ? `NULLIF(session_traffic_source_last_click.manual_campaign.campaign_name, ''),
+            NULLIF(session_traffic_source_last_click.google_ads_campaign.campaign_name, ''),
+            NULLIF(session_traffic_source_last_click.cross_channel_campaign.campaign_name, ''),`
+    : "";
+
+  const sessionSourcePresent = opts.includeSessionLastClick
+    ? `(NULLIF(session_traffic_source_last_click.manual_campaign.source, '') IS NOT NULL
+              OR NULLIF(session_traffic_source_last_click.cross_channel_campaign.source, '') IS NOT NULL)`
+    : `FALSE`;
+  const collectedSourcePresent = `NULLIF(collected_traffic_source.manual_source, '') IS NOT NULL`;
+
+  return {
+    source: `COALESCE(
+            ${sessionSource}
+            NULLIF(collected_traffic_source.manual_source, ''),
+            NULLIF(traffic_source.source, ''),
+            '(direct)'
+          )`,
+    medium: `COALESCE(
+            ${sessionMedium}
+            NULLIF(collected_traffic_source.manual_medium, ''),
+            NULLIF(traffic_source.medium, ''),
+            '(none)'
+          )`,
+    campaign: `COALESCE(
+            ${sessionCampaign}
+            NULLIF(collected_traffic_source.manual_campaign_name, ''),
+            NULLIF(traffic_source.name, ''),
+            '(not set)'
+          )`,
+    usedFallback: `(NOT (${sessionSourcePresent}) AND NOT (${collectedSourcePresent})
+            AND NULLIF(traffic_source.source, '') IS NOT NULL)`,
+  };
+}
+
+function parseAttribution(raw?: string): AnalyticsAttribution {
+  if (raw === "first_user") return "first_user";
+  return "session_last_click";
+}
+
+async function runTrafficSourceConversions(
+  days: number,
+  limit: number,
+  attribution: AnalyticsAttribution,
+  itemIdRaw: string | undefined,
+  contentRoot?: string,
+): Promise<AnalyticsReportResult> {
+  const settings = getBigQuerySettings(contentRoot);
+  const eventsTable = fqEventsWildcard(settings);
+  const { start, end, asOf } = windowBounds(days);
+  const itemId = (itemIdRaw || "").trim();
+  const filterItemId = itemId.length > 0;
+
+  const leadEventNames = getLeadConversionEventNames(contentRoot);
+  const leadEventsParam =
+    leadEventNames.length > 0 ? leadEventNames : ["__no_lead_events__"];
+
+  const warnings: AnalyticsWarning[] = [];
+  const countsConfigured = isCountsAsLeadConfigured(
+    getTrackingSettings(contentRoot).conversion_events,
+  );
+  if (!countsConfigured) {
+    warnings.push({
+      code: "counts_as_lead_not_configured",
+      message:
+        "Count as lead is not configured yet on conversion events. Lead metrics may be incomplete until staff set Count as lead under Conversions.",
+    });
+  } else if (leadEventNames.length === 0) {
+    warnings.push({
+      code: "no_lead_events_configured",
+      message:
+        "Lead conversions are not being measured because no conversion events have Count as lead turned on. Session rows still appear.",
+    });
+  }
+
+  if (filterItemId) {
+    warnings.push({
+      code: "lead_rate_channel_sessions",
+      message:
+        "item_id filters lead events only; sessions remain channel-level. lead_rate is product leads / channel sessions.",
+    });
+  }
+
+  const buildSql = (includeSessionLastClick: boolean): string => {
+    const channel =
+      attribution === "first_user"
+        ? {
+            ...bqFirstUserChannelSql(),
+            usedFallback: "FALSE",
+          }
+        : bqSessionLastClickChannelSql({ includeSessionLastClick });
+
+    const unattributedPredicate =
+      attribution === "session_last_click"
+        ? `ga_session_id IS NULL`
+        : `FALSE`;
+
+    return `
+    WITH params AS (
+      SELECT @start_date AS start_date, @end_date AS end_date
+    ),
+    base AS (
+      SELECT
+        user_pseudo_id,
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS ga_session_id,
+        event_name,
+        (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'item_id') AS item_id,
+        ${channel.source} AS source,
+        ${channel.medium} AS medium,
+        ${channel.campaign} AS campaign,
+        ${channel.usedFallback} AS used_fallback
+      FROM ${eventsTable}, params
+      WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE(params.start_date))
+        AND FORMAT_DATE('%Y%m%d', DATE(params.end_date))
+        AND (
+          event_name = 'page_view'
+          OR event_name IN UNNEST(@lead_events)
+        )
+    ),
+    sessions_by_channel AS (
+      SELECT
+        source,
+        medium,
+        campaign,
+        COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING))) AS sessions,
+        COUNTIF(used_fallback) AS fallback_hits
+      FROM base
+      WHERE event_name = 'page_view'
+        AND ga_session_id IS NOT NULL
+      GROUP BY source, medium, campaign
+    ),
+    leads_by_channel AS (
+      SELECT
+        source,
+        medium,
+        campaign,
+        COUNT(*) AS leads,
+        COUNTIF(used_fallback) AS fallback_hits
+      FROM base
+      WHERE event_name IN UNNEST(@lead_events)
+        AND event_name != '__no_lead_events__'
+        AND NOT (${unattributedPredicate})
+        AND (
+          NOT @filter_item_id
+          OR item_id = @item_id
+        )
+      GROUP BY source, medium, campaign
+    ),
+    orphans AS (
+      SELECT
+        COUNTIF(
+          event_name IN UNNEST(@lead_events)
+          AND event_name != '__no_lead_events__'
+          AND (${unattributedPredicate})
+          AND (NOT @filter_item_id OR item_id = @item_id)
+        ) AS leads_unattributed,
+        COUNTIF(
+          event_name IN UNNEST(@lead_events)
+          AND event_name != '__no_lead_events__'
+          AND @filter_item_id
+          AND (item_id IS NULL OR item_id = '')
+        ) AS leads_missing_item_id,
+        COUNTIF(used_fallback) AS fallback_hits
+      FROM base
+    ),
+    combined AS (
+      SELECT
+        COALESCE(s.source, l.source) AS source,
+        COALESCE(s.medium, l.medium) AS medium,
+        COALESCE(s.campaign, l.campaign) AS campaign,
+        COALESCE(s.sessions, 0) AS sessions,
+        COALESCE(l.leads, 0) AS leads,
+        COALESCE(s.fallback_hits, 0) + COALESCE(l.fallback_hits, 0) AS fallback_hits
+      FROM sessions_by_channel s
+      FULL OUTER JOIN leads_by_channel l
+        ON s.source = l.source AND s.medium = l.medium AND s.campaign = l.campaign
+    )
+    SELECT
+      c.source,
+      c.medium,
+      c.campaign,
+      c.sessions,
+      c.leads,
+      c.fallback_hits,
+      o.leads_unattributed,
+      o.leads_missing_item_id,
+      o.fallback_hits AS orphan_fallback_hits
+    FROM combined c
+    CROSS JOIN orphans o
+    ORDER BY c.leads DESC, c.sessions DESC
+    LIMIT @limit
+  `;
+  };
+
+  const params = {
+    start_date: start,
+    end_date: end,
+    lead_events: leadEventsParam,
+    filter_item_id: filterItemId,
+    item_id: itemId || "",
+    limit,
+  };
+
+  let raw: Record<string, unknown>[];
+  let usedSessionLastClickColumn = attribution === "session_last_click";
+  try {
+    raw = await queryRows(contentRoot, buildSql(attribution === "session_last_click"), params);
+  } catch (err) {
+    const msg = (err as Error)?.message || String(err);
+    if (
+      attribution === "session_last_click" &&
+      /unrecognized name|session_traffic_source_last_click/i.test(msg)
+    ) {
+      log.warn({ err }, "[analytics] session_traffic_source_last_click unavailable; retrying without it");
+      usedSessionLastClickColumn = false;
+      warnings.push({
+        code: "attribution_fallback_traffic_source",
+        message:
+          "session_traffic_source_last_click is not available in this BigQuery export; using collected_traffic_source / traffic_source fallback.",
+      });
+      raw = await queryRows(contentRoot, buildSql(false), params);
+    } else {
+      throw err;
+    }
+  }
+
+  const rows = raw.map((r) => {
+    const sessions = num(r.sessions);
+    const leads = num(r.leads);
+    return {
+      source: String(r.source || "(direct)"),
+      medium: String(r.medium || "(none)"),
+      campaign: String(r.campaign || "(not set)"),
+      sessions,
+      leads,
+      lead_rate: sessions > 0 ? leads / sessions : 0,
+    };
+  });
+
+  const first = raw[0] || {};
+  const leadsUnattributed =
+    attribution === "session_last_click" ? num(first.leads_unattributed) : 0;
+  const leadsMissingItemId = filterItemId ? num(first.leads_missing_item_id) : 0;
+  const fallbackHits =
+    num(first.orphan_fallback_hits) +
+    raw.reduce((s, r) => s + num(r.fallback_hits), 0);
+
+  if (
+    attribution === "session_last_click" &&
+    usedSessionLastClickColumn &&
+    fallbackHits > 0 &&
+    !warnings.some((w) => w.code === "attribution_fallback_traffic_source")
+  ) {
+    warnings.push({
+      code: "attribution_fallback_traffic_source",
+      message:
+        "Some events lacked session last-click / collected source and fell back to traffic_source (often first-user).",
+    });
+  }
+
+  if (attribution === "session_last_click" && leadsUnattributed > 0) {
+    warnings.push({
+      code: "leads_unattributed",
+      message: `${leadsUnattributed} lead event(s) lacked ga_session_id and were excluded from channel rows (see totals.leads_unattributed).`,
+    });
+  }
+
+  if (filterItemId && leadsMissingItemId > 0) {
+    warnings.push({
+      code: "leads_missing_item_id",
+      message: `${leadsMissingItemId} lead event(s) in this window had no item_id and were excluded from the product slice.`,
+    });
+  }
+
+  const totals: Record<string, unknown> = {
+    row_count: rows.length,
+    sessions: rows.reduce((s, r) => s + r.sessions, 0),
+    leads: rows.reduce((s, r) => s + r.leads, 0),
+    lead_event_names: leadEventNames,
+    attribution,
+  };
+  if (attribution === "session_last_click") {
+    totals.leads_unattributed = leadsUnattributed;
+  }
+  if (filterItemId) {
+    totals.item_id = itemId;
+    totals.leads_missing_item_id = leadsMissingItemId;
+  }
+
+  if (rows.length === 0 && leadEventNames.length > 0) {
+    warnings.push(emptyOkWarning());
+  }
+
+  return {
+    report: "traffic_source_conversions",
+    status: "ok",
+    window_days: days,
+    as_of: asOf,
+    rows,
+    totals,
+    warnings,
+  };
+}
+
 /**
  * Validate opts and run one named report. Throws only for unexpected BQ errors;
  * bad args return via thrown ValidationError message for the route to map to 400.
@@ -693,6 +1035,16 @@ export async function getAnalyticsReport(
   const days = clampDays(opts.days);
   const limit = clampLimit(opts.limit);
   const contentRoot = opts.contentRoot;
+  if (
+    opts.attribution != null &&
+    !ANALYTICS_ATTRIBUTIONS.includes(opts.attribution)
+  ) {
+    throw new AnalyticsReportValidationError(
+      `Unknown attribution "${String(opts.attribution)}". Valid: ${ANALYTICS_ATTRIBUTIONS.join(", ")}`,
+    );
+  }
+  const attribution = parseAttribution(opts.attribution);
+  const itemId = (opts.item_id || "").trim() || undefined;
 
   let resolvedPaths: string[] | undefined;
   let resolveWarnings: AnalyticsWarning[] = [];
@@ -727,6 +1079,8 @@ export async function getAnalyticsReport(
     opts.slug || "",
     opts.locale || "",
     (opts.event_names || []).join(","),
+    report === "traffic_source_conversions" ? attribution : "",
+    report === "traffic_source_conversions" ? itemId || "" : "",
   ].join("|");
 
   const hit = cache.get(cacheKey);
@@ -770,6 +1124,15 @@ export async function getAnalyticsReport(
         break;
       case "traffic_sources":
         payload = await runTrafficSources(days, limit, contentRoot);
+        break;
+      case "traffic_source_conversions":
+        payload = await runTrafficSourceConversions(
+          days,
+          limit,
+          attribution,
+          itemId,
+          contentRoot,
+        );
         break;
       default: {
         const _exhaustive: never = report;

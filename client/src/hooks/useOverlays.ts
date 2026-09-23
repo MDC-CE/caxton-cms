@@ -7,6 +7,16 @@ export interface OverlayButton {
   href: string;
 }
 
+/** Ordered path rewrite before path-preserving domain swap. */
+export interface OverlayRedirectException {
+  /** Regex tested against pathname (e.g. AI Engineering → Full Stack). */
+  match: string;
+  /** Fixed destination path when locale-specific paths are omitted. */
+  to_path?: string;
+  to_path_en?: string;
+  to_path_es?: string;
+}
+
 export interface OverlayContent {
   title: string;
   body: string;
@@ -14,6 +24,76 @@ export interface OverlayContent {
   image_id?: string;
   /** Public URL for overlay image when not using media gallery image_id (e.g. /fldoe-logo.png). */
   image_url?: string;
+  /** When set, modal auto-navigates after this many ms (fail-closed geo). */
+  auto_redirect_after_ms?: number;
+  /** Origin for path-preserving swap, e.g. https://fl.4geeksacademy.com */
+  auto_redirect_base_host?: string;
+  /** Optional regex → path exceptions; defaults apply when base host is the FL site. */
+  auto_redirect_exceptions?: OverlayRedirectException[];
+}
+
+/** TEMP Florida gate: AI Engineering surfaces → FL Full Stack. */
+export const DEFAULT_FL_REDIRECT_EXCEPTIONS: OverlayRedirectException[] = [
+  {
+    match:
+      "^/(en|es)/(?:career-programs|programs|programas(?:-de-carrera)?)/ai-engineering(?:-devs|-new)?/?$",
+    to_path_en: "/en/programs/full-stack",
+    to_path_es: "/es/programas/full-stack",
+  },
+  {
+    match: "^/(en|es)/landing/[^/]*ai-engineering[^/]*florida",
+    to_path_en: "/en/programs/full-stack",
+    to_path_es: "/es/programas/full-stack",
+  },
+];
+
+export function overlayUsesAutoRedirect(content: OverlayContent | undefined): boolean {
+  if (!content) return false;
+  return (
+    typeof content.auto_redirect_after_ms === "number" &&
+    content.auto_redirect_after_ms >= 0 &&
+    typeof content.auto_redirect_base_host === "string" &&
+    content.auto_redirect_base_host.trim().length > 0
+  );
+}
+
+/**
+ * Resolve Continue / timer destination: exception path rewrite, then
+ * path-preserving domain swap onto auto_redirect_base_host.
+ */
+export function resolveOverlayRedirectUrl(
+  content: OverlayContent,
+  pathname: string,
+  search = "",
+): string | null {
+  const baseRaw = content.auto_redirect_base_host?.trim();
+  const base = baseRaw ? baseRaw.replace(/\/$/, "") : "";
+
+  if (base) {
+    let path = pathname || "/";
+    const exceptions =
+      content.auto_redirect_exceptions && content.auto_redirect_exceptions.length > 0
+        ? content.auto_redirect_exceptions
+        : DEFAULT_FL_REDIRECT_EXCEPTIONS;
+    for (const ex of exceptions) {
+      if (!ex?.match) continue;
+      try {
+        if (!new RegExp(ex.match, "i").test(pathname)) continue;
+      } catch {
+        continue;
+      }
+      const isEs = pathname === "/es" || pathname.startsWith("/es/");
+      path =
+        (isEs ? ex.to_path_es : ex.to_path_en) ||
+        ex.to_path ||
+        path;
+      break;
+    }
+    return `${base}${path}${search || ""}`;
+  }
+
+  const btn = content.buttons?.find((b) => typeof b.href === "string" && b.href.trim());
+  return btn?.href?.trim() || null;
 }
 
 export interface OverlayTrigger {
@@ -151,12 +231,9 @@ export function matchesPage(targeting: OverlayTargeting, pathname: string): bool
   return true;
 }
 
-function matchesGeo(targeting: OverlayTargeting, geo: GeoData | null): boolean {
+function applyGeoRules(targeting: OverlayTargeting, geo: GeoData): boolean {
   const g = targeting.geo;
   if (!g) return true;
-
-  // Fail-open: if geo lookup failed, treat as no geo filter
-  if (!geo || geo.status === "fail") return true;
 
   if (g.exclude_countries && g.exclude_countries.length > 0) {
     if (geo.countryCode && g.exclude_countries.includes(geo.countryCode)) {
@@ -183,6 +260,31 @@ function matchesGeo(targeting: OverlayTargeting, geo: GeoData | null): boolean {
   }
 
   return true;
+}
+
+function matchesGeo(targeting: OverlayTargeting, geo: GeoData | null): boolean {
+  const g = targeting.geo;
+  if (!g) return true;
+
+  // Fail-open: if geo lookup failed, treat as no geo filter
+  if (!geo || geo.status === "fail") return true;
+
+  return applyGeoRules(targeting, geo);
+}
+
+/**
+ * Geo gate for overlays. Soft overlays fail-open when geo is missing.
+ * Auto-redirect overlays fail-closed: require a successful geo match.
+ */
+export function matchesGeoForOverlay(
+  overlay: Overlay,
+  geo: GeoData | null,
+): boolean {
+  if (overlayUsesAutoRedirect(overlay.content)) {
+    if (!geo || geo.status === "fail") return false;
+    return applyGeoRules(overlay.targeting, geo);
+  }
+  return matchesGeo(overlay.targeting, geo);
 }
 
 function hasBeenSeen(overlay: Overlay): boolean {
@@ -256,7 +358,7 @@ export function useOverlays() {
       const candidates = enabled.filter(
         (o) =>
           matchesPage(o.targeting, pathname) &&
-          matchesGeo(o.targeting, geo) &&
+          matchesGeoForOverlay(o, geo) &&
           !hasBeenSeen(o)
       );
 

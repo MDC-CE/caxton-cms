@@ -193,6 +193,38 @@ export function emitEntrySeoChanged(opts: {
   });
 }
 
+export function emitClusterHubPathRewriteStarted(opts: {
+  site: string;
+  contentType: string;
+  slug: string;
+  locale: string;
+  oldUrl: string;
+  newUrl: string;
+  author?: string;
+  actor?: EventActor;
+  agent_session_id?: string;
+}): EmitResult {
+  return emitEvent({
+    site: opts.site,
+    type: "cluster_hub_path_rewrite_started",
+    resource: {
+      contentType: opts.contentType,
+      slug: opts.slug,
+      locale: opts.locale,
+    },
+    attribution: singleAttribution(opts.author, opts.actor),
+    agent_session_id: opts.agent_session_id,
+    payload: {
+      oldUrl: opts.oldUrl,
+      newUrl: opts.newUrl,
+      contentType: opts.contentType,
+      slug: opts.slug,
+      locale: opts.locale,
+      author: opts.author,
+    },
+  });
+}
+
 export function emitEntryDeleted(opts: {
   site: string;
   contentType: string;

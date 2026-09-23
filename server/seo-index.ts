@@ -812,33 +812,126 @@ export function migrateLocaleFileText(text: string): { text: string; moved: bool
   return migrateMainKeywordInYamlText(text);
 }
 
-function rewriteMemberPillarPaths(opts: {
+export type RewritePillarPathsResult = {
+  written: string[];
+  /** Relative-from-cwd paths for markFileAsModified / applier. */
+  updatedPaths: string[];
+  skipped: number;
+  errors: string[];
+};
+
+/**
+ * True when any seo-index entry still has pillar_path === oldPath, or the hub
+ * entry's pillar_path / path still equals oldPath (needs self-heal after rename).
+ */
+export function clusterHasPillarPathPointers(opts: {
   contentRoot?: string;
-  hubId: string;
   oldPath: string;
-  newPath: string;
-}): string[] {
-  if (!opts.oldPath || opts.oldPath === opts.newPath) return [];
-  const index = loadSeoIndex(opts.contentRoot);
-  const cluster = index.clusters[opts.hubId];
-  const members = cluster?.members || [];
-  const written: string[] = [];
-  const root = contentRootAbs(opts.contentRoot);
-  for (const memberId of members) {
-    const row = index.entries[memberId];
-    if (!row?.file) continue;
-    const abs = path.isAbsolute(row.file) ? row.file : path.join(root, row.file);
-    if (!fs.existsSync(abs)) continue;
-    const text = fs.readFileSync(abs, "utf-8");
-    const seo = readSeoBlockFromYamlText(text);
-    seo.pillar_path = opts.newPath;
-    const next = surgicalReplaceSeoBlock(text, seo);
-    if (next !== text) {
-      fs.writeFileSync(abs, next, "utf-8");
-      written.push(abs);
+  hubContentType?: string;
+  hubSlug?: string;
+  hubLocale?: string;
+}): boolean {
+  const oldPath = (opts.oldPath || "").trim();
+  if (!oldPath) return false;
+  let index: SeoIndex;
+  try {
+    index = loadSeoIndex(opts.contentRoot);
+  } catch {
+    return false;
+  }
+  for (const row of Object.values(index.entries)) {
+    const pp = typeof row.pillar_path === "string" ? row.pillar_path.trim() : "";
+    if (pp === oldPath) return true;
+  }
+  if (opts.hubContentType && opts.hubSlug && opts.hubLocale) {
+    const hub = index.entries[seoEntryId(opts.hubContentType, opts.hubSlug, opts.hubLocale)];
+    if (hub) {
+      const hubPp = typeof hub.pillar_path === "string" ? hub.pillar_path.trim() : "";
+      const hubPath = typeof hub.path === "string" ? hub.path.trim() : "";
+      if (hubPp === oldPath || hubPath === oldPath) return true;
     }
   }
-  return written;
+  return false;
+}
+
+/**
+ * Rewrite locale seo.pillar_path from oldPath → newPath for every index entry
+ * whose on-disk pillar_path still exactly equals oldPath (path-based membership).
+ * Also heals the hub file when hubId is provided and its pillar_path is still oldPath.
+ */
+export function rewriteMemberPillarPaths(opts: {
+  contentRoot?: string;
+  /** Optional; used for hub self-heal + logging. Path discovery does not require it. */
+  hubId?: string;
+  oldPath: string;
+  newPath: string;
+}): RewritePillarPathsResult {
+  const empty: RewritePillarPathsResult = { written: [], updatedPaths: [], skipped: 0, errors: [] };
+  if (!opts.oldPath || opts.oldPath === opts.newPath) return empty;
+
+  const index = loadSeoIndex(opts.contentRoot);
+  const root = contentRootAbs(opts.contentRoot);
+  const written: string[] = [];
+  const updatedPaths: string[] = [];
+  const errors: string[] = [];
+  let skipped = 0;
+  const seenAbs = new Set<string>();
+
+  const tryRewriteFile = (abs: string): void => {
+    if (seenAbs.has(abs)) return;
+    seenAbs.add(abs);
+    if (!fs.existsSync(abs)) {
+      skipped += 1;
+      return;
+    }
+    try {
+      const text = fs.readFileSync(abs, "utf-8");
+      const seo = readSeoBlockFromYamlText(text);
+      const current =
+        typeof seo.pillar_path === "string"
+          ? seo.pillar_path.trim()
+          : typeof seo.pillar === "string"
+            ? String(seo.pillar).trim()
+            : "";
+      if (current !== opts.oldPath) {
+        skipped += 1;
+        return;
+      }
+      seo.pillar_path = opts.newPath;
+      const next = surgicalReplaceSeoBlock(text, seo);
+      if (next === text) {
+        skipped += 1;
+        return;
+      }
+      fs.writeFileSync(abs, next, "utf-8");
+      written.push(abs);
+      updatedPaths.push(relativeFromCwd(abs));
+    } catch (err) {
+      errors.push(`${abs}: ${(err as Error).message}`);
+    }
+  };
+
+  for (const [id, row] of Object.entries(index.entries)) {
+    const pp = typeof row.pillar_path === "string" ? row.pillar_path.trim() : "";
+    if (pp !== opts.oldPath) continue;
+    if (!row.file) {
+      skipped += 1;
+      continue;
+    }
+    const abs = path.isAbsolute(row.file) ? row.file : path.join(root, row.file);
+    tryRewriteFile(abs);
+    void id;
+  }
+
+  if (opts.hubId) {
+    const hub = index.entries[opts.hubId];
+    if (hub?.file) {
+      const abs = path.isAbsolute(hub.file) ? hub.file : path.join(root, hub.file);
+      tryRewriteFile(abs);
+    }
+  }
+
+  return { written, updatedPaths, skipped, errors };
 }
 
 /**
@@ -952,14 +1045,13 @@ export function writeSeoFields(opts: {
     const newPath =
       typeof validated.coerced.pillar_path === "string" ? validated.coerced.pillar_path : "";
     if (validated.coerced.is_pillar === true && prevPath && newPath && prevPath !== newPath) {
-      memberFiles.push(
-        ...rewriteMemberPillarPaths({
-          contentRoot,
-          hubId,
-          oldPath: prevPath,
-          newPath,
-        }),
-      );
+      const rewritten = rewriteMemberPillarPaths({
+        contentRoot,
+        hubId,
+        oldPath: prevPath,
+        newPath,
+      });
+      memberFiles.push(...rewritten.written);
       filesToMark.push(...memberFiles);
     }
 

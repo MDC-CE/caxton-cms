@@ -68,6 +68,27 @@ describe("privateHtmlAuthMiddleware", () => {
     expect(String(res.body)).toContain("401 Unauthorized");
   });
 
+  it("401 GitHub login link uses absolute return_to for the request host", async () => {
+    const next = vi.fn();
+    const res = mockRes();
+    await privateHtmlAuthMiddleware(
+      mockReq({
+        path: "/private/settings",
+        headers: {
+          host: "fl.4geeksacademy.com",
+          "x-forwarded-proto": "https",
+        },
+      } as Partial<Request> & { path: string }),
+      res,
+      next,
+    );
+    expect(res.statusCode).toBe(401);
+    const html = String(res.body);
+    expect(html).toContain(
+      encodeURIComponent("https://fl.4geeksacademy.com/private/settings"),
+    );
+  });
+
   it("allows embed preview frames without a session", async () => {
     const next = vi.fn();
     await privateHtmlAuthMiddleware(

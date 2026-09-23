@@ -1,11 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import {AlertTriangle, ArrowLeft, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
+import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -423,6 +424,31 @@ function buildCachedIssueAskAgentPrompt(issue: CachedIssueRow): string {
     mcp_url: mcpUrl,
     error_block: isError ? line : "- (none)",
     warning_block: !isError ? line : "- (none)",
+  });
+}
+
+function buildResolvedIssueAskAgentPrompt(row: ResolvedArchiveRow): string {
+  const parsed = row.entryKey ? parseEntryKey(row.entryKey) : null;
+  const mcpUrl = typeof window !== "undefined" ? getMcpServerUrl() : "/mcp";
+  const reopenedLine = row.reopenedAt?.trim()
+    ? `- Reopened: ${row.reopenedAt.trim()}\n`
+    : "";
+  return renderAskAgentPrompt("resolved-issue-context", {
+    issue_id: row.issueId || "(unknown)",
+    code: row.code || "(unknown)",
+    severity: row.severity || "(unknown)",
+    validator: row.validator || "(unknown)",
+    url: row.url?.trim() || "(none)",
+    content_type: parsed?.contentType || "(unknown)",
+    slug: parsed?.slug || "(unknown)",
+    locale: parsed?.locale || "(unknown)",
+    variant_line: parsed?.variant ? `\n- variant: ${parsed.variant}` : "",
+    file_path: row.file?.trim() || "(none)",
+    mcp_url: mcpUrl,
+    message: row.message?.trim() || "(none)",
+    resolved_at: row.resolvedAt || "(unknown)",
+    resolved_by: formatIssueActorLine(row.resolvedBy, row.actor) || "(unknown)",
+    reopened_line: reopenedLine,
   });
 }
 
@@ -2823,6 +2849,8 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
                   row={row}
                   idx={idx}
                   issueCodeMap={issueCodeMap}
+                  askAgentPrompt={buildResolvedIssueAskAgentPrompt(row)}
+                  onAgentSelect={openAskAgent}
                 />
               ))
             )}
@@ -3048,11 +3076,7 @@ export default function DiagnosticsPage() {
           <Tabs value={activeTab} onValueChange={onTabChange}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
               <div className="flex items-center gap-3">
-                <Link href="/">
-                  <Button variant="ghost" size="icon" data-testid="button-back-home">
-                    <ArrowLeft className="h-5 w-5" />
-                  </Button>
-                </Link>
+                <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back-home" />
                 <div className="flex items-center gap-2">
                   <Stethoscope className="h-5 w-5 text-primary" />
                   <h1 className="text-lg font-semibold text-foreground" data-testid="text-diagnostics-title">

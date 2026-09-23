@@ -1,6 +1,6 @@
 /**
  * Gate agent YAML writes of seo.kw_monthly_volume / seo.kw_difficulty (B + B1).
- * OpenRush on → reject YAML (use refresh_keyword_metrics). Off → require provenance.
+ * SEO research on → reject YAML (use get_or_refresh_seo_research). Off → require provenance.
  */
 
 import { isOpenRushConfigured } from "../../server/openrush-client.js";
@@ -81,23 +81,24 @@ export function seoResearchWriteGate(opts: {
   }
 
   const siteArg = opts.site ? { site: opts.site } : {};
-  const openrushOn = isOpenRushConfigured(opts.contentRoot);
+  const researchOn = isOpenRushConfigured(opts.contentRoot);
 
-  if (openrushOn) {
+  if (researchOn) {
     return {
       ok: false,
       code: "seo_research_use_openrush",
       message:
-        "OpenRush is configured — do not write seo.kw_monthly_volume / seo.kw_difficulty via YAML. " +
-        "Call refresh_keyword_metrics to fill the OpenRush cache (does not write YAML). " +
+        "SEO research is configured — do not write seo.kw_monthly_volume / seo.kw_difficulty via YAML. " +
+        "Call get_or_refresh_seo_research with action keyword_metrics (cache only, does not write YAML). " +
         "Do not invent volume or difficulty.",
-      details: { openrush_configured: true },
+      details: { seo_research_configured: true },
       next_actions: [
         {
-          tool: "refresh_keyword_metrics",
+          tool: "get_or_refresh_seo_research",
           priority: "required",
-          reason: "Refresh OpenRush cache for this entry's main_keyword (no YAML invent).",
+          reason: "Refresh keyword research cache for this entry's main_keyword (no YAML invent).",
           args_hint: {
+            action: "keyword_metrics",
             slug: opts.slug,
             locale: opts.locale,
             contentType: opts.contentType,
@@ -125,12 +126,12 @@ export function seoResearchWriteGate(opts: {
       ok: false,
       code: "seo_research_source_required",
       message:
-        "OpenRush is not configured. Writing seo.kw_monthly_volume / seo.kw_difficulty requires " +
+        "SEO research is not configured. Writing seo.kw_monthly_volume / seo.kw_difficulty requires " +
         "seo_research_source: staff_provided or external:<tool_name> (e.g. external:google_keyword_planner). " +
         "Do not invent estimates (rejected: openrush, estimated, model, empty). " +
         "If you have no reliable source, do not claim / release blocked.",
       details: {
-        openrush_configured: false,
+        seo_research_configured: false,
         accepted: ["staff_provided", "external:<name>"],
       },
       next_actions: [

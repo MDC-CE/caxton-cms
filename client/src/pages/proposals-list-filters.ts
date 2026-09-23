@@ -10,6 +10,9 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   proposerActorRole: "proposer_actor_role",
   agentSessionId: "agent_session_id",
   escalatedOnly: "escalated",
+  attention: "attention",
+  stalledOnly: "stalled",
+  needsReviewOnly: "needs_review",
 } as const;
 
 export type ProposalListStatus =
@@ -22,11 +25,18 @@ export type ProposalListStatus =
 
 export type ProposalListKind = "all" | "edits" | "notes" | "idea";
 
-export type ProposalListSortField = "created_at" | "updated_at";
+export type ProposalListSortField = "created_at" | "updated_at" | "attention";
 export type ProposalListSortDir = "asc" | "desc";
 
 /** `all` = no actor-type filter (omitted from API). */
 export type ProposalListActorType = "all" | "ui" | "mcp" | "system";
+
+export type ProposalListAttention =
+  | "all"
+  | "escalated"
+  | "awaiting_rereview"
+  | "no_feedback"
+  | "blocked";
 
 export type ProposalListFilters = {
   status: ProposalListStatus;
@@ -42,6 +52,12 @@ export type ProposalListFilters = {
   agentSessionId: string;
   /** When true, only proposals with the escalated flag. */
   escalatedOnly: boolean;
+  /** Attention triage bucket; `all` = no filter. */
+  attention: ProposalListAttention;
+  /** Accepted ideas with no successful implements follow-up. */
+  stalledOnly: boolean;
+  /** Open edits that still need a reviewer (re-check or no feedback). */
+  needsReviewOnly: boolean;
 };
 
 export type ProposalListViewState = {
@@ -59,6 +75,9 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   proposerActorRole: "",
   agentSessionId: "",
   escalatedOnly: false,
+  attention: "all",
+  stalledOnly: false,
+  needsReviewOnly: false,
 };
 
 export const DEFAULT_PROPOSAL_LIST_VIEW: ProposalListViewState = {
@@ -79,6 +98,14 @@ const KIND_VALUES = new Set<ProposalListKind>(["all", "edits", "notes", "idea"])
 
 const ACTOR_TYPE_VALUES = new Set<ProposalListActorType>(["all", "ui", "mcp", "system"]);
 
+const ATTENTION_VALUES = new Set<ProposalListAttention>([
+  "all",
+  "escalated",
+  "awaiting_rereview",
+  "no_feedback",
+  "blocked",
+]);
+
 function parseStatus(raw: string | null): ProposalListStatus {
   if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.status;
   return STATUS_VALUES.has(raw as ProposalListStatus)
@@ -94,7 +121,7 @@ function parseKind(raw: string | null): ProposalListKind {
 }
 
 function parseSort(raw: string | null): ProposalListSortField {
-  if (raw === "created_at" || raw === "updated_at") return raw;
+  if (raw === "created_at" || raw === "updated_at" || raw === "attention") return raw;
   return DEFAULT_PROPOSAL_LIST_FILTERS.sort;
 }
 
@@ -116,6 +143,25 @@ function parseEscalatedOnly(raw: string | null): boolean {
   return v === "1" || v === "true";
 }
 
+function parseStalledOnly(raw: string | null): boolean {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function parseNeedsReviewOnly(raw: string | null): boolean {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.needsReviewOnly;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
+function parseAttention(raw: string | null): ProposalListAttention {
+  if (raw == null || raw === "") return DEFAULT_PROPOSAL_LIST_FILTERS.attention;
+  return ATTENTION_VALUES.has(raw as ProposalListAttention)
+    ? (raw as ProposalListAttention)
+    : DEFAULT_PROPOSAL_LIST_FILTERS.attention;
+}
+
 export function parseProposalListSearch(search: string): ProposalListViewState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return {
@@ -129,6 +175,9 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       proposerActorRole: params.get(PROPOSAL_LIST_SEARCH_KEYS.proposerActorRole) ?? "",
       agentSessionId: params.get(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId) ?? "",
       escalatedOnly: parseEscalatedOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly)),
+      attention: parseAttention(params.get(PROPOSAL_LIST_SEARCH_KEYS.attention)),
+      stalledOnly: parseStalledOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly)),
+      needsReviewOnly: parseNeedsReviewOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly)),
     },
     q: params.get(PROPOSAL_LIST_SEARCH_KEYS.q) ?? "",
   };
@@ -203,6 +252,24 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly, "1");
   }
 
+  if (filters.attention === d.attention) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.attention);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.attention, filters.attention);
+  }
+
+  if (!filters.stalledOnly) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly, "1");
+  }
+
+  if (!filters.needsReviewOnly) {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly);
+  } else {
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly, "1");
+  }
+
   const trimmedQ = q.trim();
   if (!trimmedQ) {
     params.delete(PROPOSAL_LIST_SEARCH_KEYS.q);
@@ -224,6 +291,9 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   if (filters.proposerActorRole.trim()) n += 1;
   if (filters.agentSessionId.trim()) n += 1;
   if (filters.escalatedOnly) n += 1;
+  if (filters.attention !== d.attention) n += 1;
+  if (filters.stalledOnly) n += 1;
+  if (filters.needsReviewOnly) n += 1;
   return n;
 }
 
@@ -238,6 +308,9 @@ export function clearProposalListFilters(filters: ProposalListFilters): Proposal
     proposerActorRole: DEFAULT_PROPOSAL_LIST_FILTERS.proposerActorRole,
     agentSessionId: DEFAULT_PROPOSAL_LIST_FILTERS.agentSessionId,
     escalatedOnly: DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly,
+    attention: DEFAULT_PROPOSAL_LIST_FILTERS.attention,
+    stalledOnly: DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly,
+    needsReviewOnly: DEFAULT_PROPOSAL_LIST_FILTERS.needsReviewOnly,
   };
 }
 
@@ -252,6 +325,10 @@ export type ProposalListApiQuery = {
   proposer_actor_role?: string;
   agent_session_id?: string;
   escalated?: string;
+  attention?: string;
+  attention_perspective?: string;
+  stalled?: string;
+  needs_review?: string;
 };
 
 /** Map UI filters to API query params. status/kind/actor type `all` → omit. */
@@ -275,6 +352,10 @@ export function toProposalListApiQuery(
   const session = filters.agentSessionId.trim();
   if (session) out.agent_session_id = session;
   if (filters.escalatedOnly) out.escalated = "1";
+  if (filters.attention !== "all") out.attention = filters.attention;
+  if (filters.stalledOnly) out.stalled = "1";
+  if (filters.needsReviewOnly) out.needs_review = "1";
+  if (filters.sort === "attention") out.attention_perspective = "reviewer";
   return out;
 }
 
@@ -290,6 +371,10 @@ export function proposalListApiSearchParams(query: ProposalListApiQuery): string
   if (query.proposer_actor_role) params.set("proposer_actor_role", query.proposer_actor_role);
   if (query.agent_session_id) params.set("agent_session_id", query.agent_session_id);
   if (query.escalated) params.set("escalated", query.escalated);
+  if (query.attention) params.set("attention", query.attention);
+  if (query.attention_perspective) params.set("attention_perspective", query.attention_perspective);
+  if (query.stalled) params.set("stalled", query.stalled);
+  if (query.needs_review) params.set("needs_review", query.needs_review);
   return params.toString();
 }
 
@@ -298,7 +383,49 @@ export type ProposalListStats = {
   by_status: Record<string, number>;
   by_kind: Record<string, number>;
   escalated_count?: number;
+  by_attention?: Record<string, number>;
+  by_kind_status?: Record<
+    string,
+    { open?: number; finished?: number; rejected?: number }
+  >;
+  stalled_ideas?: number;
+  needs_review_edits?: number;
 };
+
+export const PROPOSAL_KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;
+export type ProposalKpiCardStatus = (typeof PROPOSAL_KPI_CARD_STATUSES)[number];
+
+export const PROPOSAL_KPI_CARD_KINDS = ["idea", "edits", "notes"] as const;
+export type ProposalKpiCardKind = (typeof PROPOSAL_KPI_CARD_KINDS)[number];
+
+export type ProposalKpiCardSpec = {
+  kind: ProposalKpiCardKind;
+  label: string;
+};
+
+const KIND_LABEL: Record<ProposalKpiCardKind, string> = {
+  idea: "Ideas",
+  edits: "Edits",
+  notes: "Notes",
+};
+
+/** Which kind KPI cards to show given the list kind filter (one card per kind). */
+export function proposalKpiCardsForKindFilter(kind: ProposalListKind): ProposalKpiCardSpec[] {
+  const kinds: ProposalKpiCardKind[] =
+    kind === "idea" || kind === "edits" || kind === "notes"
+      ? [kind]
+      : [...PROPOSAL_KPI_CARD_KINDS];
+  return kinds.map((k) => ({ kind: k, label: KIND_LABEL[k] }));
+}
+
+export function proposalKpiLiveCount(
+  stats: ProposalListStats | null | undefined,
+  kind: ProposalKpiCardKind,
+  status: ProposalKpiCardStatus,
+): number {
+  return Number(stats?.by_kind_status?.[kind]?.[status] ?? 0) || 0;
+}
+
 
 export const PROPOSAL_STATUS_OPTIONS: Array<{ value: ProposalListStatus; label: string }> = [
   { value: "all", label: "All" },
@@ -316,6 +443,17 @@ export const PROPOSAL_KIND_OPTIONS: Array<{ value: ProposalListKind; label: stri
   { value: "idea", label: "Idea" },
 ];
 
+export const PROPOSAL_ATTENTION_OPTIONS: Array<{
+  value: ProposalListAttention;
+  label: string;
+}> = [
+  { value: "all", label: "Any attention" },
+  { value: "escalated", label: "Escalated hold" },
+  { value: "awaiting_rereview", label: "Ready for re-check" },
+  { value: "no_feedback", label: "No feedback yet" },
+  { value: "blocked", label: "Waiting on author" },
+];
+
 export const PROPOSAL_ACTOR_TYPE_OPTIONS: Array<{
   value: ProposalListActorType;
   label: string;
@@ -331,9 +469,18 @@ export type ProposalSortPreset = {
   label: string;
   sort: ProposalListSortField;
   sortDir: ProposalListSortDir;
+  /** When set, selecting this preset also updates status (Needs attention → open). */
+  status?: ProposalListStatus;
 };
 
 export const PROPOSAL_SORT_PRESETS: ProposalSortPreset[] = [
+  {
+    value: "needs_attention",
+    label: "Needs attention",
+    sort: "attention",
+    sortDir: "desc",
+    status: "open",
+  },
   { value: "updated_desc", label: "Newest updated", sort: "updated_at", sortDir: "desc" },
   { value: "updated_asc", label: "Oldest updated", sort: "updated_at", sortDir: "asc" },
   { value: "created_desc", label: "Newest created", sort: "created_at", sortDir: "desc" },
@@ -344,11 +491,14 @@ export function proposalSortPresetValue(
   sort: ProposalListSortField,
   sortDir: ProposalListSortDir,
 ): string {
+  if (sort === "attention") return "needs_attention";
   const hit = PROPOSAL_SORT_PRESETS.find((p) => p.sort === sort && p.sortDir === sortDir);
   return hit?.value ?? "updated_desc";
 }
 
-export function proposalSortFromPreset(value: string): Pick<ProposalListFilters, "sort" | "sortDir"> {
+export function proposalSortFromPreset(
+  value: string,
+): Pick<ProposalListFilters, "sort" | "sortDir"> & { status?: ProposalListStatus } {
   const hit = PROPOSAL_SORT_PRESETS.find((p) => p.value === value);
   if (!hit) {
     return {
@@ -356,5 +506,15 @@ export function proposalSortFromPreset(value: string): Pick<ProposalListFilters,
       sortDir: DEFAULT_PROPOSAL_LIST_FILTERS.sortDir,
     };
   }
-  return { sort: hit.sort, sortDir: hit.sortDir };
+  return {
+    sort: hit.sort,
+    sortDir: hit.sortDir,
+    ...(hit.status ? { status: hit.status } : {}),
+  };
+}
+
+export function attentionBadgeLabel(attention: string | null | undefined): string | null {
+  if (!attention) return null;
+  const hit = PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === attention);
+  return hit && hit.value !== "all" ? hit.label : null;
 }

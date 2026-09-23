@@ -229,6 +229,8 @@ export interface ConversionEventEntry {
   when_to_use?: string;
   /** Confusable neighbors — when not to use this name (required on save). */
   when_not_to_use?: string;
+  /** When true, included in product journey lead conversion KPIs. */
+  counts_as_lead?: boolean;
   automations?: string;
   tags?: string[];
   consent?: ConsentDefaults;

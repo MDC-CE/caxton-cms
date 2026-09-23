@@ -1,7 +1,8 @@
 import React from "react";
 import { AlertTriangle, ExternalLink } from "lucide-react";
+import { buildContentUrlFromPattern } from "@/lib/locale";
 
-/** Helpers for SEO modal “live URL redirected away” warning. */
+/** Helpers for SEO modal “live URL redirected away” warning + slug-rename preview. */
 
 export type RedirectTestConflict = {
   kind: string;
@@ -42,6 +43,36 @@ export function resolveSeoLiveProbePath(
     return raw.length > 1 && raw.endsWith("/") ? raw.slice(0, -1) : raw;
   }
   return null;
+}
+
+/**
+ * Preview old→new public paths for the SEO slug-rename redirect confirm.
+ * Prefer seo-preview livePath (fills :category etc.); swap the trailing slug for the new URL.
+ */
+export function buildSlugRenamePreviewUrls(opts: {
+  seoData: { livePath?: unknown } | null | undefined;
+  canonicalUrl: string | undefined | null;
+  oldSlug: string;
+  newSlug: string;
+  urlPattern: Record<string, string> | undefined;
+  locale: string;
+}): { oldUrl: string; newUrl: string } {
+  const { seoData, canonicalUrl, oldSlug, newSlug, urlPattern, locale } = opts;
+  const probed = resolveSeoLiveProbePath(seoData, canonicalUrl);
+  const oldUrl = probed ?? buildContentUrlFromPattern(urlPattern, oldSlug, locale);
+
+  const suffix = `/${oldSlug}`;
+  if (oldUrl === `/${oldSlug}` || oldUrl.endsWith(suffix)) {
+    return {
+      oldUrl,
+      newUrl: `${oldUrl.slice(0, oldUrl.length - oldSlug.length)}${newSlug}`,
+    };
+  }
+
+  return {
+    oldUrl,
+    newUrl: buildContentUrlFromPattern(urlPattern, newSlug, locale),
+  };
 }
 
 export function isLiveUrlRedirectHijack(result: RedirectTestLike | null | undefined): boolean {

@@ -96,6 +96,10 @@ import {
 import { enrichIssueCatalogFields } from "../lib/issue-code-enrichment.js";
 import { clusterResolutionConfirmRequired } from "../lib/cluster-resolution-gate.js";
 import { seoResearchWriteGate } from "../lib/seo-research-gate.js";
+import {
+  buildKeywordMetricsResearchNextAction,
+  isWeakKeywordMetricsForResearch,
+} from "../lib/entry-seo-research-hints.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
 import {
   buildAvailableFieldsCatalog,
@@ -165,17 +169,21 @@ import {
   buildTranslateLocaleData,
   draftMissingRequiredWarnings,
   listLiveLocaleFiles,
+  validateTranslateVariantSlug,
+  readVariantAllocation,
+  variantAllowsTranslateMerge,
+  TRANSLATE_DEFAULT_VARIANT,
 } from "../lib/translate-entry.js";
 import { applyPurchasableToRecord, ecommerceManager, PURCHASABLE_FIELD } from "../../server/ecommerce/ecommerce-manager.js";
 import { FUNNEL_STAGES } from "@shared/funnel";
 import {
   applyFunnelFieldUpdates,
   isFunnelFieldPath,
-  prepareAndWriteFunnelMerge,
   readFunnelBlockFromFile,
+  stripFunnelFromAllLocaleYamls,
   type FunnelFieldUpdate,
-  type FunnelMergePatch,
 } from "../../server/funnel-fields.js";
+import { applyFieldUpdates } from "../../server/field-write-router.js";
 import { assertFunnelAudienceGates } from "../../server/product/funnel-audience-gates.js";
 import {
   assertFunnelFilterConflict,
@@ -1914,7 +1922,8 @@ export function registerPageTools(
     "get_entry_seo",
     "Get the SEO/meta block plus structured-data preview for a page, with the identifying envelope (contentType, slug, locale, locales, urls). " +
     "Returns meta, seo (locale seo.main_keyword / kw_monthly_volume / kw_difficulty / pillar_path / is_pillar / refresh_tier), " +
-    "keyword_metrics (resolved OpenRush cache over YAML when OpenRush is on; source / may_not_be_recent / stale / fetched_at / notes), " +
+    "keyword_metrics (resolved research cache over YAML when SEO research is on; source / may_not_be_recent / stale / fetched_at / notes); " +
+    "when research is on and metrics are weak/stale/missing, may include next_actions → get_or_refresh_seo_research action keyword_metrics, " +
     "include_in_clustering (derived: false only when seo.pillar_path is explicit null), " +
     "index (live seo-index.json topic-cluster inventory row including refresh_tier — NOT search-engine indexing; omitted for variants), " +
     "optional search_engines when include_search_engines:true (cached Google Search Console + Bing stub; read-only, does not refresh cache or call live APIs), " +
@@ -2148,7 +2157,7 @@ export function registerPageTools(
         kmWarnings.push({
           code: "keyword_metrics_yaml_fallback",
           message:
-            "keyword_metrics uses YAML seo.kw_* fallback (may not be recent). OpenRush cache wins when configured and present. Refresh from staff SEO Geo does not write YAML.",
+            "keyword_metrics uses YAML seo.kw_* fallback (may not be recent). SEO research cache wins when configured and present. Prefer get_or_refresh_seo_research action keyword_metrics (does not write YAML).",
         });
       }
       if (keyword_metrics.notes) {
@@ -2156,6 +2165,18 @@ export function registerPageTools(
           code: "keyword_metrics_notes",
           message: keyword_metrics.notes,
         });
+      }
+
+      const next_actions: NextAction[] = [];
+      if (isWeakKeywordMetricsForResearch(mainKw, keyword_metrics)) {
+        next_actions.push(
+          buildKeywordMetricsResearchNextAction({
+            contentType: payload.contentType,
+            slug: payload.slug,
+            locale: payload.locale,
+            ...(site ? { site } : {}),
+          }),
+        );
       }
 
       if (include_search_engines) {
@@ -2173,6 +2194,7 @@ export function registerPageTools(
       } else if (kmWarnings.length) {
         seoPayload.warnings = kmWarnings;
       }
+      if (next_actions.length) seoPayload.next_actions = next_actions;
 
       return { content: [{ type: "text", text: JSON.stringify(seoPayload, null, 2) }] };
     }
@@ -3161,7 +3183,7 @@ export function registerPageTools(
     "seo.refresh_tier is fast|medium|evergreen (fact-staleness); cannot clear (null/reset forbidden) — omit to leave unchanged; pick help via get_entry_fields fill_intent or explain_site topic seo; " +
     "research writes: if any of main_keyword|kw_monthly_volume|kw_difficulty is in updates, omitted metrics are forced to null (pass both integers to keep them); " +
     "kw_monthly_volume ≥ 0 integer; kw_difficulty 0–100 integer; not GSC. " +
-    "B+B1: when OpenRush is configured, writing kw_* is rejected (seo_research_use_openrush) — call refresh_keyword_metrics (cache only, no YAML). " +
+    "B+B1: when OpenRush is configured, writing kw_* is rejected (seo_research_use_openrush) — call get_or_refresh_seo_research action keyword_metrics (cache only, no YAML). " +
     "When OpenRush is off, kw_* sets require seo_research_source: staff_provided|external:<name> (guesses rejected). " +
     "live seo.main_keyword must be unique site-wide (exact after trim; self may re-save); conflict → seo_keyword_taken; missing seo-index.json → seo_index_unavailable (hard block); " +
     "on=true needs non-empty seo.pillar_path or seo.is_pillar:true after merge; on=false → pillar_path:null + is_pillar:false; " +
@@ -3214,7 +3236,7 @@ export function registerPageTools(
         .optional()
         .describe(
           "Required when setting seo.kw_monthly_volume and/or seo.kw_difficulty while OpenRush is off: staff_provided or external:<tool_name>. " +
-            "Rejected when OpenRush is on (use refresh_keyword_metrics). Rejected: openrush, estimated, model, empty.",
+            "Rejected when OpenRush is on (use get_or_refresh_seo_research action keyword_metrics). Rejected: openrush, estimated, model, empty.",
         ),
       create_redirect: z.boolean().optional().describe(
         "When renaming live slug (field_path slug): required if published_at is >= 24h ago. Adds old URL to meta.redirects.",
@@ -3467,9 +3489,7 @@ export function registerPageTools(
       }
 
       // Atomic funnel gate: validate merge before any YAML writes in this call.
-      let preparedFunnel:
-        | { patch: FunnelMergePatch; warnings: { code: string; message: string }[] }
-        | null = null;
+      let funnelValidated = false;
       if (funnelUpdates.length > 0) {
         const commonPath = path.join(
           contentPath,
@@ -3503,11 +3523,11 @@ export function registerPageTools(
             ],
           );
         }
-    const gates = assertFunnelAudienceGates(merged.coerced, {
-      contentType: resolved.contentType,
-      contentSlug: slug,
-      contentRoot: contentPath,
-    });
+        const gates = assertFunnelAudienceGates(merged.coerced, {
+          contentType: resolved.contentType,
+          contentSlug: slug,
+          contentRoot: contentPath,
+        });
         if (!gates.ok) {
           return actionRequired(
             {
@@ -3533,37 +3553,7 @@ export function registerPageTools(
             ],
           );
         }
-        const patch: FunnelMergePatch = {};
-        for (const u of funnelUpdates) {
-          if (u.field_path === "funnel.stage") {
-            patch.touchStage = true;
-            patch.stage = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel.products") {
-            patch.touchProducts = true;
-            patch.products = u.reset ? null : u.value;
-          } else if (u.field_path === "funnel") {
-            if (u.reset) {
-              patch.touchStage = true;
-              patch.stage = null;
-              patch.touchProducts = true;
-              patch.products = null;
-            } else if (u.value && typeof u.value === "object" && !Array.isArray(u.value)) {
-              const b = u.value as Record<string, unknown>;
-              if ("stage" in b) {
-                patch.touchStage = true;
-                patch.stage = b.stage;
-              }
-              if ("products" in b) {
-                patch.touchProducts = true;
-                patch.products = b.products;
-              }
-            }
-          }
-        }
-        preparedFunnel = {
-          patch,
-          warnings: [...merged.warnings, ...gates.warnings],
-        };
+        funnelValidated = true;
       }
 
       const agenticGate = await runAgenticWriteGate({
@@ -3626,7 +3616,7 @@ export function registerPageTools(
           }
         }
 
-        if (setUpdates.length === 0 && !preparedFunnel) {
+        if (setUpdates.length === 0 && !funnelValidated) {
           const hasSeo = resetUpdates.some(
             (u) => u.field_path.startsWith("meta.") || isSeoPath(u.field_path),
           );
@@ -3976,7 +3966,7 @@ export function registerPageTools(
         ...variantWarningsIfNeeded(variant),
         ...clusterToggleWarnings,
       ];
-let renameResult: Record<string, unknown> | null = null;
+      let renameResult: Record<string, unknown> | null = null;
       if (touchesSections) {
         warnings.push({
           code: "section_index_no_create",
@@ -3990,6 +3980,64 @@ let renameResult: Record<string, unknown> | null = null;
           message:
             "Common meta (robots/priority/change_frequency or meta_target=common) writes _common.yml and ignores variant.",
         });
+      }
+
+      // Funnel writes live _common.yml first (journey kept if later locale writes fail).
+      if (funnelValidated) {
+        const funnelResult = await applyFieldUpdates({
+          contentType: resolved.contentType,
+          slug,
+          locale,
+          variant,
+          updates: funnelUpdates.map((u) => ({
+            field_path: u.field_path,
+            value: u.value,
+            reset: u.reset === true,
+          })),
+          author: "agent",
+          contentRoot: contentPath,
+          skipSharedLayoutFanOut: true,
+        });
+        if (!funnelResult.ok) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: funnelResult.code,
+              code: funnelResult.code,
+              message: funnelResult.error,
+              details: funnelResult.details,
+            },
+            [
+              {
+                tool: "update_fields",
+                priority: "required",
+                reason: "Retry funnel paths only",
+                args_hint: {
+                  slug,
+                  locale,
+                  contentType: resolved.contentType,
+                  confirm_live_edit: true,
+                  updates: funnelUpdates.map((u) =>
+                    u.reset === true
+                      ? { field_path: u.field_path, reset: true }
+                      : { field_path: u.field_path, value: u.value },
+                  ),
+                },
+              },
+            ],
+          );
+        }
+        for (const rel of funnelResult.wrote) {
+          if (rel.includes("/") || rel.endsWith(".yml") || rel.endsWith(".yaml")) {
+            notifyMcpContentWrite(rel, undefined, { agent_session_id });
+          }
+        }
+        results.push(`funnel → _common.yml`);
+        for (const w of funnelResult.warnings) {
+          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
+            warnings.push({ code: w.code, message: w.message });
+          }
+        }
       }
 
       if (localeEntries.length > 0) {
@@ -4110,79 +4158,6 @@ let renameResult: Record<string, unknown> | null = null;
         );
       }
 
-      if (preparedFunnel) {
-        const funnelWrite = prepareAndWriteFunnelMerge(
-          resolved.contentType,
-          slug,
-          preparedFunnel.patch,
-          contentPath,
-          assertFunnelAudienceGates,
-        );
-        if (!funnelWrite.ok) {
-          if (results.length > 0) {
-            return actionRequired(
-              {
-                success: false,
-                action_required: funnelWrite.code,
-                code: funnelWrite.code,
-                message:
-                  `Other fields were written but funnel update failed: ${funnelWrite.error}. ` +
-                  "Retry update_fields with only funnel.* paths.",
-                wrote: results,
-                details: funnelWrite.details,
-              },
-              [
-                {
-                  tool: "update_fields",
-                  priority: "required",
-                  reason: "Retry funnel paths only",
-                  args_hint: {
-                    slug,
-                    locale,
-                    contentType: resolved.contentType,
-                    confirm_live_edit: true,
-                    updates: funnelUpdates.map((u) =>
-                      u.reset === true
-                        ? { field_path: u.field_path, reset: true }
-                        : { field_path: u.field_path, value: u.value },
-                    ),
-                  },
-                },
-              ],
-            );
-          }
-          return actionRequired(
-            {
-              success: false,
-              action_required: funnelWrite.code,
-              code: funnelWrite.code,
-              message: funnelWrite.error,
-              details: funnelWrite.details,
-            },
-            [],
-          );
-        }
-        if (funnelWrite.relativePath) {
-          notifyMcpContentWrite(funnelWrite.relativePath, undefined, {
-            agent_session_id,
-          });
-        }
-        results.push(`funnel → _common.yml`);
-        for (const w of preparedFunnel.warnings) {
-          warnings.push({ code: w.code, message: w.message });
-        }
-        for (const w of funnelWrite.warnings) {
-          if (!warnings.some((x) => x.code === w.code && x.message === w.message)) {
-            warnings.push({ code: w.code, message: w.message });
-          }
-        }
-        warnings.push({
-          code: "funnel_locale_agnostic",
-          message:
-            "funnel.stage / funnel.products are page-level on _common.yml (all languages). locale and variant do not scope this write.",
-        });
-      }
-
       if (results.length === 0) {
         return fail("No operations applied");
       }
@@ -4235,7 +4210,7 @@ let renameResult: Record<string, unknown> | null = null;
               code: "seo_research_not_gsc",
               message:
                 "seo.kw_monthly_volume / seo.kw_difficulty are research metrics for main_keyword (not live GSC). " +
-                "When OpenRush is on, prefer refresh_keyword_metrics (cache) over YAML.",
+                "When OpenRush is on, prefer get_or_refresh_seo_research action keyword_metrics (cache) over YAML.",
             });
           }
         }
@@ -4280,16 +4255,38 @@ let renameResult: Record<string, unknown> | null = null;
         warnings.push({
           code: "slug_rename_non_effects",
           message:
-            "Slug rename updates locale URL routing only. It does not rename the entry folder and does not create a 301 redirect.",
+            "Slug rename updates locale URL routing only. It does not rename the entry folder. Body/HTML links are not rewritten.",
         });
-        warnings.push({
-          code: "slug_rename_redirect_hint",
-          message: "Use update_redirect if you need the previous URL to 301 to the new URL.",
-        });
+        if (!create_redirect) {
+          warnings.push({
+            code: "slug_rename_redirect_hint",
+            message:
+              "Pass create_redirect: true (or use update_redirect) if the previous URL should 301 to the new URL.",
+          });
+        }
         side_effects.push({
           kind: "locale_yaml",
           summary: `Renamed live slug in ${pathInfo.relativeHint}.`,
         });
+        if (renameResult?.clusterRewireQueued) {
+          side_effects.push({
+            kind: "pipeline_event",
+            summary:
+              "Queued cluster_hub_path_rewrite — spokes whose seo.pillar_path still equals the old URL will be updated asynchronously.",
+          });
+          next_actions.push({
+            tool: "list_seo_cluster_entries",
+            priority: "optional",
+            reason: "After a short wait, confirm spokes rejoined the hub under the new URL.",
+            args_hint: { bucket: "clustered", q: slug, ...(site ? { site } : {}) },
+          });
+        } else {
+          warnings.push({
+            code: "slug_rename_no_cluster_rewire",
+            message:
+              "No cluster path rewrite was queued (no seo-index entries still pointed at the old URL).",
+          });
+        }
       }
 
       if (renameResult && renameResult.routed === false) {
@@ -7726,15 +7723,17 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
   // translate_entry
   mcp.tool(
     "translate_entry",
-    "Write translated content for a target locale. Does NOT perform AI translation — supply the translated payload.\n\n" +
+    "Write translated content for a target locale onto a non-public variant. Does NOT perform AI translation — supply the translated payload.\n\n" +
+    "Never writes live {locale}.yml. Always writes {variant}.{locale}.yml (default variant: draft).\n\n" +
     "Modes (from entry state, not a detach flag):\n" +
     "- attached shared-layout: locale field_mapping keys + optional meta; sections omit or []. Shell stays on template.{locale}.yml.\n" +
     "- detached shared-layout or classic page: non-empty sections for new/full shell (fields optional); fields-only merges preserve existing sections.\n" +
-    "New target locale: always writes draft.{locale}.yml (not public). Promote/publish validates URL uniqueness.\n" +
-    "Optional url_slug sets this locale's public URL segment (defaults to entry identity). Do not pass content.slug or content.url — use url_slug.\n" +
-    "Existing non-empty live: merges fields only; fails if url_slug would change the live URL (use update_fields slug + create_redirect for renames).\n" +
-    "Custom shell ownership: set_entry_attachment (not this tool). Tiny field tweaks on existing locales: update_fields is fine.\n" +
-    "Go live with promote_variant or publish_draft (confirm with the user first).\n" +
+    "Pass variant to choose the layer, or create_variant: true to create a missing named layer (needs content_create_variant). " +
+    "Default draft layer is created automatically when missing.\n" +
+    "Merge into an existing variant only when that variant has 0% traffic (or is unregistered). Allocation > 0 → refuse.\n" +
+    "Optional url_slug sets this locale's public URL segment on the variant (validated at promote/publish). Do not pass content.slug or content.url.\n" +
+    "Custom shell ownership: set_entry_attachment (not this tool). Tiny live field tweaks: update_fields (not this tool).\n" +
+    "Go live with promote_variant or publish_draft / propose_change promote_on_apply (confirm with the user first).\n" +
     GITHUB_COMMIT_TOOL_BLURB,
     {
       slug: z.string().describe("Page slug of the page to translate"),
@@ -7743,11 +7742,18 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       target_locale: z.string().describe("The locale code to write the translated content to, e.g. 'es' or 'fr'"),
       content: z.record(z.unknown()).describe(
         "Translated payload. Attached: field keys (bio, title, content, …) + optional meta; sections [] or omit. " +
-        "Detached/classic: sections[] for shell translate; or fields-only to merge into an existing locale (preserves sections). " +
+        "Detached/classic: sections[] for shell translate; or fields-only to merge into an existing variant (preserves sections). " +
         "Do not include slug or url — use top-level url_slug.",
       ),
+      variant: z.string().optional().describe(
+        `Variant layer to write ({variant}.{target_locale}.yml). Default "${TRANSLATE_DEFAULT_VARIANT}". Cannot be live, template, or single.`,
+      ),
+      create_variant: z.boolean().optional().describe(
+        "When true and the variant file is missing for the target locale, create it (seed from live when live exists) and register at 0% traffic. " +
+        `Required for non-default variant names; default "${TRANSLATE_DEFAULT_VARIANT}" is auto-created when missing. Needs content_create_variant.`,
+      ),
       url_slug: z.string().optional().describe(
-        "Optional public URL slug for the target locale (kebab-case). Omitted on merge keeps existing locale slug; omitted on new draft defaults to entry identity.",
+        "Optional public URL slug for the target locale (kebab-case). Stored on the variant; uniqueness is validated at promote/publish.",
       ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
       confirm_new_values: z.boolean().optional().describe(
@@ -7755,7 +7761,19 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       ),
       ...requiredAgentSessionIdField,
     },
-    async ({ slug, contentType, source_locale, target_locale, content, url_slug, site, confirm_new_values, agent_session_id }) => {
+    async ({
+      slug,
+      contentType,
+      source_locale,
+      target_locale,
+      content,
+      variant: variantArg,
+      create_variant: createVariantFlag,
+      url_slug,
+      site,
+      confirm_new_values,
+      agent_session_id,
+    }) => {
       void agent_session_id;
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
@@ -7784,6 +7802,17 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         }
       }
 
+      const variantCheck = validateTranslateVariantSlug(
+        typeof variantArg === "string" && variantArg.trim()
+          ? variantArg
+          : TRANSLATE_DEFAULT_VARIANT,
+      );
+      if (!variantCheck.ok) {
+        return fail(variantCheck.message, { code: variantCheck.code });
+      }
+      const variantSlug = variantCheck.variant;
+      const isDefaultDraftVariant = variantSlug === TRANSLATE_DEFAULT_VARIANT;
+
       const { isEntryDetached, isSharedLayoutType } = await import("../../server/shared-layout-entry.js");
       const {
         convertEmptyLiveLocaleToDraft,
@@ -7791,7 +7820,6 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       } = await import("../../server/convert-empty-locale-to-draft.js");
       const { isEmptyDetachedLocaleEntry } = await import("../../server/empty-locale.js");
       const { isEmptyLocaleContent } = await import("../../shared/isEmptyLocaleContent.js");
-      const { assertLiveEntrySeoAndRequiredFields } = await import("../../server/live-entry-seo-gate.js");
       const { contentIndex } = await import("../../server/content-index.js");
       const {
         resolveLocaleUrlSlug,
@@ -7839,6 +7867,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
                 contentType: resolved.contentType,
                 source_locale,
                 target_locale,
+                variant: variantSlug,
                 content: { ...allowedFields, ...(split.meta ? { meta: split.meta } : {}), sections: [] },
                 ...siteHint,
               },
@@ -7875,14 +7904,15 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       }
 
       const liveTargetPath = path.join(dir, `${target_locale}.yml`);
-      const draftTargetPath = path.join(dir, `draft.${target_locale}.yml`);
-      try { assertWithinBase(liveTargetPath, contentPath); } catch (e) {
+      const targetFileName = `${variantSlug}.${target_locale}.yml`;
+      const targetFilePath = path.join(dir, targetFileName);
+      try { assertWithinBase(targetFilePath, contentPath); } catch (e) {
         return fail((e as Error).message);
       }
 
-      let writeAsDraft = false;
-      let reason = "live_locale_refresh";
+      let reason = "variant_locale_write";
       let autoConverted = false;
+      let seededFromLive = false;
 
       const liveExists = fs.existsSync(liveTargetPath);
       let liveNonEmpty = false;
@@ -7907,22 +7937,22 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         }
       }
 
-      if (!liveNonEmpty) {
-        if (liveExists) {
-          const converted = convertEmptyLiveLocaleToDraft({
-            contentType: resolved.contentType,
-            slug,
-            locale: target_locale,
-            contentRoot: contentPath,
-            ci: contentIndex,
-            author: "mcp-translate_entry",
-          });
-          autoConverted = !!converted;
-          reason = converted ? "empty_live_converted_to_draft" : "new_locale_starts_as_draft";
-        } else {
-          reason = "new_locale_starts_as_draft";
-        }
-        writeAsDraft = true;
+      if (!liveNonEmpty && liveExists) {
+        const converted = convertEmptyLiveLocaleToDraft({
+          contentType: resolved.contentType,
+          slug,
+          locale: target_locale,
+          contentRoot: contentPath,
+          ci: contentIndex,
+          author: "mcp-translate_entry",
+          variantSlug,
+        });
+        autoConverted = !!converted;
+        reason = converted ? "empty_live_converted_to_variant" : "new_locale_starts_as_variant";
+      } else if (!liveExists) {
+        reason = "new_locale_starts_as_variant";
+      } else {
+        reason = "variant_over_existing_live";
       }
 
       {
@@ -7931,8 +7961,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           contentType: resolved.contentType,
           slug,
           locale: target_locale,
-          variant: writeAsDraft ? "draft" : undefined,
-          intent: writeAsDraft ? "draft" : "live",
+          variant: variantSlug,
+          intent: "draft",
           domain,
           site,
         });
@@ -7948,9 +7978,133 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         }
       }
 
-      const targetFileName = writeAsDraft ? `draft.${target_locale}.yml` : `${target_locale}.yml`;
-      const targetFilePath = writeAsDraft ? draftTargetPath : liveTargetPath;
       const targetRelPath = `${contentFolder}/${ctDir}/${slug}/${targetFileName}`;
+      const versioningRelPath = `${contentFolder}/${ctDir}/${slug}/versioning.yml`;
+      const versioningPath = path.join(dir, "versioning.yml");
+
+      let versioningData: Record<string, { variants?: Array<{ slug: string; allocation: number }> }> | null = null;
+      if (fs.existsSync(versioningPath)) {
+        try {
+          const parsed = safeLoad(fs.readFileSync(versioningPath, "utf-8"));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            versioningData = parsed as Record<
+              string,
+              { variants?: Array<{ slug: string; allocation: number }> }
+            >;
+          }
+        } catch {
+          versioningData = null;
+        }
+      }
+
+      const siteHint = site ? { site } : {};
+      const fileExistedAtStart = fs.existsSync(targetFilePath);
+
+      if (!fileExistedAtStart) {
+        const mayAutoCreate = isDefaultDraftVariant || createVariantFlag === true;
+        if (!mayAutoCreate) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: "variant_missing",
+              code: "variant_missing",
+              message:
+                `Variant file ${targetFileName} does not exist for ${resolved.contentType}/${slug}. ` +
+                "Pass create_variant: true to create it (needs content_create_variant), or pick an existing 0%-traffic variant.",
+              contentType: resolved.contentType,
+              slug,
+              locale: target_locale,
+              variant: variantSlug,
+            },
+            [
+              {
+                tool: "translate_entry",
+                reason: "Retry with create_variant: true to seed this variant from live (if any) then merge the translation",
+                args_hint: {
+                  slug,
+                  contentType: resolved.contentType,
+                  source_locale,
+                  target_locale,
+                  variant: variantSlug,
+                  create_variant: true,
+                  content,
+                  ...(url_slug !== undefined ? { url_slug } : {}),
+                  ...siteHint,
+                },
+                priority: "required",
+              },
+              {
+                tool: "create_variant",
+                reason: "Or create the variant first, then retry translate_entry",
+                args_hint: {
+                  contentType: resolved.contentType,
+                  slug,
+                  locale: target_locale,
+                  variantSlug,
+                  ...siteHint,
+                },
+                priority: "optional",
+              },
+            ],
+          );
+        }
+
+        // Non-default variant create needs content_create_variant (no silent fallback to draft).
+        if (!isDefaultDraftVariant) {
+          if (mcpToken && !(await checkCap(mcpToken, "content_create_variant", resolved.contentType))) {
+            return denyResponse("content_create_variant", resolved.contentType);
+          }
+        }
+
+        if (liveNonEmpty && liveExists) {
+          fs.copyFileSync(liveTargetPath, targetFilePath);
+          seededFromLive = true;
+          reason = "seeded_variant_from_live";
+        }
+      } else {
+        const allocation = readVariantAllocation(versioningData, target_locale, variantSlug);
+        if (!variantAllowsTranslateMerge(allocation)) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: "variant_has_traffic",
+              code: "variant_has_traffic",
+              message:
+                `Variant "${variantSlug}" for ${target_locale} has ${allocation}% traffic. ` +
+                "translate_entry will not overwrite an experiment that is serving visitors. " +
+                "Use another variant, set this variant to 0% traffic, or create a new variant.",
+              contentType: resolved.contentType,
+              slug,
+              locale: target_locale,
+              variant: variantSlug,
+              allocation,
+            },
+            [
+              {
+                tool: "translate_entry",
+                reason: "Write to a different 0%-traffic variant (create_variant: true if it does not exist yet)",
+                args_hint: {
+                  slug,
+                  contentType: resolved.contentType,
+                  source_locale,
+                  target_locale,
+                  variant: `${variantSlug}-translation`,
+                  create_variant: true,
+                  content,
+                  ...siteHint,
+                },
+                priority: "required",
+              },
+              {
+                tool: "list_variants",
+                reason: "Inspect allocations for this entry",
+                args_hint: { contentType: resolved.contentType, slug, ...siteHint },
+                priority: "recommended",
+              },
+            ],
+          );
+        }
+      }
 
       const existing = fs.existsSync(targetFilePath)
         ? (safeLoad(fs.readFileSync(targetFilePath, "utf-8")) as Record<string, unknown> | null)
@@ -7959,40 +8113,12 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
 
       const existingLocaleSlug =
         existing && typeof existing.slug === "string" ? existing.slug : null;
-      const liveLocaleSlug = liveNonEmpty && liveExists
-        ? (() => {
-            try {
-              const raw = safeLoad(fs.readFileSync(liveTargetPath, "utf-8")) as Record<string, unknown> | null;
-              return typeof raw?.slug === "string" ? raw.slug : null;
-            } catch {
-              return null;
-            }
-          })()
-        : null;
 
       const localeUrlSlug = resolveLocaleUrlSlug({
         urlSlug: url_slug,
         existingSlug: mergeIntoExisting ? existingLocaleSlug : null,
         entryIdentity: slug,
       });
-
-      if (liveNonEmpty && url_slug !== undefined) {
-        const currentPublicSlug = resolveLocaleUrlSlug({
-          existingSlug: liveLocaleSlug,
-          entryIdentity: slug,
-        });
-        if (localeUrlSlug !== currentPublicSlug) {
-          return fail(
-            `Cannot change live locale URL slug via translate_entry (${currentPublicSlug} → ${localeUrlSlug}). ` +
-            "Use update_fields with field_path slug and create_redirect when required.",
-            {
-              code: "live_slug_change_not_allowed",
-              current_slug: currentPublicSlug,
-              requested_slug: localeUrlSlug,
-            },
-          );
-        }
-      }
 
       const built = buildTranslateLocaleData({
         mode,
@@ -8002,7 +8128,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         sections: split.sections,
         allowedFields,
         existing,
-        writeAsDraft,
+        writeAsDraft: true,
         mergeIntoExisting,
       });
       if (!built.ok) {
@@ -8038,7 +8164,16 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
                 {
                   tool: "translate_entry",
                   reason: "Retry with confirm_new_values: true or a peer URL param for the target locale",
-                  args_hint: { slug, contentType: resolved.contentType, source_locale, target_locale, content, confirm_new_values: true, site },
+                  args_hint: {
+                    slug,
+                    contentType: resolved.contentType,
+                    source_locale,
+                    target_locale,
+                    variant: variantSlug,
+                    content,
+                    confirm_new_values: true,
+                    site,
+                  },
                   priority: "required",
                 },
                 {
@@ -8074,7 +8209,15 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
               {
                 tool: "translate_entry",
                 reason: `Retry with ${param} on content for the target locale`,
-                args_hint: { slug, contentType: resolved.contentType, source_locale, target_locale, content: { ...content, [param]: "…" }, site },
+                args_hint: {
+                  slug,
+                  contentType: resolved.contentType,
+                  source_locale,
+                  target_locale,
+                  variant: variantSlug,
+                  content: { ...content, [param]: "…" },
+                  site,
+                },
                 priority: "required",
               },
             ],
@@ -8104,39 +8247,23 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           message: `Ignored disallowed field keys (not in editor/field_mapping safe set): ${rejected.join(", ")}.`,
         });
       }
-      if (url_slug !== undefined && writeAsDraft) {
+      if (url_slug !== undefined) {
         warnings.push({
           code: "url_slug_on_draft",
           message:
-            `Draft locale slug set to "${localeUrlSlug}". URL uniqueness is validated at promote/publish, not on draft write.`,
+            `Variant locale slug set to "${localeUrlSlug}". URL uniqueness is validated at promote/publish, not on variant write.`,
         });
       }
       pushSlugLocaleMismatchWarning(warnings, localeUrlSlug, target_locale);
-      if (writeAsDraft) {
+      {
         const missing = draftMissingRequiredWarnings(resolved.config, common, localeData);
         if (missing.length > 0) {
           warnings.push({
             code: "draft_missing_required_fields",
             message:
-              `Draft is missing editor.required fields (ok until promote): ${missing.join(", ")}. ` +
+              `Variant is missing editor.required fields (ok until promote): ${missing.join(", ")}. ` +
               "Values on _common.yml count toward required.",
           });
-        }
-      }
-
-      if (!writeAsDraft) {
-        const gateErr = assertLiveEntrySeoAndRequiredFields({
-          contentType: resolved.contentType,
-          slug,
-          locale: target_locale,
-          pageData: localeData,
-          contentRoot: contentPath,
-          mode: "publish",
-          intent: "publish",
-          isDraftWrite: false,
-        });
-        if (gateErr) {
-          return fail(gateErr, { code: "EMPTY_LOCALE_OR_REQUIRED", path: `${ctDir}/${slug}/${targetFileName}` });
         }
       }
 
@@ -8147,31 +8274,35 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             relativePath: targetRelPath,
             remoteContent: conflictCheck.remoteContent,
             intendedContent,
-            intendedChange: { action: "translate_entry", source_locale, target_locale, mode },
+            intendedChange: {
+              action: "translate_entry",
+              source_locale,
+              target_locale,
+              mode,
+              variant: variantSlug,
+            },
           });
         }
       }
 
-      const isNew = !fs.existsSync(targetFilePath);
+      const isNew = !fileExistedAtStart;
       fs.writeFileSync(targetFilePath, intendedContent, "utf-8");
       const writeEventId = notifyMcpContentWrite(targetFilePath, mcpWriteAuthor(mcpToken));
+      void writeEventId;
 
-      if (writeAsDraft) {
-        ensureDraftVariantInVersioning({
-          contentType: resolved.contentType,
-          slug,
-          locale: target_locale,
-          contentRoot: contentPath,
-          author: "mcp-translate_entry",
-          variantSlug: "draft",
-        });
-      }
+      ensureDraftVariantInVersioning({
+        contentType: resolved.contentType,
+        slug,
+        locale: target_locale,
+        contentRoot: contentPath,
+        author: "mcp-translate_entry",
+        variantSlug,
+      });
 
-      const commitMsg = writeAsDraft
-        ? `Draft translate ${resolved.contentType}/${slug} to ${target_locale}`
-        : `Translate ${resolved.contentType}/${slug} to ${target_locale}`;
+      const commitPaths = [targetRelPath, versioningRelPath];
+      const commitMsg = `Draft translate ${resolved.contentType}/${slug} → ${variantSlug}.${target_locale}`;
       const [commitResult] = await Promise.all([
-        callCommitFilesApi([targetRelPath], commitMsg, mcpToken, domain),
+        callCommitFilesApi(commitPaths, commitMsg, mcpToken, domain),
         callRefreshCacheApi(resolved.contentType, domain),
       ]);
 
@@ -8184,22 +8315,29 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             "Entry remains attached. Shell still comes from template.{locale}.yml; this write did not bake or detach.",
         });
       }
-      if (writeAsDraft) {
+      warnings.push({
+        code: "translation_not_public",
+        message:
+          `${targetFileName} is not in listings/sitemap/hreflang until promote_variant or publish_draft. ` +
+          `Did not modify live ${target_locale}.yml.`,
+      });
+      if (mode === "detached_sections") {
         warnings.push({
-          code: "translation_not_public",
-          message: `${targetFileName} is not in listings/sitemap/hreflang until promote_variant or publish_draft. Did not create live ${target_locale}.yml as a public locale.`,
+          code: "empty_locale_blocked_on_promote",
+          message: "Promote/publish fails if the detached locale would still be empty (no sections and no content).",
         });
-        if (mode === "detached_sections") {
-          warnings.push({
-            code: "empty_locale_blocked_on_promote",
-            message: "Promote/publish fails if the detached locale would still be empty (no sections and no content).",
-          });
-        }
       }
       if (autoConverted) {
         warnings.push({
           code: "empty_live_auto_converted",
-          message: `Empty live ${target_locale}.yml was moved to draft.${target_locale}.yml before writing the translation.`,
+          message: `Empty live ${target_locale}.yml was moved to ${targetFileName} before writing the translation.`,
+        });
+      }
+      if (seededFromLive) {
+        warnings.push({
+          code: "variant_seeded_from_live",
+          message:
+            `Created ${targetFileName} by copying live ${target_locale}.yml, then applied the translation merge. Live file unchanged.`,
         });
       }
       if (built.merge) {
@@ -8209,52 +8347,53 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       }
 
-      const next_actions: NextAction[] = writeAsDraft
-        ? [
-            {
-              tool: "get_entry_content",
-              reason: "Inspect the draft translation",
-              args_hint: {
-                slug,
-                contentType: resolved.contentType,
-                locale: target_locale,
-                variant: "draft",
-                ...(site ? { site } : {}),
-              },
-              priority: "recommended",
-            },
-            {
-              tool: "run_entry_diagnostics",
-              reason: "Validate before going live (one slug — sync completed in that call)",
-              args_hint: { slugs: [slug], freshness: "hard", confirm: true, ...(site ? { site } : {}) },
-              priority: "recommended",
-            },
-            {
-              tool: "promote_variant",
-              reason: "Make this locale live when ready (confirm with user). Use publish_draft if the entry has no live locales yet.",
-              args_hint: {
-                contentType: resolved.contentType,
-                slug,
-                locale: target_locale,
-                variantSlug: "draft",
-                ...(site ? { site } : {}),
-              },
-              priority: "optional",
-            },
-          ]
-        : [];
+      const next_actions: NextAction[] = [
+        {
+          tool: "get_entry_content",
+          reason: "Inspect the variant translation",
+          args_hint: {
+            slug,
+            contentType: resolved.contentType,
+            locale: target_locale,
+            variant: variantSlug,
+            ...siteHint,
+          },
+          priority: "recommended",
+        },
+        {
+          tool: "run_entry_diagnostics",
+          reason: "Validate before going live (one slug — sync completed in that call)",
+          args_hint: { slugs: [slug], freshness: "hard", confirm: true, ...siteHint },
+          priority: "recommended",
+        },
+        {
+          tool: "promote_variant",
+          reason:
+            "Make this locale live when ready (confirm with user). Use publish_draft if the entry has no live locales yet. " +
+            "Agentic roles: prefer propose_change with promote_on_apply.",
+          args_hint: {
+            contentType: resolved.contentType,
+            slug,
+            locale: target_locale,
+            variantSlug,
+            ...siteHint,
+          },
+          priority: "optional",
+        },
+      ];
 
       if (!assessSlugLocaleMatch(localeUrlSlug, target_locale).ok) {
         next_actions.push({
           tool: "update_fields",
           priority: "optional",
-          reason: "Set a locale-fitting public URL slug if the mismatch was unintentional.",
+          reason: "Set a locale-fitting public URL slug on this variant if the mismatch was unintentional.",
           args_hint: {
             contentType: resolved.contentType,
             slug,
             locale: target_locale,
+            variant: variantSlug,
             updates: [{ field_path: "slug", value: "…" }],
-            ...(site ? { site } : {}),
+            ...siteHint,
           },
         });
       }
@@ -8262,18 +8401,17 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       const sectionsArr = Array.isArray(localeData.sections) ? localeData.sections : [];
       return ok(
         {
-          message: writeAsDraft
-            ? `Draft translation ${isNew ? "created" : "updated"} at ${resolved.contentType}/${slug}/${targetFileName}`
-            : `Translated content ${isNew ? "created" : "updated"} at ${resolved.contentType}/${slug}/${targetFileName}`,
+          message: `Draft translation ${isNew ? "created" : "updated"} at ${resolved.contentType}/${slug}/${targetFileName}`,
           slug,
           locale_url_slug: localeUrlSlug,
           contentType: resolved.contentType,
           source_locale,
           target_locale,
+          variant: variantSlug,
           mode,
           created: isNew,
-          live: !writeAsDraft,
-          layer: writeAsDraft ? "draft_locale" : "entry_locale",
+          live: false,
+          layer: "draft_locale",
           reason,
           merge: built.merge,
           sectionsCount: sectionsArr.length,
@@ -8283,7 +8421,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           ...(commitResult.queued ? { queued: true } : {}),
           ...(commitResult.commitSha ? { commitSha: commitResult.commitSha } : {}),
           ...wrotePayload({
-            layer: writeAsDraft ? "variant" : "entry_locale",
+            layer: "variant",
             contentType: resolved.contentType,
             path: `${ctDir}/${slug}/${targetFileName}`,
             locale: target_locale,
@@ -8293,15 +8431,12 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         {
           warnings,
           next_actions,
-          side_effects: writeAsDraft
-            ? [{
-                kind: "wrote_draft_locale",
-                summary: `Wrote ${targetFileName} + versioning 0%; did not publish live ${target_locale}.yml`,
-              }]
-            : [{
-                kind: "merged_live_locale",
-                summary: `Updated live ${targetFileName} (${built.merge ? "merge" : "write"})`,
-              }],
+          side_effects: [{
+            kind: "wrote_draft_locale",
+            summary:
+              `Wrote ${targetFileName} + versioning 0%; did not modify live ${target_locale}.yml`,
+            paths: [`${ctDir}/${slug}/${targetFileName}`, `${ctDir}/${slug}/versioning.yml`],
+          }],
         },
       );
     }
@@ -9062,7 +9197,26 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       const createVia = createViaForConfig(config);
       const next_actions: NextAction[] = [];
-      if (createVia === "create_entry") {
+      if (createVia === "create_entry" && isSharedLayoutConfig(config) && !isDbBacked(config)) {
+        next_actions.push({
+          tool: "propose_change",
+          reason:
+            "New attached post: file kind idea with related_entries (slug required; the folder need not exist). After accept, field edits with implements_proposal_id, review_situations [\"new_public_content\"], and no variant. Apply creates the files and does not change the shared template.",
+          args_hint: {
+            kind: "idea",
+            related_entries: [{ contentType, slug: "new-slug", locale: "en" }],
+            site,
+          },
+          priority: "recommended",
+        });
+        next_actions.push({
+          tool: "create_entry",
+          reason:
+            "Staff/live path only. Writes the post immediately. Not available on specialist connectors — prefer the idea, then field edits.",
+          args_hint: { contentType, site },
+          priority: "optional",
+        });
+      } else if (createVia === "create_entry") {
         next_actions.push({
           tool: "create_entry",
           reason: "Create a new entry of this type (pass site in multi-site)",
@@ -9199,9 +9353,23 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             observed_values_note:
               "For URL pattern params, use observed_values_by_locale — pick a slug from the target locale list, not the flat union.",
             create_via: createVia,
-            create_via_note: createVia
-              ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
-              : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            create_via_note:
+              createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+                ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant. create_entry writes live immediately and is not on specialist connectors."
+                : createVia
+                  ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
+                  : "Database-backed — create_entry cannot create rows; use DB/admin path.",
+            ...(createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
+              ? {
+                  warnings: [
+                    {
+                      code: "create_entry_writes_live",
+                      message:
+                        "create_entry writes this attached post live immediately and is not on specialist connectors. Prefer an accepted idea, then propose_change field edits with no variant.",
+                    },
+                  ],
+                }
+              : {}),
             body_model: bodyModelForConfig(config),
             template_vars_note: templateVarsNoteForBodyModel(bodyModelForConfig(config)),
             ecommerce: ecommerceManager.contentTypeHasEcommerce(contentType)
@@ -9807,7 +9975,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     "list_entry_seo",
     "Return SEO-relevant fields (meta, title, schema, url, and seo-index keyword chips + refresh_tier) for content entries. " +
     "Works for YAML and DB-backed types via the main server seo-entries API. " +
-    "main_keyword / kw_monthly_volume / kw_difficulty / refresh_tier come from the live seo-index (YAML-backed index values), not OpenRush effective metrics — use refresh_keyword_metrics or the SEO modal for OpenRush. " +
+    "main_keyword / kw_monthly_volume / kw_difficulty / refresh_tier come from the live seo-index (YAML-backed index values), not OpenRush effective metrics — use get_or_refresh_seo_research or the SEO modal for OpenRush. " +
     "Sections/body content are never returned. " +
     "IMPORTANT: Omitting slugs does NOT dump the full type — returns a minimal sample (default 5; limit 1–20). " +
     "Pass slugs for full meta on those entries. Prefer get_entry_seo for one slug; get_content_type_info for type contract. Requires content_view or seo_edit. " +

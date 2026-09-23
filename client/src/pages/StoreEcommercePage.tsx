@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IconShoppingBag, IconInfoCircle, IconExternalLink, IconBraces } from "@tabler/icons-react";
 import { Link } from "wouter";
-import { ArrowLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +15,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import JsonViewer from "@/components/editing/JsonViewer";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 
 interface EcommerceEventRow {
   name: string;
@@ -94,11 +94,7 @@ export default function StoreEcommercePage() {
     <div className="min-h-screen bg-background text-foreground">
       <div className="max-w-4xl mx-auto px-6 py-8 space-y-8">
         <div className="flex items-center gap-3">
-          <Link href="/private/diagnostics">
-            <button className="p-1.5 rounded-md hover-elevate" data-testid="button-back" title="Back">
-              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-            </button>
-          </Link>
+          <PrivateHistoryBackButton data-testid="button-back" iconClassName="h-4 w-4 text-muted-foreground" />
           <IconShoppingBag className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold" data-testid="heading-ecommerce">
             Ecommerce events

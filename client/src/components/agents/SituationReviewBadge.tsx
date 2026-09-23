@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type MouseEvent } from "react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 export type ReviewContextPayload = {
@@ -193,12 +194,15 @@ export function resolveSituationDisplay(opts: {
       damage_class: "none",
       undo_cost: "none",
       staff_summary: {
-        badge_label: opts.kind === "idea" ? "Idea" : fb.badge_label,
+        badge_label: opts.kind === "idea" ? "Idea brief" : fb.badge_label,
         situation_description:
           opts.kind === "idea"
-            ? "Idea to accept or decline — accepting does not change the live site by itself."
+            ? "Brief to greenlight or decline — accepting does not publish. Score whether the opportunity is real and whether accepting would harm the site."
             : fb.situation_description,
-        risk: fb.risk,
+        risk:
+          opts.kind === "idea"
+            ? "Accept locks a brief only — no live YAML until a later edits proposal."
+            : fb.risk,
         undo: "No live change.",
       },
     };
@@ -207,30 +211,94 @@ export function resolveSituationDisplay(opts: {
   return live ?? null;
 }
 
-/** List chip from persisted snapshot (no modal — open detail for live audit). */
+/** List chip from persisted snapshot — popover explains the review situation in plain English. */
 export function SituationSnapshotBadge({
   snapshot,
   kind,
   className,
+  stopLinkNavigation = false,
+  testIdSuffix = "",
 }: {
   snapshot?: Record<string, unknown> | null;
   /** When set, hide chip if label duplicates the kind badge. */
   kind?: string;
   className?: string;
+  /** When true, stop click from bubbling (e.g. badge inside a list card Link). */
+  stopLinkNavigation?: boolean;
+  /** Suffix for test ids — list uses `-${id}`. */
+  testIdSuffix?: string;
 }) {
-  const resolved = resolveSituationDisplay({ snapshot });
-  const label = resolved?.staff_summary?.badge_label ?? null;
-  if (!label) return null;
+  const [advanced, setAdvanced] = useState(false);
+  const resolved = resolveSituationDisplay({ snapshot, kind });
+  const staff = resolved?.staff_summary;
+  const label = staff?.badge_label ?? null;
+  if (!label || !staff) return null;
   const kindLabel = kindDisplayLabel(kind);
   if (kindLabel && label === kindLabel) return null;
+
+  const onTriggerClick = stopLinkNavigation
+    ? (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    : undefined;
+
+  const description =
+    staff.situation_description ||
+    "Open the proposal for the full review situation.";
+
   return (
-    <Badge
-      variant="outline"
-      className={cn("font-normal", className)}
-      data-testid="badge-proposal-situation-snapshot"
-    >
-      {label}
-    </Badge>
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex shrink-0"
+          data-testid={`badge-proposal-situation-snapshot${testIdSuffix}`}
+          aria-label={`${label} — what this situation means`}
+          onClick={onTriggerClick}
+        >
+          <Badge
+            variant="outline"
+            className={cn("cursor-pointer font-normal hover-elevate", className)}
+          >
+            {label}
+          </Badge>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-80 space-y-3 text-sm"
+        align="start"
+        data-testid={`popover-proposal-situation-snapshot${testIdSuffix}`}
+        onClick={onTriggerClick}
+      >
+        <p className="font-medium text-foreground">{label}</p>
+        <p className="text-muted-foreground leading-5">
+          This chip is the proposal&apos;s review situation — a short label for the kind of change
+          you are deciding on, not a status or a blocker.
+        </p>
+        <p className="text-muted-foreground leading-5">{description}</p>
+        <button
+          type="button"
+          className="text-xs text-primary hover:underline"
+          data-testid={`button-situation-snapshot-advanced${testIdSuffix}`}
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          {advanced ? "Hide advanced" : "Read more (advanced)"}
+        </button>
+        {advanced ? (
+          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
+            {staff.risk && staff.risk !== "—" ? <p>Risk: {staff.risk}</p> : null}
+            {staff.undo && staff.undo !== "—" ? <p>Undo: {staff.undo}</p> : null}
+            {resolved?.damage_class ? (
+              <p>
+                Snapshot damage class: <span className="font-mono">{resolved.damage_class}</span>
+              </p>
+            ) : null}
+            <p>Open the proposal for the live audit (checklists, related proposals, apply gates).</p>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -519,10 +587,11 @@ export function ProposalSituationCallout({
               <Badge
                 key={id}
                 variant="secondary"
-                className="font-mono text-[10px] font-normal"
+                className="text-[10px] font-normal"
                 data-testid={`chip-review-situation-${id}`}
+                title={STAFF_REVIEW_SITUATION_LABELS[id] ?? id}
               >
-                {id}
+                {STAFF_REVIEW_SITUATION_LABELS[id] ?? id}
               </Badge>
             ))}
             {resolved.situation_source ? (
@@ -549,7 +618,23 @@ export function ProposalSituationCallout({
   );
 }
 
-/** Catalog labels for staff multi-select (keep in sync with server review-situations). */
+/** Labels for live situation chips (includes idea-only ids not in the edits editor). */
+export const STAFF_REVIEW_SITUATION_LABELS: Record<string, string> = {
+  internal_links: "Hub / internal links",
+  serp_title_description: "Search title / description",
+  funnel_classification: "Funnel stage / products",
+  body_copy_edit: "Body / field edit",
+  selling_figures: "Selling-page figures",
+  new_public_content: "New public content",
+  promote_draft: "Promote draft",
+  locale_translation: "Locale translation",
+  idea_opportunity_harm: "Idea opportunity vs harm",
+  anticipated_demand: "Anticipated demand",
+  fast_decay_news: "Fast-decay news",
+  broken_url: "Broken URL",
+};
+
+/** Catalog labels for staff multi-select on edits only (keep in sync with server review-situations). */
 export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
   id: string;
   label: string;
@@ -566,9 +651,15 @@ export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
     when_to_use: "Changes to search title or meta description — honest vs live.",
   },
   {
+    id: "funnel_classification",
+    label: "Funnel stage / products",
+    when_to_use:
+      "Funnel stage or products — who the buyer is, which product owns them, then how ready they are.",
+  },
+  {
     id: "body_copy_edit",
     label: "Body / field edit",
-    when_to_use: "General copy or field updates that are not link-only or SERP-only.",
+    when_to_use: "General copy or field updates that are not link-only, SERP-only, or funnel-only.",
   },
   {
     id: "selling_figures",
@@ -585,11 +676,43 @@ export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
     label: "Promote draft",
     when_to_use: "Go-live a named draft with empty or minimal field updates.",
   },
+  {
+    id: "locale_translation",
+    label: "Locale translation",
+    when_to_use:
+      "Promote a translated locale variant — fidelity to source before go-live (not soft-only polish).",
+  },
+];
+
+/** Demand labels staff may set on open ideas (at most one). */
+export const STAFF_IDEA_DEMAND_SITUATION_OPTIONS: Array<{
+  id: string;
+  label: string;
+  when_to_use: string;
+}> = [
+  {
+    id: "anticipated_demand",
+    label: "Anticipated demand",
+    when_to_use:
+      "New product or feature that will become search volume — lasting questions, not today's volume.",
+  },
+  {
+    id: "fast_decay_news",
+    label: "Fast-decay news",
+    when_to_use: "Announcement with no lasting question — expect a quick reject.",
+  },
+  {
+    id: "broken_url",
+    label: "Broken URL",
+    when_to_use:
+      "Missing address still requested — redirect to a match, or one new page when demand is high.",
+  },
 ];
 
 /**
- * Staff editor for author-declared review situations on open/partial edits.
- * Empty selection = clear declaration (server will infer from edits).
+ * Staff editor for author-declared review situations on open/partial edits or ideas.
+ * Edits: multi-select; empty = clear declaration (server infers).
+ * Ideas: at most one demand label; empty = no demand label (opportunity-vs-harm still on).
  */
 export function ReviewSituationsEditor({
   filedSituations,
@@ -599,6 +722,7 @@ export function ReviewSituationsEditor({
   saving,
   onSave,
   className,
+  mode = "edits",
 }: {
   filedSituations: string[];
   liveSituations?: string[];
@@ -607,7 +731,9 @@ export function ReviewSituationsEditor({
   saving?: boolean;
   onSave: (ids: string[]) => void;
   className?: string;
+  mode?: "edits" | "idea";
 }) {
+  const options = mode === "idea" ? STAFF_IDEA_DEMAND_SITUATION_OPTIONS : STAFF_REVIEW_SITUATION_OPTIONS;
   const [selected, setSelected] = useState<string[]>(() => [...filedSituations]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const filedKey = filedSituations.join(",");
@@ -621,6 +747,10 @@ export function ReviewSituationsEditor({
     selected.some((id) => !filedSituations.includes(id));
 
   function toggle(id: string) {
+    if (mode === "idea") {
+      setSelected((prev) => (prev.includes(id) ? [] : [id]));
+      return;
+    }
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
@@ -635,9 +765,18 @@ export function ReviewSituationsEditor({
       data-testid="panel-review-situations-editor"
     >
       <p className="text-sm text-foreground/90" data-testid="text-review-situations-edu">
-        Pick what kind of change this is so review uses the right checklist. You can leave empty —
-        we&apos;ll infer from the edits. Multiple packs each get their own checklist; apply only
-        after failing slices are removed or fixed.
+        {mode === "idea" ? (
+          <>
+            Optional demand label for how evidence is scored. Leave empty for ordinary briefs.
+            Opportunity vs harm stays on either way. Accepting does not publish.
+          </>
+        ) : (
+          <>
+            Pick what kind of change this is so review uses the right checklist. You can leave empty —
+            we&apos;ll infer from the edits. Multiple packs each get their own checklist; apply only
+            after failing slices are removed or fixed.
+          </>
+        )}
       </p>
       {(liveSituations?.length ?? 0) > 0 ? (
         <p className="text-xs text-muted-foreground" data-testid="text-review-situations-live">
@@ -646,7 +785,7 @@ export function ReviewSituationsEditor({
         </p>
       ) : null}
       <div className="flex flex-wrap gap-1.5">
-        {STAFF_REVIEW_SITUATION_OPTIONS.map((opt) => {
+        {options.map((opt) => {
           const on = selected.includes(opt.id);
           return (
             <button
@@ -677,7 +816,7 @@ export function ReviewSituationsEditor({
           onClick={() => onSave(selected)}
           data-testid="button-save-review-situations"
         >
-          {saving ? "Saving…" : "Save situations"}
+          {saving ? "Saving…" : mode === "idea" ? "Save demand label" : "Save situations"}
         </Button>
         <Button
           type="button"
@@ -687,7 +826,7 @@ export function ReviewSituationsEditor({
           onClick={() => setSelected([])}
           data-testid="button-clear-review-situations"
         >
-          Clear (infer)
+          {mode === "idea" ? "Clear label" : "Clear (infer)"}
         </Button>
       </div>
       <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
@@ -698,14 +837,29 @@ export function ReviewSituationsEditor({
           Read more (advanced)
         </CollapsibleTrigger>
         <CollapsibleContent className="mt-1 space-y-1 text-xs text-muted-foreground">
-          <p>
-            Filed tags are author-declared. Live review may add inferred packs when the edits need
-            more checklists (soft mismatch — create still succeeds).
-          </p>
-          <p>
-            On revise, tags that no longer match remaining edits drop. Per-situation ship: drop or
-            fix failing packs&apos; fields, then apply the rest in one go.
-          </p>
+          {mode === "idea" ? (
+            <>
+              <p>
+                Anticipated demand and fast-decay news change how search evidence is judged. Broken
+                URL requires hit counts from the runtime 404 log; accepting still only greenlights —
+                a later edit&apos;s approval writes the redirect or creates the post.
+              </p>
+              <p>
+                idea_opportunity_harm is always injected and is not selectable here.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                Filed tags are author-declared. Live review may add inferred packs when the edits need
+                more checklists (soft mismatch — create still succeeds).
+              </p>
+              <p>
+                On revise, tags that no longer match remaining edits drop. Per-situation ship: drop or
+                fix failing packs&apos; fields, then apply the rest in one go.
+              </p>
+            </>
+          )}
         </CollapsibleContent>
       </Collapsible>
     </div>

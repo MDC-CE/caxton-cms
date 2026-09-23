@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Braces, Check, ChevronDown, Download, Filter, Github, Loader2, RefreshCw, Search, Server, Trash2, User, Webhook, X } from "lucide-react";
+import { Braces, Check, ChevronDown, Download, Filter, Github, Loader2, RefreshCw, Search, Server, Trash2, User, Webhook, X } from "lucide-react";
 import {
   IconCloudUpload,
   IconCloudDownload,
@@ -9,8 +9,8 @@ import {
   IconGitCommit,
 } from "@tabler/icons-react";
 import { useState, useEffect, useRef } from "react";
-import { Link } from "wouter";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -620,11 +620,7 @@ export default function SyncLogPage() {
       <div className="max-w-6xl mx-auto px-4 py-6 space-y-4">
         <div className="space-y-1">
           <div className="flex items-center gap-3 flex-wrap">
-            <Link href="/private/diagnostics">
-              <Button variant="ghost" size="icon" data-testid="button-back-from-sync-log">
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-            </Link>
+            <PrivateHistoryBackButton data-testid="button-back-from-sync-log" iconClassName="h-4 w-4" />
             <div className="flex items-center gap-2">
               <Github className="h-5 w-5" />
               <h1 className="text-xl font-semibold" data-testid="text-sync-log-title">

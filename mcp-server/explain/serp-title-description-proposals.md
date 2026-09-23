@@ -2,7 +2,7 @@
 
 How to file and approve SERP snippet edits on `4geeks.com`.
 
-**MCP:** Declare `review_situations: ["serp_title_description"]` on `propose_change` (edits). Checklist id: `title_description_ctr`. Catalog index: `explain_site` topic `review-situations`.
+**MCP:** Declare `review_situations: ["serp_title_description"]` on `propose_change` (edits). Checklist id: `title_description_ctr`. Catalog index: `explain_site` `topic: "proposals"` `subtopic: "situations"`.
 
 Fields: `meta.page_title`, `meta.description`  
 Roles: SEO Specialist or Copy Editor files; Proposal Reviewer applies, blocks, or rejects  
@@ -99,6 +99,7 @@ You have `proposals_create`. Reviewer cannot write the snippet for you.
 - `get_entry_seo` — current title, description, public path.
 - `get_entry_content` — confirm year, place, and figures still exist in the body.
 - `get_entry_activity` — if title/description were just written and live is already specific, do not file.
+- Optional: `get_or_refresh_seo_research` `action: serp` — live SERP snapshot for context (cache-first; budgeted). Does not rewrite meta.
 
 If live already has year + place + figure, the only legitimate CTR job is a tighter character budget or a missing modifier (junior/senior, remote, city) the article already states.
 
