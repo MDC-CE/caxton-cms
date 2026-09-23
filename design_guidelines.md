@@ -7,7 +7,7 @@
 **Core Principles**:
 - Content-first hierarchy with clear learning paths
 - Card-based modular design for scalability
-- Purposeful brand color (Primary blue `#005EAA`, Yellow accent `#FFD400`)
+- Purposeful brand color: Primary blue `#005EAA` for actions. Yellow `#FFD400` is reserved for summer camps
 - Clean layouts on the Figma grid (4 / 8 / 12 columns, 20px gutters)
 - Semantic tokens only — never raw Tailwind palette colors
 
@@ -22,11 +22,13 @@
 | Token | HSL Value | Hex | Usage |
 |-------|-----------|-----|-------|
 | `primary` | `207 100% 33%` | `#005EAA` | Primary buttons, links, focus rings |
-| `accent` | `50 100% 50%` | `#FFD400` | Highlights, badges (use sparingly) |
+| `accent` | `50 100% 50%` | `#FFD400` | Summer-camp surfaces only |
 | `destructive` | `349 86% 49%` | `#EA1239` | Errors, delete actions |
 | `foreground` | `220 8% 15%` | `#232529` | Body / headings (Dark Grey-500) |
 
 Full scales (Primary, Blue, Light Blue, Light/Dark Grey, Yellow, Green, Violet, Error) are in Theme Editor → Custom Theme and `theme.json` `palette_scales`.
+
+**The Summer Camp Rule.** `accent` / `#FFD400` appears only on summer-camp surfaces. Do not use it for badges, buttons, links, or progress on any other program. Chart series (`chart-2`) and the platform away-status swatch use the same hue; that does not license yellow chrome on a program page.
 
 ### Semantic Color Tokens
 
@@ -39,7 +41,7 @@ Full scales (Primary, Blue, Light Blue, Light/Dark Grey, Yellow, Green, Violet, 
 | `bg-muted` | Subtle backgrounds, disabled states |
 | `bg-primary` | Primary action buttons |
 | `bg-secondary` | Secondary buttons, tags |
-| `bg-accent` | Yellow highlights |
+| `bg-accent` | Summer-camp surfaces only |
 | `bg-destructive` | Error/danger buttons |
 | `bg-sidebar` | Sidebar background |
 
@@ -81,6 +83,8 @@ style={{ color: 'hsl(var(--primary))' }}  // CORRECT (rare)
 ```
 
 ### Status Colors
+Presence swatches only. `status-away` is not a brand accent.
+
 - `status-online` — Green-500
 - `status-away` — Yellow-500
 - `status-busy` — Error-500
@@ -244,11 +248,11 @@ Icon buttons on the bar: white fill, 1px border `#E5E7EB`. Their hit area is sti
 
 ### Progress Indicators
 - Track: muted / light grey
-- Fill: `bg-primary` (or `bg-accent` for emphasis)
+- Fill: `bg-primary`
 
 ## Accessibility
 
-- Prefer White text on Primary-500 (AAA large) and Dark Grey on Yellow-500
+- Prefer White text on Primary-500 (AAA large). On summer-camp yellow, use Dark Grey (`foreground`), not white
 - Focus rings: `ring-ring` / `border-primary`
 - Do not reduce text opacity; use `text-muted-foreground` instead
 
