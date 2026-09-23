@@ -8,7 +8,7 @@ import { denyUnlessMetricsViewOrProposalsReview } from "../lib/auth.js";
 import type { CatalogGrant } from "../lib/tool-catalog.js";
 import { ok, fail } from "../lib/respond.js";
 import { resolveSiteContext } from "../lib/content.js";
-import { SITE_PARAM_DESC, MULTI_SITE_TOOL_BLURB } from "../lib/entry-helpers.js";
+import { SITE_PARAM_DESC, MULTI_SITE_TOOL_BLURB, siteFailResult } from "../lib/entry-helpers.js";
 import { FILTER_ALL, SOURCE_FILTER_TAGS } from "../../shared/runtime-issues-list-filters.js";
 import {
   RUNTIME_ISSUES_DEFAULT_LIMIT,
@@ -100,9 +100,10 @@ export function registerRuntimeIssuesTools(
       if (denied) return denied;
 
       try {
-        const { siteConfig } = resolveSiteContext(args.site);
-        const siteName = siteConfig.contentRootName || "default";
-        const contentRoot = siteConfig.contentRoot;
+        const siteResult = resolveSiteContext(args.site);
+        if (!siteResult.ok) return siteFailResult(siteResult.error, "get_runtime_issues");
+        const siteName = siteResult.contentFolder || "default";
+        const contentRoot = siteResult.contentPath;
 
         const { listRuntimeIssues } = await import("../../server/runtime-issues-store.js");
         const {
