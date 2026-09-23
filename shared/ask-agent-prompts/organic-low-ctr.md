@@ -37,7 +37,7 @@ sections:
   - Don’t
 ---
 
-Goal: Denser SERP snippet than live for this query — keep every true token, add one the body already supports.
+Goal: Denser SERP snippet than live — keep every true token, add one the body supports.
 
 Target:
 - query: {{query}}
@@ -49,7 +49,7 @@ Target:
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP. If you cannot resolve it, stop and say so.
 2. Read get_entry_seo + get_entry_content; name the live gap in one sentence. If live already has year + place + figure and you only want a catchier hook, stop.
-3. Optionally refresh SERP context with get_or_refresh_seo_research action:serp after reading live meta (snapshot only — does not rewrite title/description).
+3. Optionally get_or_refresh_seo_research action:serp (snapshot; no title/description rewrite).
 4. File propose_change with review_situations: ["serp_title_description"] — meta.page_title and/or meta.description only. Claims must already appear on live.
 5. Summarize tokens kept and the one token added (ops own the values).
 
