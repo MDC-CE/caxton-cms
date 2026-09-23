@@ -35,6 +35,10 @@ import { applyEntryModulePreload } from "./utils/html-transforms";
 import { getEntryAssets, buildEntryPreloadTags, buildEntryLinkHeader } from "./utils/vite-manifest";
 import { isMeaningfulSsrAppHtml } from "./utils/ssr-html";
 import {
+  logSlowHtmlIfNeeded,
+  type SlowHtmlOutcome,
+} from "./utils/request-health";
+import {
   buildHtmlCacheKey,
   setCachedHtml,
   shouldBypassHtmlCache,
@@ -450,6 +454,26 @@ export function serveStatic(app: Express) {
     }
 
     const url = _req.originalUrl;
+    const tHtml = Date.now();
+    const htmlMeta: {
+      cache: "HIT" | "MISS" | "BYPASS" | "NONE";
+      outcome: SlowHtmlOutcome;
+      appHtmlLength?: number;
+    } = {
+      cache: "NONE",
+      outcome: "other",
+    };
+    res.on("finish", () => {
+      logSlowHtmlIfNeeded({
+        url,
+        ms: Date.now() - tHtml,
+        status: res.statusCode,
+        cache: htmlMeta.cache,
+        outcome: htmlMeta.outcome,
+        appHtmlLength: htmlMeta.appHtmlLength,
+      });
+    });
+
     let status = resolvePublicHtmlStatus({
       url,
       contentIndex: siteContentIndex(res),
@@ -466,6 +490,7 @@ export function serveStatic(app: Express) {
       site?.domain ||
       "default";
     const bypassCache = skipSsr || shouldBypassHtmlCache(_req);
+    if (bypassCache) htmlMeta.cache = "BYPASS";
 
     try {
       // Ensure variant key is resolved before MISS populate
@@ -519,6 +544,8 @@ export function serveStatic(app: Express) {
             "SSR returned empty body after retry — not caching empty #root",
             "warn",
           );
+          htmlMeta.outcome = "ssr_empty_fallback";
+          htmlMeta.appHtmlLength = appHtml?.length ?? 0;
           throw new Error("empty_ssr_app_html");
         }
 
@@ -562,13 +589,22 @@ export function serveStatic(app: Express) {
         if (!bypassCache && status === 200) {
           setCachedHtml(cacheKey, htmlForCache, status);
           res.setHeader("X-HTML-Cache", "MISS");
+          htmlMeta.cache = "MISS";
         }
+        htmlMeta.outcome = "ssr_ok";
+        htmlMeta.appHtmlLength = appHtml.length;
 
         maybeRecordPublicNotFound(_req, res, status);
         res.status(status).set({ "Content-Type": "text/html" }).send(html);
         return;
       }
     } catch (e) {
+      if (htmlMeta.outcome === "other") {
+        htmlMeta.outcome =
+          e instanceof Error && e.message === "empty_ssr_app_html"
+            ? "ssr_empty_fallback"
+            : "ssr_error_fallback";
+      }
       ssrDiag(
         {
           err: e,
@@ -581,6 +617,7 @@ export function serveStatic(app: Express) {
     }
 
     ssrDiag({ url, hasSchema: Boolean(ssrSchemaHtml) }, "serving client-only HTML fallback", "warn");
+    if (htmlMeta.outcome === "other") htmlMeta.outcome = "client_fallback";
 
     if (ssrSchemaHtml) {
       try {
