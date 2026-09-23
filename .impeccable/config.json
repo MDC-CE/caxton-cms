@@ -1,3 +1,57 @@
 {
-  "buildPath": "comp"
+  "buildPath": "comp",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "plus jakarta sans",
+        "createdAt": "2026-09-23T16:00:32.784Z",
+        "reason": "DESIGN.md pins Plus Jakarta Sans as the public site face"
+      },
+      {
+        "rule": "overused-font",
+        "value": "lato",
+        "createdAt": "2026-09-23T16:00:32.798Z",
+        "reason": "DESIGN.md keeps Lato on Caxton admin chrome"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "lato",
+        "createdAt": "2026-09-23T16:00:43.491Z",
+        "reason": "DESIGN.md keeps Lato on Caxton admin, outside the public type ramp"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "lato fallback",
+        "createdAt": "2026-09-23T16:00:43.504Z",
+        "reason": "Metric fallback for admin Lato, which DESIGN.md keeps"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "archivo",
+        "createdAt": "2026-09-23T16:00:43.517Z",
+        "reason": "DESIGN.md keeps Archivo on Caxton admin, outside the public type ramp"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "archivo fallback",
+        "createdAt": "2026-09-23T16:00:43.530Z",
+        "reason": "Metric fallback for admin Archivo, which DESIGN.md keeps"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "plus jakarta sans fallback",
+        "createdAt": "2026-09-23T16:00:43.542Z",
+        "reason": "Metric fallback for Plus Jakarta Sans, pinned in DESIGN.md"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "sfmono-regular",
+        "createdAt": "2026-09-23T16:00:59.638Z",
+        "reason": "System monospace for inline code chips; DESIGN.md does not define a code face"
+      }
+    ]
+  }
 }

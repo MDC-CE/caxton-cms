@@ -123,7 +123,7 @@ export default function HeroBlogHero({ data }: HeroBlogHeroProps) {
             </time>
           )}
           {updatedIso && typeof readingMinutes === "number" && readingMinutes > 0 && (
-            <span aria-hidden className="text-muted-foreground/60">
+            <span aria-hidden className="text-muted-foreground">
               ·
             </span>
           )}
@@ -134,7 +134,7 @@ export default function HeroBlogHero({ data }: HeroBlogHeroProps) {
       )}
 
       <h1
-        className="text-4xl md:text-h1 mb-4 text-foreground"
+        className="mb-4 text-foreground"
         data-testid="text-hero-title"
         dangerouslySetInnerHTML={{ __html: coerceToHtml(data.title) }}
       />
@@ -142,7 +142,7 @@ export default function HeroBlogHero({ data }: HeroBlogHeroProps) {
       {subtitleHtml && (
         <RichTextContent
           html={subtitleHtml}
-          className="text-body text-muted-foreground max-w-3xl mb-6 leading-relaxed [&_p]:mb-0"
+          className="mb-6 max-w-[65ch] text-body text-muted-foreground [&_p]:mb-0"
           data-testid="text-hero-subtitle"
         />
       )}

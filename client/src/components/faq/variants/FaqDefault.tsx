@@ -6,7 +6,6 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Button } from "@/components/ui/button";
 import type { FAQSection as FAQSectionType } from "@shared/schema";
 import { useLocation as useWouterLocation } from "wouter";
 import { useInternalNav } from "@/hooks/useInternalNav";
@@ -82,7 +81,7 @@ export function FAQSection({ data }: FAQSectionProps) {
   if (faqItems.length === 0) {
     if (!isEditMode) return null;
     return (
-      <section data-testid="section-faq-empty-edit" className="max-w-6xl mx-auto px-4">
+      <section data-testid="section-faq-empty-edit" className="page-shell py-section">
         <div
           className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-foreground flex gap-3 items-start"
           data-testid="alert-faq-hidden-no-results"
@@ -102,37 +101,37 @@ export function FAQSection({ data }: FAQSectionProps) {
   }
 
   return (
-    <section data-testid="section-faq" className="max-w-6xl mx-auto px-4">
-      <div className="max-w-6xl mx-auto px-4">
+    <section data-testid="section-faq" className="scroll-mt-24 py-section">
+      <div className="page-shell">
         <h2
-          className="mb-8 text-center text-foreground text-[36px]"
+          className="mb-6 max-w-3xl text-foreground"
           data-testid="text-faq-title"
         >
           {data.title}
         </h2>
 
-        <div className="bg-background rounded-card border overflow-hidden">
+        <div className="overflow-hidden rounded-card bg-card shadow-card">
           <Accordion type="single" collapsible>
             {faqItems.map((item, index) => (
               <AccordionItem
                 key={index}
                 value={`item-${index}`}
-                className="border-0 border-b last:border-b-0 px-6"
+                className="border-0 border-b border-border px-card-padding last:border-b-0"
                 data-testid={`accordion-faq-${index}`}
               >
                 <AccordionTrigger
-                  className="text-left font-medium text-foreground hover:no-underline py-4 text-base"
+                  className="min-h-11 py-3 text-left text-body font-semibold text-foreground hover:no-underline"
                   data-testid={`button-faq-${index}`}
                 >
                   {item.question}
                 </AccordionTrigger>
                 <AccordionContent
-                  className="text-muted-foreground pb-4 leading-relaxed"
+                  className="pb-4 text-body text-muted-foreground"
                   data-testid={`text-faq-answer-${index}`}
                 >
                   <RichTextContent
                     html={inlineMarkdownToHtml(item.answer)}
-                    className="text-muted-foreground leading-relaxed"
+                    className="text-body text-muted-foreground"
                   />
                 </AccordionContent>
               </AccordionItem>
@@ -142,28 +141,26 @@ export function FAQSection({ data }: FAQSectionProps) {
 
         {data.cta && (data.cta.text || data.cta.button) && (
           <div
-            className="mt-12 text-center p-8 rounded-lg bg-muted/30 border"
+            className="mt-8 rounded-card bg-card p-card-padding shadow-card"
             data-testid="faq-cta"
           >
-            <div className="flex justify-center mb-4">
-              <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
-                <MessageCircle size={24} className="text-primary" />
-              </div>
+            <div className="mb-4 flex h-[55px] w-[60px] items-center justify-center rounded-[25px] border border-border bg-card shadow-card">
+              <MessageCircle size={24} className="text-primary" aria-hidden />
             </div>
             {data.cta.text && (
-              <p className="text-lg text-foreground mb-4">{data.cta.text}</p>
+              <p className="mb-4 max-w-[65ch] text-body text-foreground">{data.cta.text}</p>
             )}
             {data.cta.button && (
-              <Button asChild data-testid="button-faq-cta">
-                <a
-                  href={data.cta.button.url}
-                  onClick={handleLinkClick}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {data.cta.button.label}
-                </a>
-              </Button>
+              <a
+                href={data.cta.button.url}
+                onClick={handleLinkClick}
+                className="site-action site-action-primary"
+                data-testid="button-faq-cta"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {data.cta.button.label}
+              </a>
             )}
           </div>
         )}

@@ -560,6 +560,70 @@
   padding-inline: var(--page-margin);
 }
 
+.site-theme ::selection {
+  background: hsl(var(--primary) / 0.18);
+  color: hsl(var(--foreground));
+}
+
+/* Public page actions. Admin buttons keep the shared control. */
+.site-theme .site-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 30px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.site-theme .site-action:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+.site-theme .site-action-primary {
+  background-image: linear-gradient(to right, hsl(var(--primary)), hsl(221 79% 56%));
+  color: hsl(var(--primary-foreground));
+}
+
+.site-theme .site-action-primary:hover,
+.site-theme .site-action-primary:focus-visible {
+  background-image: none;
+  background-color: hsl(207 100% 30%);
+}
+
+.site-theme .site-action-primary:active {
+  background-image: none;
+  background-color: hsl(207 100% 24%);
+}
+
+.site-theme .site-action-secondary {
+  background-color: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
+  border-color: hsl(var(--primary));
+}
+
+.site-theme .site-action-secondary:hover,
+.site-theme .site-action-secondary:focus-visible {
+  background-color: transparent;
+}
+
+.site-theme .site-action-secondary:active {
+  background-color: transparent;
+  color: hsl(207 100% 24%);
+  border-color: hsl(207 100% 24%);
+}
+
 .site-theme p {
   line-height: 20px;
 }
@@ -1190,7 +1254,7 @@
 }
 
 .chat-markdown blockquote {
-  border-left: 3px solid hsl(var(--foreground) / 0.2);
+  border-left: 1px solid hsl(var(--border));
   padding-left: 0.8em;
   margin: 0.4em 0;
   color: hsl(var(--muted-foreground));
@@ -1285,6 +1349,15 @@
   0%   { transform: scale(1);    opacity: 0.65; }
   65%  { transform: scale(1.18); opacity: 0;    }
   100% { transform: scale(1.18); opacity: 0;    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-cw,
+  .orbit-ccw,
+  .orbit-cw .orbit-item-inner,
+  .orbit-ccw .orbit-item-inner {
+    animation: none;
+  }
 }
 
 /* ─── BannerMarqueeBadges marquee animations ─────────────────── */

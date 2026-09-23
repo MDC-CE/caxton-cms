@@ -1,5 +1,4 @@
 import { createElement, useRef, useState, type MouseEventHandler } from "react";
-import { Button } from "@/components/ui/button";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { getIcon } from "@/lib/icons";
 import { cn } from "@/lib/utils";
@@ -22,39 +21,24 @@ interface OrbitBadgeProps extends BadgeItem {
 
 function OrbitBadge({ label, highlight, url, onLinkClick }: OrbitBadgeProps) {
   const pillClass = cn(
-    "flex items-center rounded-full whitespace-nowrap",
-    "gap-[0.2rem] md:gap-[0.3rem] lg:gap-[0.4rem]",
-    "px-[0.45rem] py-[0.25rem] md:px-[0.8rem] md:py-[0.45rem] lg:px-[1.15rem] lg:py-[0.35rem]",
-    url && "orbit-badge-link cursor-pointer transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2",
+    "inline-flex h-[30px] items-center gap-2 whitespace-nowrap rounded-[10px] border px-2.5",
+    "text-body-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2",
+    highlight
+      ? "border-primary bg-primary/10 font-semibold text-primary"
+      : "border-border bg-card font-normal text-foreground",
+    url && "orbit-badge-link",
   );
-  const pillStyle = highlight
-    ? {
-        background: "hsl(210 88% 96%)",
-        border: "1px solid hsl(210 70% 82%)",
-        boxShadow:
-          "0 4px 14px hsl(210 80% 65% / 0.3), inset 0 1px 0 hsl(210 100% 99%), inset 0 -1px 0 hsl(210 55% 87%)",
-      }
-    : {
-        background: "hsl(215 20% 95%)",
-        border: "1px solid hsl(215 18% 83%)",
-        boxShadow:
-          "0 4px 12px rgba(0,0,0,0.10), inset 0 1px 0 hsl(0 0% 100%), inset 0 -1px 0 hsl(215 15% 88%)",
-      };
 
   const content = (
     <>
       <span
-        className="rounded-full flex-shrink-0 w-[0.3rem] h-[0.3rem] md:w-[0.4rem] md:h-[0.4rem] lg:w-[0.45rem] lg:h-[0.45rem]"
-        style={{ background: highlight ? "hsl(210 100% 50%)" : "hsl(215 14% 62%)" }}
-      />
-      <span
         className={cn(
-          "text-[0.58rem] md:text-[0.75rem] lg:text-[0.92rem]",
-          highlight ? "font-extrabold text-primary" : "font-semibold text-[hsl(215_14%_52%)]",
+          "h-2 w-2 shrink-0 rounded-full",
+          highlight ? "bg-primary" : "bg-muted-foreground",
         )}
-      >
-        {label}
-      </span>
+        aria-hidden
+      />
+      <span>{label}</span>
     </>
   );
 
@@ -65,7 +49,6 @@ function OrbitBadge({ label, highlight, url, onLinkClick }: OrbitBadgeProps) {
         href={url}
         onClick={onLinkClick}
         className={pillClass}
-        style={pillStyle}
         {...(isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})}
       >
         {content}
@@ -74,7 +57,7 @@ function OrbitBadge({ label, highlight, url, onLinkClick }: OrbitBadgeProps) {
   }
 
   return (
-    <div className={pillClass} style={pillStyle}>
+    <div className={pillClass}>
       {content}
     </div>
   );
@@ -165,7 +148,7 @@ function OrbitDiagram({ centerLabel, inner, middle, outer, onLinkClick }: OrbitD
       ref={sceneRef}
       className="orbit-scene relative flex items-center justify-center flex-shrink-0"
       style={{
-        width: "clamp(275px, 48vw, 570px)",
+        width: "clamp(240px, 40vw, 460px)",
         aspectRatio: "650 / 540",
       }}
       onMouseMove={handleMouseMove}
@@ -188,7 +171,7 @@ function OrbitDiagram({ centerLabel, inner, middle, outer, onLinkClick }: OrbitD
           style={{
             width: `${pct}cqw`,
             height: `${pct}cqw`,
-            border: `clamp(0.8px, 0.24cqw, 1.4px) dashed hsl(215 35% 72% / 0.65)`,
+            border: "1px dashed hsl(var(--primary) / 0.28)",
           }}
         />
       ))}
@@ -206,8 +189,8 @@ function OrbitDiagram({ centerLabel, inner, middle, outer, onLinkClick }: OrbitD
           height: `${CQW.center}cqw`,
           fontSize: `${CQW.centerFont}cqw`,
           background:
-            "radial-gradient(circle at 38% 35%, hsl(var(--primary) / 0.7), hsl(var(--primary)) 55%, hsl(var(--primary)))",
-          boxShadow: "0 16px 50px hsl(var(--primary) / 0.45)",
+            "radial-gradient(circle at 38% 35%, hsl(var(--primary) / 0.75), hsl(var(--primary)) 55%)",
+          boxShadow: "0 6px 10px 0 hsl(var(--primary) / 0.3)",
         }}
       >
         <span>{centerLabel}</span>
@@ -233,38 +216,28 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
   const outer  = (diagram.badges?.outer  ?? []) as BadgeItem[];
 
   const hasLegend = !!(legendStart || legendHighlight);
+  const titleHtml = (data.title ?? "").replace(/\sstyle="[^"]*"/gi, "");
 
   return (
-    <section data-testid="section-hero-orbit">
+    <section data-testid="section-hero-orbit" className="scroll-mt-24">
       <div>
-        <div className="w-full grid grid-cols-1 md:grid-cols-[2fr_3fr] md:gap-x-1">
+        <div className="grid w-full grid-cols-1 md:grid-cols-[2fr_3fr] md:gap-x-gutter">
 
-          {/* TOP LEFT — eyebrow + title */}
           <div className="flex flex-col gap-4 md:self-end md:pb-4">
             {data.eyebrow && (
-              <div
-                className="text-[0.65rem] md:text-[0.72rem] font-bold tracking-[0.12em] text-primary uppercase"
+              <p
+                className="text-body-sm font-semibold text-primary"
                 data-testid="text-hero-eyebrow"
               >
-                <span className="inline-block w-[0.55rem] h-[0.55rem] rounded-full bg-[hsl(142_71%_45%)] align-middle mr-[0.45rem]" />
+                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-primary align-middle" aria-hidden />
                 {data.eyebrow}
-              </div>
+              </p>
             )}
             <h1
-              className="font-inter font-black leading-none text-foreground m-0 [&_em]:text-primary [&_em]:italic"
+              className="m-0 text-foreground [&_em]:font-light [&_em]:not-italic [&_em]:text-primary"
               data-testid="text-hero-title"
-            >
-              {/* Mobile: strip custom font-size so Tailwind controls size */}
-              <span
-                className="block md:hidden text-[2.75rem]"
-                dangerouslySetInnerHTML={{ __html: (data.title ?? "").replace(/font-size\s*:[^;"]*;?/gi, "") }}
-              />
-              {/* Desktop: full rich text with custom font-size preserved */}
-              <span
-                className="hidden md:block text-[3.1rem] lg:text-[3.9rem]"
-                dangerouslySetInnerHTML={{ __html: data.title ?? "" }}
-              />
-            </h1>
+              dangerouslySetInnerHTML={{ __html: titleHtml }}
+            />
           </div>
 
           {/* RIGHT — orbit diagram (spans 2 rows on desktop, order-3 on mobile) */}
@@ -285,7 +258,7 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
           <div className="max-md:contents md:flex md:flex-col md:gap-[1.4rem] md:self-start md:pt-4">
             {data.body && (
               <p
-                className="max-md:order-1 max-md:mt-4 text-muted-foreground text-[0.88rem] md:text-[0.92rem] lg:text-[1.1rem] lg:max-w-[430px] leading-[1.65] m-0 font-medium"
+                className="m-0 max-w-[65ch] text-body text-muted-foreground max-md:order-1 max-md:mt-4"
                 data-testid="text-hero-body"
               >
                 {data.body}
@@ -294,37 +267,42 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
 
             {data.cta_buttons && data.cta_buttons.length > 0 && (
               <div
-                className="max-md:order-2 max-md:mt-4 flex flex-wrap justify-center md:justify-start gap-2 md:gap-3"
+                className="flex flex-wrap justify-start gap-3 max-md:order-2 max-md:mt-4"
                 data-testid="hero-cta-buttons"
               >
-                {data.cta_buttons.map((btn, i) => (
-                  <Button
-                    key={i}
-                    variant={btn.variant === "primary" ? "default" : (btn.variant as "outline" | "secondary")}
-                    asChild
-                    data-testid={`button-hero-cta-${i}`}
-                  >
-                    <a href={btn.url} onClick={handleLinkClick} className="flex items-center !gap-1 px-2 py-1 text-sm lg:gap-2 lg:px-5 lg:py-1 font-semibold">
+                {data.cta_buttons.map((btn, i) => {
+                  const external = /^https?:\/\//i.test(btn.url);
+                  return (
+                    <a
+                      key={i}
+                      href={btn.url}
+                      onClick={handleLinkClick}
+                      className={cn(
+                        "site-action",
+                        btn.variant === "primary" ? "site-action-primary" : "site-action-secondary",
+                      )}
+                      data-testid={`button-hero-cta-${i}`}
+                      {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                    >
                       {btn.icon &&
                         (() => {
                           const Ic = getIcon(btn.icon);
-                          return Ic ? createElement(Ic, { className: "h-4 w-4" }) : null;
+                          return Ic ? createElement(Ic, { className: "h-4 w-4", "aria-hidden": true }) : null;
                         })()}
                       {btn.text}
                     </a>
-                  </Button>
-                ))}
+                  );
+                })}
               </div>
             )}
 
             {data.stat && (
-              <div
-                className="max-md:order-5 max-md:mt-4 text-[0.95rem] md:text-[1rem] lg:text-[1.05rem] text-muted-foreground"
+              <p
+                className="m-0 text-body text-muted-foreground max-md:order-5 max-md:mt-4"
                 data-testid="text-hero-stat"
               >
-                <span className="inline-block w-[0.45rem] h-[0.45rem] rounded-full bg-muted-foreground/40 align-middle mr-[0.5rem]" />
-                <span className="[&_strong]:text-foreground" dangerouslySetInnerHTML={{ __html: data.stat }} />
-              </div>
+                <span className="[&_strong]:font-semibold [&_strong]:text-foreground" dangerouslySetInnerHTML={{ __html: data.stat }} />
+              </p>
             )}
           </div>
 
@@ -335,22 +313,14 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
               data-testid="hero-orbit-legend"
             >
               {legendStart && (
-                <div className="flex items-center gap-[0.4rem] text-[0.75rem] text-muted-foreground">
-                  <span
-                    className="rounded-full flex-shrink-0"
-                    style={{
-                      width: "0.65rem",
-                      height: "0.65rem",
-                      background: "hsl(215 14% 80%)",
-                      border: "1.5px solid hsl(215 14% 62%)",
-                    }}
-                  />
+                <div className="flex items-center gap-2 text-body-sm text-muted-foreground">
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden />
                   <span>{legendStart}</span>
                 </div>
               )}
               {legendHighlight && (
-                <div className="flex items-center gap-[0.4rem] text-[0.75rem] text-muted-foreground">
-                  <span className="rounded-full flex-shrink-0 bg-primary" style={{ width: "0.8rem", height: "0.8rem" }} />
+                <div className="flex items-center gap-2 text-body-sm text-muted-foreground">
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-primary" aria-hidden />
                   <span>{legendHighlight}</span>
                 </div>
               )}

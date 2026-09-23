@@ -730,7 +730,7 @@ export function Article({ data }: ArticleProps) {
 
   return (
     <div
-      className="w-full px-4 py-8 md:px-6 lg:px-8"
+      className="page-shell w-full py-section"
       data-testid="article-section"
       data-toc-group={toc_group || undefined}
       data-article-split={isSplit ? "true" : undefined}
@@ -881,7 +881,7 @@ function MarkdownRenderer({
           return (
             <h1
               id={id}
-              className="mb-4 mt-10 scroll-mt-24 text-3xl font-bold tracking-tight first:mt-0 md:text-4xl"
+              className="mb-4 mt-10 scroll-mt-24 first:mt-0"
               data-testid={`heading-${id}`}
               {...props}
             >
@@ -895,7 +895,7 @@ function MarkdownRenderer({
           return (
             <h2
               id={id}
-              className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
+              className="mb-3 mt-10 scroll-mt-24 text-foreground first:mt-0"
               data-testid={`heading-${id}`}
               {...props}
             >
@@ -909,7 +909,7 @@ function MarkdownRenderer({
           return (
             <h3
               id={id}
-              className="mb-2 mt-8 scroll-mt-24 text-lg font-medium tracking-tight text-foreground/90 first:mt-0 md:text-xl"
+              className="mb-2 mt-8 scroll-mt-24 text-foreground first:mt-0"
               data-testid={`heading-${id}`}
               {...props}
             >
@@ -923,7 +923,7 @@ function MarkdownRenderer({
           </h4>
         ),
         p: ({ children, ...props }) => (
-          <p className="mb-4 mt-0 leading-8 text-foreground/90" {...props}>
+          <p className="mb-4 mt-0 text-body text-foreground" {...props}>
             {children}
           </p>
         ),
@@ -955,7 +955,7 @@ function MarkdownRenderer({
         ),
         blockquote: ({ children, ...props }) => (
           <blockquote
-            className="mb-5 rounded-r-md border-l-4 border-primary bg-muted/30 py-3 pl-4 pr-3 text-foreground/90 not-italic"
+            className="mb-5 rounded-card border border-border bg-muted px-4 py-3 text-body text-foreground not-italic"
             {...props}
           >
             {children}

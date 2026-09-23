@@ -27,33 +27,35 @@ export function TextBlockDefault({ data }: TextBlockProps) {
 
   return (
     <section
-      className="py-12 md:py-16"
+      className="scroll-mt-24 py-section"
       data-testid="section-text-block"
     >
-      <div className={cn("px-4 w-full", maxWidthClass, centerBlock, alignClass)}>
-        {eyebrow && (
-          <p
-            className="text-sm font-semibold uppercase tracking-widest text-muted-foreground mb-3"
-            data-testid="text-text-block-eyebrow"
-          >
-            {eyebrow}
-          </p>
-        )}
+      <div className="page-shell">
+        <div className={cn("w-full", maxWidthClass, centerBlock, alignClass)}>
+          {eyebrow && (
+            <p
+              className="mb-3 text-body-sm text-muted-foreground"
+              data-testid="text-text-block-eyebrow"
+            >
+              {eyebrow}
+            </p>
+          )}
 
-        {heading && (
-          <h2
-            className="text-3xl md:text-4xl font-bold text-foreground mb-6"
-            data-testid="text-text-block-heading"
-          >
-            {heading}
-          </h2>
-        )}
+          {heading && (
+            <h2
+              className="mb-4 text-foreground"
+              data-testid="text-text-block-heading"
+            >
+              {heading}
+            </h2>
+          )}
 
-        <RichTextContent
-          html={body}
-          className={cn("text-foreground/80", alignClass)}
-          data-testid="text-text-block-body"
-        />
+          <RichTextContent
+            html={body}
+            className={cn("text-body text-foreground", alignClass)}
+            data-testid="text-text-block-body"
+          />
+        </div>
       </div>
     </section>
   );

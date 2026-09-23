@@ -20,6 +20,17 @@ interface AnswerHighlightsDefaultProps {
   data: AnswerHighlightsSectionData;
 }
 
+function resolveSectionIcon(name?: string) {
+  if (!name) return null;
+  const aliases: Record<string, string> = {
+    IconHeartbeat: "Heart",
+    IconTool: "Wrench",
+  };
+  const Icon = getIcon(aliases[name] ?? name);
+  if (!Icon || Icon.displayName?.startsWith("CustomIcon(")) return null;
+  return Icon;
+}
+
 export default function AnswerHighlightsDefault({ data }: AnswerHighlightsDefaultProps) {
   const { heading, background, items } = data;
 
@@ -27,13 +38,13 @@ export default function AnswerHighlightsDefault({ data }: AnswerHighlightsDefaul
 
   return (
     <section
-      className={cn("py-12 md:py-16", background)}
+      className={cn("scroll-mt-24 py-section", background)}
       data-testid="section-answer-highlights"
     >
-      <div className="max-w-6xl mx-auto px-4">
+      <div className="page-shell">
         {heading && (
           <h2
-            className="text-3xl md:text-4xl font-bold text-foreground font-heading mb-10 max-w-3xl"
+            className="mb-6 max-w-3xl text-foreground"
             data-testid="text-answer-highlights-heading"
           >
             {heading}
@@ -41,31 +52,34 @@ export default function AnswerHighlightsDefault({ data }: AnswerHighlightsDefaul
         )}
 
         <div
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6"
+          className="grid grid-cols-1 gap-gutter md:grid-cols-2 lg:grid-cols-4"
           data-testid="answer-highlights-grid"
         >
           {items.map((item, index) => {
-            const Icon = item.icon ? getIcon(item.icon) : null;
+            const Icon = resolveSectionIcon(item.icon);
             return (
               <div
                 key={`${item.title}-${index}`}
-                className="flex flex-col gap-3 p-card-padding rounded-card bg-primary/5 border border-transparent"
+                className="flex flex-col gap-4 rounded-card bg-card p-card-padding text-card-foreground shadow-card transition-shadow duration-brand ease-brand hover:shadow-elevation"
                 data-testid={`card-answer-highlight-${index}`}
               >
                 {Icon && (
-                  <Icon
-                    className="w-7 h-7 text-primary shrink-0"
-                    data-testid={`icon-answer-highlight-${index}`}
-                  />
+                  <span className="flex h-[55px] w-[60px] items-center justify-center rounded-[25px] border border-border bg-card shadow-card">
+                    <Icon
+                      className="h-6 w-6 text-primary"
+                      aria-hidden
+                      data-testid={`icon-answer-highlight-${index}`}
+                    />
+                  </span>
                 )}
                 <h3
-                  className="text-base font-bold text-foreground font-heading leading-snug"
+                  className="text-foreground"
                   data-testid={`text-answer-highlight-title-${index}`}
                 >
                   {item.title}
                 </h3>
                 <p
-                  className="text-base text-muted-foreground leading-relaxed"
+                  className="text-body text-muted-foreground"
                   data-testid={`text-answer-highlight-description-${index}`}
                 >
                   {item.description}
