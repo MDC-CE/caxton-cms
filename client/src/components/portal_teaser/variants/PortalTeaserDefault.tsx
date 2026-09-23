@@ -1,5 +1,4 @@
 import { createElement } from "react";
-import { Button } from "@/components/ui/button";
 import { getIcon } from "@/lib/icons";
 import { cn } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
@@ -25,54 +24,63 @@ interface PortalTeaserDefaultProps {
   data: PortalTeaserSectionData;
 }
 
+function isExternal(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
 export default function PortalTeaserDefault({ data }: PortalTeaserDefaultProps) {
   const { badge, title, body, background, cta } = data;
+  const external = Boolean(cta?.url && isExternal(cta.url));
 
   return (
     <section
-      className={cn("py-12 md:py-16", background || "bg-muted")}
+      className={cn("scroll-mt-24 py-section", background || "bg-muted")}
       data-testid="section-portal-teaser"
     >
-      <div className="max-w-3xl mx-auto px-4">
-        <div className="rounded-card border border-border bg-card p-card-padding md:p-8">
+      <div className="page-shell">
+        <div className="max-w-[65ch] rounded-card bg-card p-card-padding text-card-foreground shadow-card">
           {badge && (
             <p
-              className="text-xs font-semibold uppercase tracking-widest text-primary mb-3"
+              className="mb-4 inline-flex items-center rounded-[10px] bg-card px-2.5 py-1.5 text-[13px] font-medium text-primary shadow-[inset_0_0_0_1px_hsl(var(--border))]"
               data-testid="text-portal-teaser-badge"
             >
               {badge}
             </p>
           )}
           <h2
-            className="text-3xl md:text-4xl font-bold text-foreground font-heading mb-4"
+            className="mb-4 text-foreground"
             data-testid="text-portal-teaser-title"
           >
             {title}
           </h2>
           <div
-            className="text-base text-muted-foreground leading-relaxed prose max-w-none prose-p:mb-3 prose-p:leading-relaxed"
+            className="max-w-none text-body text-muted-foreground [&_p]:mb-3 [&_p:last-child]:mb-0"
             data-testid="text-portal-teaser-body"
           >
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
           </div>
-          {cta?.text && cta?.url && (
+          {cta?.text && cta.url && (
             <div className="mt-6">
-              <Button
-                variant={cta.variant === "primary" ? "default" : cta.variant}
-                asChild
+              <a
+                href={cta.url}
+                className={cn(
+                  "site-action",
+                  cta.variant === "primary" ? "site-action-primary" : "site-action-secondary",
+                )}
                 data-testid="button-portal-teaser-cta"
+                {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
               >
-                <a href={cta.url} className="flex items-center gap-2">
-                  {cta.icon &&
-                    (() => {
-                      const CtaIcon = getIcon(cta.icon!);
-                      return CtaIcon
-                        ? createElement(CtaIcon, { className: "h-4 w-4" })
-                        : null;
-                    })()}
-                  {cta.text}
-                </a>
-              </Button>
+                {cta.icon &&
+                  (() => {
+                    const CtaIcon = getIcon(cta.icon!);
+                    return CtaIcon ? (
+                      <span aria-hidden="true" className="inline-flex">
+                        {createElement(CtaIcon, { className: "h-4 w-4" })}
+                      </span>
+                    ) : null;
+                  })()}
+                {cta.text}
+              </a>
             </div>
           )}
         </div>

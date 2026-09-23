@@ -58,7 +58,7 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
     <section 
       data-testid="section-hero"
     >
-      <div className="max-w-6xl mx-auto px-4 text-center">
+      <div className="page-shell text-center">
         {badgeText && (
           <Badge 
             variant="secondary" 
@@ -70,7 +70,7 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
         )}
         
         <h1 
-          className="text-4xl md:text-h1 mb-6 text-foreground"
+          className="mb-6 text-foreground"
           data-testid="text-hero-title"
           dangerouslySetInnerHTML={{ __html: coerceToHtml(data.title) }}
         />
@@ -78,7 +78,7 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
         {coerceToHtml(data.subtitle) && (
           <RichTextContent 
             html={coerceToHtml(data.subtitle)}
-            className="text-body text-muted-foreground max-w-3xl mx-auto mb-8 leading-relaxed [&_p]:mb-0"
+            className="mx-auto mb-8 max-w-[65ch] text-body text-muted-foreground [&_p]:mb-0"
             data-testid="text-hero-subtitle"
           />
         )}
@@ -113,10 +113,10 @@ export default function HeroSingleColumn({ data }: HeroSingleColumnProps) {
                     {[1, 2, 3, 4].map((i) => (
                       <Star
                         key={i}
-                        className="fill-current text-yellow-500 w-4 h-4"
+                        className="h-4 w-4 fill-current text-primary"
                       />
                     ))}
-                    <Star className="text-yellow-500 w-4 h-4" />
+                    <Star className="h-4 w-4 text-primary" />
                   </div>
                 </div>
               )}

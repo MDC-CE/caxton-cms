@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-23T14:10:00-05:00",
+  "title": "Design System: MDC Learning",
+  "extensions": {
+    "colorMeta": {
+      "signal-blue": {
+        "role": "primary",
+        "displayName": "MDC Signal Blue",
+        "canonical": "#005EAA",
+        "tonalRamp": ["#002747", "#00345E", "#004379", "#00569B", "#005EAA", "#5493C6", "#B0CDE5", "#E6EFF7"]
+      },
+      "signal-blue-hover": {
+        "role": "primary",
+        "displayName": "Signal Blue Hover",
+        "canonical": "#00569B",
+        "tonalRamp": ["#002747", "#00345E", "#004379", "#00569B", "#005EAA", "#5493C6", "#B0CDE5", "#E6EFF7"]
+      },
+      "signal-blue-pressed": {
+        "role": "primary",
+        "displayName": "Signal Blue Pressed",
+        "canonical": "#004379",
+        "tonalRamp": ["#002747", "#00345E", "#004379", "#00569B", "#005EAA", "#5493C6", "#B0CDE5", "#E6EFF7"]
+      },
+      "signal-blue-disabled": {
+        "role": "primary",
+        "displayName": "Signal Blue Disabled",
+        "canonical": "#B0CDE5",
+        "tonalRamp": ["#002747", "#00345E", "#004379", "#00569B", "#005EAA", "#5493C6", "#B0CDE5", "#E6EFF7"]
+      },
+      "signal-wash": {
+        "role": "primary",
+        "displayName": "Signal Wash",
+        "canonical": "rgba(0, 94, 170, 0.1)",
+        "tonalRamp": ["#002747", "#00345E", "#004379", "#00569B", "#005EAA", "#8AB5D8", "#B0CDE5", "#E6EFF7"]
+      },
+      "gradient-blue": {
+        "role": "primary",
+        "displayName": "Gradient Blue",
+        "canonical": "#3470E8",
+        "tonalRamp": ["#162F61", "#1D3E80", "#2550A5", "#2F66D3", "#3470E8", "#779FF0", "#C0D3F8", "#EBF1FD"]
+      },
+      "highlighter-yellow": {
+        "role": "secondary",
+        "displayName": "Highlighter Yellow",
+        "canonical": "#FFD400",
+        "tonalRamp": ["#FFD400", "#FFDD33", "#FFE254", "#FFEB8A", "#FFF2B0", "#FFFBE6"]
+      },
+      "campus-ink": {
+        "role": "neutral",
+        "displayName": "Campus Ink",
+        "canonical": "#232529",
+        "tonalRamp": ["#0F1011", "#131417", "#191A1D", "#202225", "#232529", "#6C6D70", "#BBBBBD", "#E9E9EA"]
+      },
+      "ink-quiet": {
+        "role": "neutral",
+        "displayName": "Quiet Ink",
+        "canonical": "#666666",
+        "tonalRamp": ["#0F1011", "#232529", "#4F5154", "#666666", "#767676", "#999999", "#C4C4C4", "#F3F3F3"]
+      },
+      "muted-text": {
+        "role": "neutral",
+        "displayName": "Muted Text",
+        "canonical": "#767676",
+        "tonalRamp": ["#5A5A5A", "#767676", "#999999", "#C4C4C4", "#D7D7D7", "#E4E4E4", "#EDEDED", "#FBFBFB"]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#FFFFFF",
+        "tonalRamp": ["#5A5A5A", "#767676", "#999999", "#C4C4C4", "#E4E4E4", "#EDEDED", "#FBFBFB", "#FFFFFF"]
+      },
+      "paper-soft": {
+        "role": "neutral",
+        "displayName": "Paper Soft",
+        "canonical": "#FBFBFB",
+        "tonalRamp": ["#5A5A5A", "#767676", "#999999", "#C4C4C4", "#E4E4E4", "#EDEDED", "#F3F3F3", "#FBFBFB"]
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#E5E7EB",
+        "tonalRamp": ["#5A5A5A", "#767676", "#999999", "#C4C4C4", "#E4E4E4", "#E5E7EB", "#EDEDED", "#FBFBFB"]
+      },
+      "certificate-blue": {
+        "role": "tertiary",
+        "displayName": "Certificate Blue",
+        "canonical": "#9ACDFE",
+        "tonalRamp": ["#364859", "#455C72", "#5C7B98", "#749ABF", "#9ACDFE", "#E0F0FF", "#F0F8FF", "#F5FAFF"]
+      },
+      "scholarship-green": {
+        "role": "tertiary",
+        "displayName": "Scholarship Green",
+        "canonical": "#25BF6C",
+        "tonalRamp": ["#25BF6C", "#51CC89", "#6DD49D", "#9BE2BB", "#BBEBD1", "#E9F9F0"]
+      },
+      "error-red": {
+        "role": "tertiary",
+        "displayName": "Error Red",
+        "canonical": "#EA1239",
+        "tonalRamp": ["#EA1239", "#EE4161", "#F1607A", "#F592A4", "#F8B6C2", "#FDE7EB"]
+      },
+      "on-signal": {
+        "role": "neutral",
+        "displayName": "On Signal",
+        "canonical": "#FFFFFF",
+        "tonalRamp": ["#E5E7EB", "#EDEDED", "#F3F3F3", "#FBFBFB", "#FFFFFF"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Page title. 45px from 679px, 35px below. Weight 300 is the light alternate."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section title. 35px from 679px, 30px below."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card and subsection titles. H4 uses weight 500 at the same sizes."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Reading text. Small body is 14px / 18px."
+      },
+      "label": {
+        "displayName": "Action label",
+        "purpose": "Public Sans 14 for buttons. The loaded files today are Plus Jakarta Sans only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "elevation-1",
+        "value": "0 2px 2px 0 #E5E7EB80",
+        "purpose": "Cards at rest, framed icons, chip-row shells."
+      },
+      {
+        "name": "elevation-2",
+        "value": "0 4px 4px 0 #E5E7EB80",
+        "purpose": "Card hover and the sticky bar shell."
+      },
+      {
+        "name": "elevation-blue",
+        "value": "0 6px 10px 0 #005EAA4D",
+        "purpose": "Emphasis only, not the default card."
+      },
+      {
+        "name": "submenu",
+        "value": "0 4px 8px 0 #9D9D9D",
+        "purpose": "Submenus."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-brand",
+        "value": "ease-out",
+        "purpose": "Default easing for button and elevation state changes."
+      },
+      {
+        "name": "duration-brand",
+        "value": "150ms",
+        "purpose": "Default duration for those state changes."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "332px" },
+      { "name": "md", "value": "679px" },
+      { "name": "lg", "value": "1132px" },
+      { "name": "xl", "value": "1468px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Enabled catalog action. Gradient at rest; flat on hover and pressed.",
+      "html": "<button class=\"ds-btn-primary\">View program</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 10px 50px; border: none; border-radius: 20px; background: linear-gradient(90deg, #005EAA, #3470E8); color: #FFFFFF; font-family: \"Public Sans\", sans-serif; font-size: 14px; font-weight: 400; letter-spacing: 0; cursor: pointer; transition: background 150ms ease-out; } .ds-btn-primary:hover { background: #00569B; } .ds-btn-primary:active { background: #004379; } .ds-btn-primary:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; } .ds-btn-primary:disabled { background: #B0CDE5; color: #FFFFFF; cursor: not-allowed; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Outlined action. Wash at rest; hollow on hover.",
+      "html": "<button class=\"ds-btn-secondary\">Save for later</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 10px 30px; border: 1px solid #005EAA; border-radius: 20px; background: rgba(0, 94, 170, 0.1); color: #005EAA; font-family: \"Public Sans\", sans-serif; font-size: 14px; font-weight: 400; letter-spacing: 0; cursor: pointer; transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out; } .ds-btn-secondary:hover { background: transparent; } .ds-btn-secondary:active { background: transparent; border-color: #004379; color: #004379; } .ds-btn-secondary:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; } .ds-btn-secondary:disabled { background: rgba(176, 205, 229, 0.2); border-color: #B0CDE5; color: #8AB5D8; cursor: not-allowed; }"
+    },
+    {
+      "name": "Tertiary Button",
+      "kind": "button",
+      "refersTo": "button-tertiary",
+      "description": "Text action with an optional trailing chevron.",
+      "html": "<button class=\"ds-btn-tertiary\">Learn more <svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M6 3.5L10.5 8L6 12.5\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></button>",
+      "css": ".ds-btn-tertiary { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 44px; min-width: 44px; padding: 0; border: none; background: transparent; color: #005EAA; font-family: \"Public Sans\", sans-serif; font-size: 14px; font-weight: 700; letter-spacing: 0; cursor: pointer; } .ds-btn-tertiary:hover { color: #00569B; } .ds-btn-tertiary:active { color: #004379; } .ds-btn-tertiary:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; }"
+    },
+    {
+      "name": "Catalog Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "White program tile. Elevation 1 at rest, Elevation 2 on hover.",
+      "html": "<article class=\"ds-card\"><h3 class=\"ds-card-title\">Medical Coding</h3><p class=\"ds-card-body\">A catalog card for one continuing-education program.</p></article>",
+      "css": ".ds-card { background: #FFFFFF; color: #232529; border-radius: 12px; padding: 24px; box-shadow: 0 2px 2px 0 #E5E7EB80; transition: box-shadow 150ms ease-out; } .ds-card:hover { box-shadow: 0 4px 4px 0 #E5E7EB80; } .ds-card-title { margin: 0 0 8px; font-family: \"Plus Jakarta Sans\", sans-serif; font-size: 20px; font-weight: 700; line-height: 22px; letter-spacing: 0; } .ds-card-body { margin: 0; font-family: \"Plus Jakarta Sans\", sans-serif; font-size: 16px; font-weight: 400; line-height: 20px; letter-spacing: 0; }"
+    },
+    {
+      "name": "Filter Chip",
+      "kind": "chip",
+      "refersTo": "chip-filter",
+      "description": "Idle filter. Hover draws a signal-blue border; selected fills solid.",
+      "html": "<button class=\"ds-chip\">Evening</button>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; height: 30px; padding: 10px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #666666; font-family: \"Plus Jakarta Sans\", sans-serif; font-size: 14px; font-weight: 400; line-height: 16px; letter-spacing: 0; cursor: pointer; } .ds-chip:hover { border-color: #005EAA; } .ds-chip:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; } .ds-chip[aria-pressed=\"true\"], .ds-chip.is-selected { background: #005EAA; border-color: transparent; color: #FFFFFF; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Paper field with a signal-blue focus ring.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Email</span><input class=\"ds-input\" type=\"email\" placeholder=\"name@mdc.edu\" /></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 6px; font-family: \"Plus Jakarta Sans\", sans-serif; } .ds-field-label { color: #232529; font-size: 14px; font-weight: 600; line-height: 18px; } .ds-input { height: 36px; padding: 8px 12px; border: 1px solid #DFDFDF; border-radius: 6px; background: #FFFFFF; color: #232529; font-family: \"Plus Jakarta Sans\", sans-serif; font-size: 16px; font-weight: 400; line-height: 20px; } .ds-input::placeholder { color: #767676; } .ds-input:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "nav",
+      "description": "Fixed white bar. Active link is signal blue.",
+      "html": "<nav class=\"ds-nav\"><span class=\"ds-nav-mark\">MDC</span><a class=\"ds-nav-link is-active\" href=\"#programs\">Programs</a><a class=\"ds-nav-link\" href=\"#calendar\">Calendar</a></nav>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 24px; height: 64px; padding: 0 20px; background: #FFFFFF; color: #232529; border-bottom: 1px solid #E5E7EB; font-family: \"Plus Jakarta Sans\", sans-serif; } .ds-nav-mark { font-weight: 700; font-size: 16px; letter-spacing: 0; } .ds-nav-link { color: #232529; font-size: 16px; font-weight: 400; line-height: 18px; text-decoration: none; } .ds-nav-link:hover { color: #005EAA; } .ds-nav-link.is-active { color: #005EAA; } .ds-nav-link:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; }"
+    },
+    {
+      "name": "Framed Icon",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Card icon tile. White, hairline, Elevation 1, 25px radius.",
+      "html": "<span class=\"ds-icon-frame\"><svg width=\"23\" height=\"23\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><path d=\"M6 4.5h12a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V6A1.5 1.5 0 0 1 6 4.5Z\" stroke=\"#005EAA\" stroke-width=\"1.5\"/><path d=\"M8 12h8M12 8v8\" stroke=\"#005EAA\" stroke-width=\"1.5\" stroke-linecap=\"round\"/></svg></span>",
+      "css": ".ds-icon-frame { display: inline-flex; align-items: center; justify-content: center; width: 60px; height: 55px; border-radius: 25px; background: #FFFFFF; border: 1px solid #E5E7EB; box-shadow: 0 2px 2px 0 #E5E7EB80; backdrop-filter: blur(5px); }"
+    },
+    {
+      "name": "Sticky Bar",
+      "kind": "custom",
+      "refersTo": "nav",
+      "description": "Frosted call bar with a paper-soft inner card.",
+      "html": "<div class=\"ds-sticky\"><div class=\"ds-sticky-card\"><span class=\"ds-sticky-label\">Fall enrollment</span><button class=\"ds-sticky-icon\" aria-label=\"Call\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><path d=\"M8 4.5h2.2l1.2 3-1.6 1a12 12 0 0 0 5.7 5.7l1-1.6 3 1.2V18a1.5 1.5 0 0 1-1.5 1.5A14.5 14.5 0 0 1 4.5 6 1.5 1.5 0 0 1 6 4.5Z\" stroke=\"#005EAA\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/></svg></button></div></div>",
+      "css": ".ds-sticky { display: inline-flex; padding: 5px; border-radius: 15px; background: rgba(154, 205, 254, 0.3); box-shadow: 0 4px 4px 0 #E5E7EB80; backdrop-filter: blur(5px); } .ds-sticky-card { display: flex; align-items: center; gap: 25px; padding: 15px 20px; border-radius: 10px; background: #FBFBFB; border: 0.5px solid #E5E7EB; backdrop-filter: blur(5px); } .ds-sticky-label { font-family: \"Plus Jakarta Sans\", sans-serif; font-size: 16px; font-weight: 600; line-height: 20px; color: #222222; } .ds-sticky-icon { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 15px; background: #FFFFFF; border: 1px solid #E5E7EB; cursor: pointer; } .ds-sticky-icon:hover { background: #FBFBFB; } .ds-sticky-icon:focus-visible { outline: 2px solid #005EAA; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Campus Catalog",
+    "overview": "The public site is a campus catalog. A program is a card on a strict grid, and a landing is a sequence of those modules. Type does the inviting: headlines are large, tightly leaded, and set with room around them. Color is measured. The page should feel like an editorial course listing, not a dashboard and not a campaign poster.\n\nMDC Signal Blue carries buttons, links, and focus. Highlighter Yellow is not a general accent. It appears only on summer-camp surfaces. Everything else stays on paper white, soft grey, and Campus Ink. Cards rest on a short grey shadow and lift one step on hover. A blue shadow is emphasis, not the default.\n\nThis system is the public site under `.site-theme`. Caxton admin chrome keeps Lato and Archivo and stays outside it.",
+    "keyCharacteristics": [
+      "Cards are the catalog module: white, 12px corners, Elevation 1 at rest",
+      "Headlines lock line-height to the font size; letter-spacing stays at 0",
+      "Signal blue does the actions; yellow is reserved for summer camps",
+      "Radii change with the job: 12px cards, 20px buttons, 10px chips, 25px icon frames",
+      "Every control keeps a 44×44px hit area"
+    ],
+    "rules": [
+      {
+        "name": "The Summer Camp Rule",
+        "body": "Highlighter Yellow appears only on summer-camp surfaces. It is not a badge, button, link, or progress fill on any other program.",
+        "section": "colors"
+      },
+      {
+        "name": "The Token Rule",
+        "body": "Components use semantic color tokens. Raw palette classes and hardcoded hex in class names are out.",
+        "section": "colors"
+      },
+      {
+        "name": "The Locked Leading Rule",
+        "body": "Display and headline line-height equal the font size. Letter-spacing stays at 0.",
+        "section": "typography"
+      },
+      {
+        "name": "The Two Faces Rule",
+        "body": "Plus Jakarta Sans sets the page. Public Sans sets action labels.",
+        "section": "typography"
+      },
+      {
+        "name": "The Opening Margin Rule",
+        "body": "Gutters stay 20px. Page margin stays 20px through tablet, then 60px at 1132px and 120px at 1468px.",
+        "section": "layout"
+      },
+      {
+        "name": "The Short Shadow Rule",
+        "body": "Cards rest on Elevation 1. Hover and the sticky bar use Elevation 2. The blue shadow is for emphasis only.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Role Radius Rule",
+        "body": "Radius follows the component. Cards 12px, buttons 20px, chips 10px, framed icons 25px, sticky shell 15px.",
+        "section": "shapes"
+      },
+      {
+        "name": "The 44 Rule",
+        "body": "Every button, including icon, header, and sticky-bar actions, has a minimum hit area of 44×44px.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "**Do** treat a landing as a sequence of catalog cards on the 4 / 8 / 12 grid.",
+      "**Do** use semantic color tokens for every fill, border, and text color.",
+      "**Do** keep Highlighter Yellow on summer-camp surfaces only.",
+      "**Do** set page type in Plus Jakarta Sans and action labels in Public Sans.",
+      "**Do** give every button a 44×44px hit area, even when the painted box is shorter.",
+      "**Do** rest cards on Elevation 1 and lift them to Elevation 2 on hover."
+    ],
+    "donts": [
+      "**Don't** use Tailwind palette classes or hex colors in class names.",
+      "**Don't** use Highlighter Yellow for badges, buttons, links, or progress on non-camp programs.",
+      "**Don't** apply this system to Caxton admin chrome. Admin keeps Lato and Archivo.",
+      "**Don't** fade text with opacity. Use muted text for secondary copy.",
+      "**Don't** leave the primary-button gradient on hover or pressed. Those states are flat.",
+      "**Don't** share one corner radius across cards, buttons, chips, and icon frames."
+    ]
+  }
+}
