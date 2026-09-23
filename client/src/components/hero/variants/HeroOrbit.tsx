@@ -287,7 +287,11 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
                       {btn.icon &&
                         (() => {
                           const Ic = getIcon(btn.icon);
-                          return Ic ? createElement(Ic, { className: "h-4 w-4", "aria-hidden": true }) : null;
+                          return Ic ? (
+                            <span aria-hidden="true" className="inline-flex">
+                              {createElement(Ic, { className: "h-4 w-4" })}
+                            </span>
+                          ) : null;
                         })()}
                       {btn.text}
                     </a>

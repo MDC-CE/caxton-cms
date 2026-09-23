@@ -119,9 +119,11 @@ export default function CareerTracksDefault({ data }: CareerTracksDefaultProps) 
                     {cta.icon &&
                       (() => {
                         const CtaIcon = getIcon(cta.icon!);
-                        return CtaIcon
-                          ? createElement(CtaIcon, { className: "h-4 w-4", "aria-hidden": true })
-                          : null;
+                        return CtaIcon ? (
+                          <span aria-hidden="true" className="inline-flex">
+                            {createElement(CtaIcon, { className: "h-4 w-4" })}
+                          </span>
+                        ) : null;
                       })()}
                     {cta.text}
                   </a>
