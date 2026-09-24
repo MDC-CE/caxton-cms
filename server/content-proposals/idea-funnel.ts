@@ -7,7 +7,6 @@ import {
   isFunnelStage,
   normalizeFunnelBlock,
   normalizeFunnelProducts,
-  type FunnelBlock,
   type FunnelProducts,
   type FunnelStage,
 } from "@shared/funnel";
@@ -141,8 +140,11 @@ export function hasFunnelFieldOps(
   });
 }
 
-/** YAML block to write onto _common.yml */
-export function ideaFunnelToYamlBlock(funnel: IdeaFunnel): FunnelBlock {
+/** YAML block to write onto _common.yml. Both fields are required on IdeaFunnel. */
+export function ideaFunnelToYamlBlock(funnel: IdeaFunnel): {
+  stage: FunnelStage;
+  products: FunnelProducts;
+} {
   return { stage: funnel.stage, products: funnel.products };
 }
 

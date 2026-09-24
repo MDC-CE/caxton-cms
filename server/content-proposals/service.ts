@@ -2307,6 +2307,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         existence: ExistenceState;
         draftExists?: boolean;
         createsEntry?: boolean;
+        outcomeFigures?: boolean;
       }> = [];
       for (const e of entriesIn) {
         const hasVariant = Boolean(e.variant?.trim());

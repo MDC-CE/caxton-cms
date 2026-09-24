@@ -23,7 +23,8 @@ export function contentTypeAllowsSellableEntries(
   const entry = typeEntry(contentType, contentRoot);
   if (!entry) return false;
   if (entry.products?.allow_sellable_entries === true) return true;
-  if (entry.products && entry.products.allow_sellable_entries !== true) return false;
+  // Explicit false, or a products block that omits the flag.
+  if (entry.products) return false;
   // omitted products — back-compat
   return productManager.contentTypeHasProducts(getType(contentType, contentRoot));
 }
@@ -38,7 +39,7 @@ export function effectiveAllowSellableEntries(
   if (entry?.products?.allow_sellable_entries === true) {
     return { allow_sellable_entries: true, coerced_from_inventory: false };
   }
-  if (entry?.products && entry.products.allow_sellable_entries !== true) {
+  if (entry?.products) {
     return { allow_sellable_entries: false, coerced_from_inventory: false };
   }
   const has = productManager.contentTypeHasProducts(singular);

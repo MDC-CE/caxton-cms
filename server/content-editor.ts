@@ -704,14 +704,17 @@ export async function editContent(request: ContentEditRequest): Promise<{
     // Attached shared-layout: reject entry structural overlays and layout/menu writes
     const attachedStructuralErr = rejectAttachedStructuralEdit(contentType, slug, contentRoot);
     if (attachedStructuralErr) {
+      // HTTP payloads can still send MCP aliases (add_section, …) that are not
+      // in the EditOperation union; the wire form is add_item/remove_item.
+      const topologySectionActions = new Set<string>([
+        "add_section",
+        "remove_section",
+        "reorder_sections",
+        "duplicate_section",
+        "replace_all_sections",
+      ]);
       const hasTopologySectionOps = operations.some((op) => {
-        if (
-          op.action === "add_section" ||
-          op.action === "remove_section" ||
-          op.action === "reorder_sections" ||
-          op.action === "duplicate_section" ||
-          op.action === "replace_all_sections"
-        ) {
+        if (topologySectionActions.has(op.action)) {
           return true;
         }
         if (
