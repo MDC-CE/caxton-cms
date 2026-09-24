@@ -65,6 +65,7 @@ reports/lighthouse/**/*.json
 # Site registry — runtime config; canonical copy in GCS (multisite-global/sites.yml)
 sites.yml
 4geeks-com/.sync-log-state.txt
+gcs-key.json
 
 
 .cursor/rules/personal-rules.mdc
