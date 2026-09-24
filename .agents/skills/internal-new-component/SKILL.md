@@ -48,6 +48,7 @@ Choose **one** home (never both — boot fails on duplicate type names):
 | `field-editors.ts` | Optional. Maps prop names to custom inline-editor types (e.g., `"font-size-picker"`). Export `fieldEditors: Record<string, EditorType>`. |
 | `examples/` | One or more `.yml` files with realistic YAML examples. Each file has `name`, `description`, and `yaml` (a YAML string showing the section in a `sections` array). **Every variant must have at least one example.** |
 | `screenshots/` | Shared types only: tracked WebP thumbs in the app repo. Site types use site-scoped cache/GCS. |
+| `<name>.css` | Only when Tailwind cannot express the rule (mask, clip, critical-path radius). Same folder and same repo as the component. Import it from the top of `client/src/index.css`, above `@font-face` and `@tailwind`. Do not paste the rules into `index.css`, and do not use a `<style>` tag in the section chunk. |
 
 After writing or changing `schema.ts`, keep `schema.yml` current:
 
@@ -437,6 +438,7 @@ When a component supports multiple layout variants:
 
 - **Never hardcode content** — all visible text, labels, images, icons, URLs must come from YAML props. The component is a pure renderer of its `data` prop.
 - **Never use hardcoded colors** — only semantic tokens (`bg-primary`, `text-muted-foreground`, etc.).
+- **Never put component CSS in `client/src/index.css`** — Tailwind classes on the component, or a `.css` file beside it in the registry (content repo for site components). Import that file at the top of `index.css`.
 - **Never use `lucide-react`** — always `@tabler/icons-react`.
 - **Never use raw `<img>` or `<video>` tags** — use `UniversalImage` and `UniversalVideo`.
 - **Never use emoji** — use Tabler icons instead.

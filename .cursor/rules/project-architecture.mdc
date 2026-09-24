@@ -18,3 +18,16 @@ Use [cursor-instructions.mdc](.cursor/rules/cursor-instructions.mdc) and [design
 - **Assets**: `@assets` → `attached_assets` (Vite); use for static assets.
 
 Use `import type` for type-only imports. Prefer aliases over relative paths that cross layer boundaries.
+
+## Component CSS
+
+Style a section with Tailwind on its React file. A separate stylesheet is only for rules Tailwind cannot express (masks, clips, critical-path radius).
+
+That file lives next to the component, in the same repo as the component:
+
+- Site-only: `site_<name>/component-registry/<type>/<name>.css` (content repo)
+- Shared: `shared/component-registry/<type>/<name>.css` (app repo)
+
+Do not write those rules into `client/src/index.css`. That file stays in the app repo and only imports the stylesheet. The `@import` must be the first lines of `index.css`, above `@font-face` and `@tailwind`. An `@import` later in the file is dropped, and the browser never receives the component CSS.
+
+Do not put the CSS in a `<style>` tag inside a lazy section chunk. It applies after first paint, so a clip flashes unstyled. Examples: `article/article-prose.css`, `hero/hero-auto-video-right.css`.
