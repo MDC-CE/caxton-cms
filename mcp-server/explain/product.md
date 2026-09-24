@@ -10,9 +10,11 @@ Legacy explain topic name `ecommerce` still resolves here for one changelog wind
 
 | Concept | Meaning | Where |
 |---------|---------|--------|
-| **Product** | Purchasable CMS entry | `programs/{slug}/_product.yml` with `purchasable: true` (legacy dual-read: `_ecommerce.yml`). Computed `single.purchasable` — do not author on `_common.yml`. |
-| **Audience** | Offer (Producto) + many personas; avatar nested under each persona | Same entry `_product.yml` → `offer`, `personas[]`. Locale-agnostic. |
-| **Actively selling** | Store/vitrine pause | `_product.yml` `actively_selling` (default true). **Human-only** (Store toggle). Not the lead-form filter. |
+| **Type allow** | Type may have sellable entries | `content-types.yml` → `products.allow_sellable_entries` (manage dashboard card) |
+| **Product** | Purchasable CMS entry | `programs/{slug}/_product.yml` with `purchasable: true`. Computed `single.purchasable` — do not author on `_common.yml`. |
+| **Removed** | Soft-removed from index | `_product.yml` `purchasable: false` (audience kept). **Not** the same as paused. |
+| **Audience** | Offer (Producto) + many personas; avatar nested under each persona | Same entry `_product.yml` → `offer`, `personas[]`. Locale-agnostic. Editable while removed. |
+| **Actively selling** | Store/vitrine pause | `_product.yml` `actively_selling` (default true). Needs `product_manage`. Not the lead-form filter. |
 | **Journey membership** | Which pages belong to a product’s funnel | Each page’s `_common.yml` → `funnel.stage` + `funnel.products` as `{ product, persona? }[]` or `"all"`. |
 | **Product scope** | Which product(s) a section is about | Section `ecommerce_products` / `programs[].id` — GA field names kept. |
 | **Plans / SKUs** | Billing packages | **Not in CMS** — external POS |
@@ -21,14 +23,22 @@ Legacy explain topic name `ecommerce` still resolves here for one changelog wind
 
 | Tool | Use |
 |------|-----|
-| `list_products` | Inventory first (selling flag, audience status, persona ids). Paused included by default. |
-| `get_product` | Full sidecar for one slug (offer + personas/avatar). |
-| `update_product` | Patch offer/personas/name/description (`confirm: true`). **Not** sellable/store visibility. |
+| `list_products` | Inventory first (selling flag, audience status, persona ids). Removed hidden unless `include_removed: true`. Paused included by default. |
+| `get_product` | Full sidecar for one slug (offer + personas/avatar), including soft-removed (warns not sellable). |
+| `create_or_update_product` | Create/patch sidecar (`confirm: true`). Audience/metadata → `content_edit_structure`. `purchasable` / `actively_selling` → `product_manage`. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Journey pages / metrics (GA4 BigQuery). Site-wide GA → `get_analytics_report` (topic `analytics`). |
 
-**Human-only:** making sellable (`purchasable`) or showing/hiding in the store (`actively_selling`). Agents use `propose_change` notes asking staff to act in Store / YAML. MCP refuses those fields on `update_product`.
-
 Vague “what is this site about?” → `list_products` then `get_product` on relevant slugs (also summarized on `explain_site` topic `overview`).
+
+## Research before inventing audience
+
+On consequential **previews**, `create_or_update_product` may attach **`discovery_path`** (think + tools). Skip is allowed — it does not block `confirm: true`.
+
+1. Prefer `list_products` → peer `get_product` before inventing offer/personas  
+2. If who-it’s-for / differentiators are unknown → **ask the user** in chat  
+3. Compare personas/avatars to peers — do not clone fear/objection text  
+4. Thin create (`purchasable: true` only) is allowed; set audience next  
+5. Funnel bindings are a later step (`update_fields` / Funnel tab)
 
 ## Audience
 
@@ -36,8 +46,8 @@ Vague “what is this site about?” → `list_products` then `get_product` on r
 - Persona **ids are immutable while funnel pages bind** them (including the product’s own page if it binds that persona). Creating a persona on the product does **not** bind any page. Rename (remove old id + add new) is allowed when unbound. Duplicate ids on the same product are rejected. Display `label` is always editable.
 - Cannot remove a persona (or demote below minimal) while pages still bind that persona/product in funnel. **No cascade rename** of page `_common.yml` bindings.
 - Purchasable without audience is OK; **specific funnel bindings** require minimal audience. `"all"` hubs never carry personas.
-- `update_product`: preview then `confirm: true`. Cap: `content_edit_structure`.
-- Codes: `persona_in_use`, `duplicate_persona_id`, `last_persona`, `audience_in_use`.
+- Soft-removed (`purchasable: false`): still editable for audience; not in default `list_products`.
+- Codes: `persona_in_use`, `duplicate_persona_id`, `last_persona`, `audience_in_use`, `product_id_collision`, `type_not_allow_sellable`.
 
 ## Funnel bindings
 
@@ -67,6 +77,6 @@ funnel:
 ## Key files
 
 - `shared/productAudience.ts`, `shared/funnel.ts`
-- `server/product/` (index, manager, product-io, funnel gates)
+- `server/product/` (index, manager, product-io, funnel gates, products-type-config)
 - `mcp-server/tools/product.ts`
-- Store → product detail → Audience panel / Selling toggle
+- Store → product detail → Audience panel / Selling toggle; SEO modal → Product tab; type manage → Sellable products card

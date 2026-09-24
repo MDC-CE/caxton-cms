@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 22;
+export const PIPELINE_SCHEMA_VERSION = 23;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -453,6 +453,16 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
       }
       if (!tableHasColumn(db, "content_proposals", "reviewer_action_at")) {
         db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_at INTEGER");
+      }
+    },
+  },
+  {
+    version: 23,
+    name: "content_proposals_idea_funnel",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "idea_funnel_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN idea_funnel_json TEXT");
       }
     },
   },

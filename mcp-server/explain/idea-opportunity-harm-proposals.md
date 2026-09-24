@@ -2,9 +2,11 @@
 
 Default-on review situation for every `kind: idea` proposal. Situation id: `idea_opportunity_harm`. Checklist id: same. Catalog index: `explain_site` topic `review-situations`.
 
-**MCP:** Classify always injects `idea_opportunity_harm`. Authors may declare **one** demand label on create or `set_review_situations`: `anticipated_demand` | `fast_decay_news` | `broken_url` (do not file `idea_opportunity_harm`). Edit-only packs stay refused on ideas. Hub: `explain_site` `topic: "proposals"` `subtopic: "idea-opportunity-harm"` (broken URL: `subtopic: "broken-url"`).
+**MCP:** Classify always injects `idea_opportunity_harm`. Authors may declare **one** demand label on create or `set_review_situations`: `anticipated_demand` | `existing_demand` | `fast_decay_news` | `broken_url` (do not file `idea_opportunity_harm`). Edit-only packs stay refused on ideas. Hub: `explain_site` `topic: "proposals"` `subtopic: "idea-opportunity-harm"` (current search demand: `subtopic: "existing-demand"`; broken URL: `subtopic: "broken-url"`).
 
 **Role split:** Authors optimize opportunity. Reviewers stop harm — they do not rewrite the brief to make it punchier. Accept greenlights a brief only (no YAML). Brand / selling-figure ship gates run on the later **edits** proposal that implements the idea.
+
+**New-URL ideas:** set structured `idea_funnel` `{ stage, products }` before accept (`products: "all"` only with stage `awareness`). Soft warning on create; `add_blocker` if reviewing without it; accept refuses until complete; funnel freezes at accept and seeds/matches on create.
 
 If this page ships and gets almost no visits for 90 days, what did we break?  
 If the honest answer is “hub links, crawl, freshness SLA, and another thin URL,” do not accept.

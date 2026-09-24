@@ -1,4 +1,5 @@
 import fs from "fs";
+import { createHash } from "crypto";
 import { getDefaultContentRoot } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
@@ -538,6 +539,196 @@ export function parseFunnelSettings(
   };
 }
 
+/** MCP withdraw policy for Agents Rules. */
+export const PROPOSAL_WITHDRAW_MCP_MODES = [
+  "proposer_only",
+  "any_create_author",
+  "disabled",
+] as const;
+export type ProposalWithdrawMcpMode = (typeof PROPOSAL_WITHDRAW_MCP_MODES)[number];
+
+/** Staff UI withdraw policy for Agents Rules. */
+export const PROPOSAL_WITHDRAW_STAFF_MODES = [
+  "any_editor",
+  "proposer_only",
+  "steward_only",
+] as const;
+export type ProposalWithdrawStaffMode = (typeof PROPOSAL_WITHDRAW_STAFF_MODES)[number];
+
+/**
+ * Site proposal governance (Agents → Rules). Omitted block → defaults match prior hardcoded behavior.
+ */
+export interface ProposalSettings {
+  withdraw: {
+    mcp: ProposalWithdrawMcpMode;
+    staff: ProposalWithdrawStaffMode;
+  };
+  four_eyes: {
+    enabled: boolean;
+    staff_ui_exempt: boolean;
+  };
+  hold: {
+    stewards_only: boolean;
+  };
+  claim: {
+    staff_ui_takeover: boolean;
+  };
+}
+
+export const DEFAULT_PROPOSAL_SETTINGS: ProposalSettings = {
+  withdraw: {
+    mcp: "proposer_only",
+    staff: "any_editor",
+  },
+  four_eyes: {
+    enabled: true,
+    staff_ui_exempt: false,
+  },
+  hold: {
+    stewards_only: true,
+  },
+  claim: {
+    staff_ui_takeover: true,
+  },
+};
+
+function parseWithdrawMcpMode(
+  raw: unknown,
+  fallback: ProposalWithdrawMcpMode,
+): ProposalWithdrawMcpMode {
+  if (typeof raw !== "string") return fallback;
+  const v = raw.trim() as ProposalWithdrawMcpMode;
+  return (PROPOSAL_WITHDRAW_MCP_MODES as readonly string[]).includes(v) ? v : fallback;
+}
+
+function parseWithdrawStaffMode(
+  raw: unknown,
+  fallback: ProposalWithdrawStaffMode,
+): ProposalWithdrawStaffMode {
+  if (typeof raw !== "string") return fallback;
+  const v = raw.trim() as ProposalWithdrawStaffMode;
+  return (PROPOSAL_WITHDRAW_STAFF_MODES as readonly string[]).includes(v) ? v : fallback;
+}
+
+export function parseProposalSettings(
+  raw: unknown,
+  defaults: ProposalSettings = DEFAULT_PROPOSAL_SETTINGS,
+): ProposalSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      withdraw: { ...defaults.withdraw },
+      four_eyes: { ...defaults.four_eyes },
+      hold: { ...defaults.hold },
+      claim: { ...defaults.claim },
+    };
+  }
+  const o = raw as Record<string, unknown>;
+  const withdrawRaw =
+    o.withdraw && typeof o.withdraw === "object" && !Array.isArray(o.withdraw)
+      ? (o.withdraw as Record<string, unknown>)
+      : {};
+  const fourRaw =
+    o.four_eyes && typeof o.four_eyes === "object" && !Array.isArray(o.four_eyes)
+      ? (o.four_eyes as Record<string, unknown>)
+      : {};
+  const holdRaw =
+    o.hold && typeof o.hold === "object" && !Array.isArray(o.hold)
+      ? (o.hold as Record<string, unknown>)
+      : {};
+  const claimRaw =
+    o.claim && typeof o.claim === "object" && !Array.isArray(o.claim)
+      ? (o.claim as Record<string, unknown>)
+      : {};
+  return {
+    withdraw: {
+      mcp: parseWithdrawMcpMode(withdrawRaw.mcp, defaults.withdraw.mcp),
+      staff: parseWithdrawStaffMode(withdrawRaw.staff, defaults.withdraw.staff),
+    },
+    four_eyes: {
+      enabled:
+        typeof fourRaw.enabled === "boolean" ? fourRaw.enabled : defaults.four_eyes.enabled,
+      staff_ui_exempt:
+        typeof fourRaw.staff_ui_exempt === "boolean"
+          ? fourRaw.staff_ui_exempt
+          : defaults.four_eyes.staff_ui_exempt,
+    },
+    hold: {
+      stewards_only:
+        typeof holdRaw.stewards_only === "boolean"
+          ? holdRaw.stewards_only
+          : defaults.hold.stewards_only,
+    },
+    claim: {
+      staff_ui_takeover:
+        typeof claimRaw.staff_ui_takeover === "boolean"
+          ? claimRaw.staff_ui_takeover
+          : defaults.claim.staff_ui_takeover,
+    },
+  };
+}
+
+/** Strict parse for PUT body — throws on invalid enums. */
+export function parseProposalSettingsStrict(raw: unknown): ProposalSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Request body must be a proposals settings object");
+  }
+  const o = raw as Record<string, unknown>;
+  const withdrawRaw =
+    o.withdraw && typeof o.withdraw === "object" && !Array.isArray(o.withdraw)
+      ? (o.withdraw as Record<string, unknown>)
+      : null;
+  if (!withdrawRaw) throw new Error("proposals.withdraw is required");
+  const mcp = typeof withdrawRaw.mcp === "string" ? withdrawRaw.mcp.trim() : "";
+  const staff = typeof withdrawRaw.staff === "string" ? withdrawRaw.staff.trim() : "";
+  if (!(PROPOSAL_WITHDRAW_MCP_MODES as readonly string[]).includes(mcp)) {
+    throw new Error(
+      `withdraw.mcp must be one of: ${PROPOSAL_WITHDRAW_MCP_MODES.join(", ")}`,
+    );
+  }
+  if (!(PROPOSAL_WITHDRAW_STAFF_MODES as readonly string[]).includes(staff)) {
+    throw new Error(
+      `withdraw.staff must be one of: ${PROPOSAL_WITHDRAW_STAFF_MODES.join(", ")}`,
+    );
+  }
+  const fourRaw =
+    o.four_eyes && typeof o.four_eyes === "object" && !Array.isArray(o.four_eyes)
+      ? (o.four_eyes as Record<string, unknown>)
+      : null;
+  if (!fourRaw) throw new Error("proposals.four_eyes is required");
+  if (typeof fourRaw.enabled !== "boolean") {
+    throw new Error("four_eyes.enabled must be a boolean");
+  }
+  if (typeof fourRaw.staff_ui_exempt !== "boolean") {
+    throw new Error("four_eyes.staff_ui_exempt must be a boolean");
+  }
+  const holdRaw =
+    o.hold && typeof o.hold === "object" && !Array.isArray(o.hold)
+      ? (o.hold as Record<string, unknown>)
+      : null;
+  if (!holdRaw || typeof holdRaw.stewards_only !== "boolean") {
+    throw new Error("hold.stewards_only must be a boolean");
+  }
+  const claimRaw =
+    o.claim && typeof o.claim === "object" && !Array.isArray(o.claim)
+      ? (o.claim as Record<string, unknown>)
+      : null;
+  if (!claimRaw || typeof claimRaw.staff_ui_takeover !== "boolean") {
+    throw new Error("claim.staff_ui_takeover must be a boolean");
+  }
+  return {
+    withdraw: {
+      mcp: mcp as ProposalWithdrawMcpMode,
+      staff: staff as ProposalWithdrawStaffMode,
+    },
+    four_eyes: {
+      enabled: fourRaw.enabled,
+      staff_ui_exempt: fourRaw.staff_ui_exempt,
+    },
+    hold: { stewards_only: holdRaw.stewards_only },
+    claim: { staff_ui_takeover: claimRaw.staff_ui_takeover },
+  };
+}
+
 export function parseSearchConsoleBigQuerySettings(
   raw: unknown,
   defaults: SearchConsoleBigQuerySettings = DEFAULT_SEARCH_CONSOLE_BIGQUERY,
@@ -719,6 +910,7 @@ interface SiteSettings {
   search_console: SearchConsoleSettings;
   openrush: OpenRushSettings;
   funnel: FunnelSettings;
+  proposals: ProposalSettings;
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
@@ -813,6 +1005,12 @@ function loadSettings(contentRoot?: string): SiteSettings {
     search_console: { ...DEFAULT_SEARCH_CONSOLE_SETTINGS },
     openrush: { ...DEFAULT_OPENRUSH_SETTINGS },
     funnel: { ...DEFAULT_FUNNEL_SETTINGS },
+    proposals: {
+      withdraw: { ...DEFAULT_PROPOSAL_SETTINGS.withdraw },
+      four_eyes: { ...DEFAULT_PROPOSAL_SETTINGS.four_eyes },
+      hold: { ...DEFAULT_PROPOSAL_SETTINGS.hold },
+      claim: { ...DEFAULT_PROPOSAL_SETTINGS.claim },
+    },
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
     consent: { fallback: null },
@@ -1032,6 +1230,7 @@ function loadSettings(contentRoot?: string): SiteSettings {
       search_console: parseSearchConsoleSettings(parsed.search_console),
       openrush: parseOpenRushSettings(parsed.openrush),
       funnel: parseFunnelSettings(parsed.funnel),
+      proposals: parseProposalSettings(parsed.proposals),
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
@@ -1362,6 +1561,10 @@ export function getOpenRushSettings(contentRoot?: string): OpenRushSettings {
 
 export function getFunnelSettings(contentRoot?: string): FunnelSettings {
   return loadSettings(contentRoot).funnel;
+}
+
+export function getProposalSettings(contentRoot?: string): ProposalSettings {
+  return loadSettings(contentRoot).proposals;
 }
 
 export function getEntryPreviewSettings(contentRoot?: string): EntryPreviewSettings {
@@ -1877,6 +2080,66 @@ export function updateFunnelSettings(
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(`[Settings] Updated funnel.enforcement=${merged.enforcement}`);
   return merged;
+}
+
+/** Stable short hash of settings.yml bytes for optimistic concurrency on Rules saves. */
+export function getSettingsFileRevision(contentRoot?: string): string {
+  const settingsPath = getSettingsPath(contentRoot);
+  if (!fs.existsSync(settingsPath)) return "missing";
+  const buf = fs.readFileSync(settingsPath);
+  return createHash("sha256").update(buf).digest("hex").slice(0, 16);
+}
+
+export function updateProposalSettings(
+  input: ProposalSettings,
+  contentRoot?: string,
+  opts?: { expectedRevision?: string },
+): { settings: ProposalSettings; revision: string } {
+  const settingsPath = getSettingsPath(contentRoot);
+  const currentRevision = getSettingsFileRevision(contentRoot);
+  if (opts?.expectedRevision != null && opts.expectedRevision !== currentRevision) {
+    const err = new Error(
+      "Rules changed elsewhere — reload and try again",
+    ) as Error & { code?: string; revision?: string };
+    err.code = "conflict";
+    err.revision = currentRevision;
+    throw err;
+  }
+
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const merged = parseProposalSettingsStrict(input);
+  existing.proposals = {
+    withdraw: {
+      mcp: merged.withdraw.mcp,
+      staff: merged.withdraw.staff,
+    },
+    four_eyes: {
+      enabled: merged.four_eyes.enabled,
+      staff_ui_exempt: merged.four_eyes.staff_ui_exempt,
+    },
+    hold: {
+      stewards_only: merged.hold.stewards_only,
+    },
+    claim: {
+      staff_ui_takeover: merged.claim.staff_ui_takeover,
+    },
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  const revision = getSettingsFileRevision(contentRoot);
+  log.info(
+    `[Settings] Updated proposals withdraw.mcp=${merged.withdraw.mcp} withdraw.staff=${merged.withdraw.staff} four_eyes.enabled=${merged.four_eyes.enabled}`,
+  );
+  return { settings: merged, revision };
 }
 
 export function updateTrackingSettings(input: {

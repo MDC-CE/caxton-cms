@@ -23,6 +23,8 @@ export function seedAttachedLocaleFiles(opts: {
   locale: string;
   contentRoot: string;
   author?: string;
+  /** Optional funnel block written onto new _common.yml (idea seed). */
+  funnel?: { stage: string; products: unknown } | null;
 }): { commonPath: string; localePath: string } {
   const dir = attachedEntryDir(opts.contentType, opts.slug, opts.contentRoot);
   fs.mkdirSync(dir, { recursive: true });
@@ -31,7 +33,11 @@ export function seedAttachedLocaleFiles(opts: {
   const dump = (data: Record<string, unknown>) =>
     yaml.dump(data, { lineWidth: 120, noRefs: true, sortKeys: false });
   if (!fs.existsSync(commonPath)) {
-    fs.writeFileSync(commonPath, dump({ slug: opts.slug }), "utf-8");
+    const common: Record<string, unknown> = { slug: opts.slug };
+    if (opts.funnel?.stage && opts.funnel.products != null) {
+      common.funnel = { stage: opts.funnel.stage, products: opts.funnel.products };
+    }
+    fs.writeFileSync(commonPath, dump(common), "utf-8");
     markFileAsModified(commonPath, opts.author, undefined, opts.contentRoot);
   }
   if (!fs.existsSync(localePath)) {

@@ -200,6 +200,8 @@ export interface ExpandableMenuItemProps {
 
 export interface CachedValidationEntry {
   lastRunAt: string;
+  /** Preferred stamp for freshness (falls back to lastRunAt). */
+  lastFullRunAt?: string;
   errors: Array<{ type: "error" | "warning"; code: string; message: string; file?: string; line?: number; suggestion?: string }>;
   warnings: Array<{ type: "error" | "warning"; code: string; message: string; file?: string; line?: number; suggestion?: string }>;
 }

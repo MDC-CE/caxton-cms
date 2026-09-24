@@ -206,6 +206,10 @@ type Proposal = {
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
   accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  idea_funnel?: {
+    stage: string;
+    products: "all" | Array<{ product: string; persona?: string }>;
+  } | null;
   implements_proposal_id?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
@@ -928,6 +932,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [acceptContentType, setAcceptContentType] = useState("");
   const [acceptSlug, setAcceptSlug] = useState("");
   const [acceptLocale, setAcceptLocale] = useState("");
+  const [funnelStage, setFunnelStage] = useState("awareness");
+  const [funnelProductsMode, setFunnelProductsMode] = useState<"all" | "named">("all");
+  const [funnelProductSlug, setFunnelProductSlug] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectPending, setRejectPending] = useState(false);
   const [rejectKind, setRejectKind] = useState<ProposalRejectKindValue>("bad_idea");
@@ -1008,6 +1015,19 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   });
   const mutRef = useRef(mut);
   mutRef.current = mut;
+
+  const pLoaded = data?.proposal;
+  useEffect(() => {
+    if (!pLoaded?.idea_funnel) return;
+    setFunnelStage(pLoaded.idea_funnel.stage);
+    if (pLoaded.idea_funnel.products === "all") {
+      setFunnelProductsMode("all");
+      setFunnelProductSlug("");
+    } else {
+      setFunnelProductsMode("named");
+      setFunnelProductSlug(pLoaded.idea_funnel.products[0]?.product ?? "");
+    }
+  }, [pLoaded?.id, pLoaded?.idea_funnel]);
 
   const clearPendingReject = () => {
     if (rejectTimerRef.current) {
@@ -1464,6 +1484,119 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       {p.accepted_entry.contentType}/{p.accepted_entry.slug}
                       <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
                     </Badge>
+                  </div>
+                ) : null}
+                {p.kind === "idea" ? (
+                  <div
+                    className="space-y-2 rounded-md border border-card-border bg-muted/20 px-3 py-2.5"
+                    data-testid="proposal-idea-funnel"
+                  >
+                    <p className="text-xs text-muted-foreground">
+                      {p.status === "finished" && p.close_reason === "accepted"
+                        ? "Funnel locked at accept (read-only)."
+                        : "New page ideas need who/product/stage before greenlight. Accept will not lock a new URL without it."}
+                    </p>
+                    {p.idea_funnel ? (
+                      <Badge
+                        variant="secondary"
+                        className="font-mono font-normal"
+                        data-testid="badge-idea-funnel"
+                      >
+                        {p.idea_funnel.stage}
+                        {" · "}
+                        {p.idea_funnel.products === "all"
+                          ? "all products"
+                          : p.idea_funnel.products
+                              .map((b) => (b.persona ? `${b.product}/${b.persona}` : b.product))
+                              .join(", ")}
+                      </Badge>
+                    ) : (
+                      <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="text-idea-funnel-missing">
+                        No structured funnel yet.
+                      </p>
+                    )}
+                    {p.status === "open" ? (
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        <div className="space-y-1">
+                          <Label htmlFor="idea-funnel-stage" className="text-xs">
+                            Stage
+                          </Label>
+                          <select
+                            id="idea-funnel-stage"
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                            value={funnelStage}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              setFunnelStage(next);
+                              if (next !== "awareness") setFunnelProductsMode("named");
+                            }}
+                            data-testid="select-idea-funnel-stage"
+                          >
+                            <option value="awareness">awareness</option>
+                            <option value="consideration">consideration</option>
+                            <option value="decision">decision</option>
+                            <option value="post-enrollment">post-enrollment</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="idea-funnel-products-mode" className="text-xs">
+                            Products
+                          </Label>
+                          <select
+                            id="idea-funnel-products-mode"
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                            value={funnelProductsMode}
+                            onChange={(e) =>
+                              setFunnelProductsMode(e.target.value === "all" ? "all" : "named")
+                            }
+                            disabled={funnelStage !== "awareness"}
+                            data-testid="select-idea-funnel-products-mode"
+                          >
+                            <option value="all">all (awareness only)</option>
+                            <option value="named">named product</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="idea-funnel-product" className="text-xs">
+                            Product slug
+                          </Label>
+                          <Input
+                            id="idea-funnel-product"
+                            value={funnelProductSlug}
+                            onChange={(e) => setFunnelProductSlug(e.target.value)}
+                            placeholder="full-stack"
+                            disabled={funnelProductsMode === "all"}
+                            data-testid="input-idea-funnel-product"
+                          />
+                        </div>
+                        <div className="sm:col-span-3">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            disabled={
+                              mut.isPending ||
+                              (funnelProductsMode === "named" && !funnelProductSlug.trim())
+                            }
+                            onClick={() => {
+                              const products =
+                                funnelProductsMode === "all"
+                                  ? "all"
+                                  : [{ product: funnelProductSlug.trim() }];
+                              mut.mutate({
+                                action: "set_idea_funnel",
+                                body: {
+                                  idea_funnel: { stage: funnelStage, products },
+                                },
+                              });
+                            }}
+                            data-testid="button-save-idea-funnel"
+                          >
+                            Save funnel
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
                 {p.kind === "edits" && p.implements_proposal_id ? (

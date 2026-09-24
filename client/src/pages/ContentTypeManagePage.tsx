@@ -61,7 +61,7 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken, resolveAuthorName } from "@/hooks/useDebugAuth";
@@ -300,6 +300,7 @@ interface ContentTypeConfig {
   schema_org_requirements?: Array<{ schema_type: string }>;
   seo_monitoring?: { enabled?: boolean; require_cluster?: boolean } | null;
   funnel?: { enforcement?: boolean } | null;
+  products?: { allow_sellable_entries?: boolean; coerced_from_inventory?: boolean } | null;
   strategy?: { purpose: string; constraints?: string[] } | null;
 }
 
@@ -6946,6 +6947,12 @@ export default function ContentTypeManagePage() {
   const requireClusterEnabled = typeConfig?.seo_monitoring?.require_cluster === true;
   const [funnelMonitoringSaving, setFunnelMonitoringSaving] = useState(false);
   const funnelMonitoringEnabled = typeConfig?.funnel?.enforcement !== false;
+  const [productsAllowSaving, setProductsAllowSaving] = useState(false);
+  const productsAllowSellable = typeConfig?.products?.allow_sellable_entries === true;
+  const [blockingProductsOpen, setBlockingProductsOpen] = useState(false);
+  const [blockingProducts, setBlockingProducts] = useState<
+    Array<{ product_id: string; name: string; content_slug: string; actively_selling: boolean }>
+  >([]);
   const [explainSharedLayoutOpen, setExplainSharedLayoutOpen] = useState(false);
   const [explainLinkedDatabaseOpen, setExplainLinkedDatabaseOpen] = useState(false);
   const [enableSharedLayoutOpen, setEnableSharedLayoutOpen] = useState(false);
@@ -7128,6 +7135,52 @@ export default function ContentTypeManagePage() {
       });
     } finally {
       setFunnelMonitoringSaving(false);
+    }
+  };
+
+  const saveProductsAllowSellable = async (allow: boolean) => {
+    setProductsAllowSaving(true);
+    try {
+      const res = await apiFetch(`/api/content-types/${contentType}/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          products: allow ? { allow_sellable_entries: true } : { allow_sellable_entries: false },
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          code?: string;
+          blocking_products?: Array<{
+            product_id: string;
+            name: string;
+            content_slug: string;
+            actively_selling: boolean;
+          }>;
+        };
+        if (body.code === "blocking_products" && Array.isArray(body.blocking_products)) {
+          setBlockingProducts(body.blocking_products);
+          setBlockingProductsOpen(true);
+          return;
+        }
+        throw new Error(body.error || res.statusText);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["/api/content-types", contentType, "config"] });
+      toast({
+        title: allow ? "Sellable products on" : "Sellable products off",
+        description: allow
+          ? "Entries of this type can be made sellable from the Product tab."
+          : "This type can no longer add sellable products.",
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to update sellable products",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setProductsAllowSaving(false);
     }
   };
 
@@ -7901,7 +7954,7 @@ export default function ContentTypeManagePage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           <Card data-testid="card-kpi-seo-monitoring">
             <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -7950,6 +8003,30 @@ export default function ContentTypeManagePage() {
                 When site funnel enforcement is on, require stage and products on pages of this type.
                 On by default; turn off to exclude. Does not clear page funnel fields.
               </p>
+            </CardContent>
+          </Card>
+          <Card data-testid="card-kpi-products-allow-sellable">
+            <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                Sellable products
+              </CardTitle>
+              <Switch
+                checked={productsAllowSellable}
+                disabled={productsAllowSaving || typeConfig === undefined}
+                onCheckedChange={(checked) => void saveProductsAllowSellable(checked)}
+                data-testid="switch-products-allow-sellable"
+              />
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Allow entries of this type to become sellable products (Product tab / Store). Turn off only
+                after every sellable product is removed.
+              </p>
+              {typeConfig?.products?.coerced_from_inventory ? (
+                <p className="text-[11px] text-muted-foreground">
+                  On for now because this type already has products — save the toggle to store the setting.
+                </p>
+              ) : null}
             </CardContent>
           </Card>
           <Card data-testid="card-kpi-single-template">
@@ -10802,6 +10879,37 @@ export default function ContentTypeManagePage() {
         staticCount={typeConfig?.static_entry_count ?? staticEntriesData?.total ?? staticEntriesData?.count ?? 0}
         dbCount={dbItemsMeta?.count ?? cacheStatus?.post_count ?? allItemsData?.total ?? 0}
       />
+      <Dialog open={blockingProductsOpen} onOpenChange={setBlockingProductsOpen}>
+        <DialogContent data-testid="dialog-blocking-products">
+          <DialogHeader>
+            <DialogTitle>Cannot turn off sellable products</DialogTitle>
+            <DialogDescription>
+              This type still has sellable products. Remove them as products first (Product tab → Remove as
+              product), then turn this off. Pausing is not enough.
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="space-y-2 max-h-64 overflow-y-auto text-sm" data-testid="list-blocking-products">
+            {blockingProducts.map((p) => (
+              <li key={p.product_id} className="flex items-center justify-between gap-2 border rounded-md px-3 py-2">
+                <div className="min-w-0">
+                  <p className="font-medium truncate">{p.name}</p>
+                  <p className="text-xs text-muted-foreground font-mono truncate">{p.content_slug}</p>
+                </div>
+                <Link href={`/private/store/product/${p.content_slug}`}>
+                  <Button type="button" size="sm" variant="secondary">
+                    Open in Store
+                  </Button>
+                </Link>
+              </li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button type="button" onClick={() => setBlockingProductsOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <SharedLayoutExplainDialog
         open={explainSharedLayoutOpen}
         onClose={() => setExplainSharedLayoutOpen(false)}

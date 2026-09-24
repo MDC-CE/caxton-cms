@@ -906,7 +906,7 @@ export default function AIKnowledge() {
             <DialogTitle data-testid="text-models-dialog-title">Model Configuration</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground -mt-1">
-            Completion, chat, and vision models are managed in AI Settings and written to llm.yml.
+            Completion, chat, vision, and decision models are managed in AI Settings and written to llm.yml.
           </p>
           <div className="space-y-3">
             <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">

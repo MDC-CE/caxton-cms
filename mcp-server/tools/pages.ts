@@ -4622,7 +4622,7 @@ export function registerPageTools(
       }
       if (field === PURCHASABLE_FIELD) {
         return fail(
-          "purchasable is a computed system field (from _product.yml). Do not write it. Edit the sidecar via staff Store / update_product (audience) or list_products.",
+          "purchasable is a computed system field (from _product.yml). Do not write it. Edit the sidecar via staff Store / create_or_update_product (audience) or list_products.",
         );
       }
       if (isKnownSeoFieldPath(field) || field === `${SEO_YAML_KEY}.pillar`) {
@@ -5057,7 +5057,7 @@ export function registerPageTools(
                 writable: false,
                 system_hints: [
                   "Computed from _product.yml (slug is in the product index).",
-                  "Do not write via update_fields / update_entry_field. Edit _product.yml via staff Store or get_product / update_product.",
+                  "Do not write via update_fields / update_entry_field. Edit _product.yml via staff Store or get_product / create_or_update_product.",
                   "Lead-form catalogs filter with source.query purchasable=true — not actively_selling.",
                 ],
               };

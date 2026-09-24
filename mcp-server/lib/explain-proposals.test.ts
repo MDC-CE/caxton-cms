@@ -13,6 +13,11 @@ describe("explain-proposals hub", () => {
     expect(ids).toContain("translations");
     expect(ids).toContain("situations");
     expect(ids).toContain("overview");
+    expect(ids).toContain("existing-demand");
+  });
+
+  it("resolves existing-demand subtopic stem", () => {
+    expect(getProposalsSubtopic("existing-demand")?.fileStem).toBe("existing-demand-proposals");
   });
 
   it("resolves translations subtopic to proposals-translations stem", () => {

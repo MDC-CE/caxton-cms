@@ -556,9 +556,9 @@ Proposals are the shared inbox for change. Live content does not move when a pro
 
 **Agent can…** Pick up, revise the listed changes, resolve “needs fixes,” retag review type, attach a private draft, turn off auto-retry, or withdraw **their own** filing. Open “needs fixes” blocks Approve `(Apply)` and greenlight `(Accept)`.
 
-**What you approve:** Staff can flip some flags (like don’t auto-retry) without the same pick-up steps. Hold / release hold is staff-only. Staff can still Withdraw someone else’s open proposal in the UI for cleanup; agents cannot withdraw another author’s proposal.
+**What you approve:** Staff can flip some flags (like don’t auto-retry) without the same pick-up steps. Hold / release hold defaults to steward-only (configurable under Agents → Rules). Staff withdraw of others’ filings follows site Rules; agents follow the MCP withdraw rule (own filings / any author / disabled).
 
-**Who usually does this:** Original author for polish; Approver for quality of the fix request.
+**Who usually does this:** Original author for polish; Approver for quality of the fix request. Stewards set policy on Agents → Rules.
 
 ---
 

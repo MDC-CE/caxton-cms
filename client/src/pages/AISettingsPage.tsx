@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, lazy, Suspense } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
-  IconCheck,
   IconChevronDown,
   IconDeviceFloppy,
   IconLoader2,
@@ -64,6 +63,7 @@ interface AISettingsResponse {
   model_default: string;
   model_chat: string;
   model_vision: string;
+  model_decision: string;
   provider: {
     api_key_env: string;
     base_url_env: string;
@@ -219,6 +219,7 @@ function LlmsTab() {
   const [selectedDefault, setSelectedDefault] = useState("");
   const [selectedChat, setSelectedChat] = useState("");
   const [selectedVision, setSelectedVision] = useState("");
+  const [selectedDecision, setSelectedDecision] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -255,14 +256,26 @@ function LlmsTab() {
     setSelectedDefault(settingsQuery.data.model_default || "");
     setSelectedChat(settingsQuery.data.model_chat || "");
     setSelectedVision(settingsQuery.data.model_vision || "");
+    setSelectedDecision(settingsQuery.data.model_decision || "");
   }, [settingsQuery.data]);
 
   const models = modelsQuery.data?.models ?? [];
+  const decisionModels: OpenRouterModel[] = [
+    {
+      id: "~typesafe/jev-latest",
+      name: "TypeSafe: Jev Latest",
+    },
+    {
+      id: "typesafe/jev-1.13",
+      name: "TypeSafe: Jev 1.13",
+    },
+  ];
   const apiKeyConfigured = Boolean(settingsQuery.data?.provider.api_key_configured);
   const dirty =
     selectedDefault !== (settingsQuery.data?.model_default || "") ||
     selectedChat !== (settingsQuery.data?.model_chat || "") ||
-    selectedVision !== (settingsQuery.data?.model_vision || "");
+    selectedVision !== (settingsQuery.data?.model_vision || "") ||
+    selectedDecision !== (settingsQuery.data?.model_decision || "");
 
   async function handleTestConnection() {
     setTesting(true);
@@ -279,7 +292,9 @@ function LlmsTab() {
         title: "Connection OK",
         description:
           typeof body.models_count === "number"
-            ? `OpenRouter reachable · ${body.models_count.toLocaleString()} models listed.`
+            ? body.decision_ok
+              ? `OpenRouter reachable · ${body.models_count.toLocaleString()} models · decision model ${body.decision_model || "ok"}.`
+              : `OpenRouter reachable · ${body.models_count.toLocaleString()} models listed.`
             : "OpenRouter reachable.",
       });
       await queryClient.invalidateQueries({ queryKey: ["/api/admin/ai/openrouter/models"] });
@@ -305,6 +320,7 @@ function LlmsTab() {
           model_default: selectedDefault.trim(),
           model_chat: selectedChat.trim(),
           model_vision: selectedVision.trim(),
+          model_decision: selectedDecision.trim(),
         }),
       });
       if (!res.ok) {
@@ -432,31 +448,14 @@ function LlmsTab() {
         </Card>
 
         <Card data-testid="panel-ai-models">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 pb-4">
-            <div className="flex items-center gap-2">
-              <IconBrain className="h-5 w-5 text-muted-foreground" />
-              <CardTitle className="text-base">Models</CardTitle>
-            </div>
-            <Button
-              size="sm"
-              onClick={handleSave}
-              disabled={!dirty || saving || !selectedDefault.trim()}
-              data-testid="button-save-ai-settings"
-            >
-              {saving ? (
-                <IconLoader2 className="h-4 w-4 animate-spin mr-1" />
-              ) : dirty ? (
-                <IconDeviceFloppy className="h-4 w-4 mr-1" />
-              ) : (
-                <IconCheck className="h-4 w-4 mr-1" />
-              )}
-              {saving ? "Saving…" : dirty ? "Save" : "Saved"}
-            </Button>
+          <CardHeader className="flex flex-row items-center gap-2 pb-4">
+            <IconBrain className="h-5 w-5 text-muted-foreground" />
+            <CardTitle className="text-base">Models</CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
             <p className="text-sm text-muted-foreground">
-              Choose models for completions, chat, and vision. Saving writes them to the site LLM
-              config; it does not re-test the provider.
+              Choose models for completions, chat, vision, and structured decisions. Saving writes
+              them to the site LLM config; it does not re-test the provider.
             </p>
 
             <ModelPicker
@@ -500,6 +499,23 @@ function LlmsTab() {
               Image auto-tagging and other vision tasks.
             </p>
 
+            <ModelPicker
+              id="decision-model"
+              label="Decision model (System One)"
+              value={selectedDecision}
+              onChange={setSelectedDecision}
+              models={decisionModels}
+              loading={false}
+              disabled={!apiKeyConfigured}
+              allowEmpty
+              emptyLabel="Use default (Jev latest)"
+            />
+            <p className="text-xs text-muted-foreground -mt-3">
+              Structured yes/no checks (not chat) — e.g. outcome-figure gray zone on proposals.
+              Default tracks newest Jev; pin 1.13 for stability. Test connection also probes this
+              endpoint.
+            </p>
+
             {modelsQuery.isError && (
               <p className="text-xs text-destructive flex items-center gap-1">
                 <IconAlertCircle className="h-3.5 w-3.5" />
@@ -531,19 +547,52 @@ function LlmsTab() {
               <div className="rounded-md border border-border bg-muted/40 p-3 space-y-2 text-xs text-muted-foreground">
                 <p>
                   Saving writes <code className="font-mono text-[11px]">model.default</code>,{" "}
-                  <code className="font-mono text-[11px]">model.chat</code>, and{" "}
-                  <code className="font-mono text-[11px]">model.vision</code> in{" "}
+                  <code className="font-mono text-[11px]">model.chat</code>,{" "}
+                  <code className="font-mono text-[11px]">model.vision</code>, and{" "}
+                  <code className="font-mono text-[11px]">model.decision</code> in{" "}
                   <code className="font-mono text-[11px]">llm.yml</code>. Provider env names come from
-                  the same file; keys stay in the process environment.
+                  the same file; keys stay in the process environment. Decision models use OpenRouter
+                  Decisions / System One — not chat completions.
                 </p>
                 <p>
                   Probe: <code className="font-mono text-[11px]">POST /api/admin/ai/openrouter/test</code>{" "}
-                  (lists models; does not persist settings).
+                  (lists models and runs a tiny decision noul; does not persist settings).
                 </p>
               </div>
             )}
           </CardContent>
         </Card>
+      </div>
+
+      <div
+        className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-lg"
+        data-testid="ai-models-save-bar"
+      >
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-end gap-3">
+          <p
+            className={cn(
+              "text-xs min-w-0 truncate text-right",
+              dirty ? "text-destructive" : "text-muted-foreground",
+            )}
+            data-testid="text-ai-models-save-status"
+          >
+            {saving ? "Saving…" : dirty ? "Unsaved changes" : "All changes saved"}
+          </p>
+          <Button
+            size="sm"
+            className="gap-1.5 shrink-0"
+            onClick={handleSave}
+            disabled={!dirty || saving || !selectedDefault.trim()}
+            data-testid="button-save-ai-settings"
+          >
+            {saving ? (
+              <IconLoader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : (
+              <IconDeviceFloppy className="h-3.5 w-3.5" aria-hidden />
+            )}
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </div>
 
       {showYmlEditor && (

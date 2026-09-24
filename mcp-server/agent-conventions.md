@@ -104,7 +104,7 @@ Proposals are a shared work item, not a chat. Prefer one open proposal per draft
 3. Edits: `propose_change` with `implements_proposal_id`, `review_situations: ["new_public_content"]`, and `entries[]` of field `updates[]` only — **no** `variant`. Required live fields must be in the ops (blog: title, description, body/`content`, category).
 4. Apply (a different role): `update_proposal` `action: "apply"`. A new URL-param value (for example category) also needs `confirm_new_values: true` after principal approval. Apply writes `{slug}/_common.yml` and `{locale}.yml` with `sections: []` and does not touch `template.{locale}.yml`.
 - **Escalated hold:** when `escalated: true`, a Platform Steward paused agent work (staff UI only). Do **not** call `update_proposal` — every action fails with `code: escalated` until they release. Read `escalated_note`. Overlapping create may warn `escalated_sibling` but still succeeds. After release the note may remain as history (mutations allowed again).
-- Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note and **your author username must match the proposer** (model/role ignored); staff UI may withdraw others.
+- Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note; site Rules may require matching proposer username, allow any create author, or disable MCP withdraw (`withdraw_disabled` — ask staff). Staff UI follows a separate staff setting.
 - Four-eyes = different **username+role** (or staff UI), not merely a different model under the same role.
 - **`list_proposals(proposal_id)`** on an open/partial proposal may include **`discovery_path`**: optional research menu (`think` + `tool` items). Use it to deepen judgment before apply/reject/add_blocker/adjacent notes. It is **not** `next_actions` and skip does **not** block decide actions. Items with `available: false` need a human to enable access, then refresh MCP.
 
@@ -166,3 +166,14 @@ When enabling SEO clustering or classifying a page’s topic, set `seo.refresh_t
 `get_entry_fields` requires non-empty `fields: string[]`. Omit or pass `[]` once to get `available_fields` names only (`action_required: select_fields`), then retry with the paths you need. Do not expect a full dump of every field value.
 
 **Worked example:** `get_entry_fields` with `fields: ["title", "authors"]` before updating those paths.
+
+### 9. Reader copy must not expose SEO topology
+
+Clusters, pillars, spokes, piece-count (“third in our X cluster”), and companion-piece maps are **staff/SEO packaging**. Do **not** put that architecture into reader-facing body or H2s. Link by **page job** instead (“what it is”, “how to set up”, “what’s new”).
+
+- **Bad:** “This is the third piece in our Grok Bot cluster. For the full picture, start with…”
+- **Good:** “New here? Read [what Grok Bot is](…) or [how to set it up](…). This page is only what’s new since launch.”
+- Teaching “what a topic cluster is” when that *is* the article topic is fine. YAML `cluster_*`, `seo.*`, and proposal summaries may still say “cluster hub.”
+- Reviewers score this as intent on body / new-page / hub-link / translation packs → `add_blocker` (not create refuse, not reject for voice alone).
+
+**Worked example:** hub links stay; rewrite “Recent cluster updates” → “What’s new” and drop “our tools cluster” inventory talk.

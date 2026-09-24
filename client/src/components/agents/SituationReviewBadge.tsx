@@ -79,10 +79,10 @@ const DAMAGE_CLASS_FALLBACK: Record<
     risk: "Medium — body or field changes on a live page.",
   },
   selling_page: {
-    badge_label: "Selling page",
+    badge_label: "Outcome figures",
     situation_description:
-      "This proposal changes a page that sells a program or offer. Wrong outcome claims (hire rate, salary, price) can cost real leads — verify figures before apply.",
-    risk: "High — selling page; outcome claims affect leads.",
+      "This proposal adds or changes hire rates, salaries, tuition, or prices. Verify figures against an approved source before apply.",
+    risk: "High — outcome figures; claims affect leads and trust.",
   },
   new_public_content: {
     badge_label: "New public content",
@@ -624,12 +624,13 @@ export const STAFF_REVIEW_SITUATION_LABELS: Record<string, string> = {
   serp_title_description: "Search title / description",
   funnel_classification: "Funnel stage / products",
   body_copy_edit: "Body / field edit",
-  selling_figures: "Selling-page figures",
+  selling_figures: "Outcome figures",
   new_public_content: "New public content",
   promote_draft: "Promote draft",
   locale_translation: "Locale translation",
   idea_opportunity_harm: "Idea opportunity vs harm",
   anticipated_demand: "Anticipated demand",
+  existing_demand: "Existing search demand",
   fast_decay_news: "Fast-decay news",
   broken_url: "Broken URL",
 };
@@ -663,8 +664,8 @@ export const STAFF_REVIEW_SITUATION_OPTIONS: Array<{
   },
   {
     id: "selling_figures",
-    label: "Selling-page figures",
-    when_to_use: "Program or landing where hire rates, salaries, or prices may move.",
+    label: "Outcome figures",
+    when_to_use: "Hire rates, salaries, tuition, or prices may move (any content type).",
   },
   {
     id: "new_public_content",
@@ -695,6 +696,12 @@ export const STAFF_IDEA_DEMAND_SITUATION_OPTIONS: Array<{
     label: "Anticipated demand",
     when_to_use:
       "New product or feature that will become search volume — lasting questions, not today's volume.",
+  },
+  {
+    id: "existing_demand",
+    label: "Existing search demand",
+    when_to_use:
+      "Rank and/or cite on a query that already has demand — brief must justify SERP maturity and weight class.",
   },
   {
     id: "fast_decay_news",

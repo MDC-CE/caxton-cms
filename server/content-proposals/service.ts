@@ -29,6 +29,11 @@ import {
   type AgentActorLike,
 } from "@shared/agent-identity";
 import {
+  DEFAULT_PROPOSAL_SETTINGS,
+  getProposalSettings as loadProposalSettingsFromDisk,
+  type ProposalSettings,
+} from "../settings";
+import {
   classifyProposalReview,
   collectDamageClassesForMixedCheck,
   isMixedRiskBundle,
@@ -39,6 +44,12 @@ import {
   type ReviewContext,
 } from "./review-context";
 import type { ExistenceState } from "./proposal-review-rules";
+import {
+  askTouchesOutcomeFigures,
+  getDecisionClient,
+} from "../ai/decisions";
+import { anyEntryHasCountsAsLeadForm } from "./counts-as-lead-hint";
+import { textFromUnknown, evaluateClaimCues } from "./claim-cues";
 import {
   parseReviewSituationIds,
   parseIdeaAuthorSituationIds,
@@ -68,6 +79,20 @@ import {
   type KpiGranularity,
   type KpiHistoryResult,
 } from "./kpi-history";
+import {
+  funnelFromFieldOps,
+  hasFunnelFieldOps,
+  ideaFunnelComplete,
+  ideaFunnelsEqual,
+  ideaFunnelToYamlBlock,
+  ideaRequiresStructuredFunnel,
+  parseIdeaFunnel,
+  validateIdeaFunnel,
+  IDEA_FUNNEL_CONFLICT,
+  IDEA_FUNNEL_FROZEN,
+  IDEA_FUNNEL_REQUIRED,
+  type IdeaFunnel,
+} from "./idea-funnel";
 
 const log = child({ module: "content-proposals" });
 
@@ -273,6 +298,11 @@ export type ProposalRecord = {
   replaced_by_proposal_id: string | null;
   /** Set on idea accept — reserved type/slug/locale for follow-up edits. */
   accepted_entry: AcceptedEntry | null;
+  /**
+   * Structured funnel intent for new-URL ideas (stage + products).
+   * Immutable after accept; creating edits must match / seed from this.
+   */
+  idea_funnel: IdeaFunnel | null;
   /** Edits that implement an accepted idea (optional unless slug is reserved). */
   implements_proposal_id: string | null;
   /** Computed on read — accepted idea whose locked slug is a missing file-based attached post. */
@@ -341,6 +371,8 @@ export type ProposalSummary = {
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
   accepted_entry: AcceptedEntry | null;
+  /** Structured funnel on ideas (new-URL); null when unset or non-idea. */
+  idea_funnel: IdeaFunnel | null;
   implements_proposal_id: string | null;
   /**
    * Accepted idea whose locked slug is a missing file-based attached post.
@@ -414,6 +446,7 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     supersedes_proposal_id: record.supersedes_proposal_id,
     replaced_by_proposal_id: record.replaced_by_proposal_id,
     accepted_entry: record.accepted_entry,
+    idea_funnel: record.idea_funnel,
     implements_proposal_id: record.implements_proposal_id,
     attached_create_entry: record.attached_create_entry ?? null,
     entry_count: record.entries.length,
@@ -469,6 +502,7 @@ type ProposalRow = {
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
   accepted_entry_json?: string | null;
+  idea_funnel_json?: string | null;
   implements_proposal_id?: string | null;
   author_content_at?: number | null;
   reviewer_action_at?: number | null;
@@ -532,6 +566,11 @@ export type CreateProposalInput = {
    * Empty/omit → classifier infers from pending ops. Unknown ids fail create.
    */
   review_situations?: string[];
+  /**
+   * Ideas (new-URL): optional structured funnel `{ stage, products }`.
+   * Soft warning when missing on new-URL create; accept refuses until complete.
+   */
+  idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
 };
 
 export type SimilarProposal = { id: string; title: string; score: number };
@@ -552,6 +591,7 @@ export type ProposalUpdateAction =
   | "accept"
   | "revise_entries"
   | "set_review_situations"
+  | "set_idea_funnel"
   | "escalate"
   | "deescalate";
 
@@ -589,6 +629,8 @@ export type ProposalUpdateCaller = {
   entries?: ProposalEntryInput[];
   /** set_review_situations: author-declared situation ids (edits). */
   review_situations?: string[];
+  /** set_idea_funnel / create: structured funnel for new-URL ideas. */
+  idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
   /** escalate: required steward note (min MIN_CLOSE_NOTE). */
   escalated_note?: string;
 };
@@ -731,6 +773,7 @@ function mapProposal(
     supersedes_proposal_id: row.supersedes_proposal_id ?? null,
     replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
     accepted_entry: parseAcceptedEntry(parseJson(row.accepted_entry_json ?? null, null)),
+    idea_funnel: parseIdeaFunnel(parseJson(row.idea_funnel_json ?? null, null)),
     implements_proposal_id: row.implements_proposal_id ?? null,
     author_content_at: row.author_content_at ?? null,
     reviewer_action_at: row.reviewer_action_at ?? null,
@@ -871,7 +914,8 @@ function emitProposalEvent(
     | "proposal_revised"
     | "proposal_escalated"
     | "proposal_deescalated"
-    | "proposal_review_situations_set",
+    | "proposal_review_situations_set"
+    | "proposal_idea_funnel_set",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -952,12 +996,19 @@ export type ProposalServiceDeps = {
   /** Validate and seed a new attached locale before field ops. seeded means this apply created the folder. */
   prepareCreatesEntry?: (
     entry: ProposalEntryRow,
-    opts: { confirmNewValues?: boolean; author: string },
+    opts: {
+      confirmNewValues?: boolean;
+      author: string;
+      /** When implementing an accepted idea, seed matching funnel onto _common.yml. */
+      ideaFunnel?: IdeaFunnel | null;
+    },
   ) => Promise<{ ok: boolean; error?: string; code?: string; seeded?: boolean }>;
   /** Delete a folder this apply created after a later step failed. */
   discardSeededEntry?: (entry: ProposalEntryRow) => void;
   /** Stamp published_at on first go-live when still empty. */
   stampPublishedAt?: (entry: ProposalEntryRow, author: string) => { ok: boolean; error?: string };
+  /** Site Agents Rules policy; default = hardcoded defaults (tests / omitted). */
+  getProposalSettings?: () => ProposalSettings;
 };
 
 export type ProposalStats = {
@@ -1008,6 +1059,20 @@ function fourEyesBlocked(
     callerUsername,
     asAgentActor(callerActor),
   );
+}
+
+function fourEyesBlockedForCaller(
+  policy: ProposalSettings,
+  proposerUsername: string,
+  proposerActor: Record<string, unknown> | EventActor | undefined,
+  callerUsername: string,
+  callerActor: EventActor | undefined,
+): boolean {
+  if (!policy.four_eyes.enabled) return false;
+  if (policy.four_eyes.staff_ui_exempt && isStaffUiActor(asAgentActor(callerActor))) {
+    return false;
+  }
+  return fourEyesBlocked(proposerUsername, proposerActor, callerUsername, callerActor);
 }
 
 export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at", "attention"] as const;
@@ -1290,6 +1355,16 @@ function findEscalatedSiblings(
 
 export function createProposalService(deps: ProposalServiceDeps) {
   const site = deps.site;
+
+  function policy(): ProposalSettings {
+    if (deps.getProposalSettings) return deps.getProposalSettings();
+    return {
+      withdraw: { ...DEFAULT_PROPOSAL_SETTINGS.withdraw },
+      four_eyes: { ...DEFAULT_PROPOSAL_SETTINGS.four_eyes },
+      hold: { ...DEFAULT_PROPOSAL_SETTINGS.hold },
+      claim: { ...DEFAULT_PROPOSAL_SETTINGS.claim },
+    };
+  }
 
   function runResolveActivity(opts: {
     entries: Array<{ contentType: string; slug: string; locale: string; variant?: string | null }>;
@@ -1582,6 +1657,105 @@ export function createProposalService(deps: ProposalServiceDeps) {
       .run(JSON.stringify(snap), Date.now(), proposalId);
   }
 
+  function mergeProposalTags(proposalId: string, add: string[]): void {
+    if (!add.length) return;
+    const row = dbFor(site)
+      .prepare(`SELECT tags_json FROM content_proposals WHERE id = ?`)
+      .get(proposalId) as { tags_json: string } | undefined;
+    if (!row) return;
+    const existing = parseJson<string[]>(row.tags_json, []);
+    const next = [...existing];
+    for (const t of add) {
+      if (!next.includes(t)) next.push(t);
+    }
+    if (next.length === existing.length) return;
+    dbFor(site)
+      .prepare(`UPDATE content_proposals SET tags_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(next), Date.now(), proposalId);
+  }
+
+  function tryLoadPromoteDraftText(proposal: ProposalRecord): string | null {
+    if (!proposal.promote_on_apply || !deps.readVariantFingerprint) return null;
+    try {
+      const e = proposal.entries.find((x) => x.variant?.trim());
+      if (!e?.variant?.trim()) return null;
+      // Fingerprint path already proved file exists at create; re-read raw via getContentForEdit-style if available
+      const baseline = e.baseline_context?.values;
+      if (baseline && typeof baseline === "object") {
+        const fromBaseline = textFromUnknown(baseline);
+        if (fromBaseline.trim()) return fromBaseline;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function classifyLive(
+    proposal: ProposalRecord,
+    opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
+  ): Promise<ReviewContext | null> {
+    if (proposal.status !== "open" && proposal.status !== "partial") return null;
+
+    const workEntries = proposal.entries.filter(
+      (e) => !e.status || e.status === "pending" || e.status === "failed",
+    );
+    const countsAsLeadForm =
+      proposal.kind === "edits"
+        ? anyEntryHasCountsAsLeadForm(
+            (workEntries.length ? workEntries : proposal.entries).map((e) => ({
+              contentType: e.contentType,
+              slug: e.slug,
+              locale: e.locale,
+            })),
+          )
+        : false;
+
+    const promoteDraftText = tryLoadPromoteDraftText(proposal);
+
+    const classifyOpts = {
+      proposal,
+      lookups: buildLookupsForProposal(proposal),
+      relatedOpen: findRelatedOpenByIssues(proposal),
+      snapshot: proposal.review_context_snapshot
+        ? {
+            damage_class:
+              typeof proposal.review_context_snapshot.damage_class === "string"
+                ? proposal.review_context_snapshot.damage_class
+                : undefined,
+          }
+        : null,
+      promoteDraftText,
+      countsAsLeadForm,
+    };
+
+    let ctx = classifyProposalReview(classifyOpts);
+
+    if (ctx.needs_jev_claim_check && proposal.kind === "edits") {
+      const { outcome } = await askTouchesOutcomeFigures(
+        getDecisionClient(),
+        ctx.claim_cue_text ?? "",
+      );
+      ctx = classifyProposalReview({
+        ...classifyOpts,
+        claimCueJevOutcome: outcome,
+      });
+      if (outcome === "unavailable") {
+        mergeProposalTags(proposal.id, ["used_jev_unavailable"]);
+      } else {
+        mergeProposalTags(proposal.id, ["used_jev"]);
+      }
+    }
+
+    const snap = snapshotFromReviewContext(ctx);
+    if (opts?.refreshSnapshot) {
+      persistSnapshot(proposal.id, snap);
+    } else if (opts?.persistIfMissingSnapshot && !proposal.review_context_snapshot) {
+      persistSnapshot(proposal.id, snap);
+    }
+    return ctx;
+  }
+
   function persistDecisionDebug(proposalId: string, blob: ProposalDecisionDebug): void {
     dbFor(site)
       .prepare(`UPDATE content_proposals SET decision_debug_json = ?, updated_at = ? WHERE id = ?`)
@@ -1629,33 +1803,6 @@ export function createProposalService(deps: ProposalServiceDeps) {
       recentActivity: enriched.recent_activity ?? null,
     });
     persistDecisionDebug(proposal.id, blob);
-  }
-
-  function classifyLive(
-    proposal: ProposalRecord,
-    opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
-  ): ReviewContext | null {
-    if (proposal.status !== "open" && proposal.status !== "partial") return null;
-    const ctx = classifyProposalReview({
-      proposal,
-      lookups: buildLookupsForProposal(proposal),
-      relatedOpen: findRelatedOpenByIssues(proposal),
-      snapshot: proposal.review_context_snapshot
-        ? {
-            damage_class:
-              typeof proposal.review_context_snapshot.damage_class === "string"
-                ? proposal.review_context_snapshot.damage_class
-                : undefined,
-          }
-        : null,
-    });
-    const snap = snapshotFromReviewContext(ctx);
-    if (opts?.refreshSnapshot) {
-      persistSnapshot(proposal.id, snap);
-    } else if (opts?.persistIfMissingSnapshot && !proposal.review_context_snapshot) {
-      persistSnapshot(proposal.id, snap);
-    }
-    return ctx;
   }
 
   function enrichRecentActivity(
@@ -2198,6 +2345,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
           };
         }
         const createsEntry = createsEntryKeys.has(attachedCreateKey(e.contentType, e.slug, e.locale));
+        const updateText = (e.updates ?? [])
+          .map((u) => textFromUnknown(u.value))
+          .filter(Boolean)
+          .join("\n");
+        const outcomeFigures =
+          (input.review_situations ?? []).includes("selling_figures") ||
+          evaluateClaimCues(updateText) === "clear_yes";
         classTargets.push({
           contentType: e.contentType,
           category:
@@ -2210,6 +2364,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           existence: ex.live === "unknown" ? "unknown" : liveOk ? "exists" : "missing",
           draftExists: draftOk,
           createsEntry,
+          outcomeFigures,
         });
       }
       const classes = collectDamageClassesForMixedCheck(classTargets);
@@ -2218,7 +2373,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           ok: false,
           code: "mixed_risk_bundle",
           error:
-            "This proposal mixes different risk levels (for example a selling page and a blog metadata fix). Split into separate proposals — one risk class each.",
+            "This proposal mixes different risk levels (for example outcome figures and a blog metadata fix). Split into separate proposals — one risk class each.",
         };
       }
     }
@@ -2460,6 +2615,21 @@ export function createProposalService(deps: ProposalServiceDeps) {
       supersedesId = pred.id;
     }
 
+    let ideaFunnelJson: string | null = null;
+    if (kind === "idea" && input.idea_funnel != null) {
+      const funnelCheck = validateIdeaFunnel(input.idea_funnel);
+      if (!funnelCheck.ok) {
+        return { ok: false, code: funnelCheck.code, error: funnelCheck.error };
+      }
+      ideaFunnelJson = JSON.stringify(funnelCheck.funnel);
+    } else if (kind !== "idea" && input.idea_funnel != null) {
+      return {
+        ok: false,
+        code: "idea_funnel_ideas_only",
+        error: "idea_funnel is only valid on kind idea proposals.",
+      };
+    }
+
     const now = Date.now();
     const id = randomUUID();
     const sessionId = input.agent_session_id?.trim() || null;
@@ -2471,8 +2641,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
         review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-        review_situations_json, implements_proposal_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_situations_json, implements_proposal_id, idea_funnel_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -2501,6 +2671,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       null,
       JSON.stringify(filedReviewSituations),
       implementsIdForInsert,
+      ideaFunnelJson,
     );
 
     if (supersedesId) {
@@ -2527,7 +2698,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     const proposal = get(id)!;
-    const reviewCtx = classifyLive(proposal, { refreshSnapshot: true });
+    const reviewCtx = await classifyLive(proposal, { refreshSnapshot: true });
     const withSnap = get(id)!;
     emitProposalEvent(site, "proposal_created", id, proposer.username, {
       ...(supersedesId ? { supersedes_proposal_id: supersedesId } : {}),
@@ -2631,7 +2802,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     if (action === "claim") {
       const claim = proposal.claim;
-      const uiTakeover = isStaffUiActor(asAgentActor(caller.actor));
+      const settings = policy();
+      const uiTakeover =
+        isStaffUiActor(asAgentActor(caller.actor)) && settings.claim.staff_ui_takeover;
       if (
         claim &&
         new Date(claim.expiresAt).getTime() > now &&
@@ -2669,10 +2842,33 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     if (action === "withdraw") {
+      const settings = policy();
       const sameProposer =
         proposal.proposer_username.trim().toLowerCase() === caller.username.trim().toLowerCase();
-      if (!sameProposer && !caller.asStaff) {
-        return { ok: false, code: "not_proposer", error: "Only the proposer or an editor can withdraw" };
+      const isMcp = caller.actor?.type === "mcp";
+      if (isMcp) {
+        if (settings.withdraw.mcp === "disabled") {
+          return {
+            ok: false,
+            code: "withdraw_disabled",
+            error:
+              "Site rules disable agent withdraw — ask staff to withdraw in the UI, or Reject Completely if it must not ship",
+          };
+        }
+        if (settings.withdraw.mcp === "proposer_only" && !sameProposer) {
+          return {
+            ok: false,
+            code: "not_proposer",
+            error: "Only the proposer or an editor can withdraw",
+          };
+        }
+        // any_create_author: any MCP author may withdraw
+      } else if (!sameProposer && !caller.asStaff) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the proposer or an editor can withdraw",
+        };
       }
       if (proposal.status === "finished") {
         return { ok: false, code: "already_finished", error: "Finished proposals cannot be withdrawn" };
@@ -2688,7 +2884,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `withdraw note required (min ${MIN_CLOSE_NOTE} characters)`,
         };
       }
-      const reviewBeforeWithdraw = classifyLive(proposal);
+      const reviewBeforeWithdraw = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
@@ -2702,7 +2898,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     if (action === "reject") {
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -2747,7 +2944,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `reject note required (min ${MIN_REJECT_NOTE} characters): why this must not ship`,
         };
       }
-      const reviewBeforeReject = classifyLive(proposal);
+      const reviewBeforeReject = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'rejected', claim_json = NULL, updated_at = ?,
@@ -2777,7 +2974,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         return { ok: false, code: "closed", error: "Proposal is already closed" };
       }
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -2831,7 +3029,26 @@ export function createProposalService(deps: ProposalServiceDeps) {
           existing_proposal: taken,
         };
       }
-      const reviewBeforeAccept = classifyLive(proposal);
+      const acceptEx = resolveExistence({
+        contentType: acceptedEntry.contentType,
+        slug: acceptedEntry.slug,
+        locale: acceptedEntry.locale,
+      });
+      const needsFunnel = ideaRequiresStructuredFunnel({
+        title: proposal.title,
+        summary: proposal.summary,
+        accepted_entry: { ...acceptedEntry, existence: acceptEx.live },
+      });
+      if (needsFunnel && !ideaFunnelComplete(proposal.idea_funnel)) {
+        return {
+          ok: false,
+          code: IDEA_FUNNEL_REQUIRED,
+          error:
+            "This idea locks a new URL. Set structured idea_funnel (stage + products) via set_idea_funnel before accept. products \"all\" only with stage awareness.",
+          proposal,
+        };
+      }
+      const reviewBeforeAccept = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
@@ -2891,7 +3108,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (!validated.ok) {
         return { ok: false, code: validated.code, error: validated.error };
       }
-      const reviewBeforeClose = classifyLive(proposal);
+      const reviewBeforeClose = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
@@ -2959,6 +3176,56 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return { ok: true, proposal: get(id)! };
     }
 
+    if (action === "set_idea_funnel") {
+      if (proposal.kind !== "idea") {
+        return {
+          ok: false,
+          code: "wrong_kind",
+          error: "set_idea_funnel is for idea proposals only",
+        };
+      }
+      if (proposal.status === "finished" || proposal.status === "rejected" || proposal.status === "withdrawn") {
+        return {
+          ok: false,
+          code: proposal.close_reason === "accepted" ? IDEA_FUNNEL_FROZEN : "closed",
+          error:
+            proposal.close_reason === "accepted"
+              ? "idea_funnel is frozen after accept. Reject/refile if the plan was wrong — do not edit the lock."
+              : "Cannot change idea_funnel on a closed proposal",
+        };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may set idea_funnel",
+        };
+      }
+      const funnelCheck = validateIdeaFunnel(caller.idea_funnel);
+      if (!funnelCheck.ok) {
+        return { ok: false, code: funnelCheck.code, error: funnelCheck.error };
+      }
+      db.prepare(`UPDATE content_proposals SET idea_funnel_json = ?, updated_at = ? WHERE id = ?`).run(
+        JSON.stringify(funnelCheck.funnel),
+        now,
+        id,
+      );
+      const after = getRaw(id)!;
+      await classifyLive(after, { refreshSnapshot: true });
+      emitProposalEvent(site, "proposal_idea_funnel_set", id, caller.username, {
+        idea_funnel: funnelCheck.funnel,
+      });
+      return { ok: true, proposal: get(id)! };
+    }
+
     if (action === "set_review_situations") {
       if (proposal.kind !== "edits" && proposal.kind !== "idea") {
         return {
@@ -3007,7 +3274,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         `UPDATE content_proposals SET review_situations_json = ?, updated_at = ? WHERE id = ?`,
       ).run(JSON.stringify(parsedIds), now, id);
       const after = getRaw(id)!;
-      classifyLive(after, { refreshSnapshot: true });
+      await classifyLive(after, { refreshSnapshot: true });
       emitProposalEvent(site, "proposal_review_situations_set", id, caller.username, {
         review_situations: parsedIds,
       });
@@ -3119,6 +3386,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         existence: ExistenceState;
         draftExists?: boolean;
         createsEntry?: boolean;
+        outcomeFigures?: boolean;
       }> = [];
       for (const e of entriesIn) {
         const hasVariant = Boolean(e.variant?.trim());
@@ -3156,6 +3424,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
             error: `Draft variant '${e.variant}' for ${e.contentType}/${e.slug} (${e.locale}) was not found.`,
           };
         }
+        const updateText = (e.updates ?? [])
+          .map((u) => textFromUnknown(u.value))
+          .filter(Boolean)
+          .join("\n");
+        const outcomeFigures =
+          (proposal.review_situations ?? []).includes("selling_figures") ||
+          evaluateClaimCues(updateText) === "clear_yes";
         classTargets.push({
           contentType: e.contentType,
           category: (e.updates ?? []).some(
@@ -3166,6 +3441,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           existence: ex.live === "unknown" ? "unknown" : liveOk ? "exists" : "missing",
           draftExists: draftOk,
           createsEntry: reviseCreates.has(attachedCreateKey(e.contentType, e.slug, e.locale)),
+          outcomeFigures,
         });
       }
       const classes = collectDamageClassesForMixedCheck(classTargets);
@@ -3364,7 +3640,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
       const after = getRaw(id)!;
       persistRollup(db, after);
-      classifyLive(after, { refreshSnapshot: true });
+      await classifyLive(after, { refreshSnapshot: true });
       emitProposalEvent(site, "proposal_revised", id, caller.username, {
         entry_count: captured.length,
         open_blocker_count: after.open_blocker_count,
@@ -3577,7 +3853,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
       }
       const afterAttach = getRaw(id)!;
-      classifyLive(afterAttach, { refreshSnapshot: true });
+      await classifyLive(afterAttach, { refreshSnapshot: true });
       return { ok: true, proposal: get(id)! };
     }
 
@@ -3586,7 +3862,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         return { ok: false, code: "wrong_kind", error: "apply is for edits proposals; use close for notes" };
       }
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -3608,7 +3885,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         };
       }
 
-      const reviewForApply = classifyLive(proposal);
+      const reviewForApply = await classifyLive(proposal);
       if (reviewForApply?.block_apply) {
         return {
           ok: false,
@@ -3749,9 +4026,31 @@ export function createProposalService(deps: ProposalServiceDeps) {
               failEntry("create not configured");
               continue;
             }
+            let seedFunnel: IdeaFunnel | null = null;
+            if (proposal.implements_proposal_id) {
+              const idea = loadProposal(db, proposal.implements_proposal_id);
+              const locked = idea?.idea_funnel ?? null;
+              if (locked && ideaFunnelComplete(locked)) {
+                const fromOps = funnelFromFieldOps(entry.ops);
+                if (fromOps && !ideaFunnelsEqual(fromOps, locked)) {
+                  failEntry(
+                    `${IDEA_FUNNEL_CONFLICT}: ops funnel does not match the accepted idea's frozen idea_funnel (stage=${locked.stage}).`,
+                  );
+                  continue;
+                }
+                if (hasFunnelFieldOps(entry.ops) && !fromOps) {
+                  failEntry(
+                    `${IDEA_FUNNEL_CONFLICT}: incomplete funnel.* ops — must match the accepted idea's idea_funnel or omit funnel fields to auto-seed.`,
+                  );
+                  continue;
+                }
+                if (!fromOps) seedFunnel = locked;
+              }
+            }
             const prepared = await deps.prepareCreatesEntry(entry, {
               confirmNewValues: caller.confirm_new_values === true,
               author: caller.username,
+              ideaFunnel: seedFunnel,
             });
             if (!prepared.ok && prepared.code === "confirm_new_values") {
               return {
@@ -3784,6 +4083,39 @@ export function createProposalService(deps: ProposalServiceDeps) {
               `UPDATE content_proposal_entries SET status = 'done', last_error = NULL, applied_at = ?, applied_by = ? WHERE id = ?`,
             ).run(Date.now(), caller.username, entry.id);
             continue;
+          }
+        }
+
+        // First write for a locked idea funnel without creates_entry auto-seed (e.g. DB types).
+        if (proposal.implements_proposal_id && !entry.baseline_context.creates_entry) {
+          const idea = loadProposal(db, proposal.implements_proposal_id);
+          const locked = idea?.idea_funnel ?? null;
+          if (locked && ideaFunnelComplete(locked)) {
+            const fromOps = funnelFromFieldOps(entry.ops);
+            if (fromOps && !ideaFunnelsEqual(fromOps, locked)) {
+              db.prepare(
+                `UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`,
+              ).run(
+                `${IDEA_FUNNEL_CONFLICT}: ops funnel does not match the accepted idea's frozen idea_funnel.`,
+                entry.id,
+              );
+              continue;
+            }
+            const liveNow = resolveExistence({
+              contentType: entry.contentType,
+              slug: entry.slug,
+              locale: entry.locale,
+              variant: entry.variant,
+            });
+            if (liveNow.live !== "exists" && (!fromOps || !ideaFunnelsEqual(fromOps, locked))) {
+              db.prepare(
+                `UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`,
+              ).run(
+                `${IDEA_FUNNEL_REQUIRED}: this implements an accepted idea with idea_funnel — include matching funnel.stage + funnel.products ops on the first write.`,
+                entry.id,
+              );
+              continue;
+            }
           }
         }
 
@@ -3910,8 +4242,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
       escalated, escalated_at, escalated_by, escalated_note, decision_debug_json,
       review_situations_json, accepted_entry_json, implements_proposal_id,
-      author_content_at, reviewer_action_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      author_content_at, reviewer_action_at, idea_funnel_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -3978,6 +4310,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.implements_proposal_id ?? null,
         p.author_content_at ?? null,
         p.reviewer_action_at ?? null,
+        p.idea_funnel ? JSON.stringify(p.idea_funnel) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
@@ -4233,7 +4566,11 @@ export function inspectMissingTargetFromSite(
 export async function prepareCreatesEntryOnSite(
   ctx: SiteContext,
   entry: ProposalEntryRow,
-  opts: { confirmNewValues?: boolean; author: string },
+  opts: {
+    confirmNewValues?: boolean;
+    author: string;
+    ideaFunnel?: IdeaFunnel | null;
+  },
 ): Promise<{ ok: boolean; error?: string; code?: string; seeded?: boolean }> {
   const config = getContentTypeConfig(entry.contentType, ctx.contentRoot);
   if (!config || config.database?.slug || !config.single_template) {
@@ -4284,6 +4621,7 @@ export async function prepareCreatesEntryOnSite(
     locale: entry.locale,
     contentRoot: ctx.contentRoot,
     author: opts.author,
+    funnel: opts.ideaFunnel ? ideaFunnelToYamlBlock(opts.ideaFunnel) : null,
   });
   ctx.contentIndex.refresh();
   return { ok: true, seeded: true };
@@ -4328,5 +4666,6 @@ export function proposalServiceForSite(ctx: SiteContext) {
     prepareCreatesEntry: (entry, opts) => prepareCreatesEntryOnSite(ctx, entry, opts),
     discardSeededEntry: (entry) => discardSeededEntryOnSite(ctx, entry),
     stampPublishedAt: (entry, author) => stampPublishedAtOnSite(ctx, entry, author),
+    getProposalSettings: () => loadProposalSettingsFromDisk(ctx.contentRoot),
   });
 }

@@ -39,14 +39,14 @@ const MUTATING_TOOLS = [
   "update_redirect",
   "propose_change",
   "update_proposal",
-  "update_product",
+  "create_or_update_product",
 ] as const;
 
 const TOOL_SOURCE_FILE: Record<string, string> = {
   update_redirect: "mcp-server/tools/redirects.ts",
   propose_change: "mcp-server/tools/proposals.ts",
   update_proposal: "mcp-server/tools/proposals.ts",
-  update_product: "mcp-server/tools/product.ts",
+  create_or_update_product: "mcp-server/tools/product.ts",
 };
 
 function mutatingToolSource(toolName: string): string {

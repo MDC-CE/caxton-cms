@@ -61,7 +61,7 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `add_database_item` / `add_database_items` / `update_database_item` / `update_database_items` / `delete_database_item` | Local YAML item CRUD (FAQ etc.; bulk max 40). Cap: `databases_edit_data` for that slug |
 | `create_or_update_database` | Create bank (empty local items) or deep-patch config (`confirm:true`). Cap: `databases_manage` |
 | `reindex_database` | Vector reindex after item writes or vector_search definition patches (`databases_manage`) |
-| `list_products` / `get_product` / `update_product` | Product inventory, sidecar read, audience/metadata patch (confirm). Store visibility human-only. |
+| `list_products` / `get_product` / `create_or_update_product` | Product inventory, sidecar read/create/patch (confirm). Audience: `content_edit_structure`. Sellable flags: `product_manage`. Removed hidden unless `include_removed`. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Product conversion journey (read-only; `update_product_funnel` retired) |
 | `get_analytics_report` | Named GA4 BigQuery reports (`metrics_view`): site_summary / top_pages / page_detail / events_by_name / traffic_sources / traffic_source_conversions |
 | `get_organic_traffic` | GSC organic clicks/impressions (`metrics_view` or `seo_edit`) |

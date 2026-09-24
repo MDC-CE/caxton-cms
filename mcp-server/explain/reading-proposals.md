@@ -4,7 +4,7 @@ When you open a single open/partial proposal via `list_proposals(proposal_id)`, 
 
 List rows may include a **`review_context_snapshot`** (filed-at-create or last shape-change hint). Prefer live `review_context` for decisions.
 
-**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. On **edits**, author-declared **`review_situations`** (optional) plus inferred packs drive which checklists fire — see **`explain_site` `topic: "proposals"` `subtopic: "situations"`**. On **ideas**, classify always injects **`idea_opportunity_harm`**; authors may declare one demand label (`anticipated_demand` | `fast_decay_news` | `broken_url`) — see **`subtopic: "idea-opportunity-harm"`** / **`"broken-url"`**. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
+**Situations = checklists.** One `damage_class` badge (worst case); many `active_checklists` / think items can stack on the same proposal. On **edits**, author-declared **`review_situations`** (optional) plus inferred packs drive which checklists fire — see **`explain_site` `topic: "proposals"` `subtopic: "situations"`**. On **ideas**, classify always injects **`idea_opportunity_harm`**; authors may declare one demand label (`anticipated_demand` | `existing_demand` | `fast_decay_news` | `broken_url`) — see **`subtopic: "idea-opportunity-harm"`** / **`"existing-demand"`** / **`"broken-url"`**. Staff may store a decide-time **`decision_debug`** snapshot — it is **stripped from MCP** payloads (staff UI only); do not invent or require it.
 
 **Role split:** proposers optimize opportunity (CTR / query fit) via create skills; reviewers use checklists to stop **harm** (invented claims, query drops, false scope, unjustified new URLs) — not to rewrite for punchier copy.
 
@@ -15,19 +15,20 @@ List rows may include a **`review_context_snapshot`** (filed-at-create or last s
 | **Damage class** | `none` · `existing_metadata` · `existing_content` · `selling_page` · `new_public_content` | What kind of public impact this open work has |
 | **Undo cost** | `none` · `low` · `medium` · `high` | How hard apply is to undo (`none` = notes/idea; `low` = draft-only soft_variant; `medium` = soft live write; `high` = draft_backed / promote_on_apply) |
 
-Selling content types (`landing` / `landings` / `program` / `programs`) always classify as `selling_page`, even for meta-only SEO.
+`selling_page` (staff badge **Outcome figures**) means this proposal **adds or changes** hire rates, salaries, tuition, or prices — **any** content type. It is **not** “this page is a landing/program.” Title-only / funnel-only / typo body without claim cues stay `existing_*`. Count-as-lead forms are a **soft hint** only (never alone attach figures). Gray-zone claim text may run an automated check; tags `used_jev` / `used_jev_unavailable` mark when that ran.
 
 ## Checklist module IDs
 
 | ID | When it fires |
 |---|---|
-| `selling_page_figures` | Selling page damage on **edits** |
-| `new_content_brand` | New public content on **edits** (ship gate — not on ideas) |
+| `selling_page_figures` | Outcome-figure claims on **edits** (clear cues, declared `selling_figures`, promote-draft scan, or Jev yes on ambiguous) |
+| `new_content_brand` | New public content on **edits** (ship gate — not on ideas; any type when creating/missing) |
 | `dedup_coordinate` | Open notes (or non-edits) sibling shares an issue |
 | `dedup_competing_edits` | Open edits sibling shares an issue |
 | `dedup_fix_pending` | Reviewing **notes** while an edits sibling is open — check the fix before closing as wont_fix |
 | `idea_opportunity_harm` | Always on ideas — opportunity vs site harm scorecard. Playbook: `idea-opportunity-harm` |
 | `anticipated_demand` | Idea demand label — lasting queries after a launch; empty volume OK |
+| `existing_demand` | Idea demand label — current search rank/cite vs SERP occupants. Playbook: `existing-demand` |
 | `fast_decay_news` | Idea demand label — announcement only; quick reject |
 | `broken_url` | Idea demand label — 404 proof + match vs create. Playbook: `broken-url` |
 | `idea_accept` | Always on ideas — accept locks brief only (`accepted_entry` + `next_step`) |

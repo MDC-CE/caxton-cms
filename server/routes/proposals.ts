@@ -17,6 +17,7 @@ import {
 } from "../content-proposals/attention";
 import { child } from "../logger";
 import { resolveEventActor } from "./_helpers";
+import { getProposalSettings } from "../settings";
 
 const log = child({ module: "routes/proposals" });
 
@@ -67,6 +68,7 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "set_no_auto_retry",
   "revise_entries",
   "set_review_situations",
+  "set_idea_funnel",
   "escalate",
   "deescalate",
 ]);
@@ -87,6 +89,7 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "set_no_auto_retry",
   "revise_entries",
   "set_review_situations",
+  "set_idea_funnel",
   "escalate",
   "deescalate",
 ]);
@@ -277,10 +280,10 @@ export function registerProposalRoutes(app: Express): void {
       caller_username: auth.actor,
     });
 
-    let review_context = null as ReturnType<typeof svc.classifyLive> | null;
+    let review_context = null as Awaited<ReturnType<typeof svc.classifyLive>> | null;
     if (proposalId && proposals.length === 1) {
       const p = proposals[0]!;
-      review_context = svc.classifyLive(p, { persistIfMissingSnapshot: true });
+      review_context = await svc.classifyLive(p, { persistIfMissingSnapshot: true });
       // Refresh list row snapshot fields after lazy fill
       const refreshed = svc.get(p.id);
       if (refreshed) proposals = [refreshed];
@@ -351,7 +354,7 @@ export function registerProposalRoutes(app: Express): void {
       res.status(404).json({ error: "Proposal not found" });
       return;
     }
-    const review_context = svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
+    const review_context = await svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
     const fresh = svc.get(req.params.id) ?? proposal;
     res.json({ proposal: fresh, review_context });
   });
@@ -414,6 +417,8 @@ export function registerProposalRoutes(app: Express): void {
     if (!auth) return;
 
     const actor = resolveEventActor(req, { model: req.body?.model });
+    const siteCtx = res.locals.site as SiteContext | undefined;
+    const proposalPolicy = getProposalSettings(siteCtx?.contentRoot);
 
     if (action === "escalate" || action === "deescalate") {
       if (actor?.type === "mcp") {
@@ -424,11 +429,23 @@ export function registerProposalRoutes(app: Express): void {
         });
         return;
       }
-      if (!auth.username || !userStore.userHasRole(auth.username, "platform_steward")) {
+      if (proposalPolicy.hold.stewards_only) {
+        if (!auth.username || !userStore.userHasRole(auth.username, "platform_steward")) {
+          res.status(403).json({
+            ok: false,
+            code: "steward_required",
+            error: "Only a Platform Steward can escalate or release a proposal hold.",
+          });
+          return;
+        }
+      } else if (
+        !auth.username ||
+        !userStore.hasCapability(auth.username, "proposals_review")
+      ) {
         res.status(403).json({
           ok: false,
-          code: "steward_required",
-          error: "Only a Platform Steward can escalate or release a proposal hold.",
+          code: "review_required",
+          error: "proposals_review is required to escalate or release a proposal hold.",
         });
         return;
       }
@@ -443,19 +460,36 @@ export function registerProposalRoutes(app: Express): void {
       // Staff UI may retag; MCP authors must be proposer (enforced in service).
       asStaff = actor?.type !== "mcp";
     }
+    if (action === "set_idea_funnel") {
+      asStaff = actor?.type !== "mcp";
+    }
     if (action === "escalate" || action === "deescalate") {
       asStaff = true;
     }
     if (action === "withdraw") {
-      // Staff UI may withdraw any open proposal; MCP authors must be the proposer (service).
-      asStaff = actor?.type !== "mcp";
-      if (asStaff) {
-        const svcPeek = siteService(req, res);
-        if (!svcPeek) return;
-        const current = svcPeek.get(req.params.id);
-        if (current && current.proposer_username !== auth.actor) {
-          auth = await requireProposalWrite(req, res);
-          if (!auth) return;
+      // MCP never gets staff bypass — service honors withdraw.mcp (incl. disabled).
+      if (actor?.type === "mcp") {
+        asStaff = false;
+      } else {
+        const staffMode = proposalPolicy.withdraw.staff;
+        if (staffMode === "proposer_only") {
+          asStaff = false;
+        } else if (staffMode === "steward_only") {
+          asStaff = Boolean(
+            auth.username && userStore.userHasRole(auth.username, "platform_steward"),
+          );
+        } else {
+          // any_editor
+          asStaff = true;
+        }
+        if (asStaff) {
+          const svcPeek = siteService(req, res);
+          if (!svcPeek) return;
+          const current = svcPeek.get(req.params.id);
+          if (current && current.proposer_username !== auth.actor) {
+            auth = await requireProposalWrite(req, res);
+            if (!auth) return;
+          }
         }
       }
     }
@@ -534,6 +568,10 @@ export function registerProposalRoutes(app: Express): void {
       review_situations: Array.isArray(req.body?.review_situations)
         ? req.body.review_situations
         : undefined,
+      idea_funnel:
+        req.body?.idea_funnel && typeof req.body.idea_funnel === "object"
+          ? req.body.idea_funnel
+          : undefined,
       escalated_note:
         typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
     });
@@ -544,6 +582,7 @@ export function registerProposalRoutes(app: Express): void {
           : result.code === "four_eyes" ||
               result.code === "not_claimant" ||
               result.code === "not_proposer" ||
+              result.code === "withdraw_disabled" ||
               result.code === "steward_ui_only" ||
               result.code === "escalated"
             ? 403

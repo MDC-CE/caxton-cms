@@ -21,7 +21,7 @@ Translators polish the draft with MCP write tools (`translate_entry`, `update_fi
 
 ## The house rule (paste into review checklists)
 
-**`locale_translation`:** Promote (optional field ops) on a named variant for a target locale → **apply** when the draft matches source meaning/facts, required fields are ready, URL slug is locale-fitting, and shared shell non-effects are honest. Forced awkward phrasing → `add_blocker`. Invented stats or wrong-locale links → block/reject. Apply promotes the variant — it does **not** run AI translation.
+**`locale_translation`:** Promote (optional field ops) on a named variant for a target locale → **apply** when the draft matches source meaning/facts, required fields are ready, URL slug is locale-fitting, shared shell non-effects are honest, and reader copy does **not** expose SEO topology (series/cluster inventory talk). Forced awkward phrasing or topology packaging → `add_blocker`. Invented stats or wrong-locale links → block/reject. Apply promotes the variant — it does **not** run AI translation.
 
 ---
 
@@ -33,6 +33,7 @@ Translators polish the draft with MCP write tools (`translate_entry`, `update_fi
 | `propose_change` with `variant`, `promote_on_apply: true`, `review_situations: ["locale_translation"]` | Soft-only proposal without promote labeled as translation |
 | Summary: intent + **Translated from en → es** (no pasted body) | Dump full translated HTML into `summary` |
 | Same facts, years, employers, sources as source locale | Invent salaries/rankings the source does not support |
+| Link by page job; no series/cluster inventory talk for readers | Reintroduce “Nth piece in our cluster” / companion-piece maps when translating |
 | Locale-fitting `url_slug` on the variant | Keep an English slug on `/es/` when a Spanish slug was intended |
 | Attached entries: shell still from `template.{locale}.yml` | Detach only to “make translate work” |
 | One entry + one target locale + named variant | Silent sibling-locale fan-out |

@@ -19,7 +19,7 @@ interface LLMYamlConfig {
     api_key_env?: string;
     base_url_env?: string;
   };
-  model?: string | { default: string; chat?: string; vision?: string; image?: string };
+  model?: string | { default: string; chat?: string; vision?: string; image?: string; decision?: string };
   temperature?: number;
   max_tokens?: number;
 }
@@ -101,6 +101,37 @@ export function resolveImageModel(contentRoot?: string): string {
     return cfg.model.image;
   }
   return DEFAULT_IMAGE_MODEL;
+}
+
+/** Allowed System One / Jev decision model ids for llm.yml model.decision. */
+export const ALLOWED_DECISION_MODELS = [
+  "~typesafe/jev-latest",
+  "typesafe/jev-1.13",
+] as const;
+
+export type AllowedDecisionModel = (typeof ALLOWED_DECISION_MODELS)[number];
+
+export const DEFAULT_DECISION_MODEL: AllowedDecisionModel = "~typesafe/jev-latest";
+
+export function isAllowedDecisionModel(value: string): value is AllowedDecisionModel {
+  return (ALLOWED_DECISION_MODELS as readonly string[]).includes(value.trim());
+}
+
+/**
+ * Decision / System One model from llm.yml (model.decision).
+ * Empty or invalid → ~typesafe/jev-latest.
+ */
+export function resolveDecisionModel(contentRoot?: string): AllowedDecisionModel {
+  if (process.env.LLM_DECISION_MODEL?.trim()) {
+    const fromEnv = process.env.LLM_DECISION_MODEL.trim();
+    if (isAllowedDecisionModel(fromEnv)) return fromEnv;
+  }
+  const cfg = loadYamlConfig(contentRoot);
+  if (cfg?.model && typeof cfg.model === "object" && cfg.model.decision?.trim()) {
+    const d = cfg.model.decision.trim();
+    if (isAllowedDecisionModel(d)) return d;
+  }
+  return DEFAULT_DECISION_MODEL;
 }
 
 type CompletionMessage = {

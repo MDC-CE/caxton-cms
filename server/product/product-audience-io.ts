@@ -133,6 +133,41 @@ export function listFunnelBindingsUsingPersona(
   return hits;
 }
 
+/** Pages whose funnel.products reference this product slug (any persona or product-only). Not `all`. */
+export function listFunnelBindingsForProduct(
+  productSlug: string,
+  contentRoot?: string,
+): PersonaFunnelUsagePage[] {
+  const root = contentRootAbs(contentRoot);
+  const hits: PersonaFunnelUsagePage[] = [];
+  const configs = getAllConfigs(contentRoot);
+  for (const [ct, cfg] of Object.entries(configs)) {
+    const folder = typeof (cfg as { directory?: string }).directory === "string"
+      ? (cfg as { directory: string }).directory
+      : ct;
+    const typeDir = path.join(root, folder);
+    if (!fs.existsSync(typeDir)) continue;
+    for (const ent of fs.readdirSync(typeDir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const slug = ent.name;
+      const funnelPath = commonYmlPath(ct, slug, contentRoot);
+      if (!fs.existsSync(funnelPath)) continue;
+      const funnel = readFunnelBlockFromFile(funnelPath);
+      const products = funnel?.products;
+      if (!products || products === "all") continue;
+      if (!Array.isArray(products)) continue;
+      const hit = products.some((b) => {
+        if (typeof b === "string") return b === productSlug;
+        return b && typeof b === "object" && (b as { product?: string }).product === productSlug;
+      });
+      if (!hit) continue;
+      const href = primaryHrefForEntry(ct, slug);
+      hits.push(href ? { contentType: ct, slug, href } : { contentType: ct, slug });
+    }
+  }
+  return hits;
+}
+
 /** Pages whose funnel.products bind this product+persona (for Store delete UI). */
 export function getPersonaFunnelUsage(
   contentType: string,

@@ -58,6 +58,7 @@ function sampleSnapshot(overrides: Partial<ProposalRecord> = {}): ProposalRecord
     replaced_by_proposal_id: null,
     accepted_entry: null,
     implements_proposal_id: null,
+  idea_funnel: null,
     author_content_at: null,
     reviewer_action_at: null,
     entries: [

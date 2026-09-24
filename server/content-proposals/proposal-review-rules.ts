@@ -1,7 +1,7 @@
 /**
  * Declarative proposal review rule catalog.
  * Stable IDs for audit/tests; staff copy in plain English.
- * Selling allowlist is a v1 stopgap — long-term: content-type strategy flag.
+ * Outcome figures attach from claim cues (ops/promote text), not content-type allowlists.
  */
 
 export type DamageClass =
@@ -23,6 +23,7 @@ export type ChecklistId =
   | "dedup_fix_pending"
   | "idea_opportunity_harm"
   | "anticipated_demand"
+  | "existing_demand"
   | "fast_decay_news"
   | "broken_url"
   | "idea_accept"
@@ -44,6 +45,9 @@ export const IDEA_OPPORTUNITY_HARM_STAFF_NOTE =
 
 export const ANTICIPATED_DEMAND_STAFF_NOTE =
   "Launch demand — judge lasting questions after the news fades, not today's search volume. Accepting does not publish.";
+
+export const EXISTING_DEMAND_STAFF_NOTE =
+  "Current search demand — judge whether the brief justifies rank/cite against who already sits on the SERP. Accepting does not publish.";
 
 export const FAST_DECAY_NEWS_STAFF_NOTE =
   "Announcement with no lasting question — reject quickly. Do not run keyword research.";
@@ -74,16 +78,6 @@ export const FUNNEL_CLASSIFICATION_STAFF_NOTE =
 /** Staff always-visible line when locale_translation is active. */
 export const LOCALE_TRANSLATION_STAFF_NOTE =
   "Also check locale translation — draft matches source meaning and facts before go-live, not punchier copy vs live.";
-
-/** v1 stopgap — extend until strategy.selling (or similar) exists. */
-export const SELLING_CONTENT_TYPES = new Set([
-  "landing",
-  "landings",
-  "program",
-  "programs",
-]);
-
-export const PUBLIC_CONTENT_TYPES = new Set(["blog", "blogs", "article", "articles"]);
 
 export type DamageClassMeta = {
   id: DamageClass;
@@ -116,10 +110,10 @@ export const DAMAGE_CLASS_META: Record<DamageClass, DamageClassMeta> = {
   },
   selling_page: {
     id: "selling_page",
-    badge_label: "Selling page",
+    badge_label: "Outcome figures",
     situation_description:
-      "This proposal changes a page that sells a program or offer. Wrong outcome claims (hire rate, salary, price) can cost real leads — verify figures before apply.",
-    risk: "High — selling page; outcome claims affect leads.",
+      "This proposal adds or changes hire rates, salaries, tuition, or prices. Wrong outcome claims can cost real leads — verify every figure against an approved source before apply (any content type).",
+    risk: "High — outcome figures; claims affect leads and trust.",
   },
   new_public_content: {
     id: "new_public_content",
@@ -143,11 +137,12 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
   selling_page_figures: {
     id: "selling_page_figures",
     title: "Verify every outcome figure",
-    why: "This page sells. A wrong hire rate, salary, or price is not cosmetic.",
+    why: "This edit touches hire rates, salaries, tuition, or prices. A wrong number is not cosmetic — any content type.",
     look_for: [
       "proposed number vs approved source",
       "locale of the figure",
       "reject or block if the source is missing",
+      "Count-as-lead forms on the page are a soft caution only — they do not replace figure verification",
       "optional: get_product_funnel_analytics for conversion context — not required to apply",
     ],
     priority: 10,
@@ -161,6 +156,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "facts checked against the product",
       "CTA or link to a real program",
       "reject or add_blocker if any of the three fails",
+      "SEO topology in reader copy: body/H2 must not expose our content architecture, series inventory, or cluster membership to readers (e.g. \"Nth piece in our … cluster\", \"companion pieces\", \"Recent cluster updates\") — add_blocker; teaching what a topic cluster is when that is the topic is OK; staff summaries / seo.* / YAML cluster_* stay technical",
     ],
     priority: 10,
   },
@@ -201,7 +197,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     why: "Accept greenlights a brief only. A weak idea that later ships becomes a lasting URL — stop dilution, thin pages, and unjustified locks here.",
     look_for: [
       "Goal: one 90-day outcome — cite, rank, or assist a real program (not fill a cluster hole)",
-      "Evidence: follow declared demand label when present (anticipated_demand / fast_decay_news / broken_url); with no label, score the summary — demand keyword volume only for a search claim; launch or 404 cues without a label → add_blocker naming the label",
+      "Evidence: follow declared demand label when present (anticipated_demand / existing_demand / fast_decay_news / broken_url); with no label, score the summary — demand keyword volume only for a search claim; search/cite + volume/KD without existing_demand → add_blocker naming the label; launch or 404 cues without a label → add_blocker naming the label",
       "Fit: not a dupe of a sibling; locale justified; wrong vehicle (funnel/SERP/hub-links-only) → close and refile as edits",
       "Brand: educational angle, checkable facts, real program CTA — invent/endorsement without source → reject or close",
       "Dilution: if this ships and gets ~0 visits, would we still tax hubs, crawl, freshness, inventory?",
@@ -222,6 +218,22 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "Feature on a known product: parent product volume is a ceiling only — never a pass by itself",
       "Empty feature keyword_metrics is expected — do not block for no volume",
       "Disposition: accept | add_blocker | close | reject — never apply",
+    ],
+    priority: 2,
+  },
+  existing_demand: {
+    id: "existing_demand",
+    title: "Existing demand — rank/cite vs SERP occupants",
+    why: "Current-demand pitches fail when the SERP is mature mega-brands and the page is a copyable explainer — score the brief, do not re-run research.",
+    look_for: [
+      "Brief names the query and that demand is current (volume/SERP cited by the author)",
+      "Mature?: AIO and/or stable institutional top set — missing SERP write-up → add_blocker",
+      "Weight class: mega-brands in 1–8 → not our league for a generic explainer; peer bootcamps/indie/niche → comparable",
+      "Non-copyable asset?: unique data/tool/syllabus/outcomes/demo — OECD/NIST restates = copyable; unique asset → only that slice",
+      "Thinner sibling considered; prefer less mature long-tail when mega-SERP",
+      "Kill/honesty: mature + heavier + no asset → reject or recast; filler only with rationale + 90-day kill — never as a citation play",
+      "KD number alone never decides — symptom, not verdict",
+      "Disposition: accept | add_blocker | close | reject — never apply; do not call SEO research to finish the author's brief",
     ],
     priority: 2,
   },
@@ -259,6 +271,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     look_for: [
       "accepted_entry required (contentType, slug, locale) — locks that page+locale",
       "next_step is concrete (min 20 characters)",
+      "new-URL ideas: structured idea_funnel (stage + products) required before accept — missing → add_blocker; do not invent funnel for the author; products \"all\" only with awareness",
       "follow-up edits use implements_proposal_id matching this idea",
       "do not report the page as live after accept",
       "close/park means no — not yes",
@@ -313,6 +326,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "links: destinations exist, same locale as the article, hub/pillar or in-cluster sibling — not broken placeholders or money-page spray",
       "force: one link per idea is fine; sales sentence minted only to carry the link → add_blocker (wrap existing phrase; delete the pitch)",
       "if gates 1–3 pass, apply even if prose is a bit wooden — do not reject as weaker-than-live copy",
+      "SEO topology packaging ≠ allowable wooden: series maps, piece-count-in-cluster, companion-piece inventory, or \"for the full picture start with…\" as our content TOC → add_blocker (link by page job instead); teaching topic clusters when that is the subject is OK",
       "title/description also pending → leave-live on SERP (revise_entries to drop those ops) then apply body; do not reject the whole packet for the links",
       "ops vs live only — ignore staff summary / Titulo/Meta blurb; never block because summary wording ≠ ops",
       "same-field link churn already shipped + live not broken → leave live or reject duplicate_weaker; unrelated body/CTA writes alone ≠ reject",
@@ -352,6 +366,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "Shell: attached shared-layout still comes from template.{locale}.yml — detach only if intentional",
       "Promote honesty: apply promotes the named variant — it does not run AI translation or invent sibling locales",
       "Forced awkward phrasing that breaks meaning → add_blocker (fix draft), not reject-as-weaker-copy",
+      "SEO topology in target locale: draft body/H2 must not expose our content architecture, series inventory, or cluster membership to readers — add_blocker even if the source had it; do not reintroduce packaging when translating; teaching topic clusters when that is the subject is OK",
       "Wrong-locale internal links → block; out-of-scope live defects on other pages → adjacent_findings notes",
       "ops/draft vs source locale — ignore staff summary paste; never block because summary ≠ full body",
       "optional: get_entry_content on source locale then target with variant; list_variants; explain_site topic proposals subtopic translations",
@@ -367,6 +382,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "summary why/scope justified by ops (e.g. content refresh with meta-only → add_blocker)",
       "do not require the summary to paste proposed values",
       "no invented stats in the proposed text",
+      "SEO topology in reader copy: proposed body/H2 must not expose our content architecture, series inventory, or cluster membership to readers — add_blocker (not create refuse); examples: \"Nth piece in our … cluster\", \"companion pieces\", \"Recent cluster updates\"; teaching topic clusters when that is the subject is OK",
       "when multiple review situations are active: score each pack's owned fields independently; drop or fix failing packs via revise_entries before apply",
     ],
     priority: 30,
@@ -433,14 +449,6 @@ export const UNDO_COPY: Record<UndoCost, string> = {
   medium: "Apply writes live immediately.",
   high: "Apply publishes a whole draft to live — point of no return for that piece.",
 };
-
-export function isSellingContentType(contentType: string): boolean {
-  return SELLING_CONTENT_TYPES.has(contentType.trim().toLowerCase());
-}
-
-export function isPublicContentType(contentType: string): boolean {
-  return PUBLIC_CONTENT_TYPES.has(contentType.trim().toLowerCase());
-}
 
 /** Higher = worse for mixed-risk / worst-case. */
 export const DAMAGE_CLASS_RANK: Record<DamageClass, number> = {

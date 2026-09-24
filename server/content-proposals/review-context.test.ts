@@ -55,6 +55,7 @@ function baseProposal(
     replaced_by_proposal_id: null,
     accepted_entry: null,
     implements_proposal_id: null,
+    idea_funnel: null,
     author_content_at: null,
     reviewer_action_at: null,
     ...overrides,
@@ -62,16 +63,6 @@ function baseProposal(
 }
 
 describe("damageClassForTarget", () => {
-  it("selling type wins over seo category", () => {
-    expect(
-      damageClassForTarget({
-        contentType: "landing",
-        category: "content.seo",
-        existence: "exists",
-      }),
-    ).toBe("selling_page");
-  });
-
   it("live missing + draft → new_public_content", () => {
     expect(
       damageClassForTarget({
@@ -91,6 +82,26 @@ describe("damageClassForTarget", () => {
       }),
     ).toBe("existing_metadata");
   });
+
+  it("landing exists is not selling by type alone", () => {
+    expect(
+      damageClassForTarget({
+        contentType: "landing",
+        category: "content.seo",
+        existence: "exists",
+      }),
+    ).toBe("existing_metadata");
+  });
+
+  it("idea missing program → new_public_content", () => {
+    expect(
+      damageClassForTarget({
+        contentType: "program",
+        existence: "missing",
+        forIdea: true,
+      }),
+    ).toBe("new_public_content");
+  });
 });
 
 describe("undoCostFor", () => {
@@ -103,9 +114,9 @@ describe("undoCostFor", () => {
 });
 
 describe("collectDamageClassesForMixedCheck", () => {
-  it("detects mixed selling + blog meta", () => {
+  it("detects mixed outcome figures + blog meta", () => {
     const classes = collectDamageClassesForMixedCheck([
-      { contentType: "landing", existence: "exists" },
+      { contentType: "landing", existence: "exists", outcomeFigures: true },
       { contentType: "blog", category: "content.seo", existence: "exists" },
     ]);
     expect(isMixedRiskBundle(classes)).toBe(true);
@@ -114,6 +125,14 @@ describe("collectDamageClassesForMixedCheck", () => {
   it("allows existing_metadata + existing_content together", () => {
     const classes = collectDamageClassesForMixedCheck([
       { contentType: "blog", category: "content.field", existence: "exists" },
+      { contentType: "blog", category: "content.seo", existence: "exists" },
+    ]);
+    expect(isMixedRiskBundle(classes)).toBe(false);
+  });
+
+  it("landing without figures is not mixed with blog meta", () => {
+    const classes = collectDamageClassesForMixedCheck([
+      { contentType: "landing", existence: "exists" },
       { contentType: "blog", category: "content.seo", existence: "exists" },
     ]);
     expect(isMixedRiskBundle(classes)).toBe(false);
@@ -199,9 +218,9 @@ describe("classifyProposalReview", () => {
     expect(ctx.agent_preview.warnings.some((w) => w.code === "creates_attached_entry")).toBe(true);
   });
 
-  it("treats a selling page plus a creates_entry post as a mixed risk bundle", () => {
+  it("treats outcome figures plus a creates_entry post as a mixed risk bundle", () => {
     const classes = collectDamageClassesForMixedCheck([
-      { contentType: "program", existence: "exists" },
+      { contentType: "program", existence: "exists", outcomeFigures: true },
       { contentType: "blog", existence: "missing", createsEntry: true },
     ]);
     expect(isMixedRiskBundle(classes)).toBe(true);
@@ -345,7 +364,7 @@ describe("classifyProposalReview", () => {
     expect(ctx.agent_preview.think_items.some((t) => t.id === "adjacent_findings")).toBe(true);
   });
 
-  it("adds adjacent_findings for selling_page edits", () => {
+  it("adds adjacent_findings for outcome-figure edits", () => {
     const ctx = classifyProposalReview({
       proposal: baseProposal({
         kind: "edits",
@@ -358,7 +377,7 @@ describe("classifyProposalReview", () => {
             variant: null,
             variant_fingerprint: null,
             status: "pending",
-            ops: [],
+            ops: [{ field_path: "content", value: "Our hire rate is 90%" }],
             baseline_context: { values: {} },
             last_error: null,
             applied_at: null,
@@ -378,6 +397,7 @@ describe("classifyProposalReview", () => {
       ],
     });
     expect(ctx.damage_class).toBe("selling_page");
+    expect(ctx.staff_summary.badge_label).toBe("Outcome figures");
     expect(ctx.active_checklists).toContain("adjacent_findings");
     expect(ctx.active_checklists).toContain("selling_page_figures");
     expect(ctx.agent_preview.think_items.length).toBeLessThanOrEqual(6);
@@ -725,7 +745,7 @@ describe("classifyProposalReview", () => {
     expect(ctx.active_checklists).toContain("verify_copy");
   });
 
-  it("landing + title/desc → selling_page_figures and title_description_ctr", () => {
+  it("landing + title/desc without claim cues → title_description_ctr only", () => {
     const ctx = classifyProposalReview({
       proposal: baseProposal({
         kind: "edits",
@@ -750,9 +770,227 @@ describe("classifyProposalReview", () => {
       }),
       lookups: [{ contentType: "landing", slug: "ai", locale: "en", existence: "exists" }],
     });
+    expect(ctx.damage_class).not.toBe("selling_page");
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+    expect(ctx.active_checklists).toContain("title_description_ctr");
+  });
+
+  it("blog body with salary → selling_page_figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "Average salary is $85,000" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
     expect(ctx.damage_class).toBe("selling_page");
     expect(ctx.active_checklists).toContain("selling_page_figures");
-    expect(ctx.active_checklists).toContain("title_description_ctr");
+    expect(ctx.needs_jev_claim_check).toBeFalsy();
+    expect(ctx.review_situations).toContain("selling_figures");
+  });
+
+  it("blog body typo without cues → no figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "Fixed a typo in the intro." }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+    expect(ctx.damage_class).toBe("existing_content");
+  });
+
+  it("landing funnel-only → no figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "landing/ai",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "funnel.stage", value: "consideration" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "landing",
+            slug: "ai",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "landing", slug: "ai", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+    expect(ctx.review_situations).toContain("funnel_classification");
+  });
+
+  it("ambiguous cues + Jev yes → figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "About 50% of the chapter covers recursion." }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+      claimCueJevOutcome: "yes",
+    });
+    expect(ctx.active_checklists).toContain("selling_page_figures");
+    expect(ctx.jev?.outcome).toBe("yes");
+  });
+
+  it("ambiguous cues without Jev → needs_jev_claim_check", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "content", value: "About 50% of the chapter covers recursion." }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists" }],
+    });
+    expect(ctx.needs_jev_claim_check).toBe(true);
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+  });
+
+  it("promoteDraftText with salary → figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        promote_on_apply: true,
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "blog/hello",
+            locale: "en",
+            variant: "draft.es",
+            variant_fingerprint: "fp",
+            status: "pending",
+            ops: [],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "blog",
+            slug: "hello",
+          },
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "hello",
+          locale: "en",
+          variant: "draft.es",
+          existence: "exists",
+          draftExists: true,
+        },
+      ],
+      promoteDraftText: "Graduates report an average salary of $72,000.",
+    });
+    expect(ctx.active_checklists).toContain("selling_page_figures");
+  });
+
+  it("countsAsLeadForm soft hint without figures", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            id: 1,
+            proposal_id: "p1",
+            entry_key: "landing/ai",
+            locale: "en",
+            variant: null,
+            variant_fingerprint: null,
+            status: "pending",
+            ops: [{ field_path: "title", value: "AI course" }],
+            baseline_context: { values: {} },
+            last_error: null,
+            applied_at: null,
+            applied_by: null,
+            contentType: "landing",
+            slug: "ai",
+          },
+        ],
+      }),
+      lookups: [{ contentType: "landing", slug: "ai", locale: "en", existence: "exists" }],
+      countsAsLeadForm: true,
+    });
+    expect(ctx.counts_as_lead_hint).toBe(true);
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+    expect(ctx.agent_preview.warnings.some((w) => w.code === "counts_as_lead_form")).toBe(true);
   });
 
   it("done title ops do not keep title_description_ctr when only body remains", () => {
@@ -846,5 +1084,71 @@ describe("classifyProposalReview", () => {
     expect(ctx.active_checklists).not.toContain("verify_copy");
     expect(ctx.staff_summary.situation_description).toMatch(/locale translation/i);
     expect(ctx.agent_preview.think_items.some((t) => t.id === "locale_translation")).toBe(true);
+  });
+
+  it("warns undeclared existing_demand and stacks staff note when labeled", () => {
+    const unlabeled = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "Rank for what is machine learning",
+        summary:
+          "We want to rank and get cited for what is machine learning with a new explainer. ".repeat(2),
+      }),
+    });
+    expect(unlabeled.agent_preview.warnings.some((w) => w.code === "existing_demand_undeclared")).toBe(true);
+
+    const labeled = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "Rank for what is machine learning",
+        summary:
+          "We want to rank and get cited for what is machine learning with a new explainer. ".repeat(2),
+        review_situations: ["existing_demand"],
+      }),
+    });
+    expect(labeled.review_situations).toContain("existing_demand");
+    expect(labeled.agent_preview.warnings.some((w) => w.code === "existing_demand_undeclared")).toBe(false);
+    expect(labeled.staff_summary.situation_description).toMatch(/search demand|SERP|weight/i);
+  });
+
+  it("warns idea_funnel_missing for new-URL ideas without structured funnel", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "New article about Grok",
+        summary: "Create a page that explains Grok for beginners searching the query. ".repeat(2),
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "what-is-grok",
+          locale: "en",
+          existence: "missing",
+          draftExists: false,
+        },
+      ],
+    });
+    expect(ctx.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(true);
+
+    const withFunnel = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "New article about Grok",
+        summary: "Create a page that explains Grok for beginners searching the query. ".repeat(2),
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "what-is-grok",
+          locale: "en",
+          existence: "missing",
+          draftExists: false,
+        },
+      ],
+    });
+    expect(withFunnel.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(false);
   });
 });

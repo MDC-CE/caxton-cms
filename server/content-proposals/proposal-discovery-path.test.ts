@@ -257,6 +257,41 @@ describe("buildProposalDiscoveryPath", () => {
     }
   });
 
+  it("builds existing_demand idea path with playbook only (no research tools)", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i-demand",
+        status: "open",
+        kind: "idea",
+        summary: "Rank for what is machine learning with a peer SERP angle.",
+        related_entries: [],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm", "existing_demand"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "existing_demand",
+              title: "Existing search demand",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const names = tools.map((t) => (t.kind === "tool" ? t.tool : ""));
+    expect(names).toContain("explain_site");
+    expect(names).not.toContain("get_or_refresh_seo_research");
+    const explain = tools.find((t) => t.kind === "tool" && t.tool === "explain_site");
+    if (explain?.kind === "tool") {
+      expect(explain.args_hint).toMatchObject({ topic: "proposals", subtopic: "existing-demand" });
+    }
+  });
+
   it("builds idea path with related tools; unavailable when caps empty", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: {

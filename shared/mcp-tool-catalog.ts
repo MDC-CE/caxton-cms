@@ -36,7 +36,10 @@ export const TOOL_GATES: Record<string, ToolGate> = {
   get_product_funnel_analytics: { kind: "anyCap", caps: ["content_view"] },
   list_products: { kind: "anyCap", caps: ["content_view"] },
   get_product: { kind: "anyCap", caps: ["content_view"] },
-  update_product: { kind: "anyCap", caps: ["content_edit_structure"] },
+  create_or_update_product: {
+    kind: "anyCap",
+    caps: ["content_edit_structure", "product_manage"],
+  },
   list_components: { kind: "anyCap", caps: ["content_view"] },
   get_component_schema: { kind: "anyCap", caps: ["content_view"] },
   get_component_variant: { kind: "anyCap", caps: ["content_view"] },

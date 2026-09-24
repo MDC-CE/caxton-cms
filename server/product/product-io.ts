@@ -31,6 +31,8 @@ import { productManager } from "./product-manager";
 import { scanProductContent } from "./product-index";
 import { getDefaultContentRoot } from "../site-config";
 import type { CmsProduct } from "./types";
+import { contentTypeAllowsSellableEntries } from "./products-type-config";
+import { getAllConfigs, getType } from "../content-types";
 
 function contentRootAbs(contentRoot?: string): string {
   const raw = contentRoot ?? getDefaultContentRoot();
@@ -43,6 +45,8 @@ export type ProductListRow = {
   content_type: string;
   content_slug: string;
   actively_selling: boolean;
+  /** false when soft-removed from the product index */
+  purchasable: boolean;
   audience_status: AudienceStatus;
   personas: { id: string; label: string }[];
 };
@@ -53,7 +57,7 @@ export type ProductSnapshot = {
   description?: string;
   content_type: string;
   content_slug: string;
-  purchasable: true;
+  purchasable: boolean;
   actively_selling: boolean;
   offer?: ProductOffer;
   personas?: ProductPersona[];
@@ -71,7 +75,7 @@ export type ProductPatch = {
   personas?: Array<Partial<ProductPersona> & { id: string }>;
   clear_personas?: string[];
   replace_personas?: boolean;
-  /** Staff-only; MCP must refuse. Setting false is always refused. */
+  /** Staff / product_manage: true create|re-enable; false soft-remove */
   purchasable?: boolean;
 };
 
@@ -84,7 +88,7 @@ export type ProductWriteResult =
     }
   | { ok: false; error: string; code: string; details?: unknown };
 
-function toListRow(product: CmsProduct): ProductListRow {
+function toListRow(product: CmsProduct, purchasable = true): ProductListRow {
   const audience = product.audience ?? null;
   return {
     product_id: product.product_id,
@@ -92,6 +96,7 @@ function toListRow(product: CmsProduct): ProductListRow {
     content_type: product.content_type,
     content_slug: product.content_slug,
     actively_selling: product.actively_selling,
+    purchasable,
     audience_status: audienceStatus(audience),
     personas: (audience?.personas ?? []).map((p) => ({
       id: p.id,
@@ -100,53 +105,168 @@ function toListRow(product: CmsProduct): ProductListRow {
   };
 }
 
-/** Compact inventory rows. Paused included by default. */
+function snapshotFromDoc(
+  contentType: string,
+  slug: string,
+  doc: Record<string, unknown>,
+  absolutePath: string,
+  contentRoot?: string,
+): ProductSnapshot {
+  const audience = parseAudienceFromProductDoc(doc);
+  const root = contentRootAbs(contentRoot);
+  const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+  const productId =
+    typeof doc.product_id === "string" && doc.product_id.trim()
+      ? doc.product_id.trim()
+      : `${contentType}-${slug}`;
+  const name =
+    typeof doc.name === "string" && doc.name.trim() ? doc.name.trim() : slug;
+  const purchasable = doc.purchasable === true;
+  const actively_selling =
+    typeof doc.actively_selling === "boolean"
+      ? doc.actively_selling
+      : typeof doc.active === "boolean"
+        ? doc.active
+        : true;
+  const description = typeof doc.description === "string" ? doc.description : undefined;
+  return {
+    product_id: productId,
+    name,
+    ...(description ? { description } : {}),
+    content_type: contentType,
+    content_slug: slug,
+    purchasable,
+    actively_selling,
+    ...(audience?.offer ? { offer: audience.offer } : {}),
+    ...(audience?.personas ? { personas: audience.personas } : {}),
+    audience_status: audienceStatus(audience),
+    relative_path: relativePath,
+  };
+}
+
+function humanizeSlug(slug: string): string {
+  return slug
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function findProductIdCollision(
+  productId: string,
+  exceptContentType: string,
+  exceptSlug: string,
+  contentRoot?: string,
+): { content_type: string; content_slug: string } | null {
+  for (const p of productManager.listAllProducts({ includePaused: true })) {
+    if (p.product_id !== productId) continue;
+    if (p.content_type === exceptContentType && p.content_slug === exceptSlug) continue;
+    return { content_type: p.content_type, content_slug: p.content_slug };
+  }
+  // Also scan removed sidecars for same product_id
+  for (const row of listRemovedProductRows({ contentRoot })) {
+    if (row.product_id !== productId) continue;
+    if (row.content_type === exceptContentType && row.content_slug === exceptSlug) continue;
+    return { content_type: row.content_type, content_slug: row.content_slug };
+  }
+  return null;
+}
+
+/** Compact inventory rows. Paused included by default. Removed excluded unless includeRemoved. */
 export function listProductRows(opts?: {
   includePaused?: boolean;
+  includeRemoved?: boolean;
   content_type?: string;
+  contentRoot?: string;
 }): ProductListRow[] {
   const includePaused = opts?.includePaused !== false;
   const ct = opts?.content_type?.trim();
-  return productManager
+  const rows = productManager
     .listAllProducts({ includePaused })
     .filter((p) => !ct || p.content_type === ct)
-    .map(toListRow)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .map((p) => toListRow(p, true));
+  if (opts?.includeRemoved) {
+    for (const r of listRemovedProductRows({ content_type: ct, contentRoot: opts.contentRoot })) {
+      rows.push(r);
+    }
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** Soft-removed products (purchasable: false sidecars) — not in the live index. */
+export function listRemovedProductRows(opts?: {
+  content_type?: string;
+  contentRoot?: string;
+}): ProductListRow[] {
+  const root = contentRootAbs(opts?.contentRoot);
+  const ctFilter = opts?.content_type?.trim();
+  const out: ProductListRow[] = [];
+  const configs = getAllConfigs(opts?.contentRoot);
+  for (const [ct, cfg] of Object.entries(configs)) {
+    if (ctFilter && ct !== getType(ctFilter, opts?.contentRoot) && ct !== ctFilter) continue;
+    const folder =
+      typeof (cfg as { directory?: string }).directory === "string"
+        ? (cfg as { directory: string }).directory
+        : ct;
+    const typeDir = path.join(root, folder);
+    if (!fs.existsSync(typeDir)) continue;
+    for (const ent of fs.readdirSync(typeDir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const slug = ent.name;
+      const loaded = readProductDoc(ct, slug, opts?.contentRoot);
+      if (!loaded) continue;
+      if (loaded.doc.purchasable !== false) continue;
+      const snap = snapshotFromDoc(ct, slug, loaded.doc, loaded.absolutePath, opts?.contentRoot);
+      out.push({
+        product_id: snap.product_id,
+        name: snap.name,
+        content_type: snap.content_type,
+        content_slug: snap.content_slug,
+        actively_selling: snap.actively_selling,
+        purchasable: false,
+        audience_status: snap.audience_status,
+        personas: (snap.personas ?? []).map((p) => ({
+          id: p.id,
+          label: p.label || p.role,
+        })),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Read product snapshot from index or from sidecar (including purchasable: false).
+ */
 export function readEntryProduct(
   contentType: string,
   slug: string,
   contentRoot?: string,
 ): ProductSnapshot | null {
+  const loaded = readProductDoc(contentType, slug, contentRoot);
+  if (loaded) {
+    return snapshotFromDoc(contentType, slug, loaded.doc, loaded.absolutePath, contentRoot);
+  }
   const product = productManager.findProductByCmsEntry(contentType, slug, {
     includePaused: true,
   });
   if (!product) return null;
-  const loaded = readProductDoc(contentType, slug, contentRoot);
-  const audience = loaded ? parseAudienceFromProductDoc(loaded.doc) : product.audience ?? null;
   const root = contentRootAbs(contentRoot);
-  const relativePath = loaded
-    ? path.relative(root, loaded.absolutePath).split(path.sep).join("/")
-    : `${product.content_type}/${slug}/${PRODUCT_SIDECAR_BASENAME}`;
-
-  const description =
-    loaded && typeof loaded.doc.description === "string"
-      ? loaded.doc.description
-      : product.description;
-
+  const relativePath = `${product.content_type}/${slug}/${PRODUCT_SIDECAR_BASENAME}`;
   return {
     product_id: product.product_id,
     name: product.name,
-    ...(description ? { description } : {}),
+    ...(product.description ? { description: product.description } : {}),
     content_type: product.content_type,
     content_slug: product.content_slug,
     purchasable: true,
     actively_selling: product.actively_selling,
-    ...(audience?.offer ? { offer: audience.offer } : {}),
-    ...(audience?.personas ? { personas: audience.personas } : {}),
-    audience_status: audienceStatus(audience),
-    relative_path: relativePath,
+    ...(product.audience?.offer ? { offer: product.audience.offer } : {}),
+    ...(product.audience?.personas ? { personas: product.audience.personas } : {}),
+    audience_status: audienceStatus(product.audience ?? null),
+    relative_path: relativePath.startsWith(root)
+      ? path.relative(root, relativePath).split(path.sep).join("/")
+      : relativePath,
   };
 }
 
@@ -277,7 +397,8 @@ function mergePersonas(
 }
 
 /**
- * Staff/API product patch. Callers that are MCP must strip purchasable/actively_selling first.
+ * Staff/API product patch. Create / remove / re-enable via purchasable;
+ * audience works on indexed and soft-removed sidecars.
  */
 export function writeEntryProduct(
   contentType: string,
@@ -285,45 +406,165 @@ export function writeEntryProduct(
   patch: ProductPatch,
   contentRoot?: string,
 ): ProductWriteResult {
-  if (patch.purchasable === false) {
-    return {
-      ok: false,
-      code: "purchasable_remove_forbidden",
-      error:
-        "Cannot set purchasable to false via API. Removing a product from the index is a manual content change. To hide from the store, set actively_selling to false (staff Store).",
-    };
-  }
-
-  const product = productManager.findProductByCmsEntry(contentType, slug, {
-    includePaused: true,
-  });
-  if (!product) {
-    return {
-      ok: false,
-      code: "not_a_product",
-      error: `No purchasable product for ${contentType}/${slug}. Creating a sellable product requires a human (staff/YAML); agents should propose_change notes.`,
-    };
-  }
-
   const dir = entryProductDir(contentType, slug, contentRoot);
   if (!fs.existsSync(dir)) {
     return { ok: false, code: "missing_entry", error: `Entry directory not found for ${contentType}/${slug}` };
   }
 
+  const indexed = productManager.findProductByCmsEntry(contentType, slug, {
+    includePaused: true,
+  });
   const existing = readProductDoc(contentType, slug, contentRoot);
+  const wasRemoved = existing?.doc.purchasable === false;
+  const isIndexed = !!indexed;
+
+  // Create new sellable product
+  if (!isIndexed && !existing && patch.purchasable === true) {
+    if (!contentTypeAllowsSellableEntries(contentType, contentRoot)) {
+      return {
+        ok: false,
+        code: "type_not_allow_sellable",
+        error: `Content type "${contentType}" does not allow sellable entries (products.allow_sellable_entries).`,
+      };
+    }
+    const productId =
+      typeof patch.product_id === "string" && patch.product_id.trim()
+        ? patch.product_id.trim()
+        : `${contentType}-${slug}`;
+    const collision = findProductIdCollision(productId, contentType, slug, contentRoot);
+    if (collision) {
+      return {
+        ok: false,
+        code: "product_id_collision",
+        error: `Product id "${productId}" already used by ${collision.content_type}/${collision.content_slug}.`,
+        details: collision,
+      };
+    }
+    const name =
+      typeof patch.name === "string" && patch.name.trim()
+        ? patch.name.trim()
+        : humanizeSlug(slug);
+    const doc: Record<string, unknown> = {
+      purchasable: true,
+      actively_selling: patch.actively_selling !== false,
+      product_id: productId,
+      name,
+    };
+    if (typeof patch.description === "string") doc.description = patch.description;
+
+    const writePath = productSidecarWritePath(dir);
+    const dumped = yaml.dump(doc, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
+    fs.writeFileSync(writePath, dumped.endsWith("\n") ? dumped : `${dumped}\n`, "utf-8");
+    scanProductContent(contentRootAbs(contentRoot));
+    const snapshot = readEntryProduct(contentType, slug, contentRoot);
+    if (!snapshot || !snapshot.purchasable) {
+      return {
+        ok: false,
+        code: "write_verify_failed",
+        error: "Wrote product sidecar but could not re-read product from index",
+      };
+    }
+    const root = contentRootAbs(contentRoot);
+    return {
+      ok: true,
+      product: snapshot,
+      relativePath: path.relative(root, writePath).split(path.sep).join("/"),
+      warnings: [
+        {
+          code: "thin_create",
+          message:
+            "Product is sellable. Audience (offer + personas) is still missing — set it next so funnel landings can bind personas.",
+        },
+      ],
+    };
+  }
+
+  // Need a sidecar for any further patch
+  if (!existing && !isIndexed) {
+    return {
+      ok: false,
+      code: "not_a_product",
+      error: `No product sidecar for ${contentType}/${slug}. Pass purchasable: true to create one (requires products.allow_sellable_entries and product_manage).`,
+    };
+  }
+
   const doc: Record<string, unknown> = existing?.doc ? { ...existing.doc } : {};
   if (typeof doc.purchasable !== "boolean") {
     doc.purchasable = true;
   }
 
-  if (patch.purchasable === true) {
-    doc.purchasable = true;
+  // Soft-remove
+  if (patch.purchasable === false) {
+    if (doc.purchasable !== true && !isIndexed) {
+      return {
+        ok: false,
+        code: "not_a_product",
+        error: `No sellable product for ${contentType}/${slug} to remove.`,
+      };
+    }
+    doc.purchasable = false;
   }
+
+  // Re-enable removed or create from existing sidecar
+  if (patch.purchasable === true) {
+    if (!contentTypeAllowsSellableEntries(contentType, contentRoot)) {
+      return {
+        ok: false,
+        code: "type_not_allow_sellable",
+        error: `Content type "${contentType}" does not allow sellable entries (products.allow_sellable_entries).`,
+      };
+    }
+    const productId =
+      typeof patch.product_id === "string" && patch.product_id.trim()
+        ? patch.product_id.trim()
+        : typeof doc.product_id === "string" && doc.product_id.trim()
+          ? String(doc.product_id).trim()
+          : `${contentType}-${slug}`;
+    const collision = findProductIdCollision(productId, contentType, slug, contentRoot);
+    if (collision) {
+      return {
+        ok: false,
+        code: "product_id_collision",
+        error: `Product id "${productId}" already used by ${collision.content_type}/${collision.content_slug}.`,
+        details: collision,
+      };
+    }
+    doc.purchasable = true;
+    doc.product_id = productId;
+    if (typeof doc.name !== "string" || !String(doc.name).trim()) {
+      doc.name =
+        typeof patch.name === "string" && patch.name.trim()
+          ? patch.name.trim()
+          : humanizeSlug(slug);
+    }
+    if (typeof doc.actively_selling !== "boolean") {
+      doc.actively_selling = true;
+    }
+  }
+
   if (typeof patch.actively_selling === "boolean") {
+    if (doc.purchasable === false && patch.purchasable !== true) {
+      return {
+        ok: false,
+        code: "not_sellable",
+        error:
+          "Product is not sellable (removed). Make sellable again before pausing/resuming store visibility.",
+      };
+    }
     doc.actively_selling = patch.actively_selling;
   }
-  if (typeof patch.product_id === "string" && patch.product_id.trim()) {
-    doc.product_id = patch.product_id.trim();
+  if (typeof patch.product_id === "string" && patch.product_id.trim() && patch.purchasable !== true) {
+    const nextId = patch.product_id.trim();
+    const collision = findProductIdCollision(nextId, contentType, slug, contentRoot);
+    if (collision) {
+      return {
+        ok: false,
+        code: "product_id_collision",
+        error: `Product id "${nextId}" already used by ${collision.content_type}/${collision.content_slug}.`,
+        details: collision,
+      };
+    }
+    doc.product_id = nextId;
   }
   if (typeof patch.name === "string" && patch.name.trim()) {
     doc.name = patch.name.trim();
@@ -388,6 +629,18 @@ export function writeEntryProduct(
       message: `Wrote ${PRODUCT_SIDECAR_BASENAME}; legacy ${LEGACY_PRODUCT_SIDECAR_BASENAME} still exists — run migrate script to remove it.`,
     });
   }
+  if (doc.purchasable === false) {
+    warnings.push({
+      code: "not_sellable",
+      message:
+        "Product is not sellable right now (removed from the store index). Audience can still be edited. Make sellable again to restore selling.",
+    });
+  } else if (wasRemoved && doc.purchasable === true) {
+    warnings.push({
+      code: "re_enabled",
+      message: "Product is sellable again and back in the product index.",
+    });
+  }
 
   scanProductContent(contentRootAbs(contentRoot));
 
@@ -398,7 +651,7 @@ export function writeEntryProduct(
     return {
       ok: false,
       code: "write_verify_failed",
-      error: "Wrote product sidecar but could not re-read product from index",
+      error: "Wrote product sidecar but could not re-read product",
     };
   }
 

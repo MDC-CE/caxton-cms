@@ -20,6 +20,7 @@ export const REVIEW_SITUATION_IDS = [
   "locale_translation",
   "idea_opportunity_harm",
   "anticipated_demand",
+  "existing_demand",
   "fast_decay_news",
   "broken_url",
 ] as const;
@@ -35,6 +36,7 @@ export const IDEA_DEFAULT_SITUATION_ID: ReviewSituationId = "idea_opportunity_ha
  */
 export const IDEA_AUTHOR_SITUATION_IDS = [
   "anticipated_demand",
+  "existing_demand",
   "fast_decay_news",
   "broken_url",
 ] as const;
@@ -73,6 +75,15 @@ const TRANSLATION_INTENT_RE =
   /\b(translat(e|ion|ed|ing)|locale\s+variant|from\s+[a-z]{2}\s*(→|->|to)\s*[a-z]{2}|en\s*(→|->)\s*es|es\s*(→|->)\s*en)\b/i;
 
 export const SITUATION_LOCALE_TRANSLATION_UNDECLARED = "locale_translation_undeclared";
+export const EXISTING_DEMAND_UNDECLARED = "existing_demand_undeclared";
+
+/** Summary/title cues that an unlabeled idea is a current-demand rank/cite pitch. */
+const EXISTING_DEMAND_INTENT_RE =
+  /\b(rank|ranking|cite|citation|citar|captar\s+la\s+b[uú]squeda|keyword\s+difficulty|kw_difficulty|\bKD\s*\d+|monthly\s+volume|kw_monthly|seo\s+keyword|main_keyword|organic\s+search|SERP|AIO|AI\s+Overview)\b/i;
+
+export function looksLikeExistingDemandPitch(title?: string | null, summary?: string | null): boolean {
+  return EXISTING_DEMAND_INTENT_RE.test(`${title ?? ""} ${summary ?? ""}`);
+}
 
 export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituationDef> = {
   internal_links: {
@@ -84,12 +95,13 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     explain_subtopic: "internal-links",
     checklist_ids: ["internal_links"],
     staff_note:
-      "Also check hub links — facts and locale targets intact, not punchier prose.",
+      "Also check hub links — facts and locale targets intact, not punchier prose. Block SEO topology packaging in body (series/cluster inventory talk), not stiff anchors.",
     discovery_content_look_for: [
       "list added [text](href) vs live; confirm each new href exists and matches article locale",
       "no dropped figures, years, employers, or sources to make room for links",
       "anchors on existing phrases — not new sales CTAs minted only to hang the link",
       "hub / pillar / in-cluster sibling fit — not money-page spray",
+      "no SEO topology packaging for readers (piece-count-in-cluster, companion-piece maps, series TOC) — link by page job instead",
     ],
     author_summary_hints: [
       "Add same-locale internal links to the cluster hub. Content field only. Live figures stay as-is. No title or description changes.",
@@ -138,10 +150,12 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     explain_topic: "proposals",
     explain_subtopic: "situations",
     checklist_ids: ["verify_copy"],
-    staff_note: "Check proposed fields against live — catch breakage and invented claims.",
+    staff_note:
+      "Check proposed fields against live — catch breakage, invented claims, and SEO topology talk in reader copy.",
     discovery_content_look_for: [
       "proposed fields vs live copy",
       "no invented stats in the proposed text",
+      "body/H2 must not expose our content architecture, series inventory, or cluster membership to readers",
     ],
     author_summary_hints: [
       "Update body or fields for accuracy or clarity. Intent + why only in summary; ops own the values.",
@@ -149,20 +163,20 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
   },
   selling_figures: {
     id: "selling_figures",
-    label: "Selling-page figures",
+    label: "Outcome figures",
     when_to_use:
-      "Edits on a program or landing page where hire rates, salaries, prices, or outcome claims may move.",
+      "Edits that add or change hire rates, salaries, tuition, prices, or other outcome claims (any content type). Prefer declaring this when the brief is about those numbers.",
     explain_topic: "proposals",
     explain_subtopic: "situations",
     checklist_ids: ["selling_page_figures"],
     staff_note:
-      "This page sells — verify every outcome figure against an approved source before apply.",
+      "Outcome figures — verify every hire rate, salary, tuition, or price against an approved source before apply.",
     discovery_content_look_for: [
       "proposed number vs approved source",
       "locale of the figure",
     ],
     author_summary_hints: [
-      "Update selling-page outcome figures with sources. Confirm every hire rate, salary, or price.",
+      "Update outcome figures with sources. Confirm every hire rate, salary, or price.",
     ],
   },
   new_public_content: {
@@ -174,11 +188,12 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     explain_subtopic: "situations",
     checklist_ids: ["new_content_brand"],
     staff_note:
-      "New public content — clear the brand gate (angle, facts, real program CTA). For an attached post with no file yet, applying creates that post and does not change the shared template.",
+      "New public content — clear the brand gate (angle, facts, real program CTA). Body must not explain our SEO topology to readers. For an attached post with no file yet, applying creates that post and does not change the shared template.",
     discovery_content_look_for: [
       "defensible technical or educational angle",
       "facts checked against the product",
       "CTA or link to a real program",
+      "body/H2 must not expose series inventory, cluster membership, or companion-piece maps to readers",
     ],
     author_summary_hints: [
       "New public page or draft promote path. Angle, facts, and funnel CTA must be defensible.",
@@ -211,12 +226,13 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     explain_subtopic: "translations",
     checklist_ids: ["locale_translation"],
     staff_note:
-      "Also check locale translation — draft matches source meaning and facts before go-live, not punchier copy vs live.",
+      "Also check locale translation — draft matches source meaning and facts before go-live, not punchier copy vs live. Block SEO topology packaging in the target locale.",
     discovery_content_look_for: [
       "draft (locale + variant) vs source locale meaning and facts — same years, employers, sources",
       "required fields ready on the variant; url_slug locale-fitting",
       "shell still from template.{locale}.yml unless detached intentionally",
       "apply promotes the variant — does not AI-translate or invent sibling locales",
+      "target body/H2 must not expose our content architecture, series inventory, or cluster membership to readers",
     ],
     author_summary_hints: [
       "Translated from en → es. Promote draft.{locale} — facts match source; slug locale-fitting. review_situations:[locale_translation] + promote_on_apply.",
@@ -260,6 +276,26 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     ],
     author_summary_hints: [
       "New product/feature will become search volume. Name announcement + lasting questions + fade plan. review_situations:[anticipated_demand]. Empty volume is expected.",
+    ],
+  },
+  existing_demand: {
+    id: "existing_demand",
+    label: "Existing search demand",
+    when_to_use:
+      "Idea: rank and/or cite on a query that already has measurable demand — author must document SERP maturity, weight class, unique asset, and kill line in the brief.",
+    explain_topic: "proposals",
+    explain_subtopic: "existing-demand",
+    checklist_ids: ["existing_demand"],
+    staff_note:
+      "Current search demand — judge whether the brief justifies rank/cite against who already sits on the SERP. Accepting does not publish.",
+    discovery_content_look_for: [
+      "brief names the query and that demand is current (not anticipated)",
+      "mature vs not — AIO and/or institutional top set summarized from author's SERP read",
+      "weight class: mega-brand vs peer; unique asset or explicit none; thinner sibling; kill/filler honesty",
+      "do not re-run keyword research to complete the author's homework — incomplete brief → add_blocker",
+    ],
+    author_summary_hints: [
+      "Current-demand rank/cite pitch. Call get_or_refresh_seo_research (keyword_metrics + serp) first; paste mature/weight-class/asset/sibling/kill in the brief. review_situations:[existing_demand].",
     ],
   },
   fast_decay_news: {
@@ -336,7 +372,7 @@ export function parseReviewSituationIds(
 }
 
 /**
- * Idea authors may declare at most one of anticipated_demand | fast_decay_news | broken_url.
+ * Idea authors may declare at most one of anticipated_demand | existing_demand | fast_decay_news | broken_url.
  * idea_opportunity_harm is never author-filed (always injected on classify).
  */
 export function parseIdeaAuthorSituationIds(
@@ -441,7 +477,11 @@ function hasTranslationIntent(title?: string | null, summary?: string | null): b
 export function situationsRelevantToOps(
   ids: ReviewSituationId[],
   entries: OpsEntryForSituation[],
-  opts?: { promoteOnApply?: boolean; damageClass?: DamageClass | null },
+  opts?: {
+    promoteOnApply?: boolean;
+    damageClass?: DamageClass | null;
+    outcomeFigures?: boolean;
+  },
 ): ReviewSituationId[] {
   const paths = pendingFieldPaths(entries);
   const hasSerp = paths.some(isTitleDescriptionFieldPath);
@@ -451,6 +491,7 @@ export function situationsRelevantToOps(
   const promoteOnly = isPromoteOnly(entries, opts?.promoteOnApply);
   const translationShape = isLocaleTranslationShape(entries, opts?.promoteOnApply);
   const damage = opts?.damageClass ?? null;
+  const outcomeFigures = Boolean(opts?.outcomeFigures) || damage === "selling_page";
 
   return ids.filter((id) => {
     switch (id) {
@@ -463,7 +504,7 @@ export function situationsRelevantToOps(
       case "body_copy_edit":
         return hasBody || hasOther;
       case "selling_figures":
-        return damage === "selling_page" || paths.length > 0;
+        return outcomeFigures || paths.length > 0;
       case "new_public_content":
         return damage === "new_public_content" || paths.length > 0;
       case "promote_draft":
@@ -473,6 +514,7 @@ export function situationsRelevantToOps(
       case "idea_opportunity_harm":
         return false;
       case "anticipated_demand":
+      case "existing_demand":
       case "fast_decay_news":
       case "broken_url":
         return false;
@@ -487,6 +529,8 @@ export type InferSituationsOpts = {
   title?: string | null;
   promoteOnApply?: boolean;
   damageClass?: DamageClass | null;
+  /** Claim-based outcome figures checklist is active. */
+  outcomeFigures?: boolean;
 };
 
 /**
@@ -503,6 +547,8 @@ export function inferSituationsFromOps(
   const translationShape = isLocaleTranslationShape(entries, opts.promoteOnApply);
   const translationIntent = hasTranslationIntent(opts.title, opts.summary);
   const out = new Set<ReviewSituationId>();
+  const outcomeFigures =
+    Boolean(opts.outcomeFigures) || opts.damageClass === "selling_page";
 
   const hasSerp = paths.some(isTitleDescriptionFieldPath);
   const hasBody = paths.some(isBodyFieldPath);
@@ -513,13 +559,14 @@ export function inferSituationsFromOps(
     out.add("locale_translation");
     if (hasSerp) out.add("serp_title_description");
     if (hasFunnel) out.add("funnel_classification");
-    if (opts.damageClass === "selling_page") out.add("selling_figures");
+    if (outcomeFigures) out.add("selling_figures");
     if (opts.damageClass === "new_public_content") out.add("new_public_content");
     return [...out];
   }
 
   if (isPromoteOnly(entries, opts.promoteOnApply)) {
     out.add("promote_draft");
+    if (outcomeFigures) out.add("selling_figures");
     return [...out];
   }
 
@@ -532,7 +579,7 @@ export function inferSituationsFromOps(
     out.add("body_copy_edit");
   }
 
-  if (opts.damageClass === "selling_page") out.add("selling_figures");
+  if (outcomeFigures) out.add("selling_figures");
   if (opts.damageClass === "new_public_content") out.add("new_public_content");
 
   if (out.size === 0) {
@@ -555,7 +602,11 @@ export function mergeSituations(
   declared: ReviewSituationId[],
   inferred: ReviewSituationId[],
   entries: OpsEntryForSituation[],
-  opts?: { promoteOnApply?: boolean; damageClass?: DamageClass | null },
+  opts?: {
+    promoteOnApply?: boolean;
+    damageClass?: DamageClass | null;
+    outcomeFigures?: boolean;
+  },
 ): MergeSituationsResult {
   const warnings: Array<{ code: string; message: string }> = [];
   const inferredSet = new Set(inferred);
@@ -593,6 +644,7 @@ export function mergeSituations(
     inferSituationsFromOps(entries, {
       promoteOnApply: opts?.promoteOnApply,
       damageClass: opts?.damageClass,
+      outcomeFigures: opts?.outcomeFigures,
       // do not use link/translation keywords for mismatch — ops shape only
       summary: "",
       title: "",
@@ -602,6 +654,8 @@ export function mergeSituations(
   const impliedRich = new Set(inferred);
 
   const undeclaredExtras = inferred.filter((i) => !declared.includes(i));
+  const outcomeFigures =
+    Boolean(opts?.outcomeFigures) || opts?.damageClass === "selling_page";
   const declaredNotImplied = declared.filter((d) => {
     if (d === "internal_links") return !pathsSuggestBody(entries);
     if (d === "serp_title_description") return !pathsSuggestSerp(entries);
@@ -610,7 +664,7 @@ export function mergeSituations(
     if (d === "locale_translation") {
       return !isLocaleTranslationShape(entries, opts?.promoteOnApply);
     }
-    if (d === "selling_figures") return opts?.damageClass !== "selling_page" && !hasAnyPendingOps(entries);
+    if (d === "selling_figures") return !outcomeFigures && !hasAnyPendingOps(entries);
     if (d === "new_public_content") {
       return opts?.damageClass !== "new_public_content" && !hasAnyPendingOps(entries);
     }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useLocation, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
-import { IconClipboardList, IconInfoCircle, IconLoader2, IconSearch } from "@tabler/icons-react";
+import { IconClipboardList, IconInfoCircle, IconLoader2, IconScale, IconSearch } from "@tabler/icons-react";
 import { Geekchart } from "geekchart";
 import "geekchart/fonts.css";
 import { allowedToolNames } from "@shared/mcp-tool-catalog";
@@ -26,6 +26,7 @@ import {
   ProposalDetailPanel,
   ProposalListPanel,
 } from "@/pages/ProposalsPage";
+import { AgentsRulesPanel } from "@/pages/AgentsRulesPanel";
 
 interface CapabilityGrant {
   name: string;
@@ -44,7 +45,7 @@ interface AdminRolesResponse {
   roles: Record<string, RoleDefinition>;
 }
 
-type AgentsTab = "orgchart" | "proposals";
+type AgentsTab = "orgchart" | "proposals" | "rules";
 
 const AGENTS_TABS: {
   id: AgentsTab;
@@ -54,10 +55,12 @@ const AGENTS_TABS: {
 }[] = [
   { id: "orgchart", href: "/private/agents/orgchart", label: "Org Chart", Icon: Bot },
   { id: "proposals", href: AGENTS_PROPOSALS_BASE, label: "Proposals", Icon: IconClipboardList },
+  { id: "rules", href: "/private/agents/rules", label: "Rules", Icon: IconScale },
 ];
 
 function resolveAgentsTab(pathname: string): AgentsTab | null {
   if (pathname === "/private/agents/orgchart") return "orgchart";
+  if (pathname === "/private/agents/rules") return "rules";
   if (pathname === AGENTS_PROPOSALS_BASE || pathname.startsWith(`${AGENTS_PROPOSALS_BASE}/`)) {
     return "proposals";
   }
@@ -416,6 +419,38 @@ export default function AgentsOrgChartPage() {
                       </p>
                     </PopoverContent>
                   </Popover>
+                ) : activeTab === "rules" ? (
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        aria-label="Read more (advanced)"
+                        data-testid="button-agents-rules-advanced-info"
+                      >
+                        <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="start"
+                      className="w-80 space-y-2 text-xs text-muted-foreground leading-relaxed"
+                    >
+                      <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
+                      <p>
+                        Policy is stored per site in{" "}
+                        <code className="font-mono bg-muted px-1 rounded">settings.yml</code> under{" "}
+                        <code className="font-mono bg-muted px-1 rounded">proposals:</code>. Only a
+                        Platform Steward can save.
+                      </p>
+                      <p>
+                        Who may file or decide is still Security → Roles (
+                        <code className="font-mono bg-muted px-1 rounded">proposals_create</code> /{" "}
+                        <code className="font-mono bg-muted px-1 rounded">proposals_review</code>
+                        ).
+                      </p>
+                    </PopoverContent>
+                  </Popover>
                 ) : (
                   <AgentsProposalsInfoPopover />
                 )}
@@ -425,6 +460,10 @@ export default function AgentsOrgChartPage() {
                   <>
                     MCP swarm connectors — not staff CMS roles. Assign them on Security → Users to unlock{" "}
                     <code className="text-xs font-mono bg-muted px-1 rounded">/mcp/role/…</code>.
+                  </>
+                ) : activeTab === "rules" ? (
+                  <>
+                    Site policy for withdraw, four-eyes, holds, and claims — not who has which role.
                   </>
                 ) : (
                   <>Review and apply agent-suggested entry changes or handoff notes.</>
@@ -462,6 +501,7 @@ export default function AgentsOrgChartPage() {
           {activeTab === "orgchart" && <OrgChartPanel />}
           {activeTab === "proposals" &&
             (params.id ? <ProposalDetailPanel id={params.id} /> : <ProposalListPanel />)}
+          {activeTab === "rules" && <AgentsRulesPanel />}
         </div>
       </div>
     </div>

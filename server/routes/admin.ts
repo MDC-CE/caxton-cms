@@ -2745,6 +2745,7 @@ export function registerAdminRoutes(app: Express): void {
         model_default: modelDefault,
         model_chat: modelObj?.chat || "",
         model_vision: modelObj?.vision || "",
+        model_decision: modelObj?.decision || "",
         provider: {
           api_key_env: apiKeyEnv,
           base_url_env: baseUrlEnv,
@@ -2767,6 +2768,7 @@ export function registerAdminRoutes(app: Express): void {
         model_default: modelDefault,
         model_chat: modelChat,
         model_vision: modelVision,
+        model_decision: modelDecision,
       } = req.body || {};
 
       if (modelDefault !== undefined && (typeof modelDefault !== "string" || !modelDefault.trim())) {
@@ -2778,8 +2780,30 @@ export function registerAdminRoutes(app: Express): void {
       if (modelVision !== undefined && typeof modelVision !== "string") {
         return res.status(400).json({ error: "model_vision must be a string" });
       }
-      if (modelDefault === undefined && modelChat === undefined && modelVision === undefined) {
-        return res.status(400).json({ error: "At least one of model_default, model_chat, model_vision is required" });
+      if (modelDecision !== undefined && typeof modelDecision !== "string") {
+        return res.status(400).json({ error: "model_decision must be a string" });
+      }
+      if (
+        modelDefault === undefined &&
+        modelChat === undefined &&
+        modelVision === undefined &&
+        modelDecision === undefined
+      ) {
+        return res.status(400).json({
+          error: "At least one of model_default, model_chat, model_vision, model_decision is required",
+        });
+      }
+
+      const { isAllowedDecisionModel } = await import("../ai/LLMService");
+      if (
+        typeof modelDecision === "string" &&
+        modelDecision.trim() &&
+        !isAllowedDecisionModel(modelDecision.trim())
+      ) {
+        return res.status(400).json({
+          error:
+            "model_decision must be empty, ~typesafe/jev-latest, or typesafe/jev-1.13",
+        });
       }
 
       const llmPath = path.join(getContentRoot(res), "llm.yml");
@@ -2801,6 +2825,11 @@ export function registerAdminRoutes(app: Express): void {
         if (trimmed) modelObj.vision = trimmed;
         else delete modelObj.vision;
       }
+      if (typeof modelDecision === "string") {
+        const trimmed = modelDecision.trim();
+        if (trimmed) modelObj.decision = trimmed;
+        else delete modelObj.decision;
+      }
       mutableConfig.model = modelObj;
 
       fs.writeFileSync(llmPath, yaml.dump(mutableConfig, { lineWidth: -1 }), "utf-8");
@@ -2819,6 +2848,13 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       try {
+        const { reloadDecisionClient } = await import("../ai/decisions");
+        reloadDecisionClient();
+      } catch (reloadErr) {
+        log.warn({ err: reloadErr }, "[AI Settings PATCH] Decision client reload failed (non-fatal)");
+      }
+
+      try {
         const { getAgentService } = await import("../ai/AgentService");
         getAgentService().reload();
       } catch (reloadErr) {
@@ -2830,6 +2866,7 @@ export function registerAdminRoutes(app: Express): void {
         model_default: modelObj.default || "",
         model_chat: modelObj.chat || "",
         model_vision: modelObj.vision || "",
+        model_decision: modelObj.decision || "",
       });
     } catch (err) {
       log.error({ err }, "[AI Settings PATCH] Error:");
@@ -2972,11 +3009,38 @@ export function registerAdminRoutes(app: Express): void {
       // Refresh models cache from a successful probe so the pickers stay current.
       openRouterModelsCache = null;
 
+      const contentRoot = getContentRoot(res);
+      const modelObj =
+        typeof llmConfig.model === "object" && llmConfig.model !== null
+          ? (llmConfig.model as Record<string, string>)
+          : null;
+      const { probeDecisionModel } = await import("../ai/decisions");
+      const decisionProbe = await probeDecisionModel({
+        apiKeyEnv,
+        baseUrlEnv,
+        contentRoot,
+        model: modelObj?.decision?.trim() || undefined,
+      });
+
+      if (!decisionProbe.ok) {
+        return res.status(400).json({
+          ok: false,
+          error: `OpenRouter models OK (${modelsCount} listed), but decision model failed: ${decisionProbe.error}`,
+          models_count: modelsCount,
+          base_url: baseURL,
+          api_key_env: apiKeyEnv,
+          decision_model: decisionProbe.model,
+          decision_ok: false,
+        });
+      }
+
       res.json({
         ok: true,
         models_count: modelsCount,
         base_url: baseURL,
         api_key_env: apiKeyEnv,
+        decision_ok: true,
+        decision_model: decisionProbe.model,
       });
     } catch (err) {
       log.error({ err }, "[OpenRouter test] Error:");
@@ -3052,6 +3116,13 @@ export function registerAdminRoutes(app: Express): void {
         reloadLLMConfig();
       } catch (reloadErr) {
         log.warn({ err: reloadErr }, "[AI llm.yml PUT] LLM reload failed (non-fatal)");
+      }
+
+      try {
+        const { reloadDecisionClient } = await import("../ai/decisions");
+        reloadDecisionClient();
+      } catch (reloadErr) {
+        log.warn({ err: reloadErr }, "[AI llm.yml PUT] Decision client reload failed (non-fatal)");
       }
 
       try {

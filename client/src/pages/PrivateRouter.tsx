@@ -175,6 +175,7 @@ export default function PrivateRouter() {
           <Route path="/private/mcp-server/tools" component={McpServerPage} />
           <Route path="/private/mcp-server" component={McpServerPage} />
           <Route path="/private/agents/orgchart" component={AgentsOrgChartPage} />
+          <Route path="/private/agents/rules" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals/:id" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals" component={AgentsOrgChartPage} />
           <Route path="/private/agents" component={AgentsRedirect} />

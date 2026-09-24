@@ -1716,6 +1716,109 @@ describe("content proposals", () => {
     }
   });
 
+  it("honors proposal settings for withdraw disabled, any author, and four-eyes off", async () => {
+    const summary =
+      "Policy knobs from Agents Rules: withdraw disabled, any author, and four-eyes toggle. ".repeat(2);
+    const note = "Withdrawing under site policy test for Agents Rules page coverage.";
+
+    const disabledSvc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "disabled", staff: "any_editor" },
+        four_eyes: { enabled: true, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const blocked = await disabledSvc.create(
+      {
+        title: "Withdraw disabled",
+        summary,
+        entries: [sampleEntry({ slug: "withdraw-disabled" })],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    const disabled = await disabledSvc.update(blocked.proposal.id, "withdraw", {
+      username: "alice",
+      actor: { type: "mcp", role: "copy_editor" },
+      close_note: note,
+    });
+    expect(disabled.ok).toBe(false);
+    if (!disabled.ok) expect(disabled.code).toBe("withdraw_disabled");
+
+    const anyAuthorSvc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "any_create_author", staff: "any_editor" },
+        four_eyes: { enabled: true, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const open = await anyAuthorSvc.create(
+      {
+        title: "Any author withdraw",
+        summary,
+        entries: [sampleEntry({ slug: "any-author-withdraw" })],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(open.ok).toBe(true);
+    if (!open.ok) return;
+    const otherOk = await anyAuthorSvc.update(open.proposal.id, "withdraw", {
+      username: "bob",
+      actor: { type: "mcp", role: "seo_specialist" },
+      close_note: note,
+    });
+    expect(otherOk.ok).toBe(true);
+
+    const fourOff = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: (entry) => {
+        const values: Record<string, unknown> = {};
+        for (const u of entry.updates) values[u.field_path] = "Old";
+        return { values };
+      },
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "proposer_only", staff: "any_editor" },
+        four_eyes: { enabled: false, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const selfApply = await fourOff.create(
+      {
+        title: "Self apply allowed",
+        summary,
+        entries: [
+          sampleEntry({
+            slug: "self-apply",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "New" }],
+          }),
+        ],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(selfApply.ok).toBe(true);
+    if (!selfApply.ok) return;
+    const applied = await fourOff.update(selfApply.proposal.id, "apply", {
+      username: "alice",
+      actor: { type: "mcp", role: "copy_editor" },
+    });
+    expect(applied.ok).toBe(true);
+  });
+
   it("escalates with note, clears claim, freezes MCP, keeps note after deescalate", async () => {
     const svc = makeService();
     const summary =
@@ -2117,6 +2220,7 @@ describe("attached entry from an accepted idea", () => {
         title: "New attached post",
         summary,
         related_entries: [{ contentType, slug, locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
       },
       alice,
     );
@@ -2448,13 +2552,18 @@ describe("attached entry from an accepted idea", () => {
         locale: "en",
         contentRoot: root,
         author: "alice",
+        funnel: { stage: "awareness", products: "all" },
       });
-      const common = yaml.load(fs.readFileSync(seeded.commonPath, "utf-8")) as { slug: string };
+      const common = yaml.load(fs.readFileSync(seeded.commonPath, "utf-8")) as {
+        slug: string;
+        funnel?: { stage: string; products: unknown };
+      };
       const locale = yaml.load(fs.readFileSync(seeded.localePath, "utf-8")) as {
         slug: string;
         sections: unknown[];
       };
       expect(common.slug).toBe("fresh-post");
+      expect(common.funnel).toEqual({ stage: "awareness", products: "all" });
       expect(locale.sections).toEqual([]);
       expect(fs.existsSync(path.join(path.dirname(seeded.localePath), "es.yml"))).toBe(false);
       expect(fs.existsSync(path.join(root, "blog", "template.en.yml"))).toBe(false);
@@ -2468,5 +2577,214 @@ describe("attached entry from an accepted idea", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("new-URL idea funnel: warn on create, refuse accept until set, freeze after accept", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+    });
+    const summary =
+      "New article pitch for a Grok explainer covering product basics for beginners who search. ".repeat(
+        2,
+      );
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+
+    const created = await svc.create(
+      {
+        kind: "idea",
+        title: "New article: What is Grok",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+      },
+      alice,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const ctx = await svc.classifyLive(created.proposal);
+    expect(ctx?.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(true);
+
+    const blockedAccept = await svc.update(created.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(blockedAccept.ok).toBe(false);
+    if (!blockedAccept.ok) expect(blockedAccept.code).toBe("idea_funnel_required");
+
+    const badAll = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: { stage: "consideration", products: "all" },
+    });
+    expect(badAll.ok).toBe(false);
+    if (!badAll.ok) expect(badAll.code).toBe("idea_funnel_all_stage");
+
+    const setFunnel = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: { stage: "awareness", products: "all" },
+    });
+    expect(setFunnel.ok).toBe(true);
+    if (!setFunnel.ok) return;
+    expect(setFunnel.proposal.idea_funnel).toEqual({ stage: "awareness", products: "all" });
+
+    const accepted = await svc.update(created.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+
+    const frozen = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: {
+        stage: "decision",
+        products: [{ product: "full-stack" }],
+      },
+    });
+    expect(frozen.ok).toBe(false);
+    if (!frozen.ok) expect(frozen.code).toBe("idea_funnel_frozen");
+  });
+
+  it("creates_entry apply seeds idea funnel and refuses conflicting ops", async () => {
+    let seededFunnel: unknown = null;
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      inspectMissingTarget: () => ({
+        shape: "attached_file",
+        requiredFields: ["title"],
+      }),
+      prepareCreatesEntry: async (entry, opts) => {
+        seededFunnel = opts.ideaFunnel ?? null;
+        return { ok: true, seeded: true };
+      },
+      discardSeededEntry: () => {},
+      stampPublishedAt: () => ({ ok: true }),
+    });
+    const summary =
+      "New article pitch for a funnel seed test covering product basics for beginners. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New article funnel seed",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "funnel-seed-post", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Create the attached post with implements_proposal_id next.",
+      accepted_entry: { contentType: "blog", slug: "funnel-seed-post", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+
+    const conflict = await svc.create(
+      {
+        title: "Conflict funnel create",
+        summary: "Implement accepted idea but with a conflicting funnel stage on the new post. ".repeat(
+          2,
+        ),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: "blog",
+            slug: "funnel-seed-post",
+            locale: "en",
+            updates: [
+              { field_path: "title", value: "Funnel seed" },
+              { field_path: "funnel.stage", value: "decision" },
+              { field_path: "funnel.products", value: [{ product: "full-stack" }] },
+            ],
+          },
+        ],
+      },
+      alice,
+    );
+    expect(conflict.ok).toBe(true);
+    if (!conflict.ok) return;
+    const applyConflict = await svc.update(conflict.proposal.id, "apply", { ...bob });
+    expect(applyConflict.ok).toBe(true);
+    if (!applyConflict.ok) return;
+    const failed = applyConflict.proposal.entries[0];
+    expect(failed?.status).toBe("failed");
+    expect(failed?.last_error).toMatch(/idea_funnel_conflict/);
+
+    await svc.update(conflict.proposal.id, "withdraw", {
+      ...alice,
+      close_note: "Withdrawing conflicting packet so the matching create can apply cleanly.",
+    });
+
+    const okCreate = await svc.create(
+      {
+        title: "Matching funnel create",
+        summary: "Implement accepted idea and let apply auto-seed the frozen idea funnel. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: "blog",
+            slug: "funnel-seed-post",
+            locale: "en",
+            updates: [{ field_path: "title", value: "Funnel seed" }],
+          },
+        ],
+      },
+      alice,
+    );
+    expect(okCreate.ok).toBe(true);
+    if (!okCreate.ok) return;
+    const applied = await svc.update(okCreate.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(seededFunnel).toEqual({ stage: "awareness", products: "all" });
+    expect(applied.proposal.entries[0]?.status).toBe("done");
   });
 });

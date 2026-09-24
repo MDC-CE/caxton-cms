@@ -258,6 +258,10 @@ import {
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
 import { resolveAllTemplateVars, buildContentDeliveryParamBag } from "../resolve-template-vars";
 import {
+  effectiveAllowSellableEntries,
+  listBlockingSellableProducts,
+} from "../product/products-type-config";
+import {
   buildFieldProvenance,
   writeMappedFields,
   clearFieldOverride,
@@ -1768,6 +1772,14 @@ export function registerContentRoutes(app: Express): void {
         preview: config.preview || null,
         schema_org_requirements: config.schema_org_requirements || [],
         seo_monitoring: config.seo_monitoring || null,
+        funnel: config.funnel || null,
+        products: (() => {
+          const eff = effectiveAllowSellableEntries(type, ctRoot(res));
+          return {
+            allow_sellable_entries: eff.allow_sellable_entries,
+            ...(eff.coerced_from_inventory ? { coerced_from_inventory: true } : {}),
+          };
+        })(),
         strategy: config.strategy || null,
         static_entry_count: getCI(res).findByType(type).length,
       });
@@ -2172,6 +2184,42 @@ export function registerContentRoutes(app: Express): void {
             f.enforcement === false ? { enforcement: false } : null;
         } else {
           res.status(400).json({ error: "funnel must be an object or null" });
+          return;
+        }
+      }
+
+      if (body.products !== undefined) {
+        if (body.products === null) {
+          const blocking = listBlockingSellableProducts(type, ctRoot(res));
+          if (blocking.length > 0) {
+            res.status(400).json({
+              error:
+                "Cannot turn off sellable entries while this type still has sellable products. Remove them as products first.",
+              code: "blocking_products",
+              blocking_products: blocking,
+            });
+            return;
+          }
+          update.products = null;
+        } else if (typeof body.products === "object") {
+          const p = body.products as Record<string, unknown>;
+          if (p.allow_sellable_entries === true) {
+            update.products = { allow_sellable_entries: true };
+          } else {
+            const blocking = listBlockingSellableProducts(type, ctRoot(res));
+            if (blocking.length > 0) {
+              res.status(400).json({
+                error:
+                  "Cannot turn off sellable entries while this type still has sellable products. Remove them as products first.",
+                code: "blocking_products",
+                blocking_products: blocking,
+              });
+              return;
+            }
+            update.products = null;
+          }
+        } else {
+          res.status(400).json({ error: "products must be an object or null" });
           return;
         }
       }

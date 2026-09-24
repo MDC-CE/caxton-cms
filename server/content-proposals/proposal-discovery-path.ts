@@ -194,6 +194,17 @@ const IDEA_BROKEN_URL_EXPLAIN_TOOL = {
   ],
 } as const;
 
+const IDEA_EXISTING_DEMAND_EXPLAIN_TOOL = {
+  id: "existing_demand_playbook",
+  tool: "explain_site",
+  why: "Load the existing-demand scorecard (mature SERP / weight class / unique asset) — score the brief, do not re-run research.",
+  look_for: [
+    "author must have documented SERP maturity, occupants, asset, sibling, kill",
+    "incomplete brief → add_blocker; do not call keyword_metrics/serp to finish homework",
+    "KD alone never decides",
+  ],
+} as const;
+
 const FUNNEL_ANALYTICS_TOOL = {
   id: "journey_metrics",
   tool: "get_product_funnel_analytics",
@@ -620,7 +631,8 @@ export function buildEditsDiscoveryToolItems(opts: {
 
 /**
  * Idea discovery: playbook always; get_runtime_issues + test_redirect when broken_url is filed
- * (no keyword research). SEO/cluster/organic when related_entries exist and not broken_url.
+ * (no keyword research). existing_demand → existing-demand playbook (still no research tools).
+ * SEO/cluster/organic when related_entries exist and not broken_url.
  * Unavailable tools stay listed with available:false — skip never blocks accept.
  */
 export function buildIdeaDiscoveryToolItems(opts: {
@@ -630,15 +642,18 @@ export function buildIdeaDiscoveryToolItems(opts: {
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const { allowed, related, situations } = opts;
   const brokenUrl = (situations ?? []).includes("broken_url");
-  const items: DiscoveryPathToolItem[] = [
-    toToolItem(
-      brokenUrl ? IDEA_BROKEN_URL_EXPLAIN_TOOL : IDEA_EXPLAIN_TOOL,
-      allowed,
-      brokenUrl
-        ? { topic: "proposals", subtopic: "broken-url" }
-        : { topic: "proposals", subtopic: "idea-opportunity-harm" },
-    ),
-  ];
+  const existingDemand = (situations ?? []).includes("existing_demand");
+  const explainTool = brokenUrl
+    ? IDEA_BROKEN_URL_EXPLAIN_TOOL
+    : existingDemand
+      ? IDEA_EXISTING_DEMAND_EXPLAIN_TOOL
+      : IDEA_EXPLAIN_TOOL;
+  const explainArgs = brokenUrl
+    ? { topic: "proposals", subtopic: "broken-url" }
+    : existingDemand
+      ? { topic: "proposals", subtopic: "existing-demand" }
+      : { topic: "proposals", subtopic: "idea-opportunity-harm" };
+  const items: DiscoveryPathToolItem[] = [toToolItem(explainTool, allowed, explainArgs)];
 
   if (brokenUrl) {
     items.push(toToolItem(IDEA_RUNTIME_ISSUES_TOOL, allowed, { kind: "404", pages_only: true, limit: 25 }));

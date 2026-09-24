@@ -139,7 +139,7 @@ export function formatAgentActorLine(by: string, actor?: AgentActorLike | null):
  */
 export const MCP_MUTATING_TOOLS = new Set<string>([
   "agent_session",
-  "update_product",
+  "create_or_update_product",
   "get_or_refresh_seo_research",
   "update_fields",
   "update_entry_field",

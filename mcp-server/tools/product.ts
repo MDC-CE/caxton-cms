@@ -1,12 +1,11 @@
 /**
- * MCP tools for CMS products: list / get / update sidecar + funnel journey reads.
+ * MCP tools for CMS products: list / get / create_or_update sidecar + funnel journey reads.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ok, fail, actionRequired } from "../lib/respond.js";
+import { ok, fail, actionRequired, type DiscoveryPath } from "../lib/respond.js";
 import { resolveSiteContext } from "../lib/content.js";
-import { getTokenUsername } from "../lib/oauth.js";
 import { denyUnlessContentView, checkCap, denyResponse } from "../lib/auth.js";
 import { hasCapAnyScope, type CatalogGrant } from "../lib/tool-catalog.js";
 import { registerEcommerceTools } from "./ecommerce.js";
@@ -25,10 +24,75 @@ function siteQuery(domain: string | null | undefined, extra?: Record<string, str
   return s ? `?${s}` : "";
 }
 
-const HUMAN_VISIBILITY_MSG =
-  "Making a product sellable or showing/hiding it in the store is a human decision. " +
-  "Create a propose_change notes proposal asking staff to act in the Store (or content YAML). " +
-  "Do not set purchasable or actively_selling via update_product.";
+function buildProductDiscoveryPath(opts: {
+  slug: string;
+  content_type: string;
+  mode: "create" | "audience";
+  canList: boolean;
+  canGet: boolean;
+}): DiscoveryPath {
+  return {
+    goal:
+      opts.mode === "create"
+        ? "Decide sellable identity, then research peers before inventing audience"
+        : "Clarify audience with the user and compare peer products/personas before writing",
+    items: [
+      {
+        kind: "think",
+        id: "clarify_audience",
+        title: "Clarify what you do not know",
+        why: "Vague who-it’s-for invents weak personas",
+        look_for: ["who it’s for / not for", "outcomes", "differentiators", "ask the user in chat"],
+      },
+      {
+        kind: "think",
+        id: "differentiate_offer",
+        title: "Differentiate from sibling products",
+        why: "Avoid clone one-liners across the catalog",
+        look_for: ["how this offer differs", "unique outcomes"],
+      },
+      {
+        kind: "think",
+        id: "reuse_or_split_personas",
+        title: "Reuse vs invent personas",
+        why: "Do not copy avatar fears/objections verbatim from peers",
+        look_for: ["similar roles", "new persona id only when needed"],
+      },
+      {
+        kind: "tool",
+        id: "list_peer_products",
+        tool: "list_products",
+        why: "Inventory selling flags, audience status, persona ids",
+        look_for: ["audience_status", "persona ids", "paused vs selling"],
+        available: opts.canList,
+        ...(opts.canList ? {} : { hint: "Needs content_view — ask staff to enable, then refresh MCP" }),
+      },
+      {
+        kind: "tool",
+        id: "read_peer_product",
+        tool: "get_product",
+        why: "Depth on 1–2 peers for offer/persona/avatar comparison",
+        look_for: ["offer.one_liner", "persona avatar fears/objections"],
+        available: opts.canGet,
+        ...(opts.canGet ? {} : { hint: "Needs content_view — ask staff to enable, then refresh MCP" }),
+      },
+      {
+        kind: "tool",
+        id: "product_mental_model",
+        tool: "explain_site",
+        why: "Minimal audience fields and non-effects",
+        look_for: ["topic product", "purchasable vs actively_selling"],
+        available: opts.canList,
+      },
+    ],
+    non_effects: [
+      "Skip is allowed — discovery_path does not block confirm: true",
+      "Does not bind funnel pages or edit page YAML",
+      "Creating sellable without audience remains allowed",
+      "Billing plans stay outside CMS",
+    ],
+  };
+}
 
 export function registerProductTools(
   mcp: McpServer,
@@ -40,6 +104,7 @@ export function registerProductTools(
   mcp.tool(
     "list_products",
     "List CMS products (selling flag, audience status, persona ids). " +
+      "Removed (not sellable) products are hidden unless include_removed: true. " +
       "Use first for what we sell / who for; then get_product for offer/avatar depth. " +
       "Paused included by default. Requires content_view.",
     {
@@ -47,10 +112,14 @@ export function registerProductTools(
         .boolean()
         .optional()
         .describe("Default true — include paused products"),
+      include_removed: z
+        .boolean()
+        .optional()
+        .describe("Default false — omit soft-removed (purchasable:false) products"),
       content_type: z.string().optional(),
       site: z.string().optional().describe("Site domain when multi-site"),
     },
-    async ({ include_paused, content_type, site }) => {
+    async ({ include_paused, include_removed, content_type, site }) => {
       const viewDenied = await denyUnlessContentView(mcpToken, undefined, grants);
       if (viewDenied) return viewDenied;
       const siteResult = resolveSiteContext(site);
@@ -58,12 +127,13 @@ export function registerProductTools(
       try {
         const extra: Record<string, string> = {
           include_paused: include_paused === false ? "false" : "true",
+          include_removed: include_removed === true ? "true" : "false",
         };
         if (content_type) extra.content_type = content_type;
         const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/product${siteQuery(siteResult.domain, extra)}`;
         const res = await fetch(url, { headers: buildLoopbackHeaders(mcpToken) });
         const data = (await res.json()) as {
-          products?: Array<{ content_slug: string; audience_status?: string }>;
+          products?: Array<{ content_slug: string; audience_status?: string; purchasable?: boolean }>;
           error?: string;
         };
         if (!res.ok) {
@@ -73,6 +143,9 @@ export function registerProductTools(
         const canEdit =
           hasCapAnyScope(grants ?? [], "content_edit_structure") ||
           (await checkCap(mcpToken || "", "content_edit_structure", content_type || "program"));
+        const canManage =
+          hasCapAnyScope(grants ?? [], "product_manage") ||
+          (await checkCap(mcpToken || "", "product_manage", content_type || "program"));
         const first = products[0];
         const next =
           products.length === 0
@@ -80,7 +153,7 @@ export function registerProductTools(
                 {
                   tool: "explain_site",
                   args_hint: { topic: "product" },
-                  reason: "No purchasable products — read product sidecar mental model",
+                  reason: "No products in list — read product mental model (try include_removed if expecting soft-removed)",
                 },
               ]
             : [
@@ -100,20 +173,24 @@ export function registerProductTools(
               {
                 code: "compact_rows",
                 message:
-                  "Rows are summaries (no avatar text). Use get_product for offer/persona depth. Paused products are included unless include_paused:false.",
+                  "Rows are summaries (no avatar text). Use get_product for offer/persona depth. Removed products omitted unless include_removed:true.",
               },
-              {
-                code: "human_visibility",
-                message:
-                  "Sellable and store visibility are human-only. Agents propose_change notes; staff toggle in Store.",
-              },
+              ...(canManage
+                ? []
+                : [
+                    {
+                      code: "sellable_needs_product_manage",
+                      message:
+                        "Make sellable / remove / pause need product_manage. Audience edits need content_edit_structure via create_or_update_product.",
+                    },
+                  ]),
               ...(canEdit
                 ? []
                 : [
                     {
                       code: "read_only_grants",
                       message:
-                        "This agent cannot update_product (needs content_edit_structure). Ask staff or a layout/structure agent to change audience.",
+                        "This agent cannot create_or_update_product audience (needs content_edit_structure).",
                     },
                   ]),
             ],
@@ -129,7 +206,7 @@ export function registerProductTools(
   mcp.tool(
     "get_product",
     "Read full product sidecar (_product.yml): offer, personas/avatar, selling flags, audience_status. " +
-      "Use for site positioning and who we sell to after list_products. " +
+      "Works for soft-removed (not sellable) products too — response warns when not sellable. " +
       "Does not return journey membership — use get_product_funnel. Requires content_view.",
     {
       slug: z.string().describe("Product content slug, e.g. full-stack"),
@@ -153,58 +230,93 @@ export function registerProductTools(
           return fail((data.error as string) || `Server error: ${res.status}`);
         }
         const status = data.status as string;
+        const product = data.product as { purchasable?: boolean } | undefined;
         const canEdit =
           hasCapAnyScope(grants ?? [], "content_edit_structure") ||
           (await checkCap(mcpToken || "", "content_edit_structure", ct));
+        const canManage =
+          hasCapAnyScope(grants ?? [], "product_manage") ||
+          (await checkCap(mcpToken || "", "product_manage", ct));
         const next =
-          status === "missing"
-            ? canEdit
+          product?.purchasable === false
+            ? canManage
               ? [
                   {
-                    tool: "update_product",
-                    args_hint: { slug, content_type: ct },
-                    reason: "Set minimal offer + persona (confirm: true to write)",
+                    tool: "create_or_update_product",
+                    args_hint: { slug, content_type: ct, purchasable: true },
+                    reason: "Make sellable again (preview then confirm: true)",
                   },
                 ]
               : [
                   {
                     tool: "propose_change",
                     args_hint: {
-                      title: `Audience needed for ${slug}`,
-                      summary:
-                        "Product audience is missing. Staff or a structure agent should set offer + personas on the product in the Store Audience panel so funnel landings can bind this product.",
+                      title: `Make ${slug} sellable again`,
+                      summary: "Product is not sellable (removed). Staff with product_manage should re-enable.",
                     },
-                    reason: "No content_edit_structure — ask a human / structure agent via proposal notes",
+                    reason: "No product_manage",
                   },
                 ]
-            : [
-                {
-                  tool: "get_product_funnel",
-                  args_hint: { slug },
-                  reason: "Optional: conversion journey pages for this product",
-                },
-              ];
+            : status === "missing"
+              ? canEdit
+                ? [
+                    {
+                      tool: "create_or_update_product",
+                      args_hint: { slug, content_type: ct },
+                      reason: "Set minimal offer + persona (confirm: true to write)",
+                    },
+                  ]
+                : [
+                    {
+                      tool: "propose_change",
+                      args_hint: {
+                        title: `Audience needed for ${slug}`,
+                        summary:
+                          "Product audience is missing. Staff or a structure agent should set offer + personas.",
+                      },
+                      reason: "No content_edit_structure",
+                    },
+                  ]
+              : [
+                  {
+                    tool: "get_product_funnel",
+                    args_hint: { slug },
+                    reason: "Optional: conversion journey pages for this product",
+                  },
+                ];
+        const warnings: { code: string; message: string }[] = [
+          {
+            code: "locale_agnostic",
+            message: "One brief per product; translate when writing page copy.",
+          },
+          {
+            code: "does_not_edit_pages",
+            message: "Reading product does not change funnel membership or page YAML.",
+          },
+          {
+            code: "journey_separate",
+            message:
+              "Journey membership is not in this payload — use get_product_funnel to read; write with update_fields / update_entry_attributes (funnel.*) or Funnel tab.",
+          },
+        ];
+        if (Array.isArray(data.warnings)) {
+          for (const w of data.warnings as { code: string; message: string }[]) {
+            warnings.push(w);
+          }
+        } else if (product?.purchasable === false) {
+          warnings.push({
+            code: "not_sellable",
+            message:
+              "This product is not sellable right now (removed). Distinct from paused. Audience can still be edited.",
+          });
+        }
         return ok(
           {
-            message: `Product ${slug} (${status})`,
+            message: `Product ${slug} (${status}${product?.purchasable === false ? ", not sellable" : ""})`,
             ...data,
           },
           {
-            warnings: [
-              {
-                code: "locale_agnostic",
-                message: "One brief per product; translate when writing page copy.",
-              },
-              {
-                code: "does_not_edit_pages",
-                message: "Reading product does not change funnel membership or page YAML.",
-              },
-              {
-                code: "journey_separate",
-                message:
-                  "Journey membership is not in this payload — use get_product_funnel to read; write with update_fields / update_entry_attributes (funnel.*) or Funnel tab.",
-              },
-            ],
+            warnings,
             next_actions: next,
           },
         );
@@ -215,10 +327,13 @@ export function registerProductTools(
   );
 
   mcp.tool(
-    "update_product",
-    "Patch product sidecar offer, personas, name, description, product_id (preview unless confirm:true). " +
-      "Cannot set purchasable or actively_selling — those are human Store decisions; use propose_change notes. " +
-      "Persona ids immutable while funnel pages bind (incl. product self if bound); rename OK when unbound; duplicate ids rejected. Cannot remove while pages bind. Requires content_edit_structure.",
+    "create_or_update_product",
+    "Create or patch product sidecar (_product.yml). " +
+      "Audience/name/description need content_edit_structure. " +
+      "purchasable / actively_selling need product_manage (make sellable, remove, pause/resume). " +
+      "Preview unless confirm:true. " +
+      "Persona ids immutable while funnel pages bind; cannot remove last persona while bound. " +
+      "Not update_fields — sidecar only.",
     {
       slug: z.string(),
       content_type: z.string().optional().describe("Default program"),
@@ -258,46 +373,59 @@ export function registerProductTools(
         .optional(),
       clear_personas: z.array(z.string()).optional(),
       replace_personas: z.boolean().optional(),
-      /** Refused — human only */
       actively_selling: z.boolean().optional(),
-      /** Refused — human only */
       purchasable: z.boolean().optional(),
       site: z.string().optional(),
       confirm: z.boolean().optional().describe("Preview when omitted; set true to write"),
       ...requiredAgentSessionIdField,
     },
     async (args) => {
-      if (!(await checkCap(mcpToken || "", "content_edit_structure", args.content_type || "program"))) {
-        return denyResponse("content_edit_structure", args.content_type || "program");
-      }
       const siteResult = resolveSiteContext(args.site);
       if (!siteResult.ok) return fail(siteResult.error);
       const domain = siteResult.domain;
       const ct = args.content_type || "program";
+      const touchesSellable =
+        args.actively_selling !== undefined || args.purchasable !== undefined;
+      const touchesAudience =
+        args.offer !== undefined ||
+        args.personas !== undefined ||
+        (args.clear_personas !== undefined && args.clear_personas.length > 0) ||
+        args.replace_personas === true ||
+        args.name !== undefined ||
+        args.description !== undefined ||
+        args.product_id !== undefined;
 
-      if (args.actively_selling !== undefined || args.purchasable !== undefined) {
-        return actionRequired(
-          {
-            action_required: "human_product_visibility",
-            message: HUMAN_VISIBILITY_MSG,
-            code: "human_product_visibility",
-          },
-          [
+      if (touchesSellable) {
+        if (!(await checkCap(mcpToken || "", "product_manage", ct))) {
+          return actionRequired(
             {
-              tool: "propose_change",
-              args_hint: {
-                title: `Product visibility for ${args.slug}`,
-                summary:
-                  args.actively_selling === false
-                    ? `Please pause product ${args.slug} in the Store (actively selling off). Agents cannot change store visibility.`
-                    : args.purchasable === false
-                      ? `Please review removing purchasable for ${args.slug} via manual content process — API refuses un-indexing. Prefer pause in Store if the goal is hide from selling.`
-                      : `Please set sellable/store visibility for ${args.slug} in the Store or content YAML. Agents cannot set purchasable or actively_selling.`,
-              },
-              reason: "Ask staff to change sellable / store visibility",
+              action_required: "need_product_manage",
+              message:
+                "Making sellable, removing from the index, or pause/resume requires product_manage. Ask staff to grant it or propose_change notes.",
+              code: "need_product_manage",
             },
-          ],
-        );
+            [
+              {
+                tool: "propose_change",
+                args_hint: {
+                  title: `Product visibility for ${args.slug}`,
+                  summary:
+                    args.actively_selling === false
+                      ? `Please pause product ${args.slug} in the Store.`
+                      : args.purchasable === false
+                        ? `Please remove purchasable for ${args.slug} (or pause if temporary).`
+                        : `Please make ${args.slug} sellable / update store visibility.`,
+                },
+                reason: "Ask staff with product_manage",
+              },
+            ],
+          );
+        }
+      }
+      if (touchesAudience || !touchesSellable) {
+        if (!(await checkCap(mcpToken || "", "content_edit_structure", ct))) {
+          return denyResponse("content_edit_structure", ct);
+        }
       }
 
       const patchBody: Record<string, unknown> = {
@@ -310,27 +438,56 @@ export function registerProductTools(
       if (args.personas !== undefined) patchBody.personas = args.personas;
       if (args.clear_personas !== undefined) patchBody.clear_personas = args.clear_personas;
       if (args.replace_personas !== undefined) patchBody.replace_personas = args.replace_personas;
+      if (args.actively_selling !== undefined) patchBody.actively_selling = args.actively_selling;
+      if (args.purchasable !== undefined) patchBody.purchasable = args.purchasable;
+
+      const discoveryNeeded =
+        args.purchasable === true ||
+        args.offer !== undefined ||
+        args.personas !== undefined ||
+        args.replace_personas === true;
+      const canView =
+        hasCapAnyScope(grants ?? [], "content_view") ||
+        (await checkCap(mcpToken || "", "content_view", ct));
 
       if (!args.confirm) {
+        const warnings: { code: string; message: string }[] = [
+          {
+            code: "preview",
+            message: "No files written. confirm: true persists to _product.yml.",
+          },
+        ];
+        if (args.purchasable === true && !args.offer && !args.personas) {
+          warnings.push({
+            code: "thin_create",
+            message:
+              "Thin create is allowed — product becomes sellable without audience. Prefer setting offer + personas next so funnel landings can bind personas.",
+          });
+        }
+        const discovery_path = discoveryNeeded
+          ? buildProductDiscoveryPath({
+              slug: args.slug,
+              content_type: ct,
+              mode: args.purchasable === true && !args.offer && !args.personas ? "create" : "audience",
+              canList: canView,
+              canGet: canView,
+            })
+          : undefined;
         return ok(
           {
             message: "Preview only — pass confirm: true to write product sidecar",
             slug: args.slug,
             content_type: ct,
             patch: patchBody,
+            ...(discovery_path ? { discovery_path } : {}),
           },
           {
-            warnings: [
-              {
-                code: "preview",
-                message: "No files written. confirm: true persists to _product.yml.",
-              },
-            ],
+            warnings,
             next_actions: [
               {
-                tool: "update_product",
+                tool: "create_or_update_product",
                 args_hint: { slug: args.slug, confirm: true },
-                reason: "Confirm write",
+                reason: "Confirm write (discovery_path is optional — skip allowed)",
               },
             ],
           },
@@ -399,7 +556,34 @@ export function registerProductTools(
               ],
             );
           }
+          if (code === "blocking_products") {
+            return actionRequired(
+              {
+                action_required: "remove_blocking_products",
+                message: (data.error as string) || "Type still has sellable products",
+                blocking_products: data.blocking_products,
+              },
+              [
+                {
+                  tool: "list_products",
+                  args_hint: { content_type: ct },
+                  reason: "List sellable products blocking the type toggle",
+                },
+              ],
+            );
+          }
           return fail((data.error as string) || `Server error: ${res.status}`, { code });
+        }
+        const product = data.product as { purchasable?: boolean } | undefined;
+        const warnings: { code: string; message: string }[] = Array.isArray(data.warnings)
+          ? [...(data.warnings as { code: string; message: string }[])]
+          : [];
+        if (product?.purchasable === false) {
+          warnings.push({
+            code: "not_sellable",
+            message:
+              "Product is not sellable right now. Store/journey treat it as off until Make sellable again.",
+          });
         }
         return ok(
           {
@@ -407,7 +591,7 @@ export function registerProductTools(
             ...data,
           },
           {
-            warnings: Array.isArray(data.warnings) ? (data.warnings as []) : [],
+            warnings,
             side_effects: [
               {
                 kind: "content_write",
@@ -425,7 +609,7 @@ export function registerProductTools(
           },
         );
       } catch (e) {
-        return fail(`update_product failed: ${(e as Error).message}`);
+        return fail(`create_or_update_product failed: ${(e as Error).message}`);
       }
     },
   );

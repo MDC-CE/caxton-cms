@@ -19,7 +19,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 
 See also **`explain_site` `topic: "proposals"` `subtopic: "reading"`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
-**Review situations:** optional `review_situations` on **edits** — hub `topic: "proposals"` with subtopics **`situations`**, **`internal-links`**, **`serp-title-description`**, **`funnel-classification`**, **`translations`**. Empty → infer from ops. Ideas always get default-on **`idea_opportunity_harm`** (`subtopic: "idea-opportunity-harm"`) and may declare **one** demand label: **`anticipated_demand`**, **`fast_decay_news`**, or **`broken_url`** (`subtopic: "broken-url"`). Authors who file `broken_url` must call `get_runtime_issues` first.
+**Review situations:** optional `review_situations` on **edits** — hub `topic: "proposals"` with subtopics **`situations`**, **`internal-links`**, **`serp-title-description`**, **`funnel-classification`**, **`translations`**. Empty → infer from ops. Ideas always get default-on **`idea_opportunity_harm`** (`subtopic: "idea-opportunity-harm"`) and may declare **one** demand label: **`anticipated_demand`**, **`existing_demand`** (`subtopic: "existing-demand"`), **`fast_decay_news`**, or **`broken_url`** (`subtopic: "broken-url"`). Authors who file `broken_url` must call `get_runtime_issues` first. **New-URL ideas** also need structured **`idea_funnel`** `{ stage, products }` before accept (`set_idea_funnel`; `"all"` only with awareness).
 
 | `update_proposal` | `proposals_create` and/or `proposals_review` (actions filtered) | See action allowlists below. |
 | `get_entry_activity` | same as list | Read recent writes (14 days). Use before `confirm_recent_activity`. |
@@ -68,7 +68,7 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 
 ## Ideas
 
-- **Live review:** default-on situation `idea_opportunity_harm` + checklist `idea_opportunity_harm` (Goal → Evidence → Fit → Brand → dilution) stacked with `idea_accept` (lock/`next_step`). Optional demand label stacks `anticipated_demand` | `fast_decay_news` | `broken_url` (Evidence follows the label). Playbooks: `subtopic: "idea-opportunity-harm"` / `"broken-url"`. Incomplete brief → `add_blocker`; wrong vehicle → close/refile edits. Discovery tools optional.
+- **Live review:** default-on situation `idea_opportunity_harm` + checklist `idea_opportunity_harm` (Goal → Evidence → Fit → Brand → dilution) stacked with `idea_accept` (lock/`next_step`). Optional demand label stacks `anticipated_demand` | `existing_demand` | `fast_decay_news` | `broken_url` (Evidence follows the label). Playbooks: `subtopic: "idea-opportunity-harm"` / `"existing-demand"` / `"broken-url"`. Incomplete brief → `add_blocker`; wrong vehicle → close/refile edits. Discovery tools optional.
 - **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; **`accepted_entry`** `{ contentType, slug, locale }` required (locks that page+locale); → `finished` + `accepted`. **No YAML.** Refuse if another accepted idea already holds that entry (`accepted_entry_taken`).
 - **close** park: `wont_fix` \| `tracked_elsewhere` \| `other` (not four-eyes). Do not use close for “yes.”
 - Optional `related_entries`: context only; targets may not exist yet (prefills accept UI when present).
@@ -109,11 +109,12 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **Escalated:** steward UI hold (`escalated: true` + note). Status stays open|partial. MCP `update_proposal` fails (`code: escalated`) until release. Not an MCP action. Sibling create may warn `escalated_sibling`.
 - Cleared blockers ≠ approved — re-preview then four-eyes apply/accept.
 - Optional `supersedes_proposal_id` on `propose_change` links a replacement to a rejected/withdrawn predecessor (`replaced_by` on the old). Never required.
-- **Withdraw:** proposer username only over MCP (`close_note` min 20; no reject-kind gate). Staff UI editors may still withdraw others.
+- **Withdraw:** site Rules (`proposals.withdraw.mcp`): `proposer_only` (default), `any_create_author`, or `disabled` (`withdraw_disabled` — ask staff). `close_note` min 20. Staff UI follows separate staff setting.
 
 ## Rules
 
-- **Four-eyes:** apply / reject / accept when caller identity (username+role or UI) ≠ proposer identity. **Close/park is not four-eyes.**
+- **Four-eyes:** apply / reject / accept when caller identity (username+role or UI) ≠ proposer identity — unless site Rules turn four-eyes off (or staff UI exempt). **Close/park is not four-eyes.**
+- **Site Rules:** stewards configure withdraw / four-eyes / holds at Agents → Rules; changes apply to the next action only.
 - **Non-effects:** no GitHub push; no auto-complete issues; accept does not create YAML. Apply of a `creates_entry` packet creates that one locale’s files.
 
 ## Create refuses + review context

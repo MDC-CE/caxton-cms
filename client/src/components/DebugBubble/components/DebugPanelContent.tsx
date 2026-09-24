@@ -1067,7 +1067,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={Bot}
-                label="Agents"
+                label="Agent Swarm"
                 href="/private/agents/orgchart"
                 indicator="arrow"
                 testId="link-agents"

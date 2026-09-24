@@ -5,6 +5,83 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-24"
+    summary: "Outcome figures claim-based (not landing allowlist); Jev on ambiguous cues"
+    agent_impact:
+      - "Damage class selling_page badge is now Outcome figures — attach selling_page_figures when ops/promote text add or change hire rates, salaries, tuition, or prices (any content type), or review_situations includes selling_figures."
+      - "Landings/programs are not automatically selling. Title-only / funnel-only / typo body without claim cues stay ordinary content edits."
+      - "Ambiguous claim cues may call Jev (fail-open). Tags used_jev / used_jev_unavailable mark when that ran. Count-as-lead forms are a soft caution only."
+      - "new_public_content applies to any missing create/draft/idea URL (not blog-only). Reconnect MCP if explain tips look stale."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/claim-cues.ts
+      - server/ai/decisions/
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/review-situations.md
+
+  - date: "2026-09-24"
+    summary: "Site Agents Rules: withdraw / four-eyes / holds configurable"
+    agent_impact:
+      - "Staff Platform Stewards set per-site proposal policy at /private/agents/rules (settings.yml proposals:). Defaults match prior hardcoded behavior."
+      - "MCP withdraw may be proposer_only (default), any_create_author, or disabled (code withdraw_disabled — ask staff to withdraw or Reject Completely). Four-eyes may be off site-wide."
+      - "Reconnect MCP if explain tips look stale; no tool schema change."
+    tools_changed: false
+    paths:
+      - server/settings.ts
+      - server/routes/settings.ts
+      - server/content-proposals/service.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+      - docs/staff/what-the-agent-swarm-can-do.md
+
+  - date: "2026-09-24"
+    summary: "Reader copy must not expose SEO topology (cluster packaging)"
+    agent_impact:
+      - "Body/H2 must not explain our content architecture to readers (piece-count-in-cluster, companion-piece maps, series TOC). Link by page job. Teaching topic clusters when that is the article topic is OK; seo.* / YAML cluster_* / staff summaries stay technical."
+      - "Review checklists new_content_brand, verify_copy, internal_links, locale_translation score this intent → add_blocker (not create refuse, not reject for voice alone). Packaging ≠ allowable wooden on hub-link packs."
+      - "Convention #9 + CONVENTIONS_VERSION 31. Re-bootstrap_agent for skill.content; reconnect if explain tips look stale."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-situations.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/lib/mcp-playbook.ts
+      - mcp-server/explain/internal-links-proposals.md
+      - mcp-server/explain/proposals-translations.md
+      - mcp-server/explain/review-situations.md
+
+  - date: "2026-09-23"
+    summary: "existing_demand label + structured idea_funnel for new-URL ideas"
+    agent_impact:
+      - "Ideas may declare demand label existing_demand (current search rank/cite). Author documents SERP maturity/weight class/asset in the brief; reviewer scores the card and does not re-run keyword/SERP research. Soft create warning existing_demand_undeclared when unlabeled brief looks like search/cite. Playbook: explain_site topic proposals subtopic existing-demand."
+      - "New-URL ideas need structured idea_funnel { stage, products } before accept (products \"all\" only with awareness). Soft warning idea_funnel_missing on create; set_idea_funnel for authors; accept refuses until complete; funnel freezes after accept. Creating edits that implement the idea auto-seed matching funnel (creates_entry) or refuse conflicting ops."
+      - "Reconnect MCP for propose_change / update_proposal args."
+    tools_changed: true
+    paths:
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/idea-funnel.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/existing-demand-proposals.md
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-23"
+    summary: "create_or_update_product + product_manage; type products.allow_sellable_entries; discovery_path"
+    agent_impact:
+      - "Renamed update_product → create_or_update_product (reconnect MCP). Audience/metadata still need content_edit_structure; purchasable/actively_selling need new product_manage."
+      - "list_products hides soft-removed products unless include_removed:true. get_product works on removed and warns not_sellable. Previews may include discovery_path (skip allowed)."
+      - "Type config products.allow_sellable_entries gates Make sellable; disabling while sellable products remain returns blocking_products."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/product.ts
+      - shared/mcp-tool-catalog.ts
+      - shared/capabilities.ts
+      - mcp-server/explain/product.md
+      - server/product/product-io.ts
+      - server/product/products-type-config.ts
+
   - date: "2026-09-22"
     summary: "MCP withdraw is same proposer username only"
     agent_impact:
