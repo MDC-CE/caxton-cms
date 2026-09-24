@@ -793,12 +793,15 @@ export function SeoModal({
                       <label className="text-xs font-medium text-foreground" htmlFor="seo-canonical-url">
                         Canonical URL
                       </label>
+                      <p className="text-xs text-muted-foreground">
+                        Leave empty to use this page&apos;s live URL. Fill in only to override.
+                      </p>
                       <input
                         id="seo-canonical-url"
                         type="text"
                         value={seoMeta.canonical_url}
                         onChange={(e) => setSeoMeta({ ...seoMeta, canonical_url: e.target.value })}
-                        placeholder="Leave empty unless this page should defer to another URL"
+                        placeholder="Leave empty to use this page's live URL"
                         className="w-full px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                         data-testid="input-seo-canonical-url"
                         autoFocus
@@ -848,6 +851,8 @@ export function SeoModal({
                       </CollapsibleTrigger>
                       <CollapsibleContent className="text-xs text-muted-foreground mt-1 space-y-0.5 font-mono">
                         <p>meta.canonical_url — entry YAML head</p>
+                        <p>Empty → SSR uses the live path with the environment base URL.</p>
+                        <p>Relative paths are prefixed with the site base URL; overrides are trusted as written.</p>
                       </CollapsibleContent>
                     </Collapsible>
                   </div>

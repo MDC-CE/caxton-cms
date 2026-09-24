@@ -8,6 +8,7 @@ import { createElement } from "react";
 import { getIcon } from "@/lib/icons";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { coerceToText, coerceToHtml } from "@/lib/variable-manager";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 
 interface HeroSimpleTwoColumnProps {
   data: HeroSimpleTwoColumnType;
@@ -36,12 +37,6 @@ function getGridColClass(proportion: number): string {
     12: "md:col-span-12",
   };
   return colMap[proportion] || "md:col-span-6";
-}
-
-function stripTitleForMobile(html: string): string {
-  return html
-    .replace(/font-size\s*:[^;"]*(;)?/gi, "")
-    .replace(/<br\s*\/?>/gi, " ");
 }
 
 function getTextColumnAlignClass(alignment?: "start" | "center" | "end"): string {
@@ -185,19 +180,10 @@ export default function HeroSimpleTwoColumn({ data }: HeroSimpleTwoColumnProps) 
   const textBlock = (
     <div className="text-center md:text-left">
       <h1
-        className="font-inter font-extrabold text-foreground mb-4 text-center md:text-left [&_em]:text-primary [&_em]:italic"
+        className="font-inter font-extrabold text-foreground mb-4 text-center md:text-left [&_em]:text-primary [&_em]:italic text-[2rem] leading-none md:text-[2.25rem] lg:text-[2.5rem] md:leading-[1.03]"
         data-testid="text-hero-title"
       >
-        {/* Mobile: small default; strip RTE font-size so layout stays stable */}
-        <div
-          className="block md:hidden text-[2rem] leading-none"
-          dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
-        />
-        {/* Desktop: modest default; RTE inline font-size / line-height / weight override when set */}
-        <div
-          className="hidden md:block text-[2.25rem] lg:text-[2.5rem] leading-[1.03]"
-          dangerouslySetInnerHTML={{ __html: titleHtml }}
-        />
+        <ResponsiveRichText html={titleHtml} hideBrOnMobile />
       </h1>
       {subtitleHtml && (
         <RichTextContent

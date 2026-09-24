@@ -2,6 +2,7 @@ import { createElement } from "react";
 import type { CSSProperties } from "react";
 import { Button } from "@/components/ui/button";
 import { CSSMarquee } from "@/components/ui/CSSMarquee";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { getIcon } from "@/lib/icons";
 import type { BannerMarqueeBadges as BannerMarqueeBadgesData } from "@shared/schema";
@@ -82,19 +83,10 @@ export default function BannerMarqueeBadges({ data }: Props) {
           )}
           {title && (
             <h2
-              className="font-inter font-black leading-[1.02] text-foreground tracking-[-0.02em] m-0 [&_em]:text-primary [&_em]:italic"
+              className="font-inter font-black leading-[1.02] text-foreground tracking-[-0.02em] m-0 [&_em]:text-primary [&_em]:italic text-[2.6rem] md:text-[3.75rem] lg:text-[4.8rem]"
               data-testid="text-banner-title"
             >
-              {/* Mobile: strip custom font-size so Tailwind controls size */}
-              <span
-                className="block md:hidden text-[2.6rem]"
-                dangerouslySetInnerHTML={{ __html: title.replace(/font-size\s*:[^;"]*;?/gi, "") }}
-              />
-              {/* Desktop: full rich text with custom font-size preserved */}
-              <span
-                className="hidden md:block text-[3.75rem] lg:text-[4.8rem]"
-                dangerouslySetInnerHTML={{ __html: title }}
-              />
+              <ResponsiveRichText html={title} />
             </h2>
           )}
         </div>

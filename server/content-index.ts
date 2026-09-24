@@ -443,7 +443,7 @@ export class ContentIndex {
           if (locale !== "_common" && !locale.startsWith("_")) {
             this.extractSeoData(parsed, entry.slug, entry.contentType, relFilePath);
           }
-          if (parsed && this.contentTypeHasRedirects(entry.contentType)) {
+          if (parsed) {
             const baseName = file.replace(/\.(yml|yaml)$/i, "");
             const isLiveLocale = /^[a-z]{2}(-[a-z]{2})?$/i.test(baseName);
             const variantLocaleMatch = !isLiveLocale
@@ -615,16 +615,6 @@ export class ContentIndex {
     const parsed = yaml.load(escaped) as Record<string, unknown> | null;
     if (!parsed) return null;
     return unescapeObjectVars(parsed, map) as Record<string, unknown>;
-  }
-
-  private contentTypeHasRedirects(contentType: string): boolean {
-    return (
-      contentType === "program" ||
-      contentType === "landing" ||
-      contentType === "page" ||
-      contentType === "location" ||
-      contentType === "blog"
-    );
   }
 
   private addImageRef(ref: string, filePath: string): void {
@@ -1542,7 +1532,7 @@ export class ContentIndex {
       return true;
     }
 
-    if (!entry || !this.contentTypeHasRedirects(entry.contentType)) return false;
+    if (!entry) return false;
 
     let parsed: Record<string, unknown> | null = null;
     try {

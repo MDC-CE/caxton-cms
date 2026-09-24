@@ -6,7 +6,7 @@ import {
   resolveUrlPatternWithMapping,
   getFullFieldMapping,
 } from "./content-types";
-import { getSupportedLocales, getDefaultLocale } from "./settings";
+import { getSupportedLocales, getDefaultLocale, getHomePage } from "./settings";
 
 function toBcp47(locale: string): string {
   const parts = locale.split("-");
@@ -151,17 +151,35 @@ export function generateListingHreflangTags(
   }
 }
 
-export function generateHomepageHreflangTags(): string[] {
+export function generateHomepageHreflangTags(
+  ci: typeof contentIndex = contentIndex,
+): string[] {
   try {
     const baseUrl = getBaseUrl();
     const supportedLocales = getSupportedLocales();
     const defaultLocale = getDefaultLocale();
+    const homePage = getHomePage();
+    const contentType = homePage?.type || "page";
+    const homeSlug = homePage?.slug || "home";
 
+    const localeUrls = ci.getLocaleUrls(homeSlug, contentType);
     const tags: string[] = [];
     for (const locale of supportedLocales) {
-      tags.push(`<link rel="alternate" hreflang="${toBcp47(locale)}" href="${baseUrl}/${locale}" />`);
+      const path =
+        localeUrls[locale] ||
+        ci.buildUrl(contentType, locale, homeSlug) ||
+        `/${locale}/${homeSlug}`;
+      tags.push(
+        `<link rel="alternate" hreflang="${toBcp47(locale)}" href="${baseUrl}${path}" />`,
+      );
     }
-    tags.push(`<link rel="alternate" hreflang="x-default" href="${baseUrl}/${defaultLocale}" />`);
+    const defaultPath =
+      localeUrls[defaultLocale] ||
+      ci.buildUrl(contentType, defaultLocale, homeSlug) ||
+      `/${defaultLocale}/${homeSlug}`;
+    tags.push(
+      `<link rel="alternate" hreflang="x-default" href="${baseUrl}${defaultPath}" />`,
+    );
     return tags;
   } catch {
     return [];

@@ -21,8 +21,15 @@ export const PUBLIC_HTML_STATIC: readonly string[] = [
 /**
  * Locale / legacy home aliases (exact paths after mild normalization).
  * Trailing-slash variants are accepted by {@link isLocaleHomeAlias}.
+ * Includes `/es/home` (legacy ES path that must 301 to `/es/inicio`).
  */
-export const LOCALE_HOME_ALIASES: readonly string[] = ["/", "/en", "/es", "/us"];
+export const LOCALE_HOME_ALIASES: readonly string[] = [
+  "/",
+  "/en",
+  "/es",
+  "/us",
+  "/es/home",
+];
 
 /** Normalize for alias / static lookups: drop query/hash, lowercase, strip trailing slash (except `/`). */
 export function normalizePublicPath(url: string): string {

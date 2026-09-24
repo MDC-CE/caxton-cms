@@ -11,7 +11,17 @@ vi.mock("./content-types", async (importOriginal) => {
   };
 });
 
-import { generateHreflangTags } from "./hreflang";
+vi.mock("./settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./settings")>();
+  return {
+    ...actual,
+    getSupportedLocales: vi.fn(() => ["en", "es"]),
+    getDefaultLocale: vi.fn(() => "en"),
+    getHomePage: vi.fn(() => ({ type: "page", slug: "home" })),
+  };
+});
+
+import { generateHreflangTags, generateHomepageHreflangTags } from "./hreflang";
 import {
   getContentTypeConfig,
   getHreflangsSource,
@@ -54,5 +64,26 @@ describe("generateHreflangTags", () => {
       ci,
     );
     expect(tags).toEqual([]);
+  });
+});
+
+describe("generateHomepageHreflangTags", () => {
+  it("points at final home URLs not locale aliases", () => {
+    const ci = {
+      getLocaleUrls: () => ({
+        en: "/en/home",
+        es: "/es/inicio",
+      }),
+      buildUrl: (_type: string, locale: string, slug: string) => `/${locale}/${slug}`,
+    } as any;
+
+    const tags = generateHomepageHreflangTags(ci);
+    expect(tags.some((t) => t.includes('hreflang="en"') && t.includes("/en/home"))).toBe(true);
+    expect(tags.some((t) => t.includes('hreflang="es"') && t.includes("/es/inicio"))).toBe(true);
+    expect(tags.some((t) => t.includes('hreflang="x-default"') && t.includes("/en/home"))).toBe(
+      true,
+    );
+    expect(tags.every((t) => !t.includes('href="http://localhost:5000/en"'))).toBe(true);
+    expect(tags.every((t) => !t.includes('href="http://localhost:5000/es"'))).toBe(true);
   });
 });

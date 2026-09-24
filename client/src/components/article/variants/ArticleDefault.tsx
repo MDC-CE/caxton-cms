@@ -110,6 +110,9 @@ function extractTocItems(content: string | null | undefined, idPrefix = ""): Toc
   const pushItem = (level: number, rawText: string, existingId?: string) => {
     const text = stripInlineMarkdown(rawText.trim());
     if (!text) return;
+    // Document H1 lives on the page hero; article `#` / `<h1>` demote to H2 in
+    // the DOM — keep TOC levels aligned (treat former level-1 as level 2).
+    const tocLevel = level === 1 ? 2 : level;
     let id = existingId?.trim() || `${idPrefix}${slugify(text)}`;
     if (!existingId && idPrefix && !id.startsWith(idPrefix)) {
       id = `${idPrefix}${id}`;
@@ -120,7 +123,7 @@ function extractTocItems(content: string | null | undefined, idPrefix = ""): Toc
     } else {
       slugCounts[id] = 0;
     }
-    items.push({ id, text, level });
+    items.push({ id, text, level: tocLevel });
   };
 
   // Pre-rendered HTML path (server-enhanced articles)
@@ -878,15 +881,16 @@ function MarkdownRenderer({
         h1: ({ children, ...props }) => {
           const text = extractTextFromChildren(children);
           const id = (props as { id?: string }).id || getHeadingId(text);
+          // Demote markdown/HTML h1 → h2 so the page hero remains the sole document H1.
           return (
-            <h1
+            <h2
               id={id}
-              className="mb-4 mt-10 scroll-mt-24 text-3xl font-bold tracking-tight first:mt-0 md:text-4xl"
+              className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
               data-testid={`heading-${id}`}
               {...props}
             >
               {children}
-            </h1>
+            </h2>
           );
         },
         h2: ({ children, ...props }) => {

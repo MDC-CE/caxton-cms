@@ -2,6 +2,7 @@
 import { createElement, useState, useEffect } from "react";
 import { CSSMarquee } from "@/components/ui/CSSMarquee";
 import { Button } from "@/components/ui/button";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 import UniversalImage from "@/components/UniversalImage";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { getIcon } from "@/lib/icons";
@@ -178,23 +179,13 @@ export default function HeroCredibility({ data }: HeroCredibilityProps) {
             <div className="flex flex-col gap-3 w-full">
               {/* Title: first on mobile (order-1), second on desktop (order-2) */}
               <h1
-                className="order-1 lg:order-2 text-foreground text-center lg:text-left font-inter"
+                className="order-1 lg:order-2 text-foreground text-center lg:text-left font-inter text-[50px] md:text-6xl leading-[1.05] lg:leading-[1.03]"
                 data-testid="text-hero-title"
               >
-                {/* Mobile: RTE HTML without font-size/line-height, br stripped */}
-                <div
-                  className="block lg:hidden text-[50px] md:text-6xl leading-[1.05]"
-                  dangerouslySetInnerHTML={{
-                    __html: (data.title || "")
-                      .replace(/font-size\s*:[^;"]*(;)?/gi, "")
-                      .replace(/line-height\s*:[^;"]*(;)?/gi, "")
-                      .replace(/<br\s*\/?>/gi, " ")
-                  }}
-                />
-                {/* Desktop: full RTE HTML */}
-                <div
-                  className="hidden lg:block leading-[1.03]"
-                  dangerouslySetInnerHTML={{ __html: data.title || "" }}
+                <ResponsiveRichText
+                  html={data.title || ""}
+                  mobileMax="lg"
+                  hideBrOnMobile
                 />
               </h1>
               {/* Description: second on mobile (order-2), first on desktop (order-1) */}
@@ -203,19 +194,10 @@ export default function HeroCredibility({ data }: HeroCredibilityProps) {
                   className="order-2 md:order-1 text-muted-foreground leading-relaxed text-center lg:text-left"
                   data-testid="text-hero-description"
                 >
-                  {/* Mobile: strip font-size and br */}
-                  <div
-                    className="block lg:hidden"
-                    dangerouslySetInnerHTML={{
-                      __html: data.description
-                        .replace(/font-size\s*:[^;"]*(;)?/g, "")
-                        .replace(/<br\s*\/?>/gi, " ")
-                    }}
-                  />
-                  {/* Desktop: full RTE HTML */}
-                  <div
-                    className="hidden lg:block"
-                    dangerouslySetInnerHTML={{ __html: data.description }}
+                  <ResponsiveRichText
+                    html={data.description}
+                    mobileMax="lg"
+                    hideBrOnMobile
                   />
                 </div>
               )}

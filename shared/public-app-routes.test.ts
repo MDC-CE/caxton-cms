@@ -28,6 +28,11 @@ describe("isLocaleHomeAlias", () => {
     expect(isLocaleHomeAlias("/es/inicio")).toBe(false);
     expect(isLocaleHomeAlias("/en/apply")).toBe(false);
   });
+
+  it("matches legacy /es/home", () => {
+    expect(isLocaleHomeAlias("/es/home")).toBe(true);
+    expect(isLocaleHomeAlias("/es/home/")).toBe(true);
+  });
 });
 
 describe("isPublicHtmlStaticPath", () => {

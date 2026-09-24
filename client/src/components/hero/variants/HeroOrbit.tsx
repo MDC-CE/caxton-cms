@@ -1,5 +1,6 @@
 import { createElement, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { getIcon } from "@/lib/icons";
 import type { HeroOrbit as HeroOrbitData } from "@shared/schema";
@@ -218,19 +219,10 @@ export default function HeroOrbit({ data }: HeroOrbitProps) {
               </div>
             )}
             <h1
-              className="font-inter font-black leading-none text-foreground m-0 [&_em]:text-primary [&_em]:italic"
+              className="font-inter font-black leading-none text-foreground m-0 [&_em]:text-primary [&_em]:italic text-[2.75rem] md:text-[3.1rem] lg:text-[3.9rem]"
               data-testid="text-hero-title"
             >
-              {/* Mobile: strip custom font-size so Tailwind controls size */}
-              <span
-                className="block md:hidden text-[2.75rem]"
-                dangerouslySetInnerHTML={{ __html: (data.title ?? "").replace(/font-size\s*:[^;"]*;?/gi, "") }}
-              />
-              {/* Desktop: full rich text with custom font-size preserved */}
-              <span
-                className="hidden md:block text-[3.1rem] lg:text-[3.9rem]"
-                dangerouslySetInnerHTML={{ __html: data.title ?? "" }}
-              />
+              <ResponsiveRichText html={data.title ?? ""} />
             </h1>
           </div>
 

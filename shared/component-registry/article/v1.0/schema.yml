@@ -56,7 +56,7 @@ props:
     type: boolean
     required: false
     description: >
-      Whether to show the auto-generated table of contents (based on h1, h2, h3 headings). On pages with 2+ articles,
+      Whether to show the auto-generated table of contents (based on h2/h3 headings; markdown `#` is treated as h2). On pages with 2+ articles,
       only the first article's show_toc controls the shared TOC; later values are non-effects.
   toc_position:
     type: string

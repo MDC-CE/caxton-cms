@@ -88,6 +88,45 @@ describe("ContentIndex.scanFast preserves slow maps", () => {
   });
 });
 
+describe("ContentIndex indexes meta.redirects for any content type", () => {
+  it("indexes redirects on a type outside the former allowlist (scholarship)", () => {
+    const root = makeSite();
+    // Append a type that was NOT in contentTypeHasRedirects (program|landing|page|location|blog).
+    fs.appendFileSync(
+      path.join(root, "content-types.yml"),
+      [
+        "scholarship:",
+        "  directory: scholarship",
+        "  url_pattern:",
+        "    en: /en/scholarship/:slug",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    fs.mkdirSync(path.join(root, "scholarship", "miami-tech-works"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "scholarship", "miami-tech-works", "en.yml"),
+      [
+        "slug: miami-tech-works",
+        "meta:",
+        "  redirects:",
+        "    - /landing/miami-tech-talent-coalition",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const ci = new ContentIndex(root);
+    ci.refresh({ syncSlow: true });
+
+    expect(
+      ci.getRedirects().some((r) => r.from === "/landing/miami-tech-talent-coalition"),
+    ).toBe(true);
+    const hit = ci.getRedirects().find((r) => r.from === "/landing/miami-tech-talent-coalition");
+    expect(hit?.to).toBe("/en/scholarship/miami-tech-works");
+  });
+});
+
 describe("ContentIndex.refreshAfterRedirectWrite", () => {
   it("reloads custom-redirects.yml without a full sync scan", () => {
     const root = makeSite();

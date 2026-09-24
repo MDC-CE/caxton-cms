@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { UniversalImage } from "@/components/UniversalImage";
 import { getIcon } from "@/lib/icons";
 import { coerceToText, resolveTemplateFallback } from "@/lib/variable-manager";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 import {
   Tooltip,
   TooltipContent,
@@ -36,12 +37,6 @@ const AVATAR_SIZE = "2.5rem";
 const LeadForm = lazy(
   () => import("@/components/lead_form/variants/LeadFormDefault"),
 );
-
-function stripTitleForMobile(html: string): string {
-  return html
-    .replace(/font-size\s*:[^;"]*(;)?/gi, "")
-    .replace(/line-height\s*:[^;"]*(;)?/gi, "");
-}
 
 function pageLocale(): string {
   if (typeof document === "undefined") return "en";
@@ -480,17 +475,10 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
 
             {titleHtml && (
               <h1
-                className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
+                className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic text-[2.25rem] leading-none md:text-[2.75rem] lg:text-[3.5rem] md:leading-[1.03]"
                 data-testid="text-workshop-title"
               >
-                <div
-                  className="block md:hidden text-[2.25rem] leading-none"
-                  dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
-                />
-                <div
-                  className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
-                  dangerouslySetInnerHTML={{ __html: titleHtml }}
-                />
+                <ResponsiveRichText html={titleHtml} />
               </h1>
             )}
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, type MouseEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { RichTextContent } from "@/components/ui/rich-text-content";
+import { ResponsiveRichText } from "@/components/ui/responsive-rich-text";
 import { UniversalImage } from "@/components/UniversalImage";
 import { getIcon } from "@/lib/icons";
 import { useInternalNav } from "@/hooks/useInternalNav";
@@ -1069,20 +1070,9 @@ export default function EnrollmentSelectorDefault({ data }: { data: EnrollmentSe
             </p>
           )}
 
-          <h1 className="font-inter font-black tracking-tight text-foreground leading-[1.1] mb-2 md:mb-3">
-            <div
-              className="block md:hidden text-[34px] leading-[1.1]"
-              dangerouslySetInnerHTML={{
-                __html: (data.title || "")
-                  .replace(/font-size\s*:[^;"]*(;)?/g, "")
-                  .replace(/<br\s*\/?>/gi, " "),
-              }}
-            />
-            <div
-              className="hidden md:block leading-[1.1]"
-              dangerouslySetInnerHTML={{ __html: data.title || "" }}
-            />
-          </h1>
+          <h2 className="font-inter font-black tracking-tight text-foreground leading-[1.1] mb-2 md:mb-3 text-[34px]">
+            <ResponsiveRichText html={data.title || ""} hideBrOnMobile />
+          </h2>
 
           {program.description && (
             <p className="text-[13px] md:text-[14px] text-muted-foreground leading-relaxed mb-5 md:mb-9">

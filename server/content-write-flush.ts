@@ -170,8 +170,14 @@ export function collectEntryHtmlPaths(
 
   // Home aliases when the canonical path is a locale home
   for (const p of [...paths]) {
-    if (p === "/en" || p === "/en/") {
+    if (p === "/en" || p === "/en/" || p === "/en/home") {
       add("/");
+      add("/en");
+      add("/us");
+    }
+    if (p === "/es" || p === "/es/" || p === "/es/inicio") {
+      add("/es");
+      add("/es/home");
     }
   }
 
