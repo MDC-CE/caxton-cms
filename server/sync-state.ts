@@ -183,6 +183,13 @@ export function shouldTrackFile(filePath: string, allowedExceptions?: Set<string
     if (/component-registry\/[^/]+\/[^/]+\/[^/]+\.ts$/.test(filePath)) {
       return true;
     }
+    // Section React lives with the schema. variants/ plus helpers beside the type.
+    if (/component-registry\/[^/]+\/variants\/[^/]+\.(tsx|ts|css)$/.test(filePath)) {
+      return true;
+    }
+    if (/component-registry\/[^/]+\/[^/]+\.(tsx|ts|css)$/.test(filePath)) {
+      return true;
+    }
     return false;
   }
 
@@ -699,7 +706,7 @@ export function getAllContentFiles(contentRoot?: string): string[] {
         }
       } else {
         const ext = path.extname(entry.name).toLowerCase();
-        if (ext === '.yml' || ext === '.yaml' || ext === '.json' || ext === '.ts') {
+        if (ext === '.yml' || ext === '.yaml' || ext === '.json' || ext === '.ts' || ext === '.tsx' || ext === '.css') {
           const relativePath = path.relative(process.cwd(), fullPath);
           if (shouldTrackFile(relativePath, undefined, contentRoot)) {
             files.push(relativePath);
