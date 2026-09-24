@@ -20,6 +20,7 @@ import {
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
+import { AttentionBadge } from "@/components/agents/AttentionBadge";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
 import {
@@ -330,26 +331,13 @@ export function ProposalListCard({
                     testIdSuffix={`-${p.id}`}
                   />
                 ) : null}
-                {p.attention === "awaiting_rereview" ? (
-                  <Badge
-                    variant="secondary"
-                    className="font-normal"
-                    data-testid={`badge-attention-awaiting_rereview-${p.id}`}
-                  >
-                    Ready for re-check
-                    {(p.resolved_blocker_count ?? 0) > 0
-                      ? ` (${p.resolved_blocker_count})`
-                      : ""}
-                  </Badge>
-                ) : null}
-                {p.attention === "no_feedback" ? (
-                  <Badge
-                    variant="outline"
-                    className="font-normal"
-                    data-testid={`badge-attention-no_feedback-${p.id}`}
-                  >
-                    No feedback yet
-                  </Badge>
+                {p.attention === "awaiting_rereview" || p.attention === "no_feedback" ? (
+                  <AttentionBadge
+                    attention={p.attention}
+                    resolvedBlockerCount={p.resolved_blocker_count ?? 0}
+                    stopLinkNavigation
+                    testIdSuffix={`-${p.id}`}
+                  />
                 ) : null}
                 {p.escalated ? (
                   <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />

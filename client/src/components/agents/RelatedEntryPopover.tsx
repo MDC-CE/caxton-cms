@@ -1,8 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconExternalLink, IconSearch } from "@tabler/icons-react";
+import { IconCopy, IconExternalLink, IconSearch } from "@tabler/icons-react";
 import { deslugifyLabel } from "@shared/relation-field";
-import { formatSitePath } from "@shared/formatSitePath";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
 import {
   ManagedSeoModal,
@@ -12,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
 
 type RelatedEntryInfo = {
   title: string | null;
@@ -64,6 +64,7 @@ export function RelatedEntryPopover({
   const [open, setOpen] = useState(false);
   const [seoModalOpen, setSeoModalOpen] = useState(false);
   const [seoModalTarget, setSeoModalTarget] = useState<ManagedSeoModalTarget | null>(null);
+  const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<RelatedEntryInfo>({
     queryKey: ["/api/seo/entry", contentType, slug, locale, "related-entry"],
     enabled: open && !!contentType && !!slug,
@@ -84,6 +85,7 @@ export function RelatedEntryPopover({
 
   const href = data?.path || "";
   const heading = data?.title || data?.page_title || deslugifyLabel(slug);
+  const slugValue = data?.slug || slug;
   const lastmod = data?.lastmod || null;
   const manageHref = `/private/type/${encodeURIComponent(contentType)}`;
 
@@ -139,8 +141,25 @@ export function RelatedEntryPopover({
                 </a>
               </dd>
               <dt className="text-muted-foreground">Slug</dt>
-              <dd className="text-foreground font-mono truncate" title={data?.slug || slug}>
-                {data?.slug || slug}
+              <dd className="min-w-0">
+                <button
+                  type="button"
+                  className="flex min-w-0 max-w-full items-center gap-1 rounded-sm text-left text-foreground font-mono hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  title="Click to copy slug"
+                  aria-label="Copy slug"
+                  data-testid={`button-related-entry-copy-slug-${slug}`}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(slugValue).then(
+                      () => toast({ title: "Copied", description: "Slug copied to clipboard." }),
+                      () => toast({ title: "Copy failed", variant: "destructive" }),
+                    );
+                  }}
+                >
+                  <span className="min-w-0 truncate" title={slugValue}>
+                    {slugValue}
+                  </span>
+                  <IconCopy className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                </button>
               </dd>
               <dt className="text-muted-foreground">Locale</dt>
               <dd className="text-foreground uppercase">{data?.locale || locale}</dd>
@@ -171,14 +190,6 @@ export function RelatedEntryPopover({
                 </>
               ) : null}
             </dl>
-            {data?.file ? (
-              <p
-                className="text-[11px] text-muted-foreground font-mono truncate"
-                title={data.file}
-              >
-                {formatSitePath(data.file)}
-              </p>
-            ) : null}
             {variant ? (
               <Badge variant="secondary" className="text-[10px] font-normal">
                 Soft draft · {variant}
