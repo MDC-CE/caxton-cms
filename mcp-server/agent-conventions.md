@@ -73,10 +73,10 @@ If the page were already live and you edited the live locale directly
 
 On an agentic swarm role connector (`/mcp/role/…`), write policy is enforced:
 
-- **Identity:** On a role connector, call `agent_session` start with exact `model` (`provider/model`, e.g. `claude/sonnet-4.5`). Pass `agent_session_id` on every mutate — unscoped writes are blocked. **Production** plain `/mcp` is **read-only** — use Private → MCP Server → Connection → choose a role (e.g. `/mcp/role/copy_editor`). **Non-production** (local / tunnels) plain `/mcp` may mutate freestyle (no role/session gate); caps and MCP write still apply. Optional `agent_session` still helps staff event trails.
+- **Identity:** On a role connector, call `agent_session` start with exact `model` (`provider/model`, e.g. `claude/sonnet-4.5`). Pass `agent_session_id` on every mutate — unscoped writes are blocked. **Production** plain `/mcp` hard-denies mutates with `role_connector_required` + `connector_guide` (one connection per `/mcp/role/<id>` for a swarm) — use Private → MCP Server → Connection. **Non-production** plain `/mcp` may mutate freestyle when MCP write is on. When **MCP write** is off (Security → Users), honor `mcp_write_disabled` / `mcp_write_guide.course_of_action` (propose-only until an admin enables write).
 - **Draft / variant writes** (any locale): allowed with your edit caps — no issue claim required.
 - **Live writes** (omit `variant`): allowed only while you hold an **active claim** on a validation issue for that **content type + slug + locale** as the **same human+role**. Successful live writes refresh the claim TTL (~30m).
-- **Publish / promote / demote / create_entry**: denied — open an **edits** `propose_change` (field updates and/or `promote_on_apply`). For a brief before work exists, use `propose_change` with `kind:"idea"` (accept ≠ apply; no YAML). Notes are wall reminders only (close with a reason; no YAML) — do not use notes for new-spoke pitches.
+- **Publish / promote / demote / create_entry**: denied — open an **edits** `propose_change` (field updates and/or `promote_on_apply`). For a brief before work exists, use `propose_change` with `kind:"idea"` (accept ≠ apply; no YAML). Idea **accept** requires `accepted_entry` `{ contentType, slug, locale }` plus `next_step` (locks that page+locale for follow-up). Notes are wall reminders only (close with a reason; no YAML) — do not use notes for new-spoke pitches.
 - **Stuck on a claimed issue:** `update_issue` **release** with a report (what you tried). Do **not** invent a notes proposal for that handoff — the issue stays in the open queue / can reopen for the next agent.
 
 When caps forbid a write (any connector), call `propose_change` (prefer **edits**, or **idea** for a brief) instead of pasting JSON in chat.
@@ -94,12 +94,31 @@ Proposals are a shared work item, not a chat. Prefer one open proposal per draft
 - **Reject** only when the idea must not ship (bad / not implementable / illegal-or-policy / harmful / duplicate weaker / target missing). Pass `confirm_reject`, `reject_kind`, and `close_note` (min 80). Prefer **add_blocker** for in-scope polish; author **`revise_entries`** (idle or self-claim; foreign claim blocks) then `resolve_blocker` — revise does not clear blockers.
 - Only the **active claimant** (human+role) may `resolve_blocker`. Do not resolve to overturn a disagreement — escalate or leave open; reviewers `reopen_blocker`.
 - Open blockers block **apply** and idea **accept** (reject/withdraw/close still OK). Cleared blockers ≠ ship — re-preview, then four-eyes `apply` / `accept`. For `promote_on_apply`, confirm ending experiments when asked (`confirm_end_experiment`).
+- **Idea follow-through:** after accept, file edits with `implements_proposal_id` (required when that idea reserved the page). At most one open implements child. Pickup stalled work via `list_proposals({ stalled: true })` or `proposal_stats.stalled_ideas`. Refuse codes: `explain_site` `topic: "proposals"` (subtopics `overview` / `reading`).
+- **New attached post (blog and other file-based shared layouts):** the slug is required; the folder need not exist. Do **not** call `create_entry` (it writes live and is not on specialist connectors) and do **not** attach a draft.
+
+**Worked example (new attached post):**
+
+1. Idea: `propose_change` with `kind: "idea"` and `related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }]`.
+2. Accept (a different role): `update_proposal` `action: "accept"` with that same `accepted_entry` and `next_step`. No YAML yet.
+3. Edits: `propose_change` with `implements_proposal_id`, `review_situations: ["new_public_content"]`, and `entries[]` of field `updates[]` only — **no** `variant`. Required live fields must be in the ops (blog: title, description, body/`content`, category).
+4. Apply (a different role): `update_proposal` `action: "apply"`. A new URL-param value (for example category) also needs `confirm_new_values: true` after principal approval. Apply writes `{slug}/_common.yml` and `{locale}.yml` with `sections: []` and does not touch `template.{locale}.yml`.
 - **Escalated hold:** when `escalated: true`, a Platform Steward paused agent work (staff UI only). Do **not** call `update_proposal` — every action fails with `code: escalated` until they release. Read `escalated_note`. Overlapping create may warn `escalated_sibling` but still succeeds. After release the note may remain as history (mutations allowed again).
-- Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note.
+- Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note; site Rules may require matching proposer username, allow any create author, or disable MCP withdraw (`withdraw_disabled` — ask staff). Staff UI follows a separate staff setting.
 - Four-eyes = different **username+role** (or staff UI), not merely a different model under the same role.
 - **`list_proposals(proposal_id)`** on an open/partial proposal may include **`discovery_path`**: optional research menu (`think` + `tool` items). Use it to deepen judgment before apply/reject/add_blocker/adjacent notes. It is **not** `next_actions` and skip does **not** block decide actions. Items with `available: false` need a human to enable access, then refresh MCP.
 
 **Worked example:** Blake adds a blocker on CTA product; Alex revises soft entries (or fixes the draft), resolves with a note; Casey (different role or UI) previews again then applies.
+
+### 2c. Locale translation: draft write, then promote proposal
+
+`translate_entry` always writes a **non-public variant** (default `draft`) — never live `{locale}.yml`. Polish with write tools on that variant. When ready to go public:
+
+- File **`propose_change`** with `variant`, `promote_on_apply: true`, and prefer `review_situations: ["locale_translation"]`.
+- Summary: intent + **Translated from {src} → {tgt}** (no pasted body). Soft-only proposals without promote are **not** this pack — keep polishing with write tools.
+- Reviewer scores fidelity to source locale (facts/slug/shell), not punchier-than-live English. Playbook: `explain_site` `topic: "proposals"` `subtopic: "translations"`.
+
+**Worked example:** Translator runs `translate_entry` → `draft.es.yml`, fixes wording with `update_fields` on `variant: draft`, then proposes promote with `locale_translation`; Proposal Reviewer applies.
 
 ### 3. Cluster SEO only on live (or draft-before-live)
 
@@ -124,11 +143,17 @@ On field mutates and issue `complete`, pass `why` (goal/ticket in plain English)
 Claim an issue only when you already have a **valid fix path you can execute** with MCP (or a cited offline source). Do not invent facts (search volume, difficulty, rankings).
 
 For `SEO_KEYWORD_RESEARCH_INCOMPLETE`:
-- **OpenRush on:** call `refresh_keyword_metrics` (cache only). Do **not** write `seo.kw_monthly_volume` / `seo.kw_difficulty` YAML.
-- **OpenRush off:** write both `kw_*` only with `seo_research_source: staff_provided` or `external:<tool_name>` from a real source.
+- **SEO research on:** call `get_or_refresh_seo_research` with `action: keyword_metrics` (cache-first). Do **not** write `seo.kw_monthly_volume` / `seo.kw_difficulty` YAML.
+- **SEO research off:** write both `kw_*` only with `seo_research_source: staff_provided` or `external:<tool_name>` from a real source.
 - **No reliable source:** do not claim, or claim→`release` blocked — never guess numbers.
 
-**Worked example:** OpenRush configured + keyword set without metrics → `refresh_keyword_metrics`, then revalidate — not `update_fields` with invented 1300/33.
+**Worked example:** research configured + keyword set without metrics → `get_or_refresh_seo_research` (`action: keyword_metrics`), then revalidate — not `update_fields` with invented 1300/33.
+
+### 6b. SEO research toolkit (vs measured traffic)
+
+- **Measured GSC clicks/impressions:** `get_organic_traffic` (day cache / BigQuery).
+- **Planning research:** `get_or_refresh_seo_research` — `keyword_metrics` | `serp` | `keyword_ideas` | `competitors` | `keyword_gaps`. Cache-first; session + daily budgets; warn % → `confirm_seo_research_budget`; does **not** write `seo.kw_*` YAML.
+- Do not invent volume, difficulty, or SERP features. `keyword_gaps` needs a non-empty `competitors` list (run `competitors` first).
 
 ### 7. Set `seo.refresh_tier` when clustering / topic nature is known
 
@@ -141,3 +166,14 @@ When enabling SEO clustering or classifying a page’s topic, set `seo.refresh_t
 `get_entry_fields` requires non-empty `fields: string[]`. Omit or pass `[]` once to get `available_fields` names only (`action_required: select_fields`), then retry with the paths you need. Do not expect a full dump of every field value.
 
 **Worked example:** `get_entry_fields` with `fields: ["title", "authors"]` before updating those paths.
+
+### 9. Reader copy must not expose SEO topology
+
+Clusters, pillars, spokes, piece-count (“third in our X cluster”), and companion-piece maps are **staff/SEO packaging**. Do **not** put that architecture into reader-facing body or H2s. Link by **page job** instead (“what it is”, “how to set up”, “what’s new”).
+
+- **Bad:** “This is the third piece in our Grok Bot cluster. For the full picture, start with…”
+- **Good:** “New here? Read [what Grok Bot is](…) or [how to set it up](…). This page is only what’s new since launch.”
+- Teaching “what a topic cluster is” when that *is* the article topic is fine. YAML `cluster_*`, `seo.*`, and proposal summaries may still say “cluster hub.”
+- Reviewers score this as intent on body / new-page / hub-link / translation packs → `add_blocker` (not create refuse, not reject for voice alone).
+
+**Worked example:** hub links stay; rewrite “Recent cluster updates” → “What’s new” and drop “our tools cluster” inventory talk.

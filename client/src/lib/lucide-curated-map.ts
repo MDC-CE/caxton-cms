@@ -53,6 +53,7 @@ export const curatedLucideImports = {
   "message-circle": () => import("lucide-react/dist/esm/icons/message-circle.js"),
   "network": () => import("lucide-react/dist/esm/icons/network.js"),
   "notebook-pen": () => import("lucide-react/dist/esm/icons/notebook-pen.js"),
+  "presentation": () => import("lucide-react/dist/esm/icons/presentation.js"),
   "puzzle": () => import("lucide-react/dist/esm/icons/puzzle.js"),
   "search": () => import("lucide-react/dist/esm/icons/search.js"),
   "server": () => import("lucide-react/dist/esm/icons/server.js"),
@@ -68,6 +69,7 @@ export const curatedLucideImports = {
   "twitter": () => import("lucide-react/dist/esm/icons/twitter.js"),
   "user": () => import("lucide-react/dist/esm/icons/user.js"),
   "users": () => import("lucide-react/dist/esm/icons/users.js"),
+  "volume-off": () => import("lucide-react/dist/esm/icons/volume-off.js"),
   "webhook": () => import("lucide-react/dist/esm/icons/webhook.js"),
   "zap": () => import("lucide-react/dist/esm/icons/zap.js"),
 } as Record<string, LucideIconLoader>;

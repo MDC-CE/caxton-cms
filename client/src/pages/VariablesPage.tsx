@@ -1,6 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
 import {
-  ArrowLeft,
   BookOpen,
   Braces,
   Check,
@@ -17,6 +16,7 @@ import {
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -456,11 +456,7 @@ export default function VariablesPage() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-4">
-              <Link href="/">
-                <Button variant="ghost" size="icon" data-testid="link-back-home">
-                  <ArrowLeft className="w-4 h-4" />
-                </Button>
-              </Link>
+              <PrivateHistoryBackButton fallbackHref="/" data-testid="link-back-home" iconClassName="w-4 h-4" />
               <div>
                 <h1 className="text-xl font-bold flex items-center gap-2">
                   <Braces className="w-5 h-5" />

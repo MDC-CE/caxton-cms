@@ -31,6 +31,14 @@ const REGISTRY = [
     description: "Rearrange, add, or remove sections that define the page layout.",
   },
   {
+    name: "product_manage",
+    label: "Manage products (sellable)",
+    scoped: true,
+    scopeKind: "content_types" as const,
+    description:
+      "Make entries sellable, remove them from the product index, and pause/resume store visibility. Does not authorize audience/offer edits (use Edit structure) or page funnel bindings.",
+  },
+  {
     name: "content_edit_default",
     label: "Edit default content",
     scoped: true,

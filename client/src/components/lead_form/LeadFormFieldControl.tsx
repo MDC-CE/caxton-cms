@@ -38,13 +38,23 @@ export type LeadFormComponentRenderer =
   | "simple-list"
   | "grouped-list";
 
+/** Cards arrangement: equal columns vs first option full-width + rest below. */
+export type LeadFormCardsLayout = "grid" | "showcase";
+
 export type LeadFormOption = {
   value: string;
   label: string;
+  /**
+   * Cards renderer only: card heading. When omitted, falls back to `label`.
+   * Closed input / select / lists always use `label`.
+   */
+  title?: string;
   description?: string;
   group?: string;
   cta?: string;
   icon?: string;
+  /** Optional chip on cards renderer (top-right). */
+  badge?: string;
 };
 
 type RichMenuRenderer = "cards" | "simple-list" | "grouped-list";
@@ -79,7 +89,11 @@ function groupOptions(options: LeadFormOption[]): Map<string, LeadFormOption[]> 
 function buildMenuDropdownFromOptions(
   renderer: RichMenuRenderer,
   options: LeadFormOption[],
-  meta?: { title?: string; description?: string },
+  meta?: {
+    title?: string;
+    description?: string;
+    layout?: LeadFormCardsLayout;
+  },
 ): MenuDropdownFromOptions {
   const title = meta?.title;
   const description = meta?.description;
@@ -102,13 +116,18 @@ function buildMenuDropdownFromOptions(
       type: "cards",
       title,
       description,
+      layout:
+        meta?.layout === "showcase"
+          ? { arrangement: "showcase" }
+          : undefined,
       items: options.map((o) => ({
-        title: o.label,
+        title: (typeof o.title === "string" && o.title.trim() ? o.title.trim() : o.label),
         description: o.description ?? "",
         cta: o.cta ?? "Select",
         href: o.value,
         value: o.value,
         icon: o.icon,
+        badge: o.badge,
       })),
     };
   }
@@ -149,17 +168,20 @@ function RichLayout({
   options,
   dialogTitle,
   dialogDescription,
+  layout,
   onSelect,
 }: {
   renderer: RichMenuRenderer;
   options: LeadFormOption[];
   dialogTitle?: string;
   dialogDescription?: string;
+  layout?: LeadFormCardsLayout;
   onSelect: (value: string) => void;
 }) {
   const data = buildMenuDropdownFromOptions(renderer, options, {
     title: dialogTitle,
     description: dialogDescription,
+    layout,
   });
   switch (data.type) {
     case "cards":
@@ -199,8 +221,9 @@ function ChoiceSelect({
       groups.set(key, list);
     }
     const hasNamedGroups = Array.from(groups.keys()).some((k) => k.length > 0);
+    const selectValue = value && options.some((o) => o.value === value) ? value : undefined;
     return (
-      <Select onValueChange={onChange} value={value} disabled={disabled}>
+      <Select onValueChange={onChange} value={selectValue} disabled={disabled}>
         <SelectTrigger data-testid={testId}>
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
@@ -234,8 +257,9 @@ function ChoiceSelect({
     );
   }
 
+  const selectValue = value && options.some((o) => o.value === value) ? value : undefined;
   return (
-    <Select onValueChange={onChange} value={value} disabled={disabled}>
+    <Select onValueChange={onChange} value={selectValue} disabled={disabled}>
       <SelectTrigger data-testid={testId}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
@@ -281,6 +305,7 @@ function ChoiceModal({
   testId,
   dialogTitle,
   dialogDescription,
+  layout,
 }: {
   renderer: RichMenuRenderer;
   options: LeadFormOption[];
@@ -291,6 +316,7 @@ function ChoiceModal({
   testId?: string;
   dialogTitle?: string;
   dialogDescription?: string;
+  layout?: LeadFormCardsLayout;
 }) {
   const [open, setOpen] = useState(false);
   const selected = options.find((o) => o.value === value);
@@ -332,6 +358,7 @@ function ChoiceModal({
             options={options}
             dialogTitle={dialogTitle}
             dialogDescription={dialogDescription}
+            layout={layout}
             onSelect={(v) => {
               onChange(v);
               setOpen(false);
@@ -361,6 +388,8 @@ export type LeadFormFieldControlProps = {
   dialogTitle?: string;
   /** Shown under the layout title inside the modal (menu-style). */
   dialogDescription?: string;
+  /** Cards only: `grid` (default) or `showcase` (first full-width, rest below). */
+  layout?: LeadFormCardsLayout;
   /** When true, location-style SelectGroups by `group` for inline select. */
   groupSelectByGroup?: boolean;
   phoneDefaultCountry?: Country;
@@ -383,6 +412,7 @@ export function LeadFormFieldControl({
   disabled,
   dialogTitle,
   dialogDescription,
+  layout,
   groupSelectByGroup,
   phoneDefaultCountry,
   rows,
@@ -417,6 +447,7 @@ export function LeadFormFieldControl({
         testId={testId}
         dialogTitle={dialogTitle}
         dialogDescription={dialogDescription}
+        layout={layout}
       />
     );
   }

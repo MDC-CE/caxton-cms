@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   getTokenFromCookie,
@@ -69,10 +69,12 @@ interface UseAuthUserOptions {
 }
 
 export function useAuthUser({ enabled = true }: UseAuthUserOptions = {}) {
-  // Keep token in React state so setToken/clearToken re-render and refetch profile.
-  const [token, setTokenState] = useState<string | null>(() =>
-    typeof window !== "undefined" ? getConsumerToken() : null,
-  );
+  // SSR-safe: never read document.cookie during the initial render (window may be shimmed).
+  const [token, setTokenState] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTokenState(getConsumerToken());
+  }, []);
 
   const setToken = useCallback((next: string) => {
     setConsumerToken(next);

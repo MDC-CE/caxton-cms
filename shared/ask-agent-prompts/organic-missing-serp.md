@@ -1,6 +1,6 @@
 ---
 id: organic-missing-serp
-version: 1
+version: 2
 title: Missing SERP features
 used_when: >
   Staff clicks Ask Agent on a row in Diagnostics → SEO → Opportunities →
@@ -45,10 +45,11 @@ Target:
 
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP. If you cannot resolve it, stop and say so.
-2. Read content + SEO; add a clear, concise answer block and/or FAQ that matches the query (and PAA-style questions when relevant).
-3. Fix schema.org companions / structured answers if get_entry_seo shows gaps.
-4. Summarize what you changed for this query.
+2. Optionally refresh the live SERP snapshot with get_or_refresh_seo_research action:serp (cache-first; spends research credits when stale) using the Target query as keyword — do not invent SERP features.
+3. Read content + SEO; add a clear, concise answer block and/or FAQ that matches the query (and PAA-style questions when relevant).
+4. Fix schema.org companions / structured answers if get_entry_seo shows gaps.
+5. Summarize what you changed for this query.
 
-Tools: list_entries, get_entry_content, get_entry_seo, update_fields, propose_change (if you cannot edit).
+Tools: list_entries, get_entry_content, get_entry_seo, get_or_refresh_seo_research, update_fields, propose_change (if you cannot edit).
 
 Don’t: invent or promise SERP features; rewrite unrelated pages; run diagnostics with confirm:true; locale fan-out unless a tool next_action says so.

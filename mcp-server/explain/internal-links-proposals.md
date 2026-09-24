@@ -2,7 +2,7 @@
 
 How 4Geeks authors file hub-visibility body edits, and how Proposal Reviewer applies them.
 
-**MCP:** Declare `review_situations: ["internal_links"]` on `propose_change` (edits). Catalog index: `explain_site` topic `review-situations`.
+**MCP:** Declare `review_situations: ["internal_links"]` on `propose_change` (edits). Catalog index: `explain_site` `topic: "proposals"` `subtopic: "situations"`.
 
 Site: `4geeks.com`  
 Audience: Copy Editor, SEO Specialist, Proposal Reviewer  
@@ -132,8 +132,9 @@ If title/description are also pending: that is mixed SERP + body. Prefer leave-l
 2. **Claims.** No new salary, ranking, “mejor”, or headcount the live article does not already support.
 3. **Links.** Each new href exists, correct locale, topical hub/pillar (or an in-cluster sibling), not a broken `/es/blog/:category/...` placeholder.
 4. **Force.** One link per idea is fine. A sales sentence minted only to carry the link → blocker: “put the link on the existing phrase; delete the new pitch.”
+5. **SEO topology.** Body must not expose our content architecture to readers (piece-count-in-cluster, companion-piece inventory, “for the full picture start with…” as a series TOC, H2 “Recent cluster updates”). Packaging ≠ allowable wooden → `add_blocker`. Teaching topic clusters when that *is* the subject is OK. Staff summaries may still say “cluster hub.”
 
-If 1–3 pass, **apply** even if the prose is a bit wooden.
+If 1–3 pass and gate 5 is clean, **apply** even if the prose is a bit wooden.
 
 ### Disposition table
 
@@ -141,6 +142,7 @@ If 1–3 pass, **apply** even if the prose is a bit wooden.
 |---|---|
 | Links only, facts intact, targets live | Claim → apply |
 | Links good, one forced pitch sentence | `add_blocker` (min 80: what is wrong, what fixed looks like, why). Do not reject |
+| Links good, but body exposes SEO topology (series/cluster inventory talk) | `add_blocker` — rewrite by page job; do not reject |
 | Links good, title/description also pending and weaker than live | Block or wait for author to `revise_entries` and drop SERP ops, then apply body |
 | Proposed body deletes figures or sources to make room for links | `add_blocker`. Reject `harmful` only if the author refuses to restore facts or the packet cannot be fixed |
 | Destinations missing / wrong locale / money-page spray | `add_blocker` or reject `not_implementable` / `target_missing` if the hub does not exist |
@@ -173,6 +175,7 @@ Do not reject because the summary wording differs from the ops. Summary is staff
 - New sentence: “Empieza hoy en 4Geeks y transforma tu futuro” + program URL. Rest of article fine.
 - Link target is `/en/blog/...` inside an `es` article.
 - Three consecutive paragraphs each end with the same hub CTA.
+- Intro: “This is the third piece in our Grok Bot cluster. For the full picture, start with…” — links may be fine; topology talk is not.
 
 ### Reject (rare)
 
@@ -206,7 +209,7 @@ The proposed body adds the hub URL by inventing a closing pitch paragraph the li
 
 ## What this does not change
 
-- Selling pages (`landing` / `program`) still classify as `selling_page`. Link inserts there need the selling-page figures checklist if any number moves.
+- Outcome figures (`selling_page` / `selling_page_figures`) attach when hire rates, salaries, tuition, or prices move in the proposed text — any content type, not landing/program alone.
 - Reviewer still cannot `revise_entries`. If ops are wrong, block and stop.
 - Four-eyes still applies: the human+role that files cannot be the one that applies.
 - Escalated proposals stay frozen until a steward releases them.
@@ -218,5 +221,6 @@ The proposed body adds the hub URL by inventing a closing pitch paragraph the li
 Would I still ship this body if the only difference from live is two honest, same-locale hub links?
 
 If yes, apply.  
-If the only reason to hesitate is tone, block.  
+If the only reason to hesitate is tone (stiff but honest anchors), apply.  
+If the body explains our SEO topology to readers, block.  
 If facts disappeared, do not apply.

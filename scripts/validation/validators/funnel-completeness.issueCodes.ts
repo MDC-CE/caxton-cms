@@ -37,7 +37,7 @@ export const FUNNEL_COMPLETENESS_ISSUE_CODES: Record<string, IssueCodeDefinition
     suggestion: "Add offer + persona on the product (_product.yml), then retry the binding.",
     next_actions: [
       { tool: "get_product", reason: "Inspect product audience", priority: "recommended" },
-      { tool: "update_product", reason: "Set minimal audience", priority: "optional" },
+      { tool: "create_or_update_product", reason: "Set minimal audience", priority: "optional" },
     ],
   },
   MISSING_FUNNEL_PERSONA: {

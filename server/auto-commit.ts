@@ -225,6 +225,23 @@ export function queueFileChange(
   scheduleCommit();
 }
 
+/**
+ * Rehydrate the in-memory auto-commit queue after restart from already-classified
+ * tracked local dirties (edits + deletes). No-op when auto-commit is disabled.
+ * Preserves authors so production can resolve per-user GitHub Connect tokens.
+ */
+export function requeueTrackedLocalDirties(
+  files: Array<{ filePath: string; author?: string }>,
+): void {
+  if (!isAutoCommitEnabled()) return;
+  if (!files.length) return;
+
+  for (const { filePath, author } of files) {
+    queueFileChange(filePath, author);
+  }
+  log.info(`[AutoCommit] Requeued ${files.length} tracked local dirty file(s) after restart`);
+}
+
 function scheduleCommit(useBackoff = false): void {
   if (timer !== null) return;
   if (isCommitting) return;
@@ -752,8 +769,9 @@ export function getAutoCommitStatus(): AutoCommitStatus {
     .filter(([filePath, info]) => {
       const fileSite = getSiteConfigs().find(s => filePath.startsWith(s.contentFolder.replace(/\/$/, '') + '/'));
       if (!shouldTrackFile(filePath, undefined, fileSite?.contentFolder)) return false;
-      // Locally modified = local SHA differs from remote SHA, or file has no remote SHA at all
-      return info.sha && info.sha !== info.remoteSha;
+      // Locally modified = local SHA differs from remote SHA (incl. pending delete sha ''),
+      // or local-only file with no remoteSha yet.
+      return info.sha !== info.remoteSha;
     })
     .map(([filePath]) => filePath);
 
@@ -822,4 +840,18 @@ export async function flushPendingChanges(): Promise<{ success: boolean; error?:
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
   }
+}
+
+/** Test helper: clear in-memory queue and timers. */
+export function _resetAutoCommitForTests(): void {
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  pendingChanges.clear();
+  conflictedFiles.clear();
+  nextSyncAt = null;
+  isCommitting = false;
+  lastError = null;
+  retryBackoffMs = 0;
 }

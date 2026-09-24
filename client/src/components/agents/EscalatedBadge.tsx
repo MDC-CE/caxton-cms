@@ -21,6 +21,7 @@ export function EscalatedBadge({
 
   const onTriggerClick = stopLinkNavigation
     ? (e: MouseEvent) => {
+        e.preventDefault();
         e.stopPropagation();
       }
     : undefined;

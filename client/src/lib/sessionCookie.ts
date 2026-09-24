@@ -20,8 +20,8 @@ const UTM_TRUNCATE_LEN = 200;
 export function getParentCookieDomain(hostname?: string): string | undefined {
   const host =
     hostname ??
-    (typeof window !== 'undefined' ? window.location.hostname : undefined);
-  if (!host) return undefined;
+    (typeof window !== 'undefined' ? window.location?.hostname : undefined);
+  if (!host || typeof host !== 'string') return undefined;
 
   if (
     host === 'localhost' ||
@@ -52,8 +52,13 @@ function buildCookieAttributes(maxAge = COOKIE_MAX_AGE_SECONDS): string {
   return parts.join('; ');
 }
 
+/** True when document.cookie is a usable string (SSR often has document without cookies). */
+function canUseDocumentCookie(): boolean {
+  return typeof document !== 'undefined' && typeof document.cookie === 'string';
+}
+
 export function readRawCookie(name: string): string | null {
-  if (typeof document === 'undefined') return null;
+  if (!canUseDocumentCookie()) return null;
   const prefix = `${name}=`;
   const row = document.cookie.split('; ').find((c) => c.startsWith(prefix));
   if (!row) return null;
@@ -61,12 +66,12 @@ export function readRawCookie(name: string): string | null {
 }
 
 export function writeRawCookie(name: string, value: string, maxAge = COOKIE_MAX_AGE_SECONDS): void {
-  if (typeof document === 'undefined') return;
+  if (!canUseDocumentCookie()) return;
   document.cookie = `${name}=${value}; ${buildCookieAttributes(maxAge)}`;
 }
 
 export function clearRawCookie(name: string): void {
-  if (typeof document === 'undefined') return;
+  if (!canUseDocumentCookie()) return;
   // Clear host-only and parent-domain variants
   document.cookie = `${name}=; path=/; max-age=0; samesite=lax`;
   const domain = getParentCookieDomain();
@@ -122,7 +127,7 @@ function encodeSessionCookieValue(session: Session): string | null {
 }
 
 export function getSessionFromCookie(): Session | null {
-  if (typeof document === 'undefined') return null;
+  if (!canUseDocumentCookie()) return null;
   try {
     const raw = readRawCookie(SESSION_COOKIE_NAME);
     if (!raw) return null;
@@ -138,7 +143,7 @@ export function getSessionFromCookie(): Session | null {
 }
 
 export function setSessionCookie(session: Session): void {
-  if (typeof document === 'undefined') return;
+  if (!canUseDocumentCookie()) return;
   const encoded = encodeSessionCookieValue(session);
   if (!encoded) return;
   writeRawCookie(SESSION_COOKIE_NAME, encoded);
@@ -159,7 +164,7 @@ export function getTokenFromCookie(): string | null {
 }
 
 export function setTokenCookie(token: string): void {
-  if (typeof document === 'undefined') return;
+  if (!canUseDocumentCookie()) return;
   writeRawCookie(CONSUMER_TOKEN_COOKIE_NAME, encodeURIComponent(token));
 }
 
@@ -170,8 +175,12 @@ export function clearTokenCookie(): void {
 /**
  * One-time migrate legacy localStorage session → `4g_ctx`, then remove the key.
  */
+function canUseBrowserStorage(): boolean {
+  return typeof window !== 'undefined' && typeof localStorage !== 'undefined';
+}
+
 export function migrateLegacySessionFromLocalStorage(): Session | null {
-  if (typeof window === 'undefined') return null;
+  if (!canUseBrowserStorage()) return null;
   try {
     const existing = getSessionFromCookie();
     if (existing) {
@@ -208,7 +217,7 @@ export function migrateLegacySessionFromLocalStorage(): Session | null {
  * One-time migrate legacy `4g_auth_token` localStorage → `4g_tok`.
  */
 export function migrateLegacyTokenFromLocalStorage(): string | null {
-  if (typeof window === 'undefined') return null;
+  if (!canUseBrowserStorage()) return null;
   try {
     const fromCookie = getTokenFromCookie();
     if (fromCookie) {

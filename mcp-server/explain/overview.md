@@ -23,7 +23,7 @@ This is a content-driven marketing platform built with React (Vite/TypeScript) o
 
 ## Products and audience
 
-Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s `_product.yml`. For “what we sell / who for,” call **`list_products`** then **`get_product`** on a slug. Journey pages → topic `funnel` / `get_product_funnel`; journey metrics → `get_product_funnel_analytics`. Site-wide GA4 → topic `analytics` / `get_analytics_report` (`metrics_view`). Changing offer/personas → **`update_product`** (`confirm: true`, needs structure edit). Making sellable or pausing the store is **human-only** (staff Store / `propose_change` notes).
+Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s `_product.yml`. For “what we sell / who for,” call **`list_products`** then **`get_product`** on a slug. Journey pages → topic `funnel` / `get_product_funnel`; journey metrics → `get_product_funnel_analytics`. Site-wide GA4 → topic `analytics` / `get_analytics_report` (`metrics_view`). Changing offer/personas → **`create_or_update_product`** (`confirm: true`, needs `content_edit_structure`). Make sellable / remove / pause → same tool with `purchasable` / `actively_selling` (needs `product_manage`). Removed products omitted from `list_products` unless `include_removed: true`.
 
 <!-- @dynamic:products -->
 <!-- /dynamic -->
@@ -42,19 +42,17 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `component-behaviors` | behaviors ids, CTA `tracking`, conversion_events catalog, CRM tags allowlist |
 | `seo` | meta gates, locale `seo:`, clustering inventory, GSC/Bing, organic traffic, SEO diagnostics |
 | `funnel` | `funnel.stage` / products, money pages (`decision`), `list_entries` filters, inventory vs journey |
-| `product` | What we sell / who for: `list_products`, `get_product`, `update_product` (audience); store visibility is human-only; journey tools |
+| `product` | What we sell / who for: `list_products`, `get_product`, `create_or_update_product` (audience + sellable under `product_manage`); journey tools |
 | `ecommerce` | Alias of topic `product` (legacy name) |
 | `shared-layout` | `single_template` / DB shared shell; create_entry playbook; blog as example |
 | `relation-fields` | Relation editor, authors hubs, listing vs hydrate, delete reassign |
 | `lead-forms` | Catalog `source` (`content_type` / `database` / `related_field`), required `value_path`/`label_path`, required `query` on ecommerce catalogs, `purchasable` vs `actively_selling` |
 | `redirects` | CMS 301/302: two stores, first-match, `test_redirect` (`read_redirects`) + `update_redirect` (`edit_redirects`) |
-| `proposals` | Entry change proposals + issue handoff notes: 4 tools incl. `get_entry_activity`, four-eyes apply; `list_proposals` is stats-first |
-| `reading-proposals` | Live `review_context` axes, checklist IDs, create refuses, apply block when target missing |
-| `review-situations` | Catalog of `review_situations` ids; infer-when-empty; per-situation ship |
-| `internal-links-proposals` | Hub/internal link author + reviewer playbook |
-| `serp-title-description-proposals` | SERP title/description author + reviewer playbook |
+| `proposals` | **Hub** — omit `subtopic` for index; playbooks: `overview`, `reading`, `situations`, `internal-links`, `serp-title-description`, `funnel-classification`, `idea-opportunity-harm`, `existing-demand`, `broken-url`, `translations` |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 
-**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for GSC organic clicks (site / paths / clusters / opportunities / queries / leaderboard), and `get_analytics_report` for GA4 behavioral reports (site summary / top pages / page detail / events / traffic sources). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see `get_organic_traffic`. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
+Legacy flat proposal topics (`reading-proposals`, `review-situations`, `*-proposals`) still resolve as aliases with a deprecation warning — prefer `topic: "proposals"` + `subtopic`.
+
+**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for measured GSC clicks, `get_or_refresh_seo_research` for planning keyword/SERP research (not GSC), and `get_analytics_report` for GA4 behavioral reports. Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see organic + research tools. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
 
 **Before making any structural change to this codebase, call `explain_site` with the relevant topic.**

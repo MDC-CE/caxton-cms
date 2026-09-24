@@ -1068,7 +1068,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={Bot}
-                label="Agents"
+                label="Agent Swarm"
                 href="/private/agents/orgchart"
                 indicator="arrow"
                 testId="link-agents"
@@ -1116,7 +1116,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={ClipboardList}
-                label="Proposals"
+                label="Agent Swarm Proposals"
                 href="/private/agents/proposals"
                 indicator="arrow"
                 testId="link-proposals"
@@ -1601,10 +1601,10 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                   <ul className="list-disc pl-5 space-y-1">
                     <li>
                       Field translations do <strong className="font-medium">not</strong> need detach — use MCP{" "}
-                      <code className="text-[11px]">translate_entry</code> while attached (draft → promote)
+                      <code className="text-[11px]">translate_entry</code> while attached (always a draft/variant → promote; never live YAML)
                     </li>
                     <li>After detach, shell-owned locales use <code className="text-[11px]">translate_entry</code> sections mode or MCP <code className="text-[11px]">set_entry_attachment</code></li>
-                    <li>New locales start as <code className="text-[11px]">draft.{"{locale}"}.yml</code> (not public) until promote/publish</li>
+                    <li>Translations land on <code className="text-[11px]">{"{variant}.{locale}.yml"}</code> (default <code className="text-[11px]">draft</code>) until promote/publish — live stays untouched</li>
                     <li>Empty live stubs are converted to draft — they 404 publicly with an unavailable message</li>
                   </ul>
                 </div>

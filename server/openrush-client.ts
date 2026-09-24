@@ -17,12 +17,20 @@ const log = child({ module: "openrush-client" });
 
 const OPENRUSH_SERP_URL = "https://api.openrush.com/v1/tools/inspect_serp";
 const OPENRUSH_KEYWORD_URL = "https://api.openrush.com/v1/tools/inspect_keyword";
+const OPENRUSH_RESEARCH_KEYWORDS_URL = "https://api.openrush.com/v1/tools/research_keywords";
+const OPENRUSH_DISCOVER_COMPETITORS_URL = "https://api.openrush.com/v1/tools/discover_competitors";
+const OPENRUSH_COMPARE_KEYWORD_COVERAGE_URL =
+  "https://api.openrush.com/v1/tools/compare_keyword_coverage";
 
 /** Official OpenRush credit cost for `inspect_keyword` (see credits docs). */
 export const OPENRUSH_INSPECT_KEYWORD_CREDITS = 5;
 
 /** Official OpenRush credit cost for `inspect_serp` (see credits docs). */
 export const OPENRUSH_INSPECT_SERP_CREDITS = 2;
+
+export const OPENRUSH_RESEARCH_KEYWORDS_CREDITS = 3;
+export const OPENRUSH_DISCOVER_COMPETITORS_CREDITS = 7;
+export const OPENRUSH_COMPARE_KEYWORD_COVERAGE_CREDITS = 12;
 
 export function getOpenRushApiKey(): string {
   return (process.env.OPENRUSH_API_KEY || "").trim();
@@ -123,6 +131,8 @@ export async function inspectSerpQuery(opts: {
     const parsed = parseInspectSerpData(data);
     const target = opts.targetUrl || "";
     const ourRank = target ? rankOfUrlInOrganic(target, parsed.organic) : findOurRank(parsed.organic, opts.ourHosts);
+    const location = settings.location || "United States";
+    const language = settings.language || "English";
     const entry: OpenRushSerpEntry = {
       query,
       fetched_at: new Date().toISOString(),
@@ -131,6 +141,8 @@ export async function inspectSerpQuery(opts: {
       has_paa: parsed.has_paa,
       our_serp_rank: ourRank,
       visible_in_serp: ourRank != null,
+      location,
+      language,
     };
     upsertSerpEntry(entry, opts.contentFolder);
     return {
@@ -368,4 +380,164 @@ export async function fetchOpenRushCreditsBalance(): Promise<OpenRushCreditsResu
     log.warn({ err }, "[openrush] fetch credits failed");
     return { ok: false, balance: null, error: message };
   }
+}
+
+async function openRushPost(
+  url: string,
+  body: Record<string, unknown>,
+  contentRoot?: string,
+): Promise<{ ok: true; data: unknown } | { ok: false; error: string; fatal?: boolean }> {
+  const key = getOpenRushApiKey();
+  if (!key) return { ok: false, error: "OPENRUSH_API_KEY is not set", fatal: true };
+  const settings = getOpenRushSettings(contentRoot);
+  if (!settings.enabled) {
+    return { ok: false, error: "OpenRush is disabled in settings", fatal: true };
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!res.ok) {
+      const message =
+        (typeof json?.error === "string" && json.error) ||
+        (typeof json?.message === "string" && json.message) ||
+        `OpenRush HTTP ${res.status}`;
+      const fatal = res.status === 401 || res.status === 403 || res.status === 402;
+      return { ok: false, error: message, fatal };
+    }
+    return { ok: true, data: json?.data ?? json };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type ResearchKeywordsResult = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+  credits_note?: string;
+  fatal?: boolean;
+};
+
+export async function researchKeywordsQuery(opts: {
+  seed: string;
+  contentRoot?: string;
+  mode?: string;
+  limit?: number;
+  min_volume?: number;
+  intent?: string;
+}): Promise<ResearchKeywordsResult> {
+  const seed = opts.seed.trim();
+  if (!seed) return { ok: false, error: "seed is required" };
+  const settings = getOpenRushSettings(opts.contentRoot);
+  const location = settings.location || "United States";
+  const language = settings.language || "English";
+  const body: Record<string, unknown> = {
+    seed,
+    location,
+    language,
+    mode: opts.mode || "ideas",
+    limit: opts.limit ?? 25,
+  };
+  if (opts.min_volume != null) body.min_volume = opts.min_volume;
+  if (opts.intent) body.intent = opts.intent;
+  const res = await openRushPost(OPENRUSH_RESEARCH_KEYWORDS_URL, body, opts.contentRoot);
+  if (!res.ok) return { ok: false, error: res.error, fatal: res.fatal };
+  const data =
+    res.data && typeof res.data === "object" && !Array.isArray(res.data)
+      ? (res.data as Record<string, unknown>)
+      : { raw: res.data };
+  return {
+    ok: true,
+    data,
+    credits_note: `research_keywords uses ${OPENRUSH_RESEARCH_KEYWORDS_CREDITS} research credits`,
+  };
+}
+
+export type DiscoverCompetitorsResult = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+  credits_note?: string;
+  fatal?: boolean;
+};
+
+export async function discoverCompetitorsQuery(opts: {
+  contentRoot?: string;
+  domain?: string;
+  seed_keywords?: string[];
+  limit?: number;
+}): Promise<DiscoverCompetitorsResult> {
+  const domain = opts.domain?.trim() || "";
+  const seeds = (opts.seed_keywords || []).map((s) => s.trim()).filter(Boolean);
+  if (!domain && seeds.length === 0) {
+    return { ok: false, error: "domain or seed_keywords is required" };
+  }
+  const settings = getOpenRushSettings(opts.contentRoot);
+  const body: Record<string, unknown> = {
+    location: settings.location || "United States",
+    language: settings.language || "English",
+    limit: opts.limit ?? 10,
+  };
+  if (domain) body.domain = domain;
+  if (seeds.length) body.seed_keywords = seeds;
+  const res = await openRushPost(OPENRUSH_DISCOVER_COMPETITORS_URL, body, opts.contentRoot);
+  if (!res.ok) return { ok: false, error: res.error, fatal: res.fatal };
+  const data =
+    res.data && typeof res.data === "object" && !Array.isArray(res.data)
+      ? (res.data as Record<string, unknown>)
+      : { raw: res.data };
+  return {
+    ok: true,
+    data,
+    credits_note: `discover_competitors uses ${OPENRUSH_DISCOVER_COMPETITORS_CREDITS} research credits`,
+  };
+}
+
+export type CompareKeywordCoverageResult = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+  credits_note?: string;
+  fatal?: boolean;
+};
+
+export async function compareKeywordCoverageQuery(opts: {
+  contentRoot?: string;
+  domain: string;
+  competitors: string[];
+  limit?: number;
+}): Promise<CompareKeywordCoverageResult> {
+  const domain = opts.domain.trim();
+  const competitors = opts.competitors.map((c) => c.trim()).filter(Boolean);
+  if (!domain) return { ok: false, error: "domain is required" };
+  if (competitors.length === 0) return { ok: false, error: "competitors is required" };
+  const settings = getOpenRushSettings(opts.contentRoot);
+  const res = await openRushPost(
+    OPENRUSH_COMPARE_KEYWORD_COVERAGE_URL,
+    {
+      domain,
+      competitors,
+      location: settings.location || "United States",
+      language: settings.language || "English",
+      limit: opts.limit ?? 50,
+    },
+    opts.contentRoot,
+  );
+  if (!res.ok) return { ok: false, error: res.error, fatal: res.fatal };
+  const data =
+    res.data && typeof res.data === "object" && !Array.isArray(res.data)
+      ? (res.data as Record<string, unknown>)
+      : { raw: res.data };
+  return {
+    ok: true,
+    data,
+    credits_note: `compare_keyword_coverage uses ${OPENRUSH_COMPARE_KEYWORD_COVERAGE_CREDITS} research credits`,
+  };
 }

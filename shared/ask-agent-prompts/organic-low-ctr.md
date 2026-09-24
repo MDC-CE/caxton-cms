@@ -1,6 +1,6 @@
 ---
 id: organic-low-ctr
-version: 2
+version: 3
 title: High impressions, low CTR
 used_when: >
   Staff clicks Ask Agent on a row in Diagnostics → SEO → Opportunities →
@@ -28,7 +28,7 @@ required:
   - expected_ctr
   - window_label
   - mcp_url
-max_chars: 1200
+max_chars: 1300
 sections:
   - Goal
   - Target
@@ -49,9 +49,10 @@ Target:
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP. If you cannot resolve it, stop and say so.
 2. Read get_entry_seo + get_entry_content; name the live gap in one sentence. If live already has year + place + figure and you only want a catchier hook, stop.
-3. File propose_change with review_situations: ["serp_title_description"] — meta.page_title and/or meta.description only. Claims must already appear on live.
-4. Summarize tokens kept and the one token added (ops own the values).
+3. Optionally refresh SERP context with get_or_refresh_seo_research action:serp after reading live meta (snapshot only — does not rewrite title/description).
+4. File propose_change with review_situations: ["serp_title_description"] — meta.page_title and/or meta.description only. Claims must already appear on live.
+5. Summarize tokens kept and the one token added (ops own the values).
 
-Tools: list_entries, get_entry_seo, get_entry_content, get_entry_activity, propose_change, explain_site topic serp-title-description-proposals.
+Tools: list_entries, get_entry_seo, get_entry_content, get_entry_activity, get_or_refresh_seo_research, propose_change, explain_site topic serp-title-description-proposals.
 
 Don’t: rewrite the body; mix content into the SERP packet; invent unsourced claims; locale fan-out unless a tool next_action says so; run diagnostics with confirm:true.

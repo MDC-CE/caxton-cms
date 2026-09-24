@@ -1340,6 +1340,7 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
       computeFileSha,
       updateFileAfterPull,
       loadSyncState,
+      classifySameCommitDrift,
     } = await import("./sync-state");
     const lastSyncedCommit = getLastSyncedCommit(opts?.contentRoot);
     const remoteCommit = await getBranchHeadSha(config);
@@ -1371,26 +1372,36 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
 
     if (lastSyncedCommit === remoteCommit) {
       const state = loadSyncState(opts?.contentRoot);
-      const staleFiles: string[] = [];
+      const { staleFiles, protectedLocal } = classifySameCommitDrift(state.files, {
+        shouldTrack: (filePath) => shouldTrackFile(filePath, undefined, opts?.contentRoot),
+        diskSha: (filePath) => {
+          const fullPath = path.join(process.cwd(), filePath);
+          if (!fs.existsSync(fullPath)) return null;
+          return computeFileSha(fs.readFileSync(fullPath, "utf-8"));
+        },
+      });
 
-      for (const [filePath, fileInfo] of Object.entries(state.files)) {
-        if (!shouldTrackFile(filePath, undefined, opts?.contentRoot) || !fileInfo.remoteSha) continue;
+      if (staleFiles.length === 0 && protectedLocal.length === 0) {
+        logSync("RECONCILE", `Already in sync at ${lastSyncedCommit.slice(0, 7)}`);
+        return;
+      }
 
-        const fullPath = path.join(process.cwd(), filePath);
-        if (!fs.existsSync(fullPath)) {
-          staleFiles.push(filePath);
-          continue;
-        }
-
-        const localContent = fs.readFileSync(fullPath, "utf-8");
-        const localSha = computeFileSha(localContent);
-        if (localSha !== fileInfo.remoteSha) {
-          staleFiles.push(filePath);
+      if (protectedLocal.length > 0) {
+        logSync(
+          "RECONCILE",
+          `Kept ${protectedLocal.length} tracked local pending file(s) (not overwriting from GitHub)`,
+        );
+        try {
+          const { isAutoCommitEnabled, requeueTrackedLocalDirties } = await import("./auto-commit");
+          if (isAutoCommitEnabled()) {
+            requeueTrackedLocalDirties(protectedLocal);
+          }
+        } catch (e) {
+          log.warn({ err: e }, "[SyncReconcile] Failed to requeue protected local dirties");
         }
       }
 
       if (staleFiles.length === 0) {
-        logSync("RECONCILE", `Already in sync at ${lastSyncedCommit.slice(0, 7)}`);
         return;
       }
 
@@ -1419,7 +1430,8 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
 
       // Only advance baseline when every stale file was restored; otherwise keep
       // prior remoteShas so the next startup / Sync Modal can retry.
-      if (pullErrors.length === 0) {
+      // Do not rebuild when protected local dirties remain — that would clear their pending state.
+      if (pullErrors.length === 0 && protectedLocal.length === 0) {
         rebuildSyncStateFromLocal(remoteCommit, opts?.contentRoot);
       }
 

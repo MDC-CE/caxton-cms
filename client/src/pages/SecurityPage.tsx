@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  IconArrowLeft,
   IconCheck,
   IconChevronDown,
   IconCode,
@@ -23,8 +22,9 @@ import {
   IconLock,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useLocation, useSearch } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -2363,11 +2363,7 @@ export default function SecurityPage() {
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
           <div className="flex items-center gap-3 min-w-0">
-            <Link href="/private/settings">
-              <Button variant="ghost" size="icon" data-testid="button-back-security">
-                <IconArrowLeft className="h-4 w-4" />
-              </Button>
-            </Link>
+            <PrivateHistoryBackButton data-testid="button-back-security" iconClassName="h-4 w-4" />
             <div className="min-w-0">
               <h1 className="text-xl font-semibold" data-testid="text-security-title">Security</h1>
               <p className="text-sm text-muted-foreground">Roles, users and security configuration</p>

@@ -34,6 +34,11 @@ export interface ContentTypeFunnelConfig {
   enforcement?: boolean;
 }
 
+/** Whether entries of this type may become sellable products. Omitted = false (unless back-compat). */
+export interface ContentTypeProductsConfig {
+  allow_sellable_entries?: boolean;
+}
+
 export interface LayoutMenuConfig {
   top: string | null;
   bottom: string | null;
@@ -154,6 +159,11 @@ export interface ContentTypeEntry {
    * funnel.enforcement is on. Set enforcement false to exclude this type.
    */
   funnel?: ContentTypeFunnelConfig;
+  /**
+   * Product / sellable inventory for this type. Omitted = off (see contentTypeAllowsSellableEntries
+   * for back-compat when the type already has purchasable products).
+   */
+  products?: ContentTypeProductsConfig;
   /**
    * Type-level strategy brief for staff/agents (main why of this content type).
    * Required before any editor.required true|attached. Context only for field fill_intent.
@@ -1158,7 +1168,7 @@ export function hasFieldMapping(type: string, contentRoot?: string): boolean {
   return !!getFieldMapping(type, contentRoot);
 }
 
-export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "funnel" | "strategy">> & {
+export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "funnel" | "products" | "strategy">> & {
   /** Pass `null` to unlink a database-backed type (removes the `database` key). */
   database?: DatabaseConfig | null;
   /** Pass `null` to remove preview screenshot config. */
@@ -1172,6 +1182,11 @@ export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" 
    * Set `{ enforcement: false }` to opt this type out.
    */
   funnel?: ContentTypeFunnelConfig | null;
+  /**
+   * Pass `null` to remove products key (same as omitted = allow_sellable_entries off).
+   * Callers must block disable while purchasable products remain.
+   */
+  products?: ContentTypeProductsConfig | null;
   /** Pass `null` to remove strategy (rejected if required fields remain). */
   strategy?: ContentTypeEntry["strategy"] | null;
 };
@@ -1190,6 +1205,7 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
     editor: editorUpdate,
     seo_monitoring: seoMonitoringUpdate,
     funnel: funnelUpdate,
+    products: productsUpdate,
     strategy: strategyUpdate,
     ...rest
   } = update;
@@ -1227,6 +1243,16 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
       merged.funnel = { enforcement: false };
     } else {
       delete merged.funnel;
+    }
+  }
+
+  if (productsUpdate === null) {
+    delete merged.products;
+  } else if (productsUpdate) {
+    if (productsUpdate.allow_sellable_entries === true) {
+      merged.products = { allow_sellable_entries: true };
+    } else {
+      delete merged.products;
     }
   }
 

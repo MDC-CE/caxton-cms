@@ -148,6 +148,10 @@ import {
   updateOpenRushSettings,
   getFunnelSettings,
   updateFunnelSettings,
+  getProposalSettings,
+  updateProposalSettings,
+  getSettingsFileRevision,
+  parseProposalSettingsStrict,
   buildRobotsTxtContent,
   getAuthSettings,
   updateAuthSettings,
@@ -207,6 +211,7 @@ import {
   BREATHECODE_HOST,
   extractToken,
   requireCapability,
+  requireAnyCapability,
   requireMutatingStaff,
   safeYamlLoad,
   safeYamlDump,
@@ -1887,6 +1892,77 @@ export function registerSettingsRoutes(app: Express): void {
       markFileAsModified("settings.yml", undefined, undefined, contentRoot);
       res.json({ success: true, settings });
     } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  app.get("/api/settings/proposals", async (req, res) => {
+    const auth = await requireAnyCapability(req, res, [
+      "content_view",
+      "seo_edit",
+      "seo_settings",
+    ]);
+    if (!auth.authorized) return;
+    const contentRoot = getContentRoot(res);
+    const site = res.locals.site as { config?: { domain?: string }; contentRootName?: string } | undefined;
+    const settings = getProposalSettings(contentRoot);
+    const revision = getSettingsFileRevision(contentRoot);
+    const canEdit = Boolean(
+      auth.username && userStore.userHasRole(auth.username, "platform_steward"),
+    );
+    res.json({
+      settings,
+      revision,
+      site_label: site?.config?.domain ?? site?.contentRootName ?? getContentRootName(res),
+      can_edit: canEdit,
+    });
+  });
+
+  app.put("/api/settings/proposals", async (req, res) => {
+    const auth = await requireAnyCapability(req, res, [
+      "content_view",
+      "seo_edit",
+      "seo_settings",
+    ]);
+    if (!auth.authorized) return;
+    if (!auth.username || !userStore.userHasRole(auth.username, "platform_steward")) {
+      res.status(403).json({
+        error: "Only a Platform Steward can change proposal rules",
+        code: "steward_required",
+      });
+      return;
+    }
+    try {
+      const body = req.body?.proposals ?? req.body?.settings ?? req.body;
+      const expectedRevision =
+        typeof req.body?.expected_revision === "string"
+          ? req.body.expected_revision
+          : typeof req.body?.expectedRevision === "string"
+            ? req.body.expectedRevision
+            : undefined;
+      if (expectedRevision == null || !String(expectedRevision).trim()) {
+        res.status(400).json({
+          error: "expected_revision is required",
+          code: "revision_required",
+        });
+        return;
+      }
+      const parsed = parseProposalSettingsStrict(body);
+      const contentRoot = getContentRoot(res);
+      const { settings, revision } = updateProposalSettings(parsed, contentRoot, {
+        expectedRevision: String(expectedRevision).trim(),
+      });
+      markFileAsModified("settings.yml", auth.username ?? undefined, undefined, contentRoot);
+      res.json({ success: true, settings, revision });
+    } catch (err: any) {
+      if (err?.code === "conflict") {
+        res.status(409).json({
+          error: err.message || "Rules changed elsewhere — reload and try again",
+          code: "conflict",
+          revision: err.revision,
+        });
+        return;
+      }
       res.status(400).json({ error: err.message || String(err) });
     }
   });

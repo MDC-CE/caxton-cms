@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { IS_SERVER } from "@/lib/initialData";
+import { IS_SERVER, shouldSuppressFullPageLoader, isSsrHydrateWindow } from "@/lib/initialData";
 import { useTranslation } from "react-i18next";
 import { useLocation, useSearch } from "wouter";
 import { apiFetch } from "@/lib/queryClient";
@@ -44,7 +44,7 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
   const requestLocale = isNonLocalized ? undefined : ((locale || (i18n.language as string) || "en"));
   const apiPath = getApiPath(type);
 
-  const { data, isLoading, error, refetch } = useQuery<Record<string, unknown>>({
+  const { data, isLoading, isPending, error, refetch } = useQuery<Record<string, unknown>>({
     queryKey: forceVariant
       ? [apiPath, slug, requestLocale ?? "auto", forceVariant]
       : [apiPath, slug, requestLocale ?? "auto"],
@@ -115,7 +115,13 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
     data?.settings as { loading?: { eager_count?: number } } | undefined,
   );
 
-  if ((isLoading || (data && !sectionsReady)) && !IS_SERVER) {
+  const waitingForData = isLoading || isPending;
+  const showLoader =
+    !IS_SERVER &&
+    (waitingForData ||
+      (!!data && !sectionsReady && !shouldSuppressFullPageLoader()));
+
+  if (showLoader) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"
@@ -132,6 +138,16 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
   }
 
   if (error || !data) {
+    if (!IS_SERVER && !error && (waitingForData || isSsrHydrateWindow())) {
+      return (
+        <div
+          className="min-h-screen flex items-center justify-center"
+          data-testid={`loading-${type}`}
+        >
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        </div>
+      );
+    }
     const label = capitalize(type);
     return (
       <div

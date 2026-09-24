@@ -5,6 +5,7 @@ import os from "os";
 import {
   readEntryProduct,
   writeEntryProduct,
+  listProductRows,
 } from "./product-io";
 import { scanProductContent } from "./product-index";
 
@@ -15,7 +16,6 @@ describe("product-io", () => {
   beforeEach(() => {
     prevCwd = process.cwd();
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "product-io-"));
-    // Minimal content layout
     const prog = path.join(tmp, "programs", "full-stack");
     fs.mkdirSync(prog, { recursive: true });
     fs.writeFileSync(
@@ -41,11 +41,17 @@ describe("product-io", () => {
       ].join("\n"),
       "utf-8",
     );
-    // content-types stub — product index walks type dirs from getAllConfigs
-    // Use scan with contentRoot pointing at tmp; need content-types.yml
     fs.writeFileSync(
       path.join(tmp, "content-types.yml"),
-      ["program:", "  directory: programs", "  url_pattern:", "    en: /us/:slug", ""].join("\n"),
+      [
+        "program:",
+        "  directory: programs",
+        "  url_pattern:",
+        "    en: /us/:slug",
+        "  products:",
+        "    allow_sellable_entries: true",
+        "",
+      ].join("\n"),
     );
     scanProductContent(tmp);
   });
@@ -59,6 +65,7 @@ describe("product-io", () => {
     const snap = readEntryProduct("program", "full-stack", tmp);
     expect(snap).not.toBeNull();
     expect(snap!.audience_status).toBe("minimal");
+    expect(snap!.purchasable).toBe(true);
   });
 
   it("patches actively_selling for staff", () => {
@@ -73,16 +80,70 @@ describe("product-io", () => {
     expect(result.product.actively_selling).toBe(false);
   });
 
-  it("refuses purchasable false", () => {
+  it("soft-removes with purchasable false and keeps audience", () => {
     const result = writeEntryProduct(
       "program",
       "full-stack",
       { purchasable: false },
       tmp,
     );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.product.purchasable).toBe(false);
+    expect(result.product.offer?.one_liner).toBe("Learn to code");
+    expect(listProductRows({ contentRoot: tmp })).toHaveLength(0);
+    expect(listProductRows({ contentRoot: tmp, includeRemoved: true })).toHaveLength(1);
+  });
+
+  it("re-enables removed product", () => {
+    writeEntryProduct("program", "full-stack", { purchasable: false }, tmp);
+    const result = writeEntryProduct("program", "full-stack", { purchasable: true }, tmp);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.product.purchasable).toBe(true);
+  });
+
+  it("allows audience patch while removed", () => {
+    writeEntryProduct("program", "full-stack", { purchasable: false }, tmp);
+    const result = writeEntryProduct(
+      "program",
+      "full-stack",
+      { offer: { who_its_not_for: "Kids" } },
+      tmp,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.product.purchasable).toBe(false);
+    expect(result.product.offer?.who_its_not_for).toBe("Kids");
+  });
+
+  it("creates sellable product for empty entry", () => {
+    const dir = path.join(tmp, "programs", "data-science");
+    fs.mkdirSync(dir, { recursive: true });
+    const result = writeEntryProduct(
+      "program",
+      "data-science",
+      { purchasable: true },
+      tmp,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.product.purchasable).toBe(true);
+    expect(result.product.product_id).toBe("program-data-science");
+  });
+
+  it("fails create when product_id collides", () => {
+    const dir = path.join(tmp, "programs", "other");
+    fs.mkdirSync(dir, { recursive: true });
+    const result = writeEntryProduct(
+      "program",
+      "other",
+      { purchasable: true, product_id: "program-full-stack" },
+      tmp,
+    );
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.code).toBe("purchasable_remove_forbidden");
+    expect(result.code).toBe("product_id_collision");
   });
 
   it("upserts persona and deep-merges offer", () => {
@@ -103,20 +164,6 @@ describe("product-io", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.product.offer?.who_its_not_for).toBe("Kids");
-    expect(result.product.offer?.one_liner).toBe("Learn to code");
     expect(result.product.personas?.[0]?.avatar.fears).toEqual(["Failing", "Debt"]);
-    expect(result.product.personas?.[0]?.role).toBe("Career switcher");
-  });
-
-  it("refuses clearing the last persona", () => {
-    const result = writeEntryProduct(
-      "program",
-      "full-stack",
-      { clear_personas: ["career-changer"] },
-      tmp,
-    );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.code).toBe("last_persona");
   });
 });

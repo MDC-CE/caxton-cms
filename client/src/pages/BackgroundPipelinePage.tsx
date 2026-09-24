@@ -369,6 +369,20 @@ const EVENT_META: Record<string, EventMeta> = {
     icon: IconLink,
     iconClass: "text-emerald-400 border-emerald-400/40",
   },
+  cluster_hub_path_rewrite_started: {
+    label: "Cluster Path Rewrite Started",
+    description:
+      "After a hub URL rename, spoke pages that still pointed at the old URL are being updated in the background.",
+    icon: IconLink,
+    iconClass: "text-primary border-primary/40",
+  },
+  cluster_hub_path_rewrite_done: {
+    label: "Cluster Path Rewrite Done",
+    description:
+      "Spoke seo.pillar_path values were rewritten to the hub’s new public URL (when they still matched the old one).",
+    icon: IconLink,
+    iconClass: "text-emerald-400 border-emerald-400/40",
+  },
   job_failed: {
     label: "Job Failed",
     description:
@@ -1945,7 +1959,7 @@ export default function BackgroundPipelinePage() {
               disabled={!site}
               data-testid="button-event-webhooks"
             >
-              <Link href="/private/webhooks">
+              <Link href="/private/webhooks/hooks">
                 <IconWebhook className="w-4 h-4 mr-2" />
                 Event webhooks
               </Link>

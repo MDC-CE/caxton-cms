@@ -183,7 +183,7 @@ describe("buildProposalDiscoveryPath", () => {
     expect(verify?.kind).toBe("think");
   });
 
-  it("builds idea path without apply-research tools", () => {
+  it("builds idea path with explain tool and no related page tools", () => {
     const { discovery_path, warnings } = buildProposalDiscoveryPath({
       proposal: {
         id: "i1",
@@ -192,11 +192,136 @@ describe("buildProposalDiscoveryPath", () => {
         summary: "We should write a new spoke about X with a clear funnel CTA.",
       },
       allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "idea_opportunity_harm",
+              title: "Score opportunity vs site harm",
+              why: "Accept greenlights a brief only.",
+              look_for: ["Goal", "Evidence"],
+            },
+          ],
+        },
+      },
     });
     expect(discovery_path).not.toBeNull();
-    expect(discovery_path!.items.every((i) => i.kind === "think")).toBe(true);
-    expect(warnings).toEqual([]);
     expect(discovery_path!.goal.toLowerCase()).toMatch(/accept/);
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools.map((t) => (t.kind === "tool" ? t.tool : ""))).toEqual(["explain_site"]);
+    expect(tools.every((t) => t.kind === "tool" && t.available)).toBe(true);
+    const explain = tools[0];
+    if (explain?.kind === "tool") {
+      expect(explain.args_hint).toMatchObject({
+        topic: "proposals",
+        subtopic: "idea-opportunity-harm",
+      });
+    }
+    expect(warnings).toEqual([]);
+  });
+
+  it("builds broken_url idea path with runtime issues and no keyword research", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i-404",
+        status: "open",
+        kind: "idea",
+        summary: "404 /en/old-path still requested.",
+        related_entries: [{ contentType: "blog", slug: "some-spoke", locale: "en" }],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm", "broken_url"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "broken_url",
+              title: "Broken URL strategy",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const names = tools.map((t) => (t.kind === "tool" ? t.tool : ""));
+    expect(names).toEqual(["explain_site", "get_runtime_issues", "test_redirect"]);
+    expect(names).not.toContain("get_organic_traffic");
+    expect(names).not.toContain("get_or_refresh_seo_research");
+    const explain = tools[0];
+    if (explain?.kind === "tool") {
+      expect(explain.args_hint).toMatchObject({ topic: "proposals", subtopic: "broken-url" });
+    }
+  });
+
+  it("builds existing_demand idea path with playbook only (no research tools)", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i-demand",
+        status: "open",
+        kind: "idea",
+        summary: "Rank for what is machine learning with a peer SERP angle.",
+        related_entries: [],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm", "existing_demand"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "existing_demand",
+              title: "Existing search demand",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const names = tools.map((t) => (t.kind === "tool" ? t.tool : ""));
+    expect(names).toContain("explain_site");
+    expect(names).not.toContain("get_or_refresh_seo_research");
+    const explain = tools.find((t) => t.kind === "tool" && t.tool === "explain_site");
+    if (explain?.kind === "tool") {
+      expect(explain.args_hint).toMatchObject({ topic: "proposals", subtopic: "existing-demand" });
+    }
+  });
+
+  it("builds idea path with related tools; unavailable when caps empty", () => {
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i2",
+        status: "open",
+        kind: "idea",
+        summary: "Delete a low-traffic hub after confirming spokes are dead.",
+        related_entries: [{ contentType: "blog", slug: "ai-tools-hub", locale: "en" }],
+      },
+      allowedTools: new Set(),
+      reviewContext: {
+        review_situations: ["idea_opportunity_harm"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "idea_opportunity_harm",
+              title: "Score opportunity vs site harm",
+              why: "x",
+              look_for: ["y"],
+            },
+          ],
+        },
+      },
+    });
+    expect(discovery_path).not.toBeNull();
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    expect(tools.length).toBeGreaterThanOrEqual(2);
+    expect(tools.every((t) => t.kind === "tool" && t.available === false)).toBe(true);
+    expect(warnings.some((w) => w.code === "discovery_tool_capped")).toBe(true);
+    expect(discovery_path!.non_effects.join(" ")).toMatch(/optional/i);
   });
 
   it("builds short notes path without apply-research tools", () => {
@@ -298,6 +423,52 @@ describe("buildProposalDiscoveryPath", () => {
       expect(tools[0].look_for.some((l) => /duplicate_weaker|revise_entries/i.test(l))).toBe(true);
     }
     expect(warnings.some((w) => w.code === "recent_entry_writes")).toBe(false);
+    const researchIds = tools
+      .filter((t) => t.kind === "tool")
+      .map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(researchIds).toContain("seo_research_serp");
+    expect(researchIds).toContain("seo_research_ideas");
+    const serp = tools.find((t) => t.kind === "tool" && t.id === "seo_research_serp");
+    expect(serp?.kind).toBe("tool");
+    if (serp?.kind === "tool") {
+      expect(serp.tool).toBe("get_or_refresh_seo_research");
+      expect(serp.args_hint).toMatchObject({ action: "serp", contentType: "blog", slug: "how-much" });
+      expect(serp.available).toBe(true);
+    }
+  });
+
+  it("SEO research discovery tools are unavailable without seo_edit", () => {
+    const allowed = new Set(
+      [...catalog].filter((t) => t !== "get_or_refresh_seo_research"),
+    );
+    const { discovery_path, warnings } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "how-much",
+            locale: "en",
+            status: "pending",
+            ops: [{ field_path: "meta.page_title", value: "New" }],
+          },
+        ],
+      },
+      allowedTools: allowed,
+      reviewContext: {
+        damage_class: "existing_metadata",
+        review_situations: ["serp_title_description"],
+      },
+    });
+    const serp = discovery_path!.items.find(
+      (i) => i.kind === "tool" && i.id === "seo_research_serp",
+    );
+    expect(serp?.kind).toBe("tool");
+    if (serp?.kind === "tool") {
+      expect(serp.available).toBe(false);
+      expect(serp.hint).toBeTruthy();
+    }
+    expect(warnings.some((w) => w.code === "discovery_tool_capped")).toBe(true);
   });
 
   it("no SERP + zero filtered writes keeps preview_content before recent_writes", () => {
@@ -446,6 +617,110 @@ describe("buildProposalDiscoveryPath", () => {
     if (preview?.kind === "tool") {
       expect(preview.look_for.some((l) => /added \[text\]\(href\)/i.test(l))).toBe(true);
       expect(preview.look_for.some((l) => /locale/i.test(l))).toBe(true);
+    }
+  });
+
+  it("funnel_classification includes list_products and get_product; prioritizes activity", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        ...baseEdits,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "outcomes-report",
+            locale: "en",
+            status: "pending",
+            ops: [
+              { field_path: "funnel.stage", value: "awareness" },
+              { field_path: "funnel.products", value: [{ product: "ai-engineering" }] },
+            ],
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "existing_content",
+        review_situations: ["funnel_classification"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "funnel_persona_product_stage",
+              title: "Check persona → product → stage",
+              why: "Buyer fit",
+              look_for: ["Persona / Product / Stage"],
+            },
+          ],
+        },
+      },
+    });
+    const tools = (discovery_path!.items.filter((i) => i.kind === "tool") as Array<{ id: string; tool: string }>).map(
+      (t) => t.tool,
+    );
+    expect(tools).toContain("list_products");
+    expect(tools).toContain("get_product");
+    expect(tools[0]).toBe("get_entry_activity");
+    const preview = discovery_path!.items.find((i) => i.kind === "tool" && i.id === "preview_content");
+    expect(preview?.kind).toBe("tool");
+    if (preview?.kind === "tool") {
+      expect(preview.look_for.some((l) => /persona/i.test(l))).toBe(true);
+    }
+  });
+
+  it("locale_translation adds playbook + list_variants and variant on preview args_hint", () => {
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "t1",
+        status: "open",
+        kind: "edits",
+        title: "Translate blog",
+        summary: "Translated from en → es. Promote draft.",
+        open_blocker_count: 0,
+        entries: [
+          {
+            contentType: "blog",
+            slug: "how-much",
+            locale: "es",
+            variant: "draft",
+            status: "pending",
+          },
+        ],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "existing_content",
+        review_situations: ["locale_translation"],
+        agent_preview: {
+          think_items: [
+            {
+              id: "locale_translation",
+              title: "Locale draft vs source before promote",
+              why: "Fidelity",
+              look_for: ["Fidelity / Completeness"],
+            },
+          ],
+        },
+      },
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const ids = tools.map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(ids[0]).toBe("translation_playbook");
+    expect(ids).toContain("variant_layers");
+    const playbook = tools.find((t) => t.kind === "tool" && t.id === "translation_playbook");
+    if (playbook?.kind === "tool") {
+      expect(playbook.args_hint).toMatchObject({
+        topic: "proposals",
+        subtopic: "translations",
+      });
+    }
+    const preview = tools.find((t) => t.kind === "tool" && t.id === "preview_content");
+    if (preview?.kind === "tool") {
+      expect(preview.args_hint).toMatchObject({
+        contentType: "blog",
+        slug: "how-much",
+        locale: "es",
+        variant: "draft",
+      });
+      expect(preview.look_for.some((l) => /source locale/i.test(l))).toBe(true);
     }
   });
 });

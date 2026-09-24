@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  IconArrowLeft,
   IconCheck,
   IconCode,
   IconLanguage,
@@ -24,6 +23,7 @@ import { BRAND_LOGO_ENSURE_TAGS, OG_IMAGE_ENSURE_TAGS } from "@shared/standardMe
 import { ImagePickerDialog } from "@/components/editing/ImagePickerDialog";
 import { LinkPicker } from "@/components/editing/LinkPicker";
 import { Link, useSearch, useLocation } from "wouter";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -549,11 +549,7 @@ export default function SettingsPage() {
       <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-4">
         <div className="flex items-center justify-between gap-3 mb-6">
           <div className="flex items-center gap-3">
-            <Link href="/private/diagnostics">
-              <Button variant="ghost" size="icon" data-testid="button-back-settings">
-                <IconArrowLeft className="h-4 w-4" />
-              </Button>
-            </Link>
+            <PrivateHistoryBackButton data-testid="button-back-settings" iconClassName="h-4 w-4" />
             <div>
               <h1 className="text-xl font-semibold" data-testid="text-settings-title">Settings</h1>
               <p className="text-sm text-muted-foreground">Site-wide configuration</p>

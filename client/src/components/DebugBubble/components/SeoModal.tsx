@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, Code, Eye, EyeOff, Filter, Hash, Image, Info, Loader2, MapPin, Pencil, RefreshCw, Search, Table2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, ArrowRight, ChevronDown, ChevronRight, Code, Eye, EyeOff, Filter, Hash, Image, Info, Loader2, MapPin, Pencil, RefreshCw, Search, ShoppingBag, Table2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ImagePickerDialog } from "@/components/editing/ImagePickerDialog";
 import { EntrySeoClusterFields, MappingFieldsTab } from "@/components/editing/MappingFieldsTab";
 import type { SeoModalSavedDetail } from "@/components/editing/seoModalSaved";
 import { FunnelTab } from "@/components/DebugBubble/components/FunnelTab";
+import { ProductTab, useContentTypeAllowsSellable } from "@/components/DebugBubble/components/ProductTab";
 import { OpenRushFetchControl } from "@/components/seo/OpenRushFetchControl";
 import { formatOpenRushFetchedAge } from "@/components/seo/openrushFetchAge";
 import {
@@ -29,6 +30,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import {
   Tabs,
   TabsContent,
@@ -67,7 +73,7 @@ type SeoEntrySerpPayload = {
   };
 };
 
-export type SeoModalTab = "keywords" | "serp" | "fields" | "funnel" | "schema" | "visibility" | "redirects";
+export type SeoModalTab = "keywords" | "serp" | "fields" | "funnel" | "product" | "schema" | "visibility" | "redirects";
 
 /** Truncate an absolute canonical URL for the header badge. */
 function formatCanonicalBadgeLabel(url: string): string {
@@ -79,6 +85,35 @@ function formatCanonicalBadgeLabel(url: string): string {
   } catch {
     return trimmed.length > 48 ? `${trimmed.slice(0, 45)}…` : trimmed;
   }
+}
+
+/** Truncated path chip; hover or click shows the full path in a popover. */
+function TruncatedPathReveal({
+  path,
+  testId,
+}: {
+  path: string;
+  testId?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <HoverCard open={open} onOpenChange={setOpen} openDelay={150} closeDelay={100}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid={testId}
+          aria-label={`Full path: ${path}`}
+          onClick={() => setOpen(true)}
+        >
+          <code className="bg-muted px-1.5 py-0.5 rounded truncate block w-full">{path}</code>
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent align="start" side="top" className="w-auto max-w-md p-3 z-[10001]">
+        <code className="text-xs font-mono break-all whitespace-pre-wrap leading-relaxed">{path}</code>
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 type SchemaOrgPreviewDoc = {
@@ -253,6 +288,13 @@ export function SeoModal({
   const [slugLocaleAckKeyState, setSlugLocaleAckKeyState] = useState<string | null>(null);
   const { toast } = useToast();
   const formatSitePath = useFormatSitePath();
+  const { data: showProductTab } = useContentTypeAllowsSellable(contentInfo.type);
+
+  useEffect(() => {
+    if (activeTab === "product" && showProductTab === false) {
+      setActiveTab("funnel");
+    }
+  }, [activeTab, showProductTab]);
 
   const slugLocaleAssessment = useMemo(
     () => assessSlugLocaleMatch(newSlugValue, locale),
@@ -644,17 +686,23 @@ export function SeoModal({
                 </div>
               )}
               {slugRedirectPrompt && (
-                <div className="space-y-3 rounded-md border p-3 text-foreground">
-                  <p className="text-sm font-medium">Create a redirect?</p>
+                <div
+                  className="space-y-3 rounded-md border border-primary/30 bg-primary/5 p-3 text-foreground"
+                  data-testid="panel-slug-redirect-confirm"
+                >
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <ArrowLeftRight className="h-4 w-4 text-primary shrink-0" aria-hidden />
+                    Create a redirect?
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     Do you want to create a redirect from the old URLs to the new ones? This ensures existing links and
                     bookmarks still work.
                   </p>
                   <div className="space-y-1.5">
-                    <div className="flex items-center gap-2 text-xs font-mono">
-                      <code className="bg-muted px-1.5 py-0.5 rounded truncate">{slugOldUrl}</code>
+                    <div className="flex items-center gap-2 text-xs font-mono min-w-0">
+                      <TruncatedPathReveal path={slugOldUrl} testId="text-slug-redirect-old-url" />
                       <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                      <code className="bg-muted px-1.5 py-0.5 rounded truncate">{slugNewUrl}</code>
+                      <TruncatedPathReveal path={slugNewUrl} testId="text-slug-redirect-new-url" />
                     </div>
                   </div>
                   <div className="flex gap-2 flex-wrap">
@@ -864,6 +912,12 @@ export function SeoModal({
                 <Filter className="h-3.5 w-3.5 shrink-0" />
                 <span className="hidden sm:inline">Funnel</span>
               </ToggleButtonBarTrigger>
+              {showProductTab ? (
+                <ToggleButtonBarTrigger value="product" data-testid="tab-product" className="gap-1.5" title="Product" aria-label="Product">
+                  <ShoppingBag className="h-3.5 w-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Product</span>
+                </ToggleButtonBarTrigger>
+              ) : null}
               <ToggleButtonBarTrigger value="schema" data-testid="tab-schema" className="gap-1.5" title="Schema" aria-label="Schema">
                 <Code className="h-3.5 w-3.5 shrink-0" />
                 <span className="hidden sm:inline">Schema</span>
@@ -1356,6 +1410,19 @@ export function SeoModal({
                 onSaved={onSaved}
               />
             </TabsContent>
+
+            {/* ── Product tab ────────────────────────────────────────── */}
+            {showProductTab ? (
+              <TabsContent value="product" className="min-w-0 pt-1">
+                <ProductTab
+                  contentInfo={contentInfo}
+                  contentTypeLabel={fieldsTypeLabel}
+                  portalContainer={dialogContainer}
+                  locale={fieldsLocale}
+                  variant={fieldsVariant}
+                />
+              </TabsContent>
+            ) : null}
 
             {/* ── Schema tab (read-only preview) ─────────────────────── */}
             <TabsContent value="schema" className="min-w-0 space-y-6 pt-4">

@@ -35,7 +35,9 @@ export function registerAnalyticsTools(
   mcp.tool(
     "get_analytics_report",
     "Run one named GA4 analytics report from the BigQuery export (metrics_view). " +
-      "Exclusive report per call: site_summary | top_pages | page_detail | events_by_name | traffic_sources. " +
+      "Exclusive report per call: site_summary | top_pages | page_detail | events_by_name | traffic_sources | traffic_source_conversions. " +
+      "traffic_source_conversions: sessions + lead event counts by source/medium/campaign (Count as lead catalog); " +
+      "default attribution session_last_click (ops); first_user for TOFU; optional item_id filters leads only. " +
       "page_detail: pass path (public pathname/URL) OR content_type+slug (+ optional locale); bare slug fails. " +
       "Server resolves live URLs and returns resolved_paths. days 1–90 ending yesterday (default 28); data lags ~1 day. " +
       "Soft status not_configured when tracking.bigquery is unset (see /private/tracking/ga4); empty window is status ok + warning. " +
@@ -43,7 +45,14 @@ export function registerAnalyticsTools(
       MULTI_SITE_TOOL_BLURB,
     {
       report: z
-        .enum(["site_summary", "top_pages", "page_detail", "events_by_name", "traffic_sources"])
+        .enum([
+          "site_summary",
+          "top_pages",
+          "page_detail",
+          "events_by_name",
+          "traffic_sources",
+          "traffic_source_conversions",
+        ])
         .describe("Named report for this call"),
       days: z
         .number()
@@ -58,7 +67,9 @@ export function registerAnalyticsTools(
         .min(1)
         .max(100)
         .optional()
-        .describe("Row cap for top_pages / events_by_name / traffic_sources (default 20)"),
+        .describe(
+          "Row cap for top_pages / events_by_name / traffic_sources / traffic_source_conversions (default 20)",
+        ),
       path: z
         .string()
         .optional()
@@ -79,6 +90,18 @@ export function registerAnalyticsTools(
         .array(z.string())
         .optional()
         .describe("events_by_name only: optional filter list; omit for top events by count"),
+      attribution: z
+        .enum(["session_last_click", "first_user"])
+        .optional()
+        .describe(
+          "traffic_source_conversions only: session_last_click (default, operational) or first_user (TOFU)",
+        ),
+      item_id: z
+        .string()
+        .optional()
+        .describe(
+          "traffic_source_conversions only: filter lead events to this ecommerce product_id; sessions stay channel-level",
+        ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async ({
@@ -90,6 +113,8 @@ export function registerAnalyticsTools(
       slug,
       locale,
       event_names,
+      attribution,
+      item_id,
       site,
     }) => {
       const denied = await denyUnlessMetricsView(mcpToken, grants);
@@ -108,6 +133,8 @@ export function registerAnalyticsTools(
         if (slug) params.set("slug", slug);
         if (locale) params.set("locale", locale);
         if (event_names?.length) params.set("event_names", event_names.join(","));
+        if (attribution) params.set("attribution", attribution);
+        if (item_id) params.set("item_id", item_id);
         if (domain) params.set("__site", domain);
 
         const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/analytics/report?${params}`;

@@ -18,7 +18,7 @@ import { assertSafeLocale, assertSafeSegment } from "../lib/sanitize.js";
 import { ok, fail, actionRequired } from "../lib/respond.js";
 import { requireMutateWhyHighlights } from "../lib/page-tool-helpers.js";
 import { AGENT_WHY_DESC } from "../lib/agent-report.js";
-import { runRefreshKeywordMetrics } from "../lib/refresh-keyword-metrics-mcp.js";
+import { runSeoResearch } from "../lib/seo-research-mcp.js";
 
 const CLUSTER_BUCKETS = [
   "unclustered",
@@ -212,6 +212,62 @@ export function registerSeoClusterTools(
             isError: true,
           };
         }
+        const [hubType, hubSlug, hubLocale] = data.hubId.split("/");
+        const thinOrEmpty =
+          data.members.length === 0 || !data.keyword || data.keyword.trim().length < 3;
+        const siteArg = site ? { site } : {};
+        const next_actions: Array<{
+          tool: string;
+          priority: string;
+          reason: string;
+          args_hint: Record<string, unknown>;
+        }> = [
+          {
+            tool: "get_entry_seo",
+            priority: "recommended",
+            reason: "Hub SEO + cached validation_issues",
+            args_hint: {
+              slug: hubSlug,
+              contentType: hubType,
+              locale: data.locale || hubLocale || "en",
+              ...siteArg,
+            },
+          },
+        ];
+        const discovery_path = thinOrEmpty
+          ? {
+              goal: "Optional SEO research to grow this hub. Not next_actions — skip does not block.",
+              items: [
+                {
+                  kind: "tool" as const,
+                  id: "cluster_competitors",
+                  tool: "get_or_refresh_seo_research",
+                  why: "Discover rival domains for this hub’s keyword/domain (cache-first; budgeted).",
+                  look_for: ["competitor domains to feed keyword_gaps"],
+                  available: true,
+                  args_hint: {
+                    action: "competitors",
+                    ...(data.keyword ? { seed_keywords: [data.keyword] } : {}),
+                    ...siteArg,
+                  },
+                },
+                {
+                  kind: "think" as const,
+                  id: "then_gaps",
+                  title: "Then run keyword gaps",
+                  why: "keyword_gaps requires a non-empty competitors list — pass rivals from competitors action.",
+                  look_for: [
+                    "Call get_or_refresh_seo_research action:keyword_gaps with competitors[] after discovery",
+                  ],
+                },
+              ],
+              non_effects: [
+                "discovery_path is optional; does not write YAML or cluster membership.",
+                "Not a substitute for get_organic_traffic (measured GSC clicks).",
+              ],
+            }
+          : undefined;
+
         return {
           content: [
             {
@@ -226,19 +282,8 @@ export function registerSeoClusterTools(
                         "Membership from seo-index. Bidirectional in-body links are seo-cluster-links diagnostics, not this payload.",
                     },
                   ],
-                  next_actions: [
-                    {
-                      tool: "get_entry_seo",
-                      priority: "recommended",
-                      reason: "Hub SEO + cached validation_issues",
-                      args_hint: {
-                        slug: data.hubId.split("/")[1],
-                        contentType: data.hubId.split("/")[0],
-                        locale: data.locale || "en",
-                        ...(site ? { site } : {}),
-                      },
-                    },
-                  ],
+                  next_actions,
+                  ...(discovery_path ? { discovery_path } : {}),
                 },
                 null,
                 2,
@@ -253,32 +298,66 @@ export function registerSeoClusterTools(
   );
 
   mcp.tool(
-    "refresh_keyword_metrics",
-    "Force OpenRush inspect_keyword for an entry's main keyword (or keyword override). " +
-      "Upserts the shared OpenRush keyword cache only — does NOT write seo.kw_monthly_volume / seo.kw_difficulty YAML. " +
-      "When OpenRush is on, this is the valid fix for SEO_KEYWORD_RESEARCH_INCOMPLETE (B1); do not invent YAML metrics. " +
-      "When OpenRush is inactive → openrush_inactive (use update_fields + seo_research_source only with staff_provided|external:<name>, else release). " +
-      "Spends OpenRush credits. Requires seo_edit. " +
+    "get_or_refresh_seo_research",
+    "Get or refresh SEO research (cache-first; paid fetch when stale/missing or force:true). " +
+      "Actions: keyword_metrics (volume/difficulty), serp, keyword_ideas, competitors, keyword_gaps. " +
+      "Does NOT write seo.kw_* YAML. Cache hits spend 0 credits. " +
+      "Session + daily budgets apply (warn % → confirm_seo_research_budget; 100% → exhausted). " +
+      "force skips TTL only — never budget. keyword_gaps requires non-empty competitors[]. " +
+      "When research inactive → seo_research_inactive. Requires seo_edit. " +
       MULTI_SITE_TOOL_BLURB,
     {
-      contentType: z.string().describe("Content type (e.g. locations, blog)"),
-      slug: z.string().describe("Page slug"),
+      action: z
+        .enum(["keyword_metrics", "serp", "keyword_ideas", "competitors", "keyword_gaps"])
+        .describe("Research action"),
+      contentType: z.string().optional().describe("Content type (entry-scoped actions)"),
+      slug: z.string().optional().describe("Page slug (entry-scoped)"),
       locale: z.string().default("en").describe("Locale code"),
-      keyword: z
-        .string()
+      keyword: z.string().optional().describe("Keyword/query override (default seo.main_keyword)"),
+      seed: z.string().optional().describe("Seed for keyword_ideas"),
+      mode: z.string().optional().describe("keyword_ideas mode: ideas|suggestions|related"),
+      domain: z.string().optional().describe("Our or target domain (competitors/gaps); default from Search Console / sites.yml"),
+      seed_keywords: z.array(z.string()).optional().describe("Seed keywords for competitors discovery"),
+      competitors: z.array(z.string()).optional().describe("Rival domains for keyword_gaps (required, non-empty)"),
+      limit: z.number().optional().describe("Result limit where supported"),
+      min_volume: z.number().optional().describe("keyword_ideas min volume filter"),
+      intent: z.string().optional().describe("keyword_ideas intent filter"),
+      force: z.boolean().optional().describe("Bypass TTL and re-fetch (still respects budget)"),
+      confirm_seo_research_budget: z
+        .boolean()
         .optional()
-        .describe("Optional keyword override; default = seo.main_keyword from locale YAML / seo-index"),
+        .describe("Required in warn band (≥ budget_warn_percent) until 100%"),
       why: z.string().describe(AGENT_WHY_DESC),
       agent_session_id: z
         .string()
-        .describe("Required. From agent_session start — groups this call for staff monitoring."),
+        .describe("Required. From agent_session start — session budget + staff monitoring."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ contentType, slug, locale, keyword, why, agent_session_id, site }) => {
-      void agent_session_id;
+    async (args) => {
+      const {
+        action,
+        contentType,
+        slug,
+        locale,
+        keyword,
+        seed,
+        mode,
+        domain,
+        seed_keywords,
+        competitors,
+        limit,
+        min_volume,
+        intent,
+        force,
+        confirm_seo_research_budget,
+        why,
+        agent_session_id,
+        site,
+      } = args;
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) {
-        return siteFailResult(siteResult.error, "refresh_keyword_metrics", {
+        return siteFailResult(siteResult.error, "get_or_refresh_seo_research", {
+          action,
           contentType,
           slug,
           locale,
@@ -286,45 +365,130 @@ export function registerSeoClusterTools(
       }
       const reportCheck = requireMutateWhyHighlights(why, undefined, { mode: "mutate_structural" });
       if (!reportCheck.ok) return reportCheck.result;
-      try {
-        assertSafeSegment(slug, "slug");
-        assertSafeLocale(locale);
-        assertSafeSegment(contentType, "contentType");
-      } catch (e) {
-        return fail((e as Error).message);
-      }
-      const resolved = resolveContentType(slug, contentType, siteResult.contentPath, {
-        allowSharedLayout: true,
-      });
-      if (!resolved) {
-        return fail(
-          `Page not found for slug '${slug}' (contentType: ${contentType})`,
-          { code: "not_found" },
+
+      if (action === "keyword_metrics" || action === "serp") {
+        if (!contentType || !slug) {
+          return fail("contentType and slug are required for keyword_metrics and serp", {
+            code: "args_required",
+          });
+        }
+        try {
+          assertSafeSegment(slug, "slug");
+          assertSafeLocale(locale);
+          assertSafeSegment(contentType, "contentType");
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+        const resolved = resolveContentType(slug, contentType, siteResult.contentPath, {
+          allowSharedLayout: true,
+        });
+        if (!resolved) {
+          return fail(`Page not found for slug '${slug}' (contentType: ${contentType})`, {
+            code: "not_found",
+          });
+        }
+        if (mcpToken && !(await checkCap(mcpToken, "seo_edit", resolved.contentType))) {
+          return denyResponse("seo_edit", resolved.contentType);
+        }
+
+        const result = await runSeoResearch({
+          action,
+          contentPath: siteResult.contentPath,
+          contentFolder: siteResult.contentFolder,
+          contentType: resolved.contentType,
+          slug,
+          locale,
+          keyword,
+          force,
+          confirm_seo_research_budget,
+          agent_session_id,
+          site,
+        });
+
+        if (!result.ok) {
+          if (
+            result.code === "seo_research_inactive" ||
+            result.code === "confirm_seo_research_budget"
+          ) {
+            return actionRequired(
+              {
+                success: false,
+                action_required: result.action_required || result.code,
+                code: result.code,
+                message: result.message,
+                warnings: result.warnings ?? [],
+                ...(result.details ?? {}),
+              },
+              result.next_actions ?? [],
+            );
+          }
+          return fail(result.message, {
+            code: result.code,
+            ...(result.details ?? {}),
+            warnings: result.warnings ?? [],
+            next_actions: result.next_actions ?? [],
+          });
+        }
+
+        return ok(
+          {
+            message: `SEO research ${result.action}: ${result.outcome}`,
+            action: result.action,
+            outcome: result.outcome,
+            credits_spent: result.credits_spent,
+            credits_note: result.credits_note,
+            budget: result.budget,
+            data: result.data,
+            why: reportCheck.why,
+          },
+          {
+            warnings: result.warnings,
+            side_effects: result.side_effects,
+            next_actions: result.next_actions,
+          },
         );
       }
-      if (mcpToken && !(await checkCap(mcpToken, "seo_edit", resolved.contentType))) {
-        return denyResponse("seo_edit", resolved.contentType);
+
+      // Planning actions — seo_edit on any grant (no entry required)
+      if (mcpToken && !(await checkCap(mcpToken, "seo_edit"))) {
+        return denyResponse("seo_edit");
       }
 
-      const result = await runRefreshKeywordMetrics({
+      const result = await runSeoResearch({
+        action,
         contentPath: siteResult.contentPath,
         contentFolder: siteResult.contentFolder,
-        contentType: resolved.contentType,
+        contentType,
         slug,
         locale,
-        keywordOverride: keyword,
+        keyword,
+        seed,
+        mode,
+        domain,
+        seed_keywords,
+        competitors,
+        limit,
+        min_volume,
+        intent,
+        force,
+        confirm_seo_research_budget,
+        agent_session_id,
         site,
       });
 
       if (!result.ok) {
-        if (result.code === "openrush_inactive") {
+        if (
+          result.code === "seo_research_inactive" ||
+          result.code === "confirm_seo_research_budget"
+        ) {
           return actionRequired(
             {
               success: false,
-              action_required: result.code,
+              action_required: result.action_required || result.code,
               code: result.code,
               message: result.message,
               warnings: result.warnings ?? [],
+              ...(result.details ?? {}),
             },
             result.next_actions ?? [],
           );
@@ -339,15 +503,13 @@ export function registerSeoClusterTools(
 
       return ok(
         {
-          message: `OpenRush keyword cache refreshed for "${result.keyword}".`,
-          keyword: result.keyword,
-          kw_monthly_volume: result.kw_monthly_volume,
-          kw_difficulty: result.kw_difficulty,
-          fetched_at: result.fetched_at,
-          notes: result.notes,
-          source: result.source,
-          credits: result.credits,
+          message: `SEO research ${result.action}: ${result.outcome}`,
+          action: result.action,
+          outcome: result.outcome,
+          credits_spent: result.credits_spent,
           credits_note: result.credits_note,
+          budget: result.budget,
+          data: result.data,
           why: reportCheck.why,
         },
         {

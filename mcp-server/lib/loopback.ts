@@ -7,12 +7,10 @@ import { getActiveRoleId, getActiveMcpToken } from "./auth.js";
 import {
   isExactAgentModel,
   missingExactModelPayload,
-  unscopedMutateDeniedPayload,
   sessionRequiredPayload,
   sessionUnknownPayload,
   isMcpMutatingTool,
   normalizeMcpClientName,
-  ROLE_CONNECTOR_UI_HINT,
 } from "../../shared/agent-identity.js";
 import { actionRequired, type McpTextResult } from "./respond.js";
 import {
@@ -22,6 +20,7 @@ import {
   type AgentSessionRecord,
 } from "./agent-session-store.js";
 import { resolveSiteContext } from "./content.js";
+import { denyUnscopedProductionMutate } from "./role-connector-guide.js";
 
 const MCP_SERVER_SECRET = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
 const MAIN_SERVER_PORT = process.env.PORT || "5000";
@@ -113,19 +112,7 @@ export async function assertMutatingAgentIdentity(
   if (!isMcpMutatingTool(toolName)) return null;
   const roleId = getActiveRoleId()?.trim();
   if (!roleId) {
-    const payload = unscopedMutateDeniedPayload(toolName);
-    return actionRequired(payload, [
-      {
-        tool: "get_current_user",
-        priority: "recommended",
-        reason: "Confirm active_role is set (role connector).",
-      },
-      {
-        tool: "bootstrap_agent",
-        priority: "recommended",
-        reason: ROLE_CONNECTOR_UI_HINT,
-      },
-    ]);
+    return denyUnscopedProductionMutate(toolName, getActiveMcpToken());
   }
 
   const action = typeof args?.action === "string" ? args.action : undefined;

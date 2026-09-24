@@ -2,10 +2,12 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import type Database from "better-sqlite3";
 import { getSiteSqlite } from "../db";
+import { child } from "../logger";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { emitEvent } from "../events/event-store";
 import { singleAttribution, type EventActor } from "../events/types";
-import { getContentForEdit, editContent } from "../content-editor";
+import { getContentForEdit } from "../content-editor";
+import { applyFieldUpdates, readFieldValueAtPath } from "../field-write-router";
 import type { SiteContext } from "../site-manager";
 import { fingerprintEdits, fingerprintNotes, fingerprintIdeas, stableJson } from "./fingerprint";
 import {
@@ -13,16 +15,24 @@ import {
   type ResolveRecentActivityResult,
 } from "./entry-activity";
 import { hashVariantFileContents } from "../versioning/promote-with-teardown";
-import { child } from "../logger";
-import type { ContentType } from "@shared/schema";
-import { getFolder } from "../content-types";
-import { resolveWritableVersioningTarget } from "../shared-layout-entry";
+import { isSectionFieldPath, missingRequiredFromOps, type MissingTargetShape } from "./attached-entry-gate";
+import { getFolder, getContentTypeConfig, listExtraUrlPatternParams } from "../content-types";
+import { isEntryDetached, isTemplateVersioningSlug, resolveWritableVersioningTarget } from "../shared-layout-entry";
+import { listRequiredEditorFields } from "@shared/validateRequiredFields";
+import { extractParamSlug, validateUrlParamPeerValues } from "../url-param-peers";
+import { ensurePublishedAtOnce } from "../published-at";
+import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-attached-entry";
 import {
   sameAgentIdentity,
   formatAgentActorLine,
   isStaffUiActor,
   type AgentActorLike,
 } from "@shared/agent-identity";
+import {
+  DEFAULT_PROPOSAL_SETTINGS,
+  getProposalSettings as loadProposalSettingsFromDisk,
+  type ProposalSettings,
+} from "../settings";
 import {
   classifyProposalReview,
   collectDamageClassesForMixedCheck,
@@ -35,7 +45,14 @@ import {
 } from "./review-context";
 import type { ExistenceState } from "./proposal-review-rules";
 import {
+  askTouchesOutcomeFigures,
+  getDecisionClient,
+} from "../ai/decisions";
+import { anyEntryHasCountsAsLeadForm } from "./counts-as-lead-hint";
+import { textFromUnknown, evaluateClaimCues } from "./claim-cues";
+import {
   parseReviewSituationIds,
+  parseIdeaAuthorSituationIds,
   refreshSituationsAfterRevise,
   type ReviewSituationId,
 } from "./review-situations";
@@ -43,8 +60,43 @@ import {
   buildDecisionDebug,
   type ProposalDecisionDebug,
 } from "./decision-debug";
+import {
+  compareByAttention,
+  deriveProposalAttention,
+  emptyAttentionCounts,
+  resolvedBlockerCount,
+  type AttentionPerspective,
+  type ProposalAttention,
+} from "./attention";
+import {
+  ensureKpiCatchUp,
+  getKpiHistory,
+  invalidateTodayKpiCache,
+  liveByKindStatus,
+  wipeAndBackfillKpiHistory,
+  type KindStatusCardCounts,
+  type KpiCardKind,
+  type KpiGranularity,
+  type KpiHistoryResult,
+} from "./kpi-history";
+import {
+  funnelFromFieldOps,
+  hasFunnelFieldOps,
+  ideaFunnelComplete,
+  ideaFunnelsEqual,
+  ideaFunnelToYamlBlock,
+  ideaRequiresStructuredFunnel,
+  parseIdeaFunnel,
+  validateIdeaFunnel,
+  IDEA_FUNNEL_CONFLICT,
+  IDEA_FUNNEL_FROZEN,
+  IDEA_FUNNEL_REQUIRED,
+  type IdeaFunnel,
+} from "./idea-funnel";
 
 const log = child({ module: "content-proposals" });
+
+export type { AttentionPerspective, ProposalAttention };
 
 export const PROPOSAL_CLAIM_TTL_MS = 30 * 60 * 1000;
 export const RAG_SIMILARITY_THRESHOLD = 0.82;
@@ -108,6 +160,40 @@ export type RelatedEntryRef = {
   locale?: string;
 };
 
+/** Locked page target set on idea accept (required for follow-through). */
+export type AcceptedEntry = {
+  contentType: string;
+  slug: string;
+  locale: string;
+};
+
+export function parseAcceptedEntry(raw: unknown): AcceptedEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const contentType = typeof o.contentType === "string" ? o.contentType.trim() : "";
+  const slug = typeof o.slug === "string" ? o.slug.trim() : "";
+  const locale = typeof o.locale === "string" ? o.locale.trim() : "";
+  if (!contentType || !slug || !locale) return null;
+  return { contentType, slug, locale };
+}
+
+export function acceptedEntryKey(entry: AcceptedEntry): string {
+  return `${entry.contentType}/${entry.slug}/${entry.locale}`;
+}
+
+export function entriesMatchAccepted(
+  entries: Array<{ contentType: string; slug: string; locale: string }>,
+  accepted: AcceptedEntry,
+): boolean {
+  if (entries.length === 0) return false;
+  return entries.every(
+    (e) =>
+      e.contentType === accepted.contentType &&
+      e.slug === accepted.slug &&
+      e.locale === accepted.locale,
+  );
+}
+
 export function isProposalCloseReason(raw: string): raw is ProposalCloseReason {
   return (PROPOSAL_CLOSE_REASONS as string[]).includes(raw);
 }
@@ -143,7 +229,7 @@ export type ProposalEntryRow = {
   variant_fingerprint: string | null;
   status: EntryRowStatus;
   ops: FieldUpdate[];
-  baseline_context: { values: Record<string, unknown>; note?: string };
+  baseline_context: { values: Record<string, unknown>; note?: string; creates_entry?: boolean };
   last_error: string | null;
   applied_at: number | null;
   applied_by: string | null;
@@ -163,6 +249,8 @@ export type ProposalBlocker = {
   resolved_by: string | null;
   resolve_note: string | null;
   agent_session_id: string | null;
+  author_actor: Record<string, unknown>;
+  resolved_by_actor: Record<string, unknown>;
 };
 
 export type ProposalRecord = {
@@ -208,6 +296,21 @@ export type ProposalRecord = {
   decision_debug: ProposalDecisionDebug | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  /** Set on idea accept — reserved type/slug/locale for follow-up edits. */
+  accepted_entry: AcceptedEntry | null;
+  /**
+   * Structured funnel intent for new-URL ideas (stage + products).
+   * Immutable after accept; creating edits must match / seed from this.
+   */
+  idea_funnel: IdeaFunnel | null;
+  /** Edits that implement an accepted idea (optional unless slug is reserved). */
+  implements_proposal_id: string | null;
+  /** Computed on read — accepted idea whose locked slug is a missing file-based attached post. */
+  attached_create_entry?: AcceptedEntry | null;
+  /** Last author rewrite or author-marked blocker fix. */
+  author_content_at: number | null;
+  /** Last reviewer add/reopen/non-author resolve. */
+  reviewer_action_at: number | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
@@ -249,6 +352,9 @@ export type ProposalSummary = {
   promote_on_apply: boolean;
   review_mode: ReviewMode;
   open_blocker_count: number;
+  resolved_blocker_count: number;
+  /** Derived triage bucket; null when finished/rejected/withdrawn. */
+  attention: ProposalAttention | null;
   no_auto_retry: boolean;
   escalated: boolean;
   escalated_at: number | null;
@@ -264,12 +370,32 @@ export type ProposalSummary = {
   review_context_snapshot: Record<string, unknown> | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  accepted_entry: AcceptedEntry | null;
+  /** Structured funnel on ideas (new-URL); null when unset or non-idea. */
+  idea_funnel: IdeaFunnel | null;
+  implements_proposal_id: string | null;
+  /**
+   * Accepted idea whose locked slug is a missing file-based attached post.
+   * Computed on read — not stored. Author follow-up is edits with no variant.
+   */
+  attached_create_entry?: AcceptedEntry | null;
   entry_count: number;
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
   entries: ProposalEntrySummary[];
   escalated_siblings?: Array<{ id: string; title: string }>;
 };
+
+function attentionForRecord(record: ProposalRecord): ProposalAttention | null {
+  return deriveProposalAttention({
+    status: record.status,
+    escalated: record.escalated,
+    open_blocker_count: record.open_blocker_count,
+    resolved_blocker_count: resolvedBlockerCount(record.blockers),
+    author_content_at: record.author_content_at,
+    reviewer_action_at: record.reviewer_action_at,
+  });
+}
 
 export function toProposalSummary(record: ProposalRecord): ProposalSummary {
   const pathSet = new Set<string>();
@@ -281,6 +407,8 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     }
   }
   const field_paths = [...pathSet].sort();
+  const resolved_count = resolvedBlockerCount(record.blockers);
+  const attention = attentionForRecord(record);
   return {
     detail: "summary",
     id: record.id,
@@ -301,6 +429,8 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     promote_on_apply: record.promote_on_apply,
     review_mode: record.review_mode,
     open_blocker_count: record.open_blocker_count,
+    resolved_blocker_count: resolved_count,
+    attention,
     no_auto_retry: record.no_auto_retry,
     escalated: record.escalated,
     escalated_at: record.escalated_at,
@@ -315,6 +445,10 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     review_context_snapshot: record.review_context_snapshot,
     supersedes_proposal_id: record.supersedes_proposal_id,
     replaced_by_proposal_id: record.replaced_by_proposal_id,
+    accepted_entry: record.accepted_entry,
+    idea_funnel: record.idea_funnel,
+    implements_proposal_id: record.implements_proposal_id,
+    attached_create_entry: record.attached_create_entry ?? null,
     entry_count: record.entries.length,
     field_paths,
     entries: record.entries.map((e) => ({
@@ -367,6 +501,11 @@ type ProposalRow = {
   decision_debug_json?: string | null;
   supersedes_proposal_id: string | null;
   replaced_by_proposal_id: string | null;
+  accepted_entry_json?: string | null;
+  idea_funnel_json?: string | null;
+  implements_proposal_id?: string | null;
+  author_content_at?: number | null;
+  reviewer_action_at?: number | null;
 };
 
 type EntryDbRow = {
@@ -396,6 +535,8 @@ type BlockerDbRow = {
   resolved_by: string | null;
   resolve_note: string | null;
   agent_session_id: string | null;
+  author_actor_json: string | null;
+  resolved_by_actor_json: string | null;
 };
 
 export type CreateProposalInput = {
@@ -418,11 +559,18 @@ export type CreateProposalInput = {
   related_entries?: RelatedEntryRef[];
   /** Optional: link a replacement to a rejected/withdrawn predecessor. */
   supersedes_proposal_id?: string;
+  /** Edits: link to an accepted idea this work implements. */
+  implements_proposal_id?: string;
   /**
    * Optional author-declared review situations (edits only).
    * Empty/omit → classifier infers from pending ops. Unknown ids fail create.
    */
   review_situations?: string[];
+  /**
+   * Ideas (new-URL): optional structured funnel `{ stage, products }`.
+   * Soft warning when missing on new-URL create; accept refuses until complete.
+   */
+  idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
 };
 
 export type SimilarProposal = { id: string; title: string; score: number };
@@ -443,6 +591,7 @@ export type ProposalUpdateAction =
   | "accept"
   | "revise_entries"
   | "set_review_situations"
+  | "set_idea_funnel"
   | "escalate"
   | "deescalate";
 
@@ -463,12 +612,16 @@ export type ProposalUpdateCaller = {
   confirm_end_experiment?: boolean;
   /** Soft-confirm after inspecting recent entry writes on apply. */
   confirm_recent_activity?: boolean;
+  /** Apply of a new attached post: principal approved a URL param not seen on peers. */
+  confirm_new_values?: boolean;
   promote_on_apply?: boolean;
   close_reason?: string;
   close_note?: string;
   no_auto_retry?: boolean;
   /** Accept idea: free-text next step (min MIN_ACCEPT_NEXT_STEP). */
   next_step?: string;
+  /** Accept idea: required locked page target. */
+  accepted_entry?: AcceptedEntry | { contentType?: string; slug?: string; locale?: string };
   /** Reject: must be true for MCP; staff UI sends true after dialog. */
   confirm_reject?: boolean;
   reject_kind?: string;
@@ -476,6 +629,8 @@ export type ProposalUpdateCaller = {
   entries?: ProposalEntryInput[];
   /** set_review_situations: author-declared situation ids (edits). */
   review_situations?: string[];
+  /** set_idea_funnel / create: structured funnel for new-URL ideas. */
+  idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
   /** escalate: required steward note (min MIN_CLOSE_NOTE). */
   escalated_note?: string;
 };
@@ -499,16 +654,6 @@ function makeEntryKey(contentType: string, slug: string): string {
   return `${contentType}/${slug}`;
 }
 
-function getByPath(obj: Record<string, unknown>, pathStr: string): unknown {
-  const parts = pathStr.replace(/\[(\d+)\]/g, ".$1").split(".").filter(Boolean);
-  let current: unknown = obj;
-  for (const part of parts) {
-    if (current === null || current === undefined || typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
-}
-
 function valuesEqual(a: unknown, b: unknown): boolean {
   return stableJson(a) === stableJson(b);
 }
@@ -530,6 +675,18 @@ export function deriveReviewMode(opts: {
   return "soft";
 }
 
+function parseActorRecord(raw: string | null): Record<string, unknown> {
+  const parsed = parseJson<unknown>(raw, {});
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  return parsed as Record<string, unknown>;
+}
+
+/** Snapshot replace: missing or non-object actor fields stay SQL NULL. */
+function blockerActorColumn(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return JSON.stringify(raw);
+}
+
 function mapBlocker(row: BlockerDbRow): ProposalBlocker {
   return {
     id: row.id,
@@ -543,6 +700,8 @@ function mapBlocker(row: BlockerDbRow): ProposalBlocker {
     resolved_by: row.resolved_by,
     resolve_note: row.resolve_note,
     agent_session_id: row.agent_session_id,
+    author_actor: parseActorRecord(row.author_actor_json),
+    resolved_by_actor: parseActorRecord(row.resolved_by_actor_json),
   };
 }
 
@@ -613,6 +772,11 @@ function mapProposal(
     decision_debug: parseJson(row.decision_debug_json ?? null, null as ProposalDecisionDebug | null),
     supersedes_proposal_id: row.supersedes_proposal_id ?? null,
     replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
+    accepted_entry: parseAcceptedEntry(parseJson(row.accepted_entry_json ?? null, null)),
+    idea_funnel: parseIdeaFunnel(parseJson(row.idea_funnel_json ?? null, null)),
+    implements_proposal_id: row.implements_proposal_id ?? null,
+    author_content_at: row.author_content_at ?? null,
+    reviewer_action_at: row.reviewer_action_at ?? null,
     entries,
     blockers,
   };
@@ -647,14 +811,29 @@ function loadProposal(db: Database.Database, id: string): ProposalRecord | null 
   return mapProposal(row, loadEntries(db, id), loadBlockers(db, id));
 }
 
-function persistRollup(db: Database.Database, proposal: ProposalRecord): ProposalStatus {
+function persistRollup(
+  db: Database.Database,
+  proposal: ProposalRecord,
+  opts?: { closedBy?: string },
+): ProposalStatus {
   if (proposal.kind === "notes" || proposal.kind === "idea") return proposal.status;
   const next = rollupStatus(proposal.kind, proposal.entries);
-  db.prepare(`UPDATE content_proposals SET status = ?, updated_at = ? WHERE id = ?`).run(
-    next,
-    Date.now(),
-    proposal.id,
-  );
+  const now = Date.now();
+  if (next === "finished" && proposal.status !== "finished") {
+    db.prepare(
+      `UPDATE content_proposals
+       SET status = ?, updated_at = ?,
+           closed_at = COALESCE(closed_at, ?),
+           closed_by = COALESCE(closed_by, ?)
+       WHERE id = ?`,
+    ).run(next, now, now, opts?.closedBy ?? null, proposal.id);
+  } else {
+    db.prepare(`UPDATE content_proposals SET status = ?, updated_at = ? WHERE id = ?`).run(
+      next,
+      now,
+      proposal.id,
+    );
+  }
   return next;
 }
 
@@ -735,12 +914,23 @@ function emitProposalEvent(
     | "proposal_revised"
     | "proposal_escalated"
     | "proposal_deescalated"
-    | "proposal_review_situations_set",
+    | "proposal_review_situations_set"
+    | "proposal_idea_funnel_set",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
   actor?: EventActor,
 ): void {
+  if (
+    type === "proposal_created" ||
+    type === "proposal_finished" ||
+    type === "proposal_closed" ||
+    type === "proposal_rejected" ||
+    type === "proposal_withdrawn" ||
+    type === "proposal_applied_progress"
+  ) {
+    invalidateTodayKpiCache(site);
+  }
   emitEvent({
     site,
     type,
@@ -798,6 +988,27 @@ export type ProposalServiceDeps = {
     locale: string;
     variant?: string | null;
   }) => { live: ExistenceState; draftExists: boolean };
+  /**
+   * When live content is missing: database row vs file-based attached post vs anything else.
+   * Default (tests): other — missing live stays entry_not_found.
+   */
+  inspectMissingTarget?: (entry: { contentType: string; slug: string }) => MissingTargetShape;
+  /** Validate and seed a new attached locale before field ops. seeded means this apply created the folder. */
+  prepareCreatesEntry?: (
+    entry: ProposalEntryRow,
+    opts: {
+      confirmNewValues?: boolean;
+      author: string;
+      /** When implementing an accepted idea, seed matching funnel onto _common.yml. */
+      ideaFunnel?: IdeaFunnel | null;
+    },
+  ) => Promise<{ ok: boolean; error?: string; code?: string; seeded?: boolean }>;
+  /** Delete a folder this apply created after a later step failed. */
+  discardSeededEntry?: (entry: ProposalEntryRow) => void;
+  /** Stamp published_at on first go-live when still empty. */
+  stampPublishedAt?: (entry: ProposalEntryRow, author: string) => { ok: boolean; error?: string };
+  /** Site Agents Rules policy; default = hardcoded defaults (tests / omitted). */
+  getProposalSettings?: () => ProposalSettings;
 };
 
 export type ProposalStats = {
@@ -805,6 +1016,14 @@ export type ProposalStats = {
   by_status: Record<ProposalStatus, number>;
   by_kind: Record<ProposalKind, number>;
   escalated_count: number;
+  /** Open|partial rows by derived attention (escalated label wins when flagged). */
+  by_attention: Record<ProposalAttention, number>;
+  /** Live stock for KPI cards: open includes partial; withdrawn omitted. */
+  by_kind_status: KindStatusCardCounts;
+  /** Accepted ideas with locked entry and no open/partial/finished implements child. */
+  stalled_ideas: number;
+  /** Open|partial edits in awaiting_rereview or no_feedback (not blocked, not escalated). */
+  needs_review_edits: number;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -842,7 +1061,21 @@ function fourEyesBlocked(
   );
 }
 
-export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at"] as const;
+function fourEyesBlockedForCaller(
+  policy: ProposalSettings,
+  proposerUsername: string,
+  proposerActor: Record<string, unknown> | EventActor | undefined,
+  callerUsername: string,
+  callerActor: EventActor | undefined,
+): boolean {
+  if (!policy.four_eyes.enabled) return false;
+  if (policy.four_eyes.staff_ui_exempt && isStaffUiActor(asAgentActor(callerActor))) {
+    return false;
+  }
+  return fourEyesBlocked(proposerUsername, proposerActor, callerUsername, callerActor);
+}
+
+export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at", "attention"] as const;
 export type ProposalSortField = (typeof PROPOSAL_SORT_FIELDS)[number];
 export type ProposalSortDir = "asc" | "desc";
 
@@ -856,12 +1089,13 @@ export function parseProposalSort(
   | { ok: true; sort: ProposalSortField; sortDir: ProposalSortDir }
   | { ok: false; error: string } {
   const fieldRaw = sort == null || String(sort).trim() === "" ? "updated_at" : String(sort).trim();
-  if (fieldRaw !== "created_at" && fieldRaw !== "updated_at") {
+  if (fieldRaw !== "created_at" && fieldRaw !== "updated_at" && fieldRaw !== "attention") {
     return {
       ok: false,
-      error: `Invalid sort '${fieldRaw}'. Allowed: created_at, updated_at`,
+      error: `Invalid sort '${fieldRaw}'. Allowed: created_at, updated_at, attention`,
     };
   }
+  // Attention rank is fixed; sort_dir is accepted but ignored by list().
   const dirRaw =
     sortDir == null || String(sortDir).trim() === "" ? "desc" : String(sortDir).trim();
   if (dirRaw !== "asc" && dirRaw !== "desc") {
@@ -914,6 +1148,12 @@ function compareProposalsBySort(
   sort: ProposalSortField,
   sortDir: ProposalSortDir,
 ): number {
+  if (sort === "attention") {
+    // Callers should use compareByAttention; keep a safe chronological fallback.
+    const factor = sortDir === "asc" ? 1 : -1;
+    if (a.updated_at !== b.updated_at) return (a.updated_at - b.updated_at) * factor;
+    return a.id.localeCompare(b.id);
+  }
   const factor = sortDir === "asc" ? 1 : -1;
   const av = a[sort];
   const bv = b[sort];
@@ -962,6 +1202,82 @@ function findOpenEditsForEntry(
        LIMIT 5`,
     )
     .all(site, entryKey, locale) as Array<{ id: string }>;
+  for (const row of rows) {
+    if (excludeProposalId && row.id === excludeProposalId) continue;
+    return loadProposal(db, row.id);
+  }
+  return null;
+}
+
+const STALLED_IMPLEMENTS_STATUSES = "('open','partial','finished')";
+
+/** SQL predicate for stalled accepted ideas. Pass table alias (e.g. `p`) or `""` for unqualified columns. */
+function stalledIdeaSqlPredicate(alias: string): string {
+  const col = (name: string) => (alias ? `${alias}.${name}` : name);
+  return (
+    `${col("kind")} = 'idea' AND ${col("status")} = 'finished' AND ${col("close_reason")} = 'accepted' ` +
+    `AND ${col("accepted_entry_json")} IS NOT NULL AND TRIM(${col("accepted_entry_json")}) != '' ` +
+    `AND ${col("accepted_entry_json")} != 'null' AND NOT EXISTS (` +
+    `SELECT 1 FROM content_proposals c WHERE c.site = ${col("site")} ` +
+    `AND c.implements_proposal_id = ${col("id")} AND c.kind = 'edits' ` +
+    `AND c.status IN ${STALLED_IMPLEMENTS_STATUSES})`
+  );
+}
+
+function countStalledIdeas(db: Database.Database, site: string): number {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM content_proposals p WHERE p.site = ? AND ${stalledIdeaSqlPredicate("p")}`,
+      )
+      .get(site) as { n: number };
+    return Number(row?.n) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function findAcceptedIdeaOwningEntry(
+  db: Database.Database,
+  site: string,
+  contentType: string,
+  slug: string,
+  locale: string,
+  excludeIdeaId?: string,
+): ProposalRecord | null {
+  const key = acceptedEntryKey({ contentType, slug, locale });
+  const rows = db
+    .prepare(
+      `SELECT id, accepted_entry_json FROM content_proposals
+       WHERE site = ? AND kind = 'idea' AND status = 'finished' AND close_reason = 'accepted'
+         AND accepted_entry_json IS NOT NULL`,
+    )
+    .all(site) as Array<{ id: string; accepted_entry_json: string }>;
+  for (const row of rows) {
+    if (excludeIdeaId && row.id === excludeIdeaId) continue;
+    const entry = parseAcceptedEntry(parseJson(row.accepted_entry_json, null));
+    if (!entry) continue;
+    if (acceptedEntryKey(entry) === key) {
+      return loadProposal(db, row.id);
+    }
+  }
+  return null;
+}
+
+function findOpenImplementsForIdea(
+  db: Database.Database,
+  site: string,
+  ideaId: string,
+  excludeProposalId?: string,
+): ProposalRecord | null {
+  const rows = db
+    .prepare(
+      `SELECT id FROM content_proposals
+       WHERE site = ? AND kind = 'edits' AND status IN ('open','partial')
+         AND implements_proposal_id = ?
+       LIMIT 5`,
+    )
+    .all(site, ideaId) as Array<{ id: string }>;
   for (const row of rows) {
     if (excludeProposalId && row.id === excludeProposalId) continue;
     return loadProposal(db, row.id);
@@ -1040,6 +1356,16 @@ function findEscalatedSiblings(
 export function createProposalService(deps: ProposalServiceDeps) {
   const site = deps.site;
 
+  function policy(): ProposalSettings {
+    if (deps.getProposalSettings) return deps.getProposalSettings();
+    return {
+      withdraw: { ...DEFAULT_PROPOSAL_SETTINGS.withdraw },
+      four_eyes: { ...DEFAULT_PROPOSAL_SETTINGS.four_eyes },
+      hold: { ...DEFAULT_PROPOSAL_SETTINGS.hold },
+      claim: { ...DEFAULT_PROPOSAL_SETTINGS.claim },
+    };
+  }
+
   function runResolveActivity(opts: {
     entries: Array<{ contentType: string; slug: string; locale: string; variant?: string | null }>;
     excludeAgentSessionId?: string | null;
@@ -1064,6 +1390,200 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }): { live: ExistenceState; draftExists: boolean } {
     if (deps.resolveExistence) return deps.resolveExistence(entry);
     return { live: "exists", draftExists: Boolean(entry.variant?.trim()) };
+  }
+
+  function attachedCreateKey(contentType: string, slug: string, locale: string): string {
+    return `${contentType}\0${slug}\0${locale}`;
+  }
+
+  function inspectTarget(contentType: string, slug: string): MissingTargetShape {
+    if (!deps.inspectMissingTarget) return { shape: "other" };
+    return deps.inspectMissingTarget({ contentType, slug });
+  }
+
+  function attachedCreateHintFor(proposal: ProposalRecord): AcceptedEntry | null {
+    if (proposal.kind !== "idea" || proposal.close_reason !== "accepted" || !proposal.accepted_entry) {
+      return null;
+    }
+    const ae = proposal.accepted_entry;
+    const ex = resolveExistence({ contentType: ae.contentType, slug: ae.slug, locale: ae.locale });
+    if (ex.live === "exists") return null;
+    const shape = inspectTarget(ae.contentType, ae.slug);
+    if (shape.shape !== "attached_file") return null;
+    return ae;
+  }
+
+  function withAttachedCreate(proposal: ProposalRecord): ProposalRecord {
+    const hint = attachedCreateHintFor(proposal);
+    if (!hint) return proposal;
+    return { ...proposal, attached_create_entry: hint };
+  }
+
+  function resolveImplementsForEdits(
+    db: Database.Database,
+    implementsRaw: string | undefined,
+    entriesIn: ProposalEntryInput[],
+    excludeProposalId?: string,
+  ):
+    | { ok: true; idea: ProposalRecord | null }
+    | {
+        ok: false;
+        code: string;
+        error: string;
+        existing_proposal?: ProposalRecord;
+        duplicate_of?: string;
+      } {
+    const id = implementsRaw?.trim() || "";
+    let idea: ProposalRecord | null = null;
+    if (id) {
+      idea = loadProposal(db, id);
+      if (
+        !idea ||
+        idea.site !== site ||
+        idea.kind !== "idea" ||
+        idea.close_reason !== "accepted" ||
+        idea.status !== "finished"
+      ) {
+        return {
+          ok: false,
+          code: "implements_not_found",
+          error:
+            "implements_proposal_id must reference an accepted idea on this site (finished with close_reason accepted).",
+        };
+      }
+      if (!idea.accepted_entry) {
+        return {
+          ok: false,
+          code: "implements_idea_incomplete",
+          error:
+            "That accepted idea has no locked page entry. Staff must re-accept with a content type, slug, and locale (legacy ideas).",
+          existing_proposal: idea,
+        };
+      }
+      if (!entriesMatchAccepted(entriesIn, idea.accepted_entry)) {
+        const ae = idea.accepted_entry;
+        return {
+          ok: false,
+          code: "implements_entry_mismatch",
+          error: `Edits must target ${ae.contentType}/${ae.slug} (${ae.locale}) to implement this idea.`,
+          existing_proposal: idea,
+        };
+      }
+      const openImpl = findOpenImplementsForIdea(db, site, idea.id, excludeProposalId);
+      if (openImpl) {
+        return {
+          ok: false,
+          code: "idea_already_in_progress",
+          error: `An open edits proposal already implements this idea (${openImpl.id}). Join it instead of creating another.`,
+          duplicate_of: openImpl.id,
+          existing_proposal: openImpl,
+        };
+      }
+    }
+    for (const e of entriesIn) {
+      const owner = findAcceptedIdeaOwningEntry(db, site, e.contentType, e.slug, e.locale);
+      if (!owner) continue;
+      if (!id) {
+        return {
+          ok: false,
+          code: "implements_required",
+          error: `An accepted idea (${owner.id}) already reserved ${e.contentType}/${e.slug} (${e.locale}). Pass implements_proposal_id: "${owner.id}".`,
+          duplicate_of: owner.id,
+          existing_proposal: owner,
+        };
+      }
+      if (id !== owner.id) {
+        return {
+          ok: false,
+          code: "implements_required",
+          error: `That page is reserved by accepted idea ${owner.id}. Pass implements_proposal_id: "${owner.id}".`,
+          duplicate_of: owner.id,
+          existing_proposal: owner,
+        };
+      }
+    }
+    return { ok: true, idea };
+  }
+
+  function gateMissingAttachedEntry(opts: {
+    entry: ProposalEntryInput;
+    promoteOnApply: boolean;
+    hasVariant: boolean;
+    implementsIdea: ProposalRecord | null;
+    db: Database.Database;
+  }):
+    | { ok: true; createsEntry: boolean }
+    | { ok: false; code: string; error: string; existing_proposal?: ProposalRecord; duplicate_of?: string } {
+    const e = opts.entry;
+    const shape = inspectTarget(e.contentType, e.slug);
+    const where = `${e.contentType}/${e.slug} (${e.locale})`;
+    if (shape.shape === "database") {
+      return {
+        ok: false,
+        code: "database_entry_required",
+        error:
+          `${where} is a database entry and has no row yet. This workflow cannot create that row. ` +
+          "Field updates still work once the row exists (they write overrides). The accepted idea can stay reserved.",
+      };
+    }
+    if (shape.shape === "attached_file" && (opts.hasVariant || opts.promoteOnApply)) {
+      return {
+        ok: false,
+        code: "attached_no_draft",
+        error:
+          `${where} is an attached post. Do not attach a draft or promote_on_apply. ` +
+          "Resubmit with implements_proposal_id, review_situations [\"new_public_content\"], and field updates only. Apply creates the files.",
+      };
+    }
+    if (shape.shape !== "attached_file") {
+      if (!opts.hasVariant) {
+        return {
+          ok: false,
+          code: "entry_not_found",
+          error: `Page ${where} does not exist yet. File an idea brief, or create the draft first, then propose edits on that target.`,
+        };
+      }
+      return {
+        ok: false,
+        code: "entry_not_found",
+        error: `Draft variant '${e.variant}' for ${where} was not found. Create the draft first, or use kind idea for a new-page brief.`,
+      };
+    }
+    if (!opts.implementsIdea) {
+      const owner = findAcceptedIdeaOwningEntry(opts.db, site, e.contentType, e.slug, e.locale);
+      if (owner) {
+        return {
+          ok: false,
+          code: "implements_required",
+          error: `An accepted idea (${owner.id}) already reserved ${where}. Pass implements_proposal_id: "${owner.id}".`,
+          duplicate_of: owner.id,
+          existing_proposal: owner,
+        };
+      }
+      return {
+        ok: false,
+        code: "entry_not_found",
+        error: `Page ${where} does not exist yet. File an idea brief, accept it with this slug, then propose field edits with implements_proposal_id. Do not create a draft.`,
+      };
+    }
+    const updates = e.updates ?? [];
+    const sectionPaths = updates.map((u) => u.field_path).filter(isSectionFieldPath);
+    if (sectionPaths.length) {
+      return {
+        ok: false,
+        code: "attached_sections_refused",
+        error: `Attached posts do not take section writes (${sectionPaths.join(", ")}). Send field updates only. The shared template stays unchanged.`,
+      };
+    }
+    const missing = missingRequiredFromOps(shape.requiredFields, updates);
+    if (missing.length) {
+      return {
+        ok: false,
+        code: "required_fields_missing",
+        error: `This new post is missing required fields: ${missing.join(", ")}. The accepted idea still holds the slug. Add those field updates and retry.`,
+      };
+    }
+    return { ok: true, createsEntry: true };
   }
 
   function buildLookupsForProposal(proposal: ProposalRecord): EntryExistenceLookup[] {
@@ -1137,6 +1657,105 @@ export function createProposalService(deps: ProposalServiceDeps) {
       .run(JSON.stringify(snap), Date.now(), proposalId);
   }
 
+  function mergeProposalTags(proposalId: string, add: string[]): void {
+    if (!add.length) return;
+    const row = dbFor(site)
+      .prepare(`SELECT tags_json FROM content_proposals WHERE id = ?`)
+      .get(proposalId) as { tags_json: string } | undefined;
+    if (!row) return;
+    const existing = parseJson<string[]>(row.tags_json, []);
+    const next = [...existing];
+    for (const t of add) {
+      if (!next.includes(t)) next.push(t);
+    }
+    if (next.length === existing.length) return;
+    dbFor(site)
+      .prepare(`UPDATE content_proposals SET tags_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(next), Date.now(), proposalId);
+  }
+
+  function tryLoadPromoteDraftText(proposal: ProposalRecord): string | null {
+    if (!proposal.promote_on_apply || !deps.readVariantFingerprint) return null;
+    try {
+      const e = proposal.entries.find((x) => x.variant?.trim());
+      if (!e?.variant?.trim()) return null;
+      // Fingerprint path already proved file exists at create; re-read raw via getContentForEdit-style if available
+      const baseline = e.baseline_context?.values;
+      if (baseline && typeof baseline === "object") {
+        const fromBaseline = textFromUnknown(baseline);
+        if (fromBaseline.trim()) return fromBaseline;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function classifyLive(
+    proposal: ProposalRecord,
+    opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
+  ): Promise<ReviewContext | null> {
+    if (proposal.status !== "open" && proposal.status !== "partial") return null;
+
+    const workEntries = proposal.entries.filter(
+      (e) => !e.status || e.status === "pending" || e.status === "failed",
+    );
+    const countsAsLeadForm =
+      proposal.kind === "edits"
+        ? anyEntryHasCountsAsLeadForm(
+            (workEntries.length ? workEntries : proposal.entries).map((e) => ({
+              contentType: e.contentType,
+              slug: e.slug,
+              locale: e.locale,
+            })),
+          )
+        : false;
+
+    const promoteDraftText = tryLoadPromoteDraftText(proposal);
+
+    const classifyOpts = {
+      proposal,
+      lookups: buildLookupsForProposal(proposal),
+      relatedOpen: findRelatedOpenByIssues(proposal),
+      snapshot: proposal.review_context_snapshot
+        ? {
+            damage_class:
+              typeof proposal.review_context_snapshot.damage_class === "string"
+                ? proposal.review_context_snapshot.damage_class
+                : undefined,
+          }
+        : null,
+      promoteDraftText,
+      countsAsLeadForm,
+    };
+
+    let ctx = classifyProposalReview(classifyOpts);
+
+    if (ctx.needs_jev_claim_check && proposal.kind === "edits") {
+      const { outcome } = await askTouchesOutcomeFigures(
+        getDecisionClient(),
+        ctx.claim_cue_text ?? "",
+      );
+      ctx = classifyProposalReview({
+        ...classifyOpts,
+        claimCueJevOutcome: outcome,
+      });
+      if (outcome === "unavailable") {
+        mergeProposalTags(proposal.id, ["used_jev_unavailable"]);
+      } else {
+        mergeProposalTags(proposal.id, ["used_jev"]);
+      }
+    }
+
+    const snap = snapshotFromReviewContext(ctx);
+    if (opts?.refreshSnapshot) {
+      persistSnapshot(proposal.id, snap);
+    } else if (opts?.persistIfMissingSnapshot && !proposal.review_context_snapshot) {
+      persistSnapshot(proposal.id, snap);
+    }
+    return ctx;
+  }
+
   function persistDecisionDebug(proposalId: string, blob: ProposalDecisionDebug): void {
     dbFor(site)
       .prepare(`UPDATE content_proposals SET decision_debug_json = ?, updated_at = ? WHERE id = ?`)
@@ -1168,6 +1787,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         escalated: proposal.escalated,
         escalated_note: proposal.escalated_note,
         entries: proposal.entries,
+        related_entries: proposal.related_entries,
         open_blocker_count: proposal.open_blocker_count,
         blockers: proposal.blockers,
       },
@@ -1183,33 +1803,6 @@ export function createProposalService(deps: ProposalServiceDeps) {
       recentActivity: enriched.recent_activity ?? null,
     });
     persistDecisionDebug(proposal.id, blob);
-  }
-
-  function classifyLive(
-    proposal: ProposalRecord,
-    opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
-  ): ReviewContext | null {
-    if (proposal.status !== "open" && proposal.status !== "partial") return null;
-    const ctx = classifyProposalReview({
-      proposal,
-      lookups: buildLookupsForProposal(proposal),
-      relatedOpen: findRelatedOpenByIssues(proposal),
-      snapshot: proposal.review_context_snapshot
-        ? {
-            damage_class:
-              typeof proposal.review_context_snapshot.damage_class === "string"
-                ? proposal.review_context_snapshot.damage_class
-                : undefined,
-          }
-        : null,
-    });
-    const snap = snapshotFromReviewContext(ctx);
-    if (opts?.refreshSnapshot) {
-      persistSnapshot(proposal.id, snap);
-    } else if (opts?.persistIfMissingSnapshot && !proposal.review_context_snapshot) {
-      persistSnapshot(proposal.id, snap);
-    }
-    return ctx;
   }
 
   function enrichRecentActivity(
@@ -1250,7 +1843,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   function get(id: string): ProposalRecord | null {
     const raw = loadProposal(dbFor(site), id);
-    return raw ? withSiblings(enrichRecentActivity(raw)) : null;
+    return raw ? withAttachedCreate(withSiblings(enrichRecentActivity(raw))) : null;
   }
 
   /** Unenriched load for internal mutate paths (avoid nested activity reads mid-apply). */
@@ -1260,8 +1853,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   function stats(): ProposalStats {
     const db = dbFor(site);
+    ensureKpiCatchUp(db, site);
     const by_status = { ...EMPTY_STATUS_COUNTS };
     const by_kind = { ...EMPTY_KIND_COUNTS };
+    const by_attention = emptyAttentionCounts();
+    let needs_review_edits = 0;
     const statusRows = db
       .prepare(`SELECT status, COUNT(*) AS n FROM content_proposals WHERE site = ? GROUP BY status`)
       .all(site) as Array<{ status: ProposalStatus; n: number }>;
@@ -1282,12 +1878,69 @@ export function createProposalService(deps: ProposalServiceDeps) {
         `SELECT COUNT(*) AS n FROM content_proposals WHERE site = ? AND escalated = 1`,
       )
       .get(site) as { n: number };
+
+    try {
+      const attentionRows = db
+        .prepare(
+          `SELECT p.id, p.kind, p.status, p.escalated, p.author_content_at, p.reviewer_action_at,
+                  (SELECT COUNT(*) FROM content_proposal_blockers b
+                   WHERE b.proposal_id = p.id AND b.status = 'open') AS open_n,
+                  (SELECT COUNT(*) FROM content_proposal_blockers b
+                   WHERE b.proposal_id = p.id AND b.status = 'resolved') AS resolved_n
+           FROM content_proposals p
+           WHERE p.site = ? AND p.status IN ('open', 'partial')`,
+        )
+        .all(site) as Array<{
+        id: string;
+        kind: ProposalKind;
+        status: ProposalStatus;
+        escalated: number;
+        author_content_at: number | null;
+        reviewer_action_at: number | null;
+        open_n: number;
+        resolved_n: number;
+      }>;
+      for (const row of attentionRows) {
+        const bucket = deriveProposalAttention({
+          status: row.status,
+          escalated: Boolean(row.escalated),
+          open_blocker_count: Number(row.open_n) || 0,
+          resolved_blocker_count: Number(row.resolved_n) || 0,
+          author_content_at: row.author_content_at,
+          reviewer_action_at: row.reviewer_action_at,
+        });
+        if (bucket) by_attention[bucket] += 1;
+        if (
+          row.kind === "edits" &&
+          (bucket === "awaiting_rereview" || bucket === "no_feedback")
+        ) {
+          needs_review_edits += 1;
+        }
+      }
+    } catch {
+      // Blockers table missing in older DBs — leave by_attention zeros.
+    }
+
     return {
       total: Number(totalRow?.n) || 0,
       by_status,
       by_kind,
       escalated_count: Number(escalatedRow?.n) || 0,
+      by_attention,
+      by_kind_status: liveByKindStatus(db, site),
+      stalled_ideas: countStalledIdeas(db, site),
+      needs_review_edits,
     };
+  }
+
+  function kpiHistory(opts?: {
+    kind?: KpiCardKind | null;
+    granularity?: KpiGranularity;
+    from?: string;
+    to?: string;
+    fresh?: boolean;
+  }): KpiHistoryResult {
+    return getKpiHistory(dbFor(site), site, opts);
   }
 
   /** Distinct proposers with a proposal touched in the last `days` (by updated_at). */
@@ -1327,93 +1980,188 @@ export function createProposalService(deps: ProposalServiceDeps) {
     proposer_actor_role?: string;
     agent_session_id?: string;
     escalated?: boolean;
+    attention?: ProposalAttention;
+    /** Accepted ideas with no successful implements follow-up. */
+    stalled?: boolean;
+    /** Open|partial edits that still need a reviewer (re-check or no feedback). */
+    needs_review?: boolean;
     limit?: number;
     offset?: number;
     sort?: ProposalSortField;
     sortDir?: ProposalSortDir;
-  }): { proposals: ProposalRecord[]; total: number } {
+    attention_perspective?: AttentionPerspective;
+    /** Username for within-bucket foreign-claim demotion (attention sort). */
+    caller_username?: string;
+  }): {
+    proposals: ProposalRecord[];
+    total: number;
+    status_bias_applied: boolean;
+    attention_perspective: AttentionPerspective | null;
+  } {
     if (opts.proposal_id) {
       const one = get(opts.proposal_id);
-      return { proposals: one ? [one] : [], total: one ? 1 : 0 };
+      return {
+        proposals: one ? [one] : [],
+        total: one ? 1 : 0,
+        status_bias_applied: false,
+        attention_perspective: null,
+      };
     }
     const db = dbFor(site);
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
     const offset = Math.max(0, opts.offset ?? 0);
     const sort: ProposalSortField = opts.sort ?? "updated_at";
     const sortDir: ProposalSortDir = opts.sortDir ?? "desc";
-    const orderSql = `ORDER BY ${sort} ${sortDir.toUpperCase()}, id ASC`;
+    const perspective: AttentionPerspective = opts.attention_perspective ?? "reviewer";
+    const needsReview = opts.needs_review === true;
+    const stalled = opts.stalled === true && !needsReview;
+    const sortForRank: ProposalSortField = needsReview ? "attention" : sort;
+    const useAttentionPath = sortForRank === "attention" || opts.attention != null || needsReview;
+    const statusBiasApplied =
+      needsReview || (useAttentionPath && opts.status == null && !stalled);
+    const tableAlias = stalled ? "p" : "";
+    const fromSql = tableAlias ? `content_proposals ${tableAlias}` : `content_proposals`;
+    const col = (name: string) => (tableAlias ? `${tableAlias}.${name}` : name);
 
-    let where = `WHERE site = ?`;
+    let where = `WHERE ${col("site")} = ?`;
     const params: unknown[] = [site];
-    if (opts.status) {
-      where += ` AND status = ?`;
-      params.push(opts.status);
+    if (stalled) {
+      where += ` AND ${stalledIdeaSqlPredicate(tableAlias || "p")}`;
     }
-    if (opts.kind) {
-      where += ` AND kind = ?`;
-      params.push(opts.kind);
+    if (needsReview) {
+      where += ` AND ${col("kind")} = 'edits' AND ${col("status")} IN ('open', 'partial')`;
+    } else {
+      if (opts.status) {
+        where += ` AND ${col("status")} = ?`;
+        params.push(opts.status);
+      } else if (statusBiasApplied) {
+        where += ` AND ${col("status")} IN ('open', 'partial')`;
+      }
+      if (opts.kind) {
+        where += ` AND ${col("kind")} = ?`;
+        params.push(opts.kind);
+      }
     }
     if (opts.issue_id) {
-      where += ` AND related_issue_ids_json LIKE ?`;
+      where += ` AND ${col("related_issue_ids_json")} LIKE ?`;
       params.push(`%${opts.issue_id}%`);
     }
     if (opts.query?.trim()) {
-      where += ` AND search_text LIKE ?`;
+      where += ` AND ${col("search_text")} LIKE ?`;
       params.push(`%${opts.query.trim().toLowerCase()}%`);
     }
     const proposerUsername = opts.proposer_username?.trim();
     if (proposerUsername) {
-      where += ` AND LOWER(proposer_username) = LOWER(?)`;
+      where += ` AND LOWER(${col("proposer_username")}) = LOWER(?)`;
       params.push(proposerUsername);
     }
     if (opts.proposer_actor_type) {
-      where += ` AND json_extract(proposer_actor_json, '$.type') = ?`;
+      where += ` AND json_extract(${col("proposer_actor_json")}, '$.type') = ?`;
       params.push(opts.proposer_actor_type);
     }
     const proposerActorRole = opts.proposer_actor_role?.trim();
     if (proposerActorRole) {
-      where += ` AND json_extract(proposer_actor_json, '$.role') = ?`;
+      where += ` AND json_extract(${col("proposer_actor_json")}, '$.role') = ?`;
       params.push(proposerActorRole);
     }
     const agentSessionId = opts.agent_session_id?.trim();
     if (agentSessionId) {
-      where += ` AND created_agent_session_id = ?`;
+      where += ` AND ${col("created_agent_session_id")} = ?`;
       params.push(agentSessionId);
     }
     if (opts.escalated === true) {
-      where += ` AND escalated = 1`;
+      where += ` AND ${col("escalated")} = 1`;
     } else if (opts.escalated === false) {
-      where += ` AND escalated = 0`;
+      where += ` AND ${col("escalated")} = 0`;
     }
 
-    if (opts.issue_id) {
+    const mapRow = (r: ProposalRow) =>
+      mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id));
+
+    const withAttentionMeta = (p: ProposalRecord) => {
+      const resolved = resolvedBlockerCount(p.blockers);
+      const attention = attentionForRecord(p);
+      return { proposal: p, attention, resolved };
+    };
+
+    if (useAttentionPath || opts.issue_id) {
+      const orderSql =
+        sortForRank === "attention"
+          ? `ORDER BY ${col("updated_at")} DESC, ${col("id")} ASC`
+          : `ORDER BY ${col(sort === "created_at" ? "created_at" : "updated_at")} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
       const rows = db
-        .prepare(`SELECT * FROM content_proposals ${where} ${orderSql}`)
+        .prepare(`SELECT ${tableAlias ? `${tableAlias}.*` : "*"} FROM ${fromSql} ${where} ${orderSql}`)
         .all(...params) as ProposalRow[];
-      let records = rows
-        .map((r) => mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)))
-        .filter((p) => p.related_issue_ids.includes(opts.issue_id!));
-      records = [...records].sort((a, b) => compareProposalsBySort(a, b, sort, sortDir));
-      const total = records.length;
+      let records = rows.map(mapRow);
+      if (opts.issue_id) {
+        records = records.filter((p) => p.related_issue_ids.includes(opts.issue_id!));
+      }
+
+      let decorated = records.map(withAttentionMeta);
+      if (needsReview) {
+        decorated = decorated.filter(
+          (d) => d.attention === "awaiting_rereview" || d.attention === "no_feedback",
+        );
+      }
+      if (opts.attention) {
+        decorated = decorated.filter((d) => d.attention === opts.attention);
+      }
+
+      if (sortForRank === "attention") {
+        decorated = [...decorated].sort((a, b) =>
+          compareByAttention(
+            {
+              id: a.proposal.id,
+              updated_at: a.proposal.updated_at,
+              attention: a.attention,
+              claim: a.proposal.claim,
+            },
+            {
+              id: b.proposal.id,
+              updated_at: b.proposal.updated_at,
+              attention: b.attention,
+              claim: b.proposal.claim,
+            },
+            perspective,
+            opts.caller_username,
+          ),
+        );
+      } else if (opts.issue_id) {
+        decorated = [...decorated].sort((a, b) =>
+          compareProposalsBySort(a.proposal, b.proposal, sort, sortDir),
+        );
+      }
+
+      const total = decorated.length;
       return {
-        proposals: records.slice(offset, offset + limit).map((p) => withSiblings(enrichRecentActivity(p))),
+        proposals: decorated
+          .slice(offset, offset + limit)
+          .map((d) => withAttachedCreate(withSiblings(enrichRecentActivity(d.proposal)))),
         total,
+        status_bias_applied: statusBiasApplied,
+        attention_perspective: sortForRank === "attention" ? perspective : null,
       };
     }
 
+    const orderSql = `ORDER BY ${col(sort)} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
     const totalRow = db
-      .prepare(`SELECT COUNT(*) AS n FROM content_proposals ${where}`)
+      .prepare(`SELECT COUNT(*) AS n FROM ${fromSql} ${where}`)
       .get(...params) as { n: number };
     const total = Number(totalRow?.n) || 0;
     const rows = db
       .prepare(
-        `SELECT * FROM content_proposals ${where} ${orderSql} LIMIT ? OFFSET ?`,
+        `SELECT ${tableAlias ? `${tableAlias}.*` : "*"} FROM ${fromSql} ${where} ${orderSql} LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as ProposalRow[];
     const proposals = rows.map((r) =>
-      withSiblings(enrichRecentActivity(mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)))),
+      withAttachedCreate(withSiblings(enrichRecentActivity(mapRow(r)))),
     );
-    return { proposals, total };
+    return {
+      proposals,
+      total,
+      status_bias_applied: false,
+      attention_perspective: null,
+    };
   }
 
   async function create(
@@ -1450,6 +2198,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       ...e,
       updates: e.updates ?? [],
     }));
+    const createsEntryKeys = new Set<string>();
     let kind: ProposalKind;
     if (entriesIn.length > 0 || promote_on_apply) {
       kind = "edits";
@@ -1460,12 +2209,24 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
     let filedReviewSituations: ReviewSituationId[] = [];
 
-    if (kind !== "edits" && (input.review_situations?.length ?? 0) > 0) {
+    if (kind === "notes" && (input.review_situations?.length ?? 0) > 0) {
       return {
         ok: false,
         code: "review_situations_edits_only",
-        error: "review_situations is only valid on edits proposals (not notes or ideas).",
+        error: "review_situations is only valid on edits or idea proposals (not notes).",
       };
+    }
+
+    if (kind === "idea" && (input.review_situations?.length ?? 0) > 0) {
+      const ideaSit = parseIdeaAuthorSituationIds(input.review_situations);
+      if (!ideaSit.ok) {
+        return {
+          ok: false,
+          code: ideaSit.code ?? "invalid_review_situations",
+          error: ideaSit.error,
+        };
+      }
+      filedReviewSituations = ideaSit.ids;
     }
 
     if (input.kind === "idea" && (entriesIn.length > 0 || promote_on_apply)) {
@@ -1534,12 +2295,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       filedReviewSituations = situationsParse.ids;
 
-      // Existence + mixed risk + competing entry
+      const dbEarly = dbFor(site);
+      const implementsResolved = resolveImplementsForEdits(dbEarly, input.implements_proposal_id, entriesIn);
+      if (!implementsResolved.ok) return implementsResolved;
+      const implementsIdea = implementsResolved.idea;
+
+      // Existence + mixed risk
       const classTargets: Array<{
         contentType: string;
         category?: ProposalCategory;
         existence: ExistenceState;
         draftExists?: boolean;
+        createsEntry?: boolean;
       }> = [];
       for (const e of entriesIn) {
         const hasVariant = Boolean(e.variant?.trim());
@@ -1551,20 +2318,40 @@ export function createProposalService(deps: ProposalServiceDeps) {
         });
         const liveOk = ex.live === "exists";
         const draftOk = hasVariant && ex.draftExists;
-        if (!hasVariant && !liveOk) {
+        const liveMissing = !liveOk && ex.live !== "unknown";
+        if (liveMissing && !draftOk) {
+          const gate = gateMissingAttachedEntry({
+            entry: e,
+            promoteOnApply: promote_on_apply,
+            hasVariant,
+            implementsIdea,
+            db: dbEarly,
+          });
+          if (!gate.ok) return gate;
+          if (gate.createsEntry) {
+            createsEntryKeys.add(attachedCreateKey(e.contentType, e.slug, e.locale));
+          }
+        } else if (!hasVariant && !liveOk) {
           return {
             ok: false,
             code: "entry_not_found",
             error: `Page ${e.contentType}/${e.slug} (${e.locale}) does not exist yet. File an idea brief, or create the draft first, then propose edits on that target.`,
           };
-        }
-        if (hasVariant && !ex.draftExists) {
+        } else if (hasVariant && !ex.draftExists) {
           return {
             ok: false,
             code: "entry_not_found",
             error: `Draft variant '${e.variant}' for ${e.contentType}/${e.slug} (${e.locale}) was not found. Create the draft first, or use kind idea for a new-page brief.`,
           };
         }
+        const createsEntry = createsEntryKeys.has(attachedCreateKey(e.contentType, e.slug, e.locale));
+        const updateText = (e.updates ?? [])
+          .map((u) => textFromUnknown(u.value))
+          .filter(Boolean)
+          .join("\n");
+        const outcomeFigures =
+          (input.review_situations ?? []).includes("selling_figures") ||
+          evaluateClaimCues(updateText) === "clear_yes";
         classTargets.push({
           contentType: e.contentType,
           category:
@@ -1574,8 +2361,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
             )
               ? "content.seo"
               : "content.field"),
-          existence: ex.live,
+          existence: ex.live === "unknown" ? "unknown" : liveOk ? "exists" : "missing",
           draftExists: draftOk,
+          createsEntry,
+          outcomeFigures,
         });
       }
       const classes = collectDamageClassesForMixedCheck(classTargets);
@@ -1584,7 +2373,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           ok: false,
           code: "mixed_risk_bundle",
           error:
-            "This proposal mixes different risk levels (for example a selling page and a blog metadata fix). Split into separate proposals — one risk class each.",
+            "This proposal mixes different risk levels (for example outcome figures and a blog metadata fix). Split into separate proposals — one risk class each.",
         };
       }
     }
@@ -1688,6 +2477,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
     }
 
+    const implementsIdForInsert =
+      kind === "edits" ? input.implements_proposal_id?.trim() || null : null;
+
     const searchBlob = [
       title,
       summary,
@@ -1754,16 +2546,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     const captured: Array<{
       input: ProposalEntryInput & { updates: FieldUpdate[] };
-      baseline: { values: Record<string, unknown>; note?: string };
+      baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean };
       variant_fingerprint: string | null;
     }> = [];
     for (const e of entriesIn) {
       const updates = e.updates ?? [];
-      let baseline: { values: Record<string, unknown>; note?: string } = {
+      const createsEntry = createsEntryKeys.has(attachedCreateKey(e.contentType, e.slug, e.locale));
+      let baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean } = {
         values: {},
         note: input.situation_note,
+        ...(createsEntry ? { creates_entry: true } : {}),
       };
-      if (updates.length) {
+      if (updates.length && !createsEntry) {
         const capturedBaseline = deps.captureBaseline({ ...e, updates });
         if (capturedBaseline.error) {
           return { ok: false, code: "baseline_failed", error: capturedBaseline.error };
@@ -1821,6 +2615,21 @@ export function createProposalService(deps: ProposalServiceDeps) {
       supersedesId = pred.id;
     }
 
+    let ideaFunnelJson: string | null = null;
+    if (kind === "idea" && input.idea_funnel != null) {
+      const funnelCheck = validateIdeaFunnel(input.idea_funnel);
+      if (!funnelCheck.ok) {
+        return { ok: false, code: funnelCheck.code, error: funnelCheck.error };
+      }
+      ideaFunnelJson = JSON.stringify(funnelCheck.funnel);
+    } else if (kind !== "idea" && input.idea_funnel != null) {
+      return {
+        ok: false,
+        code: "idea_funnel_ideas_only",
+        error: "idea_funnel is only valid on kind idea proposals.",
+      };
+    }
+
     const now = Date.now();
     const id = randomUUID();
     const sessionId = input.agent_session_id?.trim() || null;
@@ -1832,8 +2641,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
         review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-        review_situations_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_situations_json, implements_proposal_id, idea_funnel_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -1861,6 +2670,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
       supersedesId,
       null,
       JSON.stringify(filedReviewSituations),
+      implementsIdForInsert,
+      ideaFunnelJson,
     );
 
     if (supersedesId) {
@@ -1887,11 +2698,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     const proposal = get(id)!;
-    const reviewCtx = classifyLive(proposal, { refreshSnapshot: true });
+    const reviewCtx = await classifyLive(proposal, { refreshSnapshot: true });
     const withSnap = get(id)!;
     emitProposalEvent(site, "proposal_created", id, proposer.username, {
       ...(supersedesId ? { supersedes_proposal_id: supersedesId } : {}),
-    });
+    }, proposer.actor && typeof proposer.actor === "object" && "type" in proposer.actor
+      ? (proposer.actor as EventActor)
+      : undefined);
     if (deps.indexSearch) {
       deps.indexSearch(withSnap).catch((err) => log.warn({ err }, "proposal index failed"));
     }
@@ -1990,7 +2803,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     if (action === "claim") {
       const claim = proposal.claim;
-      const uiTakeover = isStaffUiActor(asAgentActor(caller.actor));
+      const settings = policy();
+      const uiTakeover =
+        isStaffUiActor(asAgentActor(caller.actor)) && settings.claim.staff_ui_takeover;
       if (
         claim &&
         new Date(claim.expiresAt).getTime() > now &&
@@ -2028,8 +2843,33 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
 
     if (action === "withdraw") {
-      if (proposal.proposer_username !== caller.username && !caller.asStaff) {
-        return { ok: false, code: "not_proposer", error: "Only the proposer or an editor can withdraw" };
+      const settings = policy();
+      const sameProposer =
+        proposal.proposer_username.trim().toLowerCase() === caller.username.trim().toLowerCase();
+      const isMcp = caller.actor?.type === "mcp";
+      if (isMcp) {
+        if (settings.withdraw.mcp === "disabled") {
+          return {
+            ok: false,
+            code: "withdraw_disabled",
+            error:
+              "Site rules disable agent withdraw — ask staff to withdraw in the UI, or Reject Completely if it must not ship",
+          };
+        }
+        if (settings.withdraw.mcp === "proposer_only" && !sameProposer) {
+          return {
+            ok: false,
+            code: "not_proposer",
+            error: "Only the proposer or an editor can withdraw",
+          };
+        }
+        // any_create_author: any MCP author may withdraw
+      } else if (!sameProposer && !caller.asStaff) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the proposer or an editor can withdraw",
+        };
       }
       if (proposal.status === "finished") {
         return { ok: false, code: "already_finished", error: "Finished proposals cannot be withdrawn" };
@@ -2045,7 +2885,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `withdraw note required (min ${MIN_CLOSE_NOTE} characters)`,
         };
       }
-      const reviewBeforeWithdraw = classifyLive(proposal);
+      const reviewBeforeWithdraw = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
@@ -2053,13 +2893,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
          WHERE id = ?`,
       ).run(now, "withdrawn", withdrawNote, caller.username, now, id);
       captureDecisionDebug(proposal, "withdraw", caller, reviewBeforeWithdraw);
-      emitProposalEvent(site, "proposal_withdrawn", id, caller.username);
+      emitProposalEvent(site, "proposal_withdrawn", id, caller.username, {}, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
     if (action === "reject") {
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -2104,7 +2945,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `reject note required (min ${MIN_REJECT_NOTE} characters): why this must not ship`,
         };
       }
-      const reviewBeforeReject = classifyLive(proposal);
+      const reviewBeforeReject = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'rejected', claim_json = NULL, updated_at = ?,
@@ -2114,7 +2955,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       captureDecisionDebug(proposal, "reject", caller, reviewBeforeReject);
       emitProposalEvent(site, "proposal_rejected", id, caller.username, {
         reject_kind: kindRaw,
-      });
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2134,7 +2975,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         return { ok: false, code: "closed", error: "Proposal is already closed" };
       }
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -2163,18 +3005,64 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: `Accept requires a next-step note (min ${MIN_ACCEPT_NEXT_STEP} characters)`,
         };
       }
-      const reviewBeforeAccept = classifyLive(proposal);
+      const acceptedEntry = parseAcceptedEntry(caller.accepted_entry);
+      if (!acceptedEntry) {
+        return {
+          ok: false,
+          code: "accepted_entry_required",
+          error:
+            "Accept requires accepted_entry with contentType, slug, and locale (the page this idea locks for follow-up work).",
+        };
+      }
+      const taken = findAcceptedIdeaOwningEntry(
+        db,
+        site,
+        acceptedEntry.contentType,
+        acceptedEntry.slug,
+        acceptedEntry.locale,
+        id,
+      );
+      if (taken) {
+        return {
+          ok: false,
+          code: "accepted_entry_taken",
+          error: `Another accepted idea (${taken.id}) already reserved ${acceptedEntryKey(acceptedEntry)}.`,
+          existing_proposal: taken,
+        };
+      }
+      const acceptEx = resolveExistence({
+        contentType: acceptedEntry.contentType,
+        slug: acceptedEntry.slug,
+        locale: acceptedEntry.locale,
+      });
+      const needsFunnel = ideaRequiresStructuredFunnel({
+        title: proposal.title,
+        summary: proposal.summary,
+        accepted_entry: { ...acceptedEntry, existence: acceptEx.live },
+      });
+      if (needsFunnel && !ideaFunnelComplete(proposal.idea_funnel)) {
+        return {
+          ok: false,
+          code: IDEA_FUNNEL_REQUIRED,
+          error:
+            "This idea locks a new URL. Set structured idea_funnel (stage + products) via set_idea_funnel before accept. products \"all\" only with stage awareness.",
+          proposal,
+        };
+      }
+      const reviewBeforeAccept = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
-             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?
+             close_reason = ?, close_note = ?, closed_by = ?, closed_at = ?,
+             accepted_entry_json = ?
          WHERE id = ?`,
-      ).run(now, "accepted", nextStep, caller.username, now, id);
+      ).run(now, "accepted", nextStep, caller.username, now, JSON.stringify(acceptedEntry), id);
       captureDecisionDebug(proposal, "accept", caller, reviewBeforeAccept);
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: "accepted",
         close_note: nextStep,
-      });
+        accepted_entry: acceptedEntry,
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2221,7 +3109,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (!validated.ok) {
         return { ok: false, code: validated.code, error: validated.error };
       }
-      const reviewBeforeClose = classifyLive(proposal);
+      const reviewBeforeClose = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
@@ -2232,7 +3120,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       emitProposalEvent(site, "proposal_closed", id, caller.username, {
         close_reason: validated.reason,
         close_note: validated.note,
-      });
+      }, caller.actor);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2289,12 +3177,62 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return { ok: true, proposal: get(id)! };
     }
 
-    if (action === "set_review_situations") {
-      if (proposal.kind !== "edits") {
+    if (action === "set_idea_funnel") {
+      if (proposal.kind !== "idea") {
         return {
           ok: false,
           code: "wrong_kind",
-          error: "set_review_situations is for edits proposals only",
+          error: "set_idea_funnel is for idea proposals only",
+        };
+      }
+      if (proposal.status === "finished" || proposal.status === "rejected" || proposal.status === "withdrawn") {
+        return {
+          ok: false,
+          code: proposal.close_reason === "accepted" ? IDEA_FUNNEL_FROZEN : "closed",
+          error:
+            proposal.close_reason === "accepted"
+              ? "idea_funnel is frozen after accept. Reject/refile if the plan was wrong — do not edit the lock."
+              : "Cannot change idea_funnel on a closed proposal",
+        };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may set idea_funnel",
+        };
+      }
+      const funnelCheck = validateIdeaFunnel(caller.idea_funnel);
+      if (!funnelCheck.ok) {
+        return { ok: false, code: funnelCheck.code, error: funnelCheck.error };
+      }
+      db.prepare(`UPDATE content_proposals SET idea_funnel_json = ?, updated_at = ? WHERE id = ?`).run(
+        JSON.stringify(funnelCheck.funnel),
+        now,
+        id,
+      );
+      const after = getRaw(id)!;
+      await classifyLive(after, { refreshSnapshot: true });
+      emitProposalEvent(site, "proposal_idea_funnel_set", id, caller.username, {
+        idea_funnel: funnelCheck.funnel,
+      });
+      return { ok: true, proposal: get(id)! };
+    }
+
+    if (action === "set_review_situations") {
+      if (proposal.kind !== "edits" && proposal.kind !== "idea") {
+        return {
+          ok: false,
+          code: "wrong_kind",
+          error: "set_review_situations is for edits or idea proposals only",
         };
       }
       if (proposal.status !== "open" && proposal.status !== "partial") {
@@ -2315,17 +3253,31 @@ export function createProposalService(deps: ProposalServiceDeps) {
           error: "Only the original proposer (or staff) may set review situations",
         };
       }
-      const parsed = parseReviewSituationIds(caller.review_situations ?? []);
-      if (!parsed.ok) {
-        return { ok: false, code: "invalid_review_situations", error: parsed.error };
+      let parsedIds: ReviewSituationId[];
+      if (proposal.kind === "idea") {
+        const ideaSit = parseIdeaAuthorSituationIds(caller.review_situations ?? []);
+        if (!ideaSit.ok) {
+          return {
+            ok: false,
+            code: ideaSit.code ?? "invalid_review_situations",
+            error: ideaSit.error,
+          };
+        }
+        parsedIds = ideaSit.ids;
+      } else {
+        const parsed = parseReviewSituationIds(caller.review_situations ?? []);
+        if (!parsed.ok) {
+          return { ok: false, code: "invalid_review_situations", error: parsed.error };
+        }
+        parsedIds = parsed.ids;
       }
       db.prepare(
         `UPDATE content_proposals SET review_situations_json = ?, updated_at = ? WHERE id = ?`,
-      ).run(JSON.stringify(parsed.ids), now, id);
+      ).run(JSON.stringify(parsedIds), now, id);
       const after = getRaw(id)!;
-      classifyLive(after, { refreshSnapshot: true });
+      await classifyLive(after, { refreshSnapshot: true });
       emitProposalEvent(site, "proposal_review_situations_set", id, caller.username, {
-        review_situations: parsed.ids,
+        review_situations: parsedIds,
       });
       return { ok: true, proposal: get(id)! };
     }
@@ -2419,11 +3371,23 @@ export function createProposalService(deps: ProposalServiceDeps) {
         }
       }
 
+      const reviseDb = dbFor(site);
+      const implementsResolved = resolveImplementsForEdits(
+        reviseDb,
+        proposal.implements_proposal_id ?? undefined,
+        entriesIn,
+        id,
+      );
+      if (!implementsResolved.ok) return implementsResolved;
+      const reviseCreates = new Set<string>();
+
       const classTargets: Array<{
         contentType: string;
         category?: ProposalCategory;
         existence: ExistenceState;
         draftExists?: boolean;
+        createsEntry?: boolean;
+        outcomeFigures?: boolean;
       }> = [];
       for (const e of entriesIn) {
         const hasVariant = Boolean(e.variant?.trim());
@@ -2435,20 +3399,39 @@ export function createProposalService(deps: ProposalServiceDeps) {
         });
         const liveOk = ex.live === "exists";
         const draftOk = hasVariant && ex.draftExists;
-        if (!hasVariant && !liveOk) {
+        const liveMissing = !liveOk && ex.live !== "unknown";
+        if (liveMissing && !draftOk) {
+          const gate = gateMissingAttachedEntry({
+            entry: e,
+            promoteOnApply: proposal.promote_on_apply,
+            hasVariant,
+            implementsIdea: implementsResolved.idea,
+            db: reviseDb,
+          });
+          if (!gate.ok) return gate;
+          if (gate.createsEntry) {
+            reviseCreates.add(attachedCreateKey(e.contentType, e.slug, e.locale));
+          }
+        } else if (!hasVariant && !liveOk) {
           return {
             ok: false,
             code: "entry_not_found",
             error: `Page ${e.contentType}/${e.slug} (${e.locale}) does not exist yet.`,
           };
-        }
-        if (hasVariant && !ex.draftExists) {
+        } else if (hasVariant && !ex.draftExists) {
           return {
             ok: false,
             code: "entry_not_found",
             error: `Draft variant '${e.variant}' for ${e.contentType}/${e.slug} (${e.locale}) was not found.`,
           };
         }
+        const updateText = (e.updates ?? [])
+          .map((u) => textFromUnknown(u.value))
+          .filter(Boolean)
+          .join("\n");
+        const outcomeFigures =
+          (proposal.review_situations ?? []).includes("selling_figures") ||
+          evaluateClaimCues(updateText) === "clear_yes";
         classTargets.push({
           contentType: e.contentType,
           category: (e.updates ?? []).some(
@@ -2456,8 +3439,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
           )
             ? "content.seo"
             : "content.field",
-          existence: ex.live,
+          existence: ex.live === "unknown" ? "unknown" : liveOk ? "exists" : "missing",
           draftExists: draftOk,
+          createsEntry: reviseCreates.has(attachedCreateKey(e.contentType, e.slug, e.locale)),
+          outcomeFigures,
         });
       }
       const classes = collectDamageClassesForMixedCheck(classTargets);
@@ -2552,8 +3537,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }> = [];
       for (const e of entriesIn) {
         const updates = e.updates ?? [];
-        let baseline: { values: Record<string, unknown>; note?: string } = { values: {} };
-        if (updates.length) {
+        const createsEntry = reviseCreates.has(attachedCreateKey(e.contentType, e.slug, e.locale));
+        let baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean } = {
+          values: {},
+          ...(createsEntry ? { creates_entry: true } : {}),
+        };
+        if (updates.length && !createsEntry) {
           const capturedBaseline = deps.captureBaseline({ ...e, updates });
           if (capturedBaseline.error) {
             return { ok: false, code: "baseline_failed", error: capturedBaseline.error };
@@ -2634,8 +3623,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         );
       }
       db.prepare(
-        `UPDATE content_proposals SET fingerprint = ?, search_text = ?, updated_at = ? WHERE id = ?`,
-      ).run(fingerprint, searchBlob, now, id);
+        `UPDATE content_proposals SET fingerprint = ?, search_text = ?, updated_at = ?, author_content_at = ? WHERE id = ?`,
+      ).run(fingerprint, searchBlob, now, now, id);
 
       const afterOps = getRaw(id)!;
       const priorDeclared = (afterOps.review_situations ?? []) as ReviewSituationId[];
@@ -2652,11 +3641,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
       const after = getRaw(id)!;
       persistRollup(db, after);
-      classifyLive(after, { refreshSnapshot: true });
+      await classifyLive(after, { refreshSnapshot: true });
       emitProposalEvent(site, "proposal_revised", id, caller.username, {
         entry_count: captured.length,
         open_blocker_count: after.open_blocker_count,
-      });
+      }, caller.actor);
       return {
         ok: true,
         proposal: get(id)!,
@@ -2685,10 +3674,21 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       db.prepare(
         `INSERT INTO content_proposal_blockers (
-          proposal_id, kind, body, status, author, created_at, agent_session_id
-        ) VALUES (?,?,?,?,?,?,?)`,
-      ).run(id, "blocker", body, "open", caller.username, now, caller.agent_session_id?.trim() || null);
-      db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
+          proposal_id, kind, body, status, author, created_at, agent_session_id, author_actor_json
+        ) VALUES (?,?,?,?,?,?,?,?)`,
+      ).run(
+        id,
+        "blocker",
+        body,
+        "open",
+        caller.username,
+        now,
+        caller.agent_session_id?.trim() || null,
+        JSON.stringify(caller.actor ?? {}),
+      );
+      db.prepare(
+        `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
+      ).run(now, now, id);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2730,10 +3730,25 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       db.prepare(
         `UPDATE content_proposal_blockers
-         SET status = 'resolved', resolved_at = ?, resolved_by = ?, resolve_note = ?
+         SET status = 'resolved', resolved_at = ?, resolved_by = ?, resolve_note = ?,
+             resolved_by_actor_json = ?
          WHERE id = ? AND proposal_id = ?`,
-      ).run(now, caller.username, resolveNote, blockerId, id);
-      db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
+      ).run(now, caller.username, resolveNote, JSON.stringify(caller.actor ?? {}), blockerId, id);
+      const authorFixed = sameAgentIdentity(
+        proposal.proposer_username,
+        asAgentActor(proposal.proposer_actor),
+        caller.username,
+        asAgentActor(caller.actor),
+      );
+      if (authorFixed) {
+        db.prepare(
+          `UPDATE content_proposals SET updated_at = ?, author_content_at = ? WHERE id = ?`,
+        ).run(now, now, id);
+      } else {
+        db.prepare(
+          `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
+        ).run(now, now, id);
+      }
       const fresh = get(id)!;
       const warnings =
         fresh.open_blocker_count === 0
@@ -2758,10 +3773,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       db.prepare(
         `UPDATE content_proposal_blockers
-         SET status = 'open', resolved_at = NULL, resolved_by = NULL, resolve_note = NULL
+         SET status = 'open', resolved_at = NULL, resolved_by = NULL, resolve_note = NULL,
+             resolved_by_actor_json = NULL
          WHERE id = ? AND proposal_id = ?`,
       ).run(blockerId, id);
-      db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
+      db.prepare(
+        `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
+      ).run(now, now, id);
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2836,7 +3854,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
       }
       const afterAttach = getRaw(id)!;
-      classifyLive(afterAttach, { refreshSnapshot: true });
+      await classifyLive(afterAttach, { refreshSnapshot: true });
       return { ok: true, proposal: get(id)! };
     }
 
@@ -2845,7 +3863,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         return { ok: false, code: "wrong_kind", error: "apply is for edits proposals; use close for notes" };
       }
       if (
-        fourEyesBlocked(
+        fourEyesBlockedForCaller(
+          policy(),
           proposal.proposer_username,
           proposal.proposer_actor,
           caller.username,
@@ -2867,7 +3886,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         };
       }
 
-      const reviewForApply = classifyLive(proposal);
+      const reviewForApply = await classifyLive(proposal);
       if (reviewForApply?.block_apply) {
         return {
           ok: false,
@@ -2992,6 +4011,115 @@ export function createProposalService(deps: ProposalServiceDeps) {
           continue;
         }
 
+        if (entry.baseline_context.creates_entry && !entry.variant) {
+          const exNow = resolveExistence({
+            contentType: entry.contentType,
+            slug: entry.slug,
+            locale: entry.locale,
+          });
+          if (exNow.live !== "exists") {
+            const failEntry = (message: string) => {
+              db.prepare(
+                `UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`,
+              ).run(message, entry.id);
+            };
+            if (!deps.prepareCreatesEntry) {
+              failEntry("create not configured");
+              continue;
+            }
+            let seedFunnel: IdeaFunnel | null = null;
+            if (proposal.implements_proposal_id) {
+              const idea = loadProposal(db, proposal.implements_proposal_id);
+              const locked = idea?.idea_funnel ?? null;
+              if (locked && ideaFunnelComplete(locked)) {
+                const fromOps = funnelFromFieldOps(entry.ops);
+                if (fromOps && !ideaFunnelsEqual(fromOps, locked)) {
+                  failEntry(
+                    `${IDEA_FUNNEL_CONFLICT}: ops funnel does not match the accepted idea's frozen idea_funnel (stage=${locked.stage}).`,
+                  );
+                  continue;
+                }
+                if (hasFunnelFieldOps(entry.ops) && !fromOps) {
+                  failEntry(
+                    `${IDEA_FUNNEL_CONFLICT}: incomplete funnel.* ops — must match the accepted idea's idea_funnel or omit funnel fields to auto-seed.`,
+                  );
+                  continue;
+                }
+                if (!fromOps) seedFunnel = locked;
+              }
+            }
+            const prepared = await deps.prepareCreatesEntry(entry, {
+              confirmNewValues: caller.confirm_new_values === true,
+              author: caller.username,
+              ideaFunnel: seedFunnel,
+            });
+            if (!prepared.ok && prepared.code === "confirm_new_values") {
+              return {
+                ok: false,
+                code: "confirm_new_values",
+                error: prepared.error ?? "confirm_new_values required",
+                proposal: get(id)!,
+              };
+            }
+            if (!prepared.ok) {
+              if (prepared.seeded) deps.discardSeededEntry?.(entry);
+              failEntry(prepared.error ?? "create failed");
+              continue;
+            }
+            const appliedCreate = await deps.applyUpdates(entry, caller.username);
+            if (!appliedCreate.ok) {
+              if (prepared.seeded) deps.discardSeededEntry?.(entry);
+              failEntry(appliedCreate.error ?? "apply failed");
+              continue;
+            }
+            if (deps.stampPublishedAt) {
+              const stamped = deps.stampPublishedAt(entry, caller.username);
+              if (!stamped.ok) {
+                if (prepared.seeded) deps.discardSeededEntry?.(entry);
+                failEntry(stamped.error ?? "published_at stamp failed");
+                continue;
+              }
+            }
+            db.prepare(
+              `UPDATE content_proposal_entries SET status = 'done', last_error = NULL, applied_at = ?, applied_by = ? WHERE id = ?`,
+            ).run(Date.now(), caller.username, entry.id);
+            continue;
+          }
+        }
+
+        // First write for a locked idea funnel without creates_entry auto-seed (e.g. DB types).
+        if (proposal.implements_proposal_id && !entry.baseline_context.creates_entry) {
+          const idea = loadProposal(db, proposal.implements_proposal_id);
+          const locked = idea?.idea_funnel ?? null;
+          if (locked && ideaFunnelComplete(locked)) {
+            const fromOps = funnelFromFieldOps(entry.ops);
+            if (fromOps && !ideaFunnelsEqual(fromOps, locked)) {
+              db.prepare(
+                `UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`,
+              ).run(
+                `${IDEA_FUNNEL_CONFLICT}: ops funnel does not match the accepted idea's frozen idea_funnel.`,
+                entry.id,
+              );
+              continue;
+            }
+            const liveNow = resolveExistence({
+              contentType: entry.contentType,
+              slug: entry.slug,
+              locale: entry.locale,
+              variant: entry.variant,
+            });
+            if (liveNow.live !== "exists" && (!fromOps || !ideaFunnelsEqual(fromOps, locked))) {
+              db.prepare(
+                `UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`,
+              ).run(
+                `${IDEA_FUNNEL_REQUIRED}: this implements an accepted idea with idea_funnel — include matching funnel.stage + funnel.products ops on the first write.`,
+                entry.id,
+              );
+              continue;
+            }
+          }
+        }
+
         if (entry.variant && deps.readVariantFingerprint && entry.variant_fingerprint) {
           const fp = deps.readVariantFingerprint({
             contentType: entry.contentType,
@@ -3049,16 +4177,16 @@ export function createProposalService(deps: ProposalServiceDeps) {
         ).run(Date.now(), caller.username, entry.id);
       }
       const updated = get(id)!;
-      const next = persistRollup(db, updated);
+      const next = persistRollup(db, updated, { closedBy: caller.username });
       const fresh = get(id)!;
       emitProposalEvent(site, "proposal_applied_progress", id, caller.username, {
         status: next,
         done: fresh.entries.filter((e) => e.status === "done").length,
         total: fresh.entries.length,
-      });
+      }, caller.actor);
       if (next === "finished") {
         captureDecisionDebug(proposal, "apply", caller, reviewForApply);
-        emitProposalEvent(site, "proposal_finished", id, caller.username);
+        emitProposalEvent(site, "proposal_finished", id, caller.username, {}, caller.actor);
       }
       return { ok: true, proposal: fresh };
     }
@@ -3066,7 +4194,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
-  return { get, list, stats, listRecentProposers, exportAll, create, update, classifyLive };
+  return { get, list, stats, kpiHistory, listRecentProposers, exportAll, create, update, classifyLive };
 }
 
 /** Full site dump for production → local pull (includes entries + blockers). */
@@ -3114,8 +4242,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       close_reason, close_note, closed_by, closed_at, related_entries_json,
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
       escalated, escalated_at, escalated_by, escalated_note, decision_debug_json,
-      review_situations_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      review_situations_json, accepted_entry_json, implements_proposal_id,
+      author_content_at, reviewer_action_at, idea_funnel_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -3126,8 +4255,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
   const insertBlocker = db.prepare(
     `INSERT INTO content_proposal_blockers (
       id, proposal_id, kind, body, status, author, created_at, resolved_at, resolved_by,
-      resolve_note, agent_session_id
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      resolve_note, agent_session_id, author_actor_json, resolved_by_actor_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
 
   const run = db.transaction((rows: ProposalRecord[]) => {
@@ -3178,6 +4307,11 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.escalated_note ?? null,
         p.decision_debug ? JSON.stringify(p.decision_debug) : null,
         JSON.stringify(p.review_situations ?? []),
+        p.accepted_entry ? JSON.stringify(p.accepted_entry) : null,
+        p.implements_proposal_id ?? null,
+        p.author_content_at ?? null,
+        p.reviewer_action_at ?? null,
+        p.idea_funnel ? JSON.stringify(p.idea_funnel) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
@@ -3208,6 +4342,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
           b.resolved_by ?? null,
           b.resolve_note ?? null,
           b.agent_session_id ?? null,
+          blockerActorColumn(b.author_actor),
+          blockerActorColumn(b.resolved_by_actor),
         );
       }
     }
@@ -3217,7 +4353,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
     return rows.length;
   });
 
-  return run(proposals);
+  const n = run(proposals);
+  wipeAndBackfillKpiHistory(db, site);
+  return n;
 }
 
 function inferCategory(entries: ProposalEntryInput[]): ProposalCategory {
@@ -3244,7 +4382,16 @@ export function captureBaselineFromSite(ctx: SiteContext, entry: ProposalEntryIn
   }
   const values: Record<string, unknown> = {};
   for (const u of entry.updates ?? []) {
-    values[u.field_path] = getByPath(loaded.content, u.field_path);
+    const read = readFieldValueAtPath({
+      contentType: entry.contentType,
+      slug: entry.slug,
+      locale: entry.locale,
+      variant: entry.variant,
+      field_path: u.field_path,
+      contentRoot: ctx.contentRoot,
+      ci: ctx.contentIndex,
+    });
+    values[u.field_path] = read.value;
   }
   return { values };
 }
@@ -3276,23 +4423,23 @@ export async function applyUpdatesOnSite(
   author: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!entry.ops.length) return { ok: true };
-  const operations = entry.ops.map((u) =>
-    u.reset
-      ? { action: "update_field" as const, path: u.field_path, value: null }
-      : { action: "update_field" as const, path: u.field_path, value: u.value },
-  );
-  const result = await editContent({
+  const result = await applyFieldUpdates({
     contentType: entry.contentType,
     slug: entry.slug,
     locale: entry.locale,
     variant: entry.variant || undefined,
-    operations,
+    updates: entry.ops.map((u) => ({
+      field_path: u.field_path,
+      value: u.value,
+      reset: u.reset === true,
+    })),
     author,
     contentRoot: ctx.contentRoot,
+    contentRootName: ctx.contentRootName,
     ci: ctx.contentIndex,
     skipSharedLayoutFanOut: true,
   });
-  if (!result.success) return { ok: false, error: result.error || "Write failed" };
+  if (!result.ok) return { ok: false, error: result.error || "Write failed" };
   return { ok: true };
 }
 
@@ -3313,7 +4460,7 @@ export async function promoteEntryOnSite(
   if (!resolved.ok) {
     return { ok: false, code: "not_found", error: resolved.error };
   }
-  const folder = getFolder(entry.contentType as ContentType);
+  const folder = getFolder(entry.contentType);
   const result = await promoteVariantWithOptionalTeardown({
     contentType: entry.contentType,
     slug: resolved.slug,
@@ -3400,6 +4547,110 @@ export function resolveExistenceFromSite(
   return { live, draftExists };
 }
 
+export function inspectMissingTargetFromSite(
+  ctx: SiteContext,
+  entry: { contentType: string; slug: string },
+): MissingTargetShape {
+  const config = getContentTypeConfig(entry.contentType, ctx.contentRoot);
+  if (!config) return { shape: "other" };
+  if (config.database?.slug) return { shape: "database" };
+  if (!config.single_template) return { shape: "other" };
+  if (isTemplateVersioningSlug(entry.slug)) return { shape: "other" };
+  if (isEntryDetached(entry.contentType, entry.slug, ctx.contentRoot)) return { shape: "other" };
+  const requiredFields = listRequiredEditorFields(config.editor, {
+    isSharedLayout: true,
+    isDetached: false,
+  });
+  return { shape: "attached_file", requiredFields };
+}
+
+export async function prepareCreatesEntryOnSite(
+  ctx: SiteContext,
+  entry: ProposalEntryRow,
+  opts: {
+    confirmNewValues?: boolean;
+    author: string;
+    ideaFunnel?: IdeaFunnel | null;
+  },
+): Promise<{ ok: boolean; error?: string; code?: string; seeded?: boolean }> {
+  const config = getContentTypeConfig(entry.contentType, ctx.contentRoot);
+  if (!config || config.database?.slug || !config.single_template) {
+    return { ok: false, code: "not_attached_file", error: "This page is not a file-based attached post." };
+  }
+  const requiredFields = listRequiredEditorFields(config.editor, {
+    isSharedLayout: true,
+    isDetached: false,
+  });
+  const missing = missingRequiredFromOps(requiredFields, entry.ops);
+  if (missing.length) {
+    return {
+      ok: false,
+      code: "required_fields_missing",
+      error: `This new post is missing required fields: ${missing.join(", ")}.`,
+    };
+  }
+  const params = listExtraUrlPatternParams(config.url_pattern);
+  const proposed: Record<string, string> = {};
+  for (const op of entry.ops) {
+    if (op.reset) continue;
+    const head = op.field_path.split(".")[0] ?? op.field_path;
+    const key = params.includes(op.field_path) ? op.field_path : params.includes(head) ? head : "";
+    if (!key) continue;
+    const slug = extractParamSlug(op.value);
+    if (slug) proposed[key] = slug;
+  }
+  const peer = validateUrlParamPeerValues(
+    ctx.contentRoot,
+    entry.contentType,
+    config,
+    { [entry.locale]: proposed },
+    opts.confirmNewValues,
+  );
+  if (peer) {
+    return {
+      ok: false,
+      code: "confirm_new_values",
+      error:
+        `New ${peer.param} "${peer.proposed_value}" is not an existing ${peer.locale} value. ` +
+        `Observed: ${peer.observed_values.slice(0, 20).join(", ")}. ` +
+        "Pass confirm_new_values: true on apply after principal approval, or pick an observed value.",
+    };
+  }
+  seedAttachedLocaleFiles({
+    contentType: entry.contentType,
+    slug: entry.slug,
+    locale: entry.locale,
+    contentRoot: ctx.contentRoot,
+    author: opts.author,
+    funnel: opts.ideaFunnel ? ideaFunnelToYamlBlock(opts.ideaFunnel) : null,
+  });
+  ctx.contentIndex.refresh();
+  return { ok: true, seeded: true };
+}
+
+export function discardSeededEntryOnSite(ctx: SiteContext, entry: ProposalEntryRow): void {
+  discardSeededAttachedEntry({
+    contentType: entry.contentType,
+    slug: entry.slug,
+    locale: entry.locale,
+    contentRoot: ctx.contentRoot,
+  });
+  ctx.contentIndex.refresh();
+}
+
+export function stampPublishedAtOnSite(
+  ctx: SiteContext,
+  entry: ProposalEntryRow,
+  author: string,
+): { ok: boolean; error?: string } {
+  const stamped = ensurePublishedAtOnce(entry.contentType, entry.slug, {
+    author,
+    contentRoot: ctx.contentRoot,
+  });
+  if (stamped.error) return { ok: false, error: stamped.error };
+  return { ok: true };
+}
+
 export function proposalServiceForSite(ctx: SiteContext) {
   const site = ctx.contentRootName;
   return createProposalService({
@@ -3412,5 +4663,10 @@ export function proposalServiceForSite(ctx: SiteContext) {
     findSimilar: (q) => findSimilarProposals(site, q),
     indexSearch: (p) => indexProposalSearch(site, p),
     resolveExistence: (entry) => resolveExistenceFromSite(ctx, entry),
+    inspectMissingTarget: (entry) => inspectMissingTargetFromSite(ctx, entry),
+    prepareCreatesEntry: (entry, opts) => prepareCreatesEntryOnSite(ctx, entry, opts),
+    discardSeededEntry: (entry) => discardSeededEntryOnSite(ctx, entry),
+    stampPublishedAt: (entry, author) => stampPublishedAtOnSite(ctx, entry, author),
+    getProposalSettings: () => loadProposalSettingsFromDisk(ctx.contentRoot),
   });
 }

@@ -15,8 +15,13 @@ import {
   type ProductFunnelJourney,
 } from "./funnel-journey";
 import { ecommerceManager } from "./ecommerce-manager";
-import { FUNNEL_STAGES, type FunnelStage } from "@shared/funnel";
+import { FUNNEL_STAGES } from "@shared/funnel";
 import { readFunnelBlockFromFile, commonYmlPath } from "../funnel-fields";
+import {
+  getLeadConversionEventNames,
+  getTrackingSettings,
+  isCountsAsLeadConfigured,
+} from "../settings";
 import { child } from "../logger";
 
 const log = child({ module: "journey-analytics" });
@@ -24,7 +29,6 @@ const log = child({ module: "journey-analytics" });
 const TTL_MS = 10 * 60 * 1000;
 const DEFAULT_DAYS = 28;
 
-const LEAD_CONVERSION_EVENTS = ["student_application", "request_more_info"] as const;
 const ECOMMERCE_INTENT_EVENTS = [
   "view_item",
   "add_to_cart",
@@ -33,10 +37,13 @@ const ECOMMERCE_INTENT_EVENTS = [
   "click_begin_checkout",
 ] as const;
 
-/** Events counted for per-page + product lead conversions (keep UI popovers in sync). */
-export const JOURNEY_LEAD_CONVERSION_EVENTS = LEAD_CONVERSION_EVENTS;
 /** Events counted for per-page + product ecommerce intent (keep UI popovers in sync). */
 export const JOURNEY_ECOMMERCE_INTENT_EVENTS = ECOMMERCE_INTENT_EVENTS;
+
+/** @deprecated Prefer response.lead_event_names — kept for any leftover imports. */
+export function getJourneyLeadConversionEvents(contentRoot?: string): string[] {
+  return getLeadConversionEventNames(contentRoot);
+}
 
 export type PagePathMetrics = {
   sessions: number;
@@ -58,6 +65,10 @@ export type JourneyPagePerformance = {
   window_days: number;
   as_of: string;
   warnings: JourneyAnalyticsWarning[];
+  /** Conversion event names currently counted as leads (from settings). */
+  lead_event_names: string[];
+  /** False when every conversion event lacks an explicit counts_as_lead field. */
+  counts_as_lead_configured: boolean;
   /** Per content entry key content_type/slug */
   pages: Record<
     string,
@@ -80,6 +91,8 @@ export type JourneyPagePerformance = {
   product: {
     conversions: number;
     ecommerce_intent: number;
+    /** Product-scoped GA4 purchase count (off-site checkout). */
+    purchases: number;
     item_id?: string;
     content_slug: string;
   };
@@ -192,6 +205,10 @@ function emptyPagePerformance(
   days: number,
   warnings: JourneyAnalyticsWarning[],
   status: "ok" | "unavailable" = "unavailable",
+  extras?: {
+    lead_event_names?: string[];
+    counts_as_lead_configured?: boolean;
+  },
 ): JourneyPagePerformance {
   const { asOf } = windowBounds(days);
   return {
@@ -200,10 +217,17 @@ function emptyPagePerformance(
     window_days: days,
     as_of: asOf,
     warnings,
+    lead_event_names: extras?.lead_event_names ?? [],
+    counts_as_lead_configured: extras?.counts_as_lead_configured ?? false,
     pages: {},
     stages: Object.fromEntries(FUNNEL_STAGES.map((s) => [s, { sessions_distinct: 0, page_count: 0 }])),
     summary: { sessions_product_specific: 0, sessions_shared: 0 },
-    product: { conversions: 0, ecommerce_intent: 0, content_slug: productSlug },
+    product: {
+      conversions: 0,
+      ecommerce_intent: 0,
+      purchases: 0,
+      content_slug: productSlug,
+    },
   };
 }
 
@@ -241,27 +265,51 @@ export async function getProductJourneyAnalytics(opts: {
 
   const bqStatus = getBigQueryConfigStatus(opts.contentRoot);
   if (!bqStatus.configured) {
-    const payload = emptyPagePerformance(productSlug, days, [
-      ...bqStatus.warnings.map((m) => ({
-        code: "bigquery_not_configured",
-        message: m,
-      })),
+    const leadNames = getLeadConversionEventNames(opts.contentRoot);
+    const countsConfigured = isCountsAsLeadConfigured(
+      getTrackingSettings(opts.contentRoot).conversion_events,
+    );
+    const payload = emptyPagePerformance(
+      productSlug,
+      days,
+      [
+        ...bqStatus.warnings.map((m) => ({
+          code: "bigquery_not_configured",
+          message: m,
+        })),
+        {
+          code: "configure_at",
+          message: "Configure project/dataset at /private/tracking/ga4",
+        },
+      ],
+      "unavailable",
       {
-        code: "configure_at",
-        message: "Configure project/dataset at /private/tracking/ga4",
+        lead_event_names: leadNames,
+        counts_as_lead_configured: countsConfigured,
       },
-    ]);
+    );
     return payload;
   }
 
   const client = getBigQueryClient(opts.contentRoot);
   if (!client) {
-    return emptyPagePerformance(productSlug, days, [
+    return emptyPagePerformance(
+      productSlug,
+      days,
+      [
+        {
+          code: "bigquery_client_unavailable",
+          message: "Could not create BigQuery client — check GCS_CREDENTIALS_JSON / ADC",
+        },
+      ],
+      "unavailable",
       {
-        code: "bigquery_client_unavailable",
-        message: "Could not create BigQuery client — check GCS_CREDENTIALS_JSON / ADC",
+        lead_event_names: getLeadConversionEventNames(opts.contentRoot),
+        counts_as_lead_configured: isCountsAsLeadConfigured(
+          getTrackingSettings(opts.contentRoot).conversion_events,
+        ),
       },
-    ]);
+    );
   }
 
   const journey = buildProductFunnelJourney(productSlug, contentType, opts.contentRoot);
@@ -305,6 +353,26 @@ export async function getProductJourneyAnalytics(opts: {
   const identityValues = [productSlug, itemId].filter(Boolean) as string[];
 
   const warnings: JourneyAnalyticsWarning[] = [];
+  const leadEventNames = getLeadConversionEventNames(opts.contentRoot);
+  const countsConfigured = isCountsAsLeadConfigured(
+    getTrackingSettings(opts.contentRoot).conversion_events,
+  );
+  if (!countsConfigured) {
+    warnings.push({
+      code: "counts_as_lead_not_configured",
+      message:
+        "Count as lead is not configured yet on conversion events. Lead conversion metrics may be incomplete until staff set Count as lead on each event under Conversions.",
+    });
+  } else if (leadEventNames.length === 0) {
+    warnings.push({
+      code: "no_lead_events_configured",
+      message:
+        "Lead conversions are not being measured because no conversion events have Count as lead turned on. Purchases and ecommerce intent still appear when available.",
+    });
+  }
+
+  /** BigQuery rejects empty UNNEST arrays — use a never-matching sentinel. */
+  const leadEventsParam = leadEventNames.length > 0 ? leadEventNames : ["__no_lead_events__"];
 
   try {
     const pagePathExpr = bqNormalizedPagePathSql();
@@ -376,15 +444,12 @@ export async function getProductJourneyAnalytics(opts: {
         WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE(params.start_date))
           AND FORMAT_DATE('%Y%m%d', DATE(params.end_date))
           AND event_name = 'page_view'
-      ),
-      cleaned AS (
-        SELECT user_pseudo_id, ga_session_id,
-          CASE WHEN page_path = '' THEN '/' ELSE page_path END AS page_path
-        FROM base
-        WHERE page_path IN UNNEST(@paths)
       )
-      SELECT COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING))) AS sessions
-      FROM cleaned
+      SELECT
+        COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING))) AS sessions
+      FROM base
+      WHERE page_path IS NOT NULL AND page_path != ''
+        AND CASE WHEN page_path = '' THEN '/' ELSE page_path END IN UNNEST(@paths)
     `;
 
     const productEventsSql = `
@@ -415,9 +480,12 @@ export async function getProductJourneyAnalytics(opts: {
     const location = settings.location || undefined;
     const trafficAndActionEvents = [
       "page_view",
-      ...LEAD_CONVERSION_EVENTS,
+      ...leadEventsParam.filter((n) => n !== "__no_lead_events__"),
       ...ECOMMERCE_INTENT_EVENTS,
     ];
+    // Ensure unique for UNNEST
+    const trafficUnique = Array.from(new Set(trafficAndActionEvents));
+
     const pathRows =
       allPaths.length > 0
         ? (
@@ -429,8 +497,8 @@ export async function getProductJourneyAnalytics(opts: {
                 paths: allPaths,
                 has_product_ids: identityValues.length > 0,
                 ids: identityValues.length > 0 ? identityValues : ["__none__"],
-                traffic_and_action_events: trafficAndActionEvents,
-                lead_events: [...LEAD_CONVERSION_EVENTS],
+                traffic_and_action_events: trafficUnique,
+                lead_events: leadEventsParam,
                 ecommerce_events: [...ECOMMERCE_INTENT_EVENTS],
               },
               location,
@@ -511,13 +579,14 @@ export async function getProductJourneyAnalytics(opts: {
 
     let conversions = 0;
     let ecommerce_intent = 0;
+    let purchases = 0;
     if (identityValues.length > 0) {
       const [leadRows] = await client.query({
         query: productEventsSql,
         params: {
           start_date: start,
           end_date: end,
-          event_names: [...LEAD_CONVERSION_EVENTS],
+          event_names: leadEventsParam,
           ids: identityValues,
         },
         location,
@@ -540,7 +609,21 @@ export async function getProductJourneyAnalytics(opts: {
       for (const row of ecomRows as Array<Record<string, unknown>>) {
         ecommerce_intent += Number(row.event_count || 0);
       }
-      if (conversions === 0 && ecommerce_intent === 0) {
+      const [purchaseRows] = await client.query({
+        query: productEventsSql,
+        params: {
+          start_date: start,
+          end_date: end,
+          event_names: ["purchase"],
+          ids: identityValues,
+        },
+        location,
+        maximumBytesBilled: "5000000000",
+      });
+      for (const row of purchaseRows as Array<Record<string, unknown>>) {
+        purchases += Number(row.event_count || 0);
+      }
+      if (conversions === 0 && ecommerce_intent === 0 && purchases === 0) {
         warnings.push({
           code: "product_params_may_be_missing",
           message:
@@ -560,12 +643,15 @@ export async function getProductJourneyAnalytics(opts: {
       window_days: days,
       as_of: asOf,
       warnings,
+      lead_event_names: leadEventNames,
+      counts_as_lead_configured: countsConfigured,
       pages,
       stages,
       summary: { sessions_product_specific, sessions_shared },
       product: {
         conversions,
         ecommerce_intent,
+        purchases,
         item_id: itemId,
         content_slug: productSlug,
       },
@@ -575,15 +661,25 @@ export async function getProductJourneyAnalytics(opts: {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn({ err, productSlug }, "[JourneyAnalytics] query failed");
-    return emptyPagePerformance(productSlug, days, [
-      { code: "bigquery_query_failed", message },
+    return emptyPagePerformance(
+      productSlug,
+      days,
+      [
+        { code: "bigquery_query_failed", message },
+        {
+          code: "configure_at",
+          message: "Check /private/tracking/ga4 and GCS_CREDENTIALS_JSON / ADC",
+        },
+      ],
+      "unavailable",
       {
-        code: "configure_at",
-        message: "Check /private/tracking/ga4 and GCS_CREDENTIALS_JSON / ADC",
+        lead_event_names: leadEventNames,
+        counts_as_lead_configured: countsConfigured,
       },
-    ]);
+    );
   }
 }
+
 
 /** Test helper — clear TTL cache */
 export function clearJourneyAnalyticsCache(): void {

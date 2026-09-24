@@ -18,6 +18,8 @@ export const EVENT_TYPES = [
   "validation_issue_released",
   "binding_propagation_started",
   "binding_propagation_done",
+  "cluster_hub_path_rewrite_started",
+  "cluster_hub_path_rewrite_done",
   "job_failed",
   "ai_image_gc_completed",
   "agent_session_started",
@@ -35,6 +37,7 @@ export const EVENT_TYPES = [
   "proposal_escalated",
   "proposal_deescalated",
   "proposal_review_situations_set",
+  "proposal_idea_funnel_set",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -61,6 +64,7 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   entry_locale_promoted: { outbox: "dispatch", affectsWriteGeneration: true },
   entry_locale_unpublished: { outbox: "dispatch", affectsWriteGeneration: true },
   binding_propagation_started: { outbox: "dispatch", affectsWriteGeneration: false },
+  cluster_hub_path_rewrite_started: { outbox: "dispatch", affectsWriteGeneration: false },
   index_snapshot_ready: { outbox: "audit", affectsWriteGeneration: false },
   seo_index_ready: { outbox: "audit", affectsWriteGeneration: false },
   validation_results_ready: { outbox: "audit", affectsWriteGeneration: false },
@@ -69,6 +73,7 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   validation_issue_reopened: { outbox: "audit", affectsWriteGeneration: false },
   validation_issue_released: { outbox: "audit", affectsWriteGeneration: false },
   binding_propagation_done: { outbox: "audit", affectsWriteGeneration: false },
+  cluster_hub_path_rewrite_done: { outbox: "audit", affectsWriteGeneration: false },
   job_failed: { outbox: "audit", affectsWriteGeneration: false },
   ai_image_gc_completed: { outbox: "audit", affectsWriteGeneration: false },
   agent_session_started: { outbox: "audit", affectsWriteGeneration: false },
@@ -86,6 +91,7 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   proposal_escalated: { outbox: "audit", affectsWriteGeneration: false },
   proposal_deescalated: { outbox: "audit", affectsWriteGeneration: false },
   proposal_review_situations_set: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_idea_funnel_set: { outbox: "audit", affectsWriteGeneration: false },
 };
 
 export function isOutboxDispatchable(type: EventType): boolean {
@@ -191,6 +197,7 @@ export const SYSTEM_JOB_FOLLOW_UP_TYPES = [
   "index_snapshot_ready",
   "validation_results_ready",
   "binding_propagation_done",
+  "cluster_hub_path_rewrite_done",
 ] as const;
 
 export type SystemJobFollowUpType = (typeof SYSTEM_JOB_FOLLOW_UP_TYPES)[number];
@@ -198,6 +205,7 @@ export type SystemJobFollowUpType = (typeof SYSTEM_JOB_FOLLOW_UP_TYPES)[number];
 export function systemJobSourceForType(type: SystemJobFollowUpType): string {
   if (type === "index_snapshot_ready") return "index-refresh";
   if (type === "validation_results_ready") return "on-save-validation";
+  if (type === "cluster_hub_path_rewrite_done") return "cluster-hub-path-rewrite";
   return "binding-propagation";
 }
 

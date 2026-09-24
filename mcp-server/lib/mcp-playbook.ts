@@ -8,13 +8,13 @@ import path from "path";
 import { createHash } from "crypto";
 
 /** Bump when the technical playbook markdown below changes. */
-export const PLAYBOOK_VERSION = "7";
+export const PLAYBOOK_VERSION = "8";
 
 /**
  * Explicit conventions seed version. Bump when editing mcp-server/agent-conventions.md
  * so agents re-fetch skill.content (known_skill_version mismatch).
  */
-export const CONVENTIONS_VERSION = "22";
+export const CONVENTIONS_VERSION = "32";
 
 export const CONVENTIONS_PATH = "mcp-server/agent-conventions.md";
 
@@ -30,8 +30,9 @@ For remote chat agents (Claude.ai, Grok, custom connectors). Conversation style 
 
 ## Identity (required for writes)
 
-- **Production:** Connect via a **role URL** (\`/mcp/role/copy_editor\`, etc.) — plain \`/mcp\` is read-only (mutating tools are not registered).
-- **Non-production (local / tunnels):** Plain \`/mcp\` may mutate freestyle — no role connector and no \`agent_session_id\` gate. Caps and MCP write still apply. Optional \`agent_session\` still helps staff event trails (otherwise writes show as Unscoped).
+- **Production plain \`/mcp\`:** Read-only for writes. Mutating tools may appear in \`tools/list\` but every mutate returns \`action_required: role_connector_required\` with \`connector_guide.role_connectors\` (URLs) and \`swarm_setup\`. Call \`get_current_user\` / \`bootstrap_agent\` — reconnect with **one MCP connection per agent role URL**. OAuth consent for plain \`/mcp\` also warns humans.
+- **Non-production (local / tunnels):** Plain \`/mcp\` may mutate freestyle when MCP write is on — no role connector and no \`agent_session_id\` gate. Caps and MCP write still apply. Optional \`agent_session\` still helps staff event trails (otherwise writes show as Unscoped).
+- **MCP write off** (Security → Users → Allow using MCP to WRITE data): \`action_required: mcp_write_disabled\` + \`mcp_write_guide.course_of_action\` on bootstrap / \`get_current_user\` / direct mutates. Propose-only (\`propose_change\` / author \`update_proposal\`) remains. Ask a user admin to enable write.
 - On a **role connector** (any environment): call \`agent_session\` \`start\` with exact \`model\` as \`provider/model\` (e.g. \`claude/sonnet-4.5\` or \`xai/grok-4\`). Family-only labels like \`claude\` fail. There is no \`MCP_AGENT_MODEL\` env.
 - Every mutating tool on a role connector requires \`agent_session_id\` from that start (no unscoped writes). Sessions are per site; scope is username + role + OAuth client.
 - If an open session already exists for that scope: \`action_required: session_conflict\` — retry with \`resume:true\` (same model) or \`force_new:true\` + report (abandon). Idle 24h fully expires a session.
@@ -58,8 +59,8 @@ Optional \`discovery_path\` (when present) is a research menu to deepen judgment
 ## Products and positioning
 
 - Vague “what is this site / brand about?” → \`list_products\` then \`get_product\` on relevant slugs (offer + personas).
-- Change audience (offer/personas) → \`update_product\` with \`confirm: true\` (needs content_edit_structure).
-- Make sellable or pause/resume store visibility → human only: \`propose_change\` notes asking staff to use the Store. Never set \`purchasable\` / \`actively_selling\` via MCP.
+- Change audience (offer/personas) → \`create_or_update_product\` with \`confirm: true\` (needs content_edit_structure).
+- Make sellable / remove / pause → \`create_or_update_product\` with purchasable / actively_selling (needs product_manage). Prefer discovery_path on preview; ask the user when who-it's-for is unknown; compare peer products via list_products / get_product.
 - Journey membership → \`get_product_funnel\`; journey page KPIs → \`get_product_funnel_analytics\`. Site-wide GA4 → \`get_analytics_report\` (\`metrics_view\`; topic \`analytics\`). GSC → \`get_organic_traffic\`.
 
 ## Depth and stale tools

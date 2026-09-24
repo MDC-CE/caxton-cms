@@ -76,7 +76,11 @@ const CORE_EDITS_TOOLS: Array<{
     id: "seo_context",
     tool: "get_entry_seo",
     why: "Review SEO/meta context for the entry.",
-    look_for: ["title/description fit", "keyword or schema gaps"],
+    look_for: [
+      "title/description fit",
+      "keyword or schema gaps",
+      "keyword_metrics source/stale — prefer get_or_refresh_seo_research over inventing YAML kw_*",
+    ],
   },
   {
     id: "diagnostics",
@@ -96,11 +100,139 @@ const ORGANIC_TOOL = {
   look_for: ["high-traffic paths", "sudden drops after similar changes"],
 } as const;
 
+const IDEA_EXPLAIN_TOOL = {
+  id: "idea_harm_playbook",
+  tool: "explain_site",
+  why: "Load the idea opportunity-vs-harm scorecard before accept or close.",
+  look_for: [
+    "Goal → Evidence → Fit → Brand → dilution",
+    "incomplete brief → add_blocker; wrong vehicle → close and refile as edits",
+    "accept ≠ live YAML; brand/figures ship on later edits",
+  ],
+} as const;
+
+const TRANSLATION_EXPLAIN_TOOL = {
+  id: "translation_playbook",
+  tool: "explain_site",
+  why: "Load the locale translation draft→promote scorecard before apply.",
+  look_for: [
+    "Fidelity → Completeness → Slug → Shell → promote honesty",
+    "draft vs source locale — not punchier copy vs live English",
+    "apply promotes the variant — does not AI-translate",
+  ],
+} as const;
+
+const LIST_VARIANTS_TOOL = {
+  id: "variant_layers",
+  tool: "list_variants",
+  why: "Confirm which non-public layers exist before promoting a translated draft.",
+  look_for: [
+    "named variant on the proposal matches a real draft layer",
+    "allocation / traffic on that variant before go-live",
+  ],
+} as const;
+
+const IDEA_ENTRY_SEO_TOOL = {
+  id: "related_seo",
+  tool: "get_entry_seo",
+  why: "Optional: cluster membership and public path for a related page named on the idea.",
+  look_for: [
+    "pillar / include_in_clustering / locale",
+    "is this a new spoke vs refresh of an existing slug",
+  ],
+} as const;
+
+const IDEA_CLUSTER_ENTRIES_TOOL = {
+  id: "cluster_siblings",
+  tool: "list_seo_cluster_entries",
+  why: "Optional: sibling spokes for cannibal / dilution check.",
+  look_for: [
+    "nearby spokes with the same angle",
+    "hub vs spoke traffic roles before deleting or adding URLs",
+  ],
+} as const;
+
+const IDEA_ORGANIC_TOOL = {
+  id: "idea_traffic_risk",
+  tool: "get_organic_traffic",
+  why: "Optional: visit risk on related paths (e.g. hub deletion or busy sibling).",
+  look_for: [
+    "does the hub or sibling still carry clicks the brief claims are dead",
+    "short visit dip vs lasting loss — evidence in brief or here",
+  ],
+} as const;
+
+const IDEA_RUNTIME_ISSUES_TOOL = {
+  id: "runtime_404",
+  tool: "get_runtime_issues",
+  why: "Confirm the missing address hit count, sources, referrer, and campaign tags against a fresh read.",
+  look_for: [
+    "path matches the brief",
+    "windowed count / sources / sampleReferrer / queryAttribution vs summary",
+    "higher count OK; different referrer, new campaign tag, or collapsed count → add_blocker",
+  ],
+} as const;
+
+const IDEA_TEST_REDIRECT_TOOL = {
+  id: "test_redirect_404",
+  tool: "test_redirect",
+  why: "Optional: see whether the missing address already resolves to a page or redirect.",
+  look_for: [
+    "winner / conflicts for the broken path",
+    "do not treat a soft match as a funnel product+persona fit",
+  ],
+} as const;
+
+const IDEA_BROKEN_URL_EXPLAIN_TOOL = {
+  id: "broken_url_playbook",
+  tool: "explain_site",
+  why: "Load the broken-url strategy (match vs create, accept writes nothing).",
+  look_for: [
+    "match = answers address + funnel product/persona",
+    "new page = attached creates_entry follow-up; 404 row is extra justification",
+    "accept never writes redirect or YAML",
+  ],
+} as const;
+
+const IDEA_EXISTING_DEMAND_EXPLAIN_TOOL = {
+  id: "existing_demand_playbook",
+  tool: "explain_site",
+  why: "Load the existing-demand scorecard (mature SERP / weight class / unique asset) — score the brief, do not re-run research.",
+  look_for: [
+    "author must have documented SERP maturity, occupants, asset, sibling, kill",
+    "incomplete brief → add_blocker; do not call keyword_metrics/serp to finish homework",
+    "KD alone never decides",
+  ],
+} as const;
+
 const FUNNEL_ANALYTICS_TOOL = {
   id: "journey_metrics",
   tool: "get_product_funnel_analytics",
   why: "Optional: product journey page performance (GA4) before applying selling/funnel changes.",
   look_for: ["weak journey stages", "path sessions vs conversions"],
+} as const;
+
+const LIST_PRODUCTS_TOOL = {
+  id: "product_inventory",
+  tool: "list_products",
+  why: "See purchasable products and persona ids before judging funnel bindings.",
+  look_for: [
+    "which products have personas that match this content's buyer intent",
+    "audience_status missing/minimal → product-only binding OK with warn; do not invent persona ids",
+    "do not map broad topic to products:all without checking persona fit first",
+  ],
+} as const;
+
+const GET_PRODUCT_TOOL = {
+  id: "product_audience",
+  tool: "get_product",
+  why: "Read offer + personas for the product(s) this proposal binds — cascade starts at persona.",
+  look_for: [
+    "Persona: content intent vs persona id / who_its_for / avatar (pass|fail|warn)",
+    "Product: proposed funnel.products follow that fit; multi-bind OK when two+ personas truly fit",
+    "Stage: proposed funnel.stage matches readiness even if only stage or only products moved",
+    "products:all only when no single product's personas fit better; all never carries personas",
+  ],
 } as const;
 
 const SITE_ANALYTICS_TOOL = {
@@ -110,13 +242,46 @@ const SITE_ANALYTICS_TOOL = {
   look_for: ["high-traffic paths", "baseline sessions/views"],
 } as const;
 
-/** All tool names that may appear on an edits discovery_path (for catalog checks). */
+const SEO_RESEARCH_SERP_TOOL = {
+  id: "seo_research_serp",
+  tool: "get_or_refresh_seo_research",
+  why: "Optional: refresh live SERP snapshot for the entry main keyword (cache-first; budgeted).",
+  look_for: [
+    "featured snippet / PAA / organic rivals for the target query",
+    "do not invent SERP features; action:serp only",
+  ],
+} as const;
+
+const SEO_RESEARCH_IDEAS_TOOL = {
+  id: "seo_research_ideas",
+  tool: "get_or_refresh_seo_research",
+  why: "Optional: keyword ideas around the page main keyword / seed (cache-first; budgeted).",
+  look_for: [
+    "related demand phrases for title/description or body angle",
+    "action:keyword_ideas — not a substitute for get_organic_traffic",
+  ],
+} as const;
+
+/** All tool names that may appear on a proposal discovery_path (for catalog checks). */
 export function proposalDiscoveryToolNames(): string[] {
   return [
     ...CORE_EDITS_TOOLS.map((t) => t.tool),
     ORGANIC_TOOL.tool,
     FUNNEL_ANALYTICS_TOOL.tool,
+    LIST_PRODUCTS_TOOL.tool,
+    GET_PRODUCT_TOOL.tool,
     SITE_ANALYTICS_TOOL.tool,
+    SEO_RESEARCH_SERP_TOOL.tool,
+    SEO_RESEARCH_IDEAS_TOOL.tool,
+    IDEA_EXPLAIN_TOOL.tool,
+    TRANSLATION_EXPLAIN_TOOL.tool,
+    LIST_VARIANTS_TOOL.tool,
+    IDEA_ENTRY_SEO_TOOL.tool,
+    IDEA_CLUSTER_ENTRIES_TOOL.tool,
+    IDEA_ORGANIC_TOOL.tool,
+    IDEA_RUNTIME_ISSUES_TOOL.tool,
+    IDEA_TEST_REDIRECT_TOOL.tool,
+    IDEA_BROKEN_URL_EXPLAIN_TOOL.tool,
   ];
 }
 
@@ -141,6 +306,12 @@ export type ProposalDiscoveryInput = {
   escalated?: boolean;
   escalated_note?: string | null;
   entries?: ProposalDiscoveryEntry[];
+  /** Idea context targets (slug may not exist yet). */
+  related_entries?: Array<{
+    contentType: string;
+    slug: string;
+    locale?: string;
+  }>;
   open_blocker_count?: number;
   blockers?: unknown[];
 };
@@ -326,6 +497,12 @@ export function buildEditsDiscoveryToolItems(opts: {
   activityEntry?: ProposalDiscoveryEntry | null;
   /** Extra look_for lines prepended on get_entry_content (situation overlays). */
   contentLookFor?: string[];
+  /** When funnel_classification is active, include list_products / get_product. */
+  includeProductAudienceTools?: boolean;
+  /** SERP title/description situations — optional research serp + ideas (≤2). */
+  includeSeoResearchTools?: boolean;
+  /** locale_translation — playbook + list_variants. */
+  includeTranslationTools?: boolean;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -334,22 +511,42 @@ export function buildEditsDiscoveryToolItems(opts: {
     entry,
     prioritizeActivity = false,
     activityEntry = null,
+    includeProductAudienceTools = false,
+    includeSeoResearchTools = false,
+    includeTranslationTools = false,
   } = opts;
 
   const activityHint = activityArgsHint(activityEntry ?? (entry as ProposalDiscoveryEntry | null));
+  const contentHint =
+    entry?.contentType && entry.slug
+      ? {
+          contentType: entry.contentType,
+          slug: entry.slug,
+          ...(entry.locale ? { locale: entry.locale } : {}),
+          ...(entry.variant?.trim() ? { variant: entry.variant.trim() } : {}),
+        }
+      : undefined;
 
   const core = CORE_EDITS_TOOLS.map((t) => {
-    if (t.id === "recent_writes") return toToolItem(t, allowed, activityHint);
-    if (t.id === "preview_content" && opts.contentLookFor?.length) {
-      return toToolItem(
-        {
-          ...t,
-          look_for: [...opts.contentLookFor, ...t.look_for],
-        },
-        allowed,
-      );
+    if (t.id === "recent_writes") {
+      const look_for = includeProductAudienceTools
+        ? [
+            "overlapping writers on funnel.stage / funnel.products (same paths)",
+            "similar funnel classification already shipped and live not broken → leave live or reject duplicate_weaker",
+            "unrelated recent body/CTA writes alone → do not reject",
+            ...t.look_for,
+          ]
+        : [...t.look_for];
+      return toToolItem({ ...t, look_for }, allowed, activityHint);
     }
-    return toToolItem(t, allowed);
+    if (t.id === "preview_content") {
+      const look_for =
+        opts.contentLookFor?.length
+          ? [...opts.contentLookFor, ...t.look_for]
+          : [...t.look_for];
+      return toToolItem({ ...t, look_for }, allowed, contentHint);
+    }
+    return toToolItem(t, allowed, contentHint);
   });
 
   let items: DiscoveryPathToolItem[];
@@ -359,6 +556,29 @@ export function buildEditsDiscoveryToolItems(opts: {
     items = recent ? [recent, ...rest] : [...core];
   } else {
     items = [...core];
+  }
+
+  if (includeTranslationTools) {
+    items.unshift(
+      toToolItem(TRANSLATION_EXPLAIN_TOOL, allowed, {
+        topic: "proposals",
+        subtopic: "translations",
+      }),
+    );
+    if (entry?.contentType && entry.slug) {
+      items.push(
+        toToolItem(LIST_VARIANTS_TOOL, allowed, {
+          contentType: entry.contentType,
+          slug: entry.slug,
+          ...(entry.locale ? { locale: entry.locale } : {}),
+        }),
+      );
+    }
+  }
+
+  if (includeProductAudienceTools) {
+    items.push(toToolItem(LIST_PRODUCTS_TOOL, allowed));
+    items.push(toToolItem(GET_PRODUCT_TOOL, allowed));
   }
 
   items.push(toToolItem(ORGANIC_TOOL, allowed));
@@ -389,6 +609,80 @@ export function buildEditsDiscoveryToolItems(opts: {
           }
         : { report: "site_summary" };
     items.push(toToolItem(SITE_ANALYTICS_TOOL, allowed, args_hint));
+  }
+
+  if (includeSeoResearchTools && entry?.contentType && entry.slug) {
+    const researchHint: Record<string, unknown> = {
+      contentType: entry.contentType,
+      slug: entry.slug,
+      locale: entry.locale || "en",
+    };
+    items.push(
+      toToolItem(SEO_RESEARCH_SERP_TOOL, allowed, { ...researchHint, action: "serp" }),
+    );
+    items.push(
+      toToolItem(SEO_RESEARCH_IDEAS_TOOL, allowed, { ...researchHint, action: "keyword_ideas" }),
+    );
+  }
+
+  const anyCapped = items.some((i) => !i.available);
+  return { items, anyCapped };
+}
+
+/**
+ * Idea discovery: playbook always; get_runtime_issues + test_redirect when broken_url is filed
+ * (no keyword research). existing_demand → existing-demand playbook (still no research tools).
+ * SEO/cluster/organic when related_entries exist and not broken_url.
+ * Unavailable tools stay listed with available:false — skip never blocks accept.
+ */
+export function buildIdeaDiscoveryToolItems(opts: {
+  allowed: Set<string> | null;
+  related?: Array<{ contentType: string; slug: string; locale?: string }> | null;
+  situations?: ReviewSituationId[] | null;
+}): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
+  const { allowed, related, situations } = opts;
+  const brokenUrl = (situations ?? []).includes("broken_url");
+  const existingDemand = (situations ?? []).includes("existing_demand");
+  const explainTool = brokenUrl
+    ? IDEA_BROKEN_URL_EXPLAIN_TOOL
+    : existingDemand
+      ? IDEA_EXISTING_DEMAND_EXPLAIN_TOOL
+      : IDEA_EXPLAIN_TOOL;
+  const explainArgs = brokenUrl
+    ? { topic: "proposals", subtopic: "broken-url" }
+    : existingDemand
+      ? { topic: "proposals", subtopic: "existing-demand" }
+      : { topic: "proposals", subtopic: "idea-opportunity-harm" };
+  const items: DiscoveryPathToolItem[] = [toToolItem(explainTool, allowed, explainArgs)];
+
+  if (brokenUrl) {
+    items.push(toToolItem(IDEA_RUNTIME_ISSUES_TOOL, allowed, { kind: "404", pages_only: true, limit: 25 }));
+    items.push(toToolItem(IDEA_TEST_REDIRECT_TOOL, allowed, {}));
+    const anyCappedBroken = items.some((i) => !i.available);
+    return { items, anyCapped: anyCappedBroken };
+  }
+
+  const first = related?.find((r) => r.contentType?.trim() && r.slug?.trim()) ?? null;
+  if (first) {
+    const locale = first.locale?.trim() || "en";
+    items.push(
+      toToolItem(IDEA_ENTRY_SEO_TOOL, allowed, {
+        contentType: first.contentType,
+        slug: first.slug,
+        locale,
+      }),
+    );
+    items.push(
+      toToolItem(IDEA_CLUSTER_ENTRIES_TOOL, allowed, {
+        q: first.slug,
+        bucket: "clustered",
+      }),
+    );
+    items.push(
+      toToolItem(IDEA_ORGANIC_TOOL, allowed, {
+        mode: "paths",
+      }),
+    );
   }
 
   const anyCapped = items.some((i) => !i.available);
@@ -439,12 +733,14 @@ function fallbackIdeaThink(proposal: ProposalDiscoveryInput): DiscoveryPathItem[
       kind: "think",
       id: "idea_accept",
       title: "Accept greenlights a brief only",
-      why: "Accept does not create pages or write YAML.",
+      why: "Accept does not create pages or write YAML. Lock accepted_entry; follow-up is a later edits proposal with implements_proposal_id.",
       look_for: [
         proposal.summary
           ? `summary: ${proposal.summary.slice(0, 200)}${proposal.summary.length > 200 ? "…" : ""}`
           : "brief intent",
+        "accepted_entry required (contentType, slug, locale)",
         "next_step is concrete (min 20 characters)",
+        "follow-up edits use implements_proposal_id",
         "close/park means no — not yes",
       ],
     },
@@ -561,7 +857,11 @@ export function buildProposalDiscoveryPath(
     const hasSerp = hasTitleDescriptionOps(
       (proposal.entries ?? []) as Parameters<typeof hasTitleDescriptionOps>[0],
     );
+    const hasFunnelOp = pendingFieldPaths.some((p) => p === "funnel" || p.startsWith("funnel."));
     const situations = (reviewContext?.review_situations ?? []) as ReviewSituationId[];
+    const funnelClassification =
+      situations.includes("funnel_classification") || hasFunnelOp;
+    const localeTranslation = situations.includes("locale_translation");
     const contentLookFor = discoveryContentLookForForSituations(situations);
     const pending = pendingEntries(proposal);
     const gateWriteCount = pending.reduce(
@@ -570,8 +870,13 @@ export function buildProposalDiscoveryPath(
     );
     const prioritizeActivity =
       hasSerp ||
+      hasFunnelOp ||
       situations.includes("serp_title_description") ||
+      situations.includes("funnel_classification") ||
       gateWriteCount > 0;
+
+    const includeSeoResearchTools =
+      hasSerp || situations.includes("serp_title_description");
 
     const hottest = pickHottestPendingEntry(proposal, recentActivity);
     const first = pending[0] ?? proposal.entries?.[0] ?? null;
@@ -589,6 +894,9 @@ export function buildProposalDiscoveryPath(
       prioritizeActivity,
       activityEntry: hottest,
       contentLookFor,
+      includeProductAudienceTools: funnelClassification,
+      includeSeoResearchTools,
+      includeTranslationTools: localeTranslation,
     });
     tools = built.items;
     if (built.anyCapped) {
@@ -596,6 +904,20 @@ export function buildProposalDiscoveryPath(
         code: DISCOVERY_TOOL_CAPPED,
         message:
           "One or more discovery research tools are not available on this role. See discovery_path items with available:false — ask a human to enable access, then refresh MCP.",
+      });
+    }
+  } else if (kind === "idea") {
+    const built = buildIdeaDiscoveryToolItems({
+      allowed,
+      related: proposal.related_entries ?? null,
+      situations: (reviewContext?.review_situations ?? []) as ReviewSituationId[],
+    });
+    tools = built.items;
+    if (built.anyCapped) {
+      warnings.push({
+        code: DISCOVERY_TOOL_CAPPED,
+        message:
+          "One or more discovery research tools are not available on this role. See discovery_path items with available:false — ask a human to enable access, then refresh MCP. Skip does not block accept or close.",
       });
     }
   }

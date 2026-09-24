@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getTokenUsername } from "../lib/oauth.js";
 import { checkCap } from "../lib/auth.js";
 import { allowedToolNames, type CatalogGrant } from "../lib/tool-catalog.js";
+import { buildConnectorTeachFields } from "../lib/role-connector-guide.js";
 
 const MAIN_SERVER_PORT = process.env.PORT || "5000";
 const MCP_SERVER_SECRET = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
@@ -31,9 +32,11 @@ export function registerUserTools(
       "Useful for agents that need to understand who they are acting as and what operations they are permitted to perform. " +
       "Returns: username, firstName, lastName, email, roles, capabilities, allowed_tools, " +
       "mcp_read_enabled, mcp_write_enabled (MCP-only overlay; CMS roles unchanged), " +
-      "active_role (null on /mcp; role id on /mcp/role/:id), role_description. " +
+      "active_role (null on /mcp; role id on /mcp/role/:id), role_description, " +
+      "primary_blocker, connector_guide (production plain /mcp), mcp_write_guide (when MCP write toggle is off). " +
       "When mcp_write_enabled is false, capabilities are propose-only (view caps + proposals_create); " +
-      "direct mutate tools and proposals_review are absent from allowed_tools — use propose_change and author update_proposal. " +
+      "direct mutate tools and proposals_review are absent from allowed_tools — use propose_change and author update_proposal; " +
+      "follow mcp_write_guide.course_of_action. " +
       "When mcp_read_enabled is false, the connection is rejected before tools run. " +
       "Missing write defaults to false (freestyle is an explicit allowlist); missing read defaults to true. " +
       "Note: metrics_view is read-only (diagnostics/insights/error log/conversions/tracking); it does not authorize content edits or job runs. " +
@@ -79,6 +82,10 @@ export function registerUserTools(
             : [];
         const mcpReadEnabled = profile.mcp_read_enabled !== false;
         const mcpWriteEnabled = mcpReadEnabled && profile.mcp_write_enabled === true;
+        const teach = await buildConnectorTeachFields({
+          mcpToken,
+          activeRoleId: opts?.activeRoleId ?? null,
+        });
         const payload = {
           ...profile,
           // Session grants win when role-scoped (do not re-expand to all user roles).
@@ -89,6 +96,10 @@ export function registerUserTools(
           active_role: opts?.activeRoleId ?? null,
           role_label: opts?.roleLabel ?? null,
           role_description: opts?.roleDescription ?? null,
+          primary_blocker: teach.primary_blocker,
+          production_unscoped: teach.production_unscoped,
+          ...(teach.connector_guide ? { connector_guide: teach.connector_guide } : {}),
+          ...(teach.mcp_write_guide ? { mcp_write_guide: teach.mcp_write_guide } : {}),
         };
         return {
           content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],

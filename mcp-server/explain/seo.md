@@ -32,7 +32,17 @@ Fact-staleness class for **substantive** content refreshes — **not** GSC traff
 
 - `get_entry_seo`, `list_entry_seo`, `update_fields` (meta.* / seo.*)
 - `list_entries` with optional `refresh_tier` filter (inventory)
-- `refresh_keyword_metrics` — OpenRush inspect_keyword → keyword cache only (no YAML `kw_*`)
+- `get_or_refresh_seo_research` — cache-first SEO research (budgets; no YAML `kw_*`)
+
+| Action | When | Credits (approx) | TTL |
+|---|---|---|---|
+| `keyword_metrics` | Volume/difficulty for main_keyword | 5 | 7d |
+| `serp` | Live SERP snapshot for a query | 2 | 7d |
+| `keyword_ideas` | Expand a seed into demand ideas | 3 | 7d |
+| `competitors` | Rival domains (domain or seeds) | 7 | 14d |
+| `keyword_gaps` | Gaps vs rivals (needs `competitors[]`) | 12 | 14d |
+
+Warn band → `confirm_seo_research_budget`; 100% → exhausted. Not a substitute for `get_organic_traffic` (measured GSC).
 - `list_seo_clusters`, `list_seo_cluster_entries`, `get_seo_cluster`
 - `get_organic_traffic` — GSC clicks/impressions (day cache / site BigQuery); not inspection, not planning volume
 - `get_analytics_report` — GA4 behavioral reports (BigQuery export); requires `metrics_view` — see topic `analytics`
@@ -64,7 +74,7 @@ Fact-staleness class for **substantive** content refreshes — **not** GSC traff
   - Conflict: `false` + non-null `seo.pillar_path` in the same `update_fields` → reject.
 - **Raw opt-out:** `seo.pillar_path: null` still works; MCP warns `seo_cluster_monitoring_disabled`. Empty/missing path = cluster gap, not opt-out.
 - **Cluster gap codes (`ORPHAN_PAGE` / `PARTIALLY_SET_CLUSTER`):** Platform catalog adds `help`, dense `suggestion`, and `next_actions` on diagnostics / `validation_issues`. Optional site markdown `{contentRoot}/validation-issue-context/seo-cluster/{CODE}.md` appears as advisory `staff_context` when non-empty. While those issues are open, `update_fields` requires `confirm_cluster_resolution: true` to set `seo.is_pillar: true` or opt out; joining a hub with non-null `seo.pillar_path` does not need confirm.
-- **Keyword research (`SEO_KEYWORD_RESEARCH_INCOMPLETE`):** Prefer OpenRush. MCP `refresh_keyword_metrics` upserts the keyword cache and does **not** write YAML. When OpenRush is configured, `update_fields` of `seo.kw_monthly_volume` / `seo.kw_difficulty` is rejected (`seo_research_use_openrush`). When OpenRush is off, those YAML writes require `seo_research_source: staff_provided|external:<name>` (`seo_research_source_required` otherwise). Do not invent metrics; release blocked if no reliable source. Staff UI may still set YAML by hand.
+- **Keyword research (`SEO_KEYWORD_RESEARCH_INCOMPLETE`):** Prefer SEO research. MCP `get_or_refresh_seo_research` (`action: keyword_metrics`) upserts the keyword cache and does **not** write YAML. When research is configured, `update_fields` of `seo.kw_monthly_volume` / `seo.kw_difficulty` is rejected (`seo_research_use_openrush`). When off, those YAML writes require `seo_research_source: staff_provided|external:<name>` (`seo_research_source_required` otherwise). Do not invent metrics; release blocked if no reliable source. Staff UI may still set YAML by hand. Also supports `serp`, `keyword_ideas`, `competitors`, `keyword_gaps` with TTL caches and session/daily credit budgets (`confirm_seo_research_budget` in the warn band).
 - **Reads (membership):** `get_entry_seo.include_in_clustering`; `get_entry_fields` with `fields: ["seo.include_in_clustering"]` returns the virtual row (`writable` only when type monitored; not auto-added with other seo.*).
 - **Inventory (MCP sync):** `list_seo_clusters`, `list_seo_cluster_entries` (buckets: unclustered / partiallySet / brokenRefs / emptyHubs / clustered), `get_seo_cluster`. Rows include `sibling_locales` — loop locales yourself (no write fan-out). Trust inventory/`seo-index` immediately after `update_fields`; diagnostics cache may lag.
 - **Bidirectional in-body links:** validator `seo-cluster-links` (SEO category). Hub must `<a href>` (or url field / markdown link) to members; members must link back to the hub. HTML `<a href>` in blog `content` is detected during diagnostics. Non-anchor UI does not count. Codes: `HUB_MISSING_MEMBER_LINKS`, `MEMBER_MISSING_HUB_LINK`. **Diagnostics warnings only** — `run_entry_diagnostics` (SEO category); **does not block** `publish_draft` / `promote_variant`. Live micro-saves do not run this check either.

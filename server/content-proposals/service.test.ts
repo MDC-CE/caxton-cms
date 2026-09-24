@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import os from "os";
 import path from "path";
+import yaml from "js-yaml";
 import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
 import { fingerprintEdits, fingerprintNotes } from "./fingerprint";
+import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-attached-entry";
 import {
   createProposalService,
   listOpenProposalsForVariant,
@@ -396,6 +399,16 @@ describe("content proposals", () => {
     expect(staffOk.proposal.no_auto_retry).toBe(true);
   });
 
+  it("stats by_kind_status is a full zero matrix on an empty site", () => {
+    const s = makeService().stats();
+    expect(s.total).toBe(0);
+    expect(s.by_kind_status).toEqual({
+      idea: { open: 0, finished: 0, rejected: 0 },
+      edits: { open: 0, finished: 0, rejected: 0 },
+      notes: { open: 0, finished: 0, rejected: 0 },
+    });
+  });
+
   it("stats counts by status and kind; list supports offset", async () => {
     const svc = makeService();
     const summary =
@@ -425,6 +438,14 @@ describe("content proposals", () => {
     expect(s.by_kind.edits).toBe(3);
     expect(s.by_kind.notes).toBe(1);
     expect(s.by_status.open).toBe(4);
+    expect(s.by_kind_status.edits.open).toBe(3);
+    expect(s.by_kind_status.notes.open).toBe(1);
+    expect(s.by_kind_status.idea.open).toBe(0);
+    expect(s.by_kind_status.idea).toEqual({ open: 0, finished: 0, rejected: 0 });
+    expect(s.by_kind_status.edits.finished).toBe(0);
+    expect(s.by_kind_status.edits.rejected).toBe(0);
+    expect(s.by_kind_status.notes.finished).toBe(0);
+    expect(s.by_kind_status.notes.rejected).toBe(0);
 
     const page = svc.list({ kind: "edits", limit: 2, offset: 0 });
     expect(page.total).toBe(3);
@@ -454,6 +475,193 @@ describe("content proposals", () => {
     expect(asc.proposals[1]!.created_at).toBeLessThanOrEqual(asc.proposals[2]!.created_at);
     const desc = svc.list({ kind: "edits", sort: "updated_at", sortDir: "desc", limit: 10 });
     expect(desc.proposals[0]!.updated_at).toBeGreaterThanOrEqual(desc.proposals[1]!.updated_at);
+  });
+
+  it("list attention sort, filter, status bias, and summary fields", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const body =
+      "The CTA is too vague for this locale. Fixed looks like a concrete next step. Why: conversion. ".repeat(
+        2,
+      );
+
+    const none = await svc.create(
+      {
+        title: "No feedback",
+        summary,
+        entries: [sampleEntry({ slug: "att-none" })],
+      },
+      { username: "alice" },
+    );
+    expect(none.ok).toBe(true);
+    if (!none.ok) return;
+
+    const blocked = await svc.create(
+      {
+        title: "Blocked",
+        summary,
+        entries: [sampleEntry({ slug: "att-blocked" })],
+      },
+      { username: "alice" },
+    );
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    const addB = await svc.update(blocked.proposal.id, "add_blocker", {
+      username: "blake",
+      body,
+    });
+    expect(addB.ok).toBe(true);
+
+    const rereview = await svc.create(
+      {
+        title: "Rereview",
+        summary,
+        entries: [sampleEntry({ slug: "att-rereview" })],
+      },
+      { username: "alice" },
+    );
+    expect(rereview.ok).toBe(true);
+    if (!rereview.ok) return;
+    const addR = await svc.update(rereview.proposal.id, "add_blocker", {
+      username: "blake",
+      body,
+    });
+    expect(addR.ok).toBe(true);
+    const bid = svc.get(rereview.proposal.id)!.blockers[0]!.id;
+    await svc.update(rereview.proposal.id, "claim", { username: "alice" });
+    const resolved = await svc.update(rereview.proposal.id, "resolve_blocker", {
+      username: "alice",
+      blocker_id: bid,
+      resolve_note: "Updated the CTA copy to match the review feedback.",
+    });
+    expect(resolved.ok).toBe(true);
+
+    const stats = svc.stats();
+    expect(stats.by_attention.no_feedback).toBeGreaterThanOrEqual(1);
+    expect(stats.by_attention.blocked).toBeGreaterThanOrEqual(1);
+    expect(stats.by_attention.awaiting_rereview).toBeGreaterThanOrEqual(1);
+
+    const reviewer = svc.list({
+      sort: "attention",
+      attention_perspective: "reviewer",
+      limit: 20,
+    });
+    expect(reviewer.status_bias_applied).toBe(true);
+    expect(reviewer.attention_perspective).toBe("reviewer");
+    const titles = reviewer.proposals.map((p) => p.title);
+    const iRereview = titles.indexOf("Rereview");
+    const iNone = titles.indexOf("No feedback");
+    const iBlocked = titles.indexOf("Blocked");
+    expect(iRereview).toBeGreaterThanOrEqual(0);
+    expect(iNone).toBeGreaterThan(iRereview);
+    expect(iBlocked).toBeGreaterThan(iNone);
+
+    const author = svc.list({
+      sort: "attention",
+      attention_perspective: "author",
+      limit: 20,
+    });
+    const authorTitles = author.proposals.map((p) => p.title);
+    expect(authorTitles.indexOf("Blocked")).toBeLessThan(authorTitles.indexOf("Rereview"));
+
+    const onlyRereview = svc.list({
+      attention: "awaiting_rereview",
+      sort: "attention",
+      limit: 20,
+    });
+    expect(onlyRereview.proposals.every((p) => p.title === "Rereview")).toBe(true);
+
+    const finishedOnly = svc.list({
+      status: "finished",
+      sort: "attention",
+      limit: 20,
+    });
+    expect(finishedOnly.status_bias_applied).toBe(false);
+    expect(finishedOnly.total).toBe(0);
+
+    const chrono = svc.list({ kind: "edits", sort: "updated_at", limit: 20 });
+    expect(chrono.status_bias_applied).toBe(false);
+
+    const summaryRow = toProposalSummary(svc.get(rereview.proposal.id)!);
+    expect(summaryRow.attention).toBe("awaiting_rereview");
+    expect(summaryRow.resolved_blocker_count).toBe(1);
+    expect(summaryRow.open_blocker_count).toBe(0);
+  });
+
+  it("author revise moves unblocked edits to re-check and leaves open blockers blocked", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const author = { username: "alice", actor: { type: "mcp" as const, role: "content" } };
+
+    const clean = await svc.create(
+      {
+        title: "Rewrite first",
+        summary,
+        entries: [sampleEntry({ slug: "att-rewrite" })],
+      },
+      author,
+    );
+    expect(clean.ok).toBe(true);
+    if (!clean.ok) return;
+    expect(toProposalSummary(clean.proposal).attention).toBe("no_feedback");
+
+    const revised = await svc.update(clean.proposal.id, "revise_entries", {
+      ...author,
+      entries: [
+        sampleEntry({
+          slug: "att-rewrite",
+          updates: [{ field_path: "call_to_action.title", value: "Newer title" }],
+        }),
+      ],
+    });
+    expect(revised.ok).toBe(true);
+    if (!revised.ok) return;
+    expect(toProposalSummary(revised.proposal).attention).toBe("awaiting_rereview");
+
+    const held = await svc.create(
+      {
+        title: "Held rewrite",
+        summary,
+        entries: [sampleEntry({ slug: "att-held" })],
+      },
+      author,
+    );
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+    const body =
+      "The CTA is too vague for this locale. Fixed looks like a concrete next step. Why: conversion. ".repeat(
+        2,
+      );
+    expect(
+      (
+        await svc.update(held.proposal.id, "add_blocker", {
+          username: "blake",
+          body,
+        })
+      ).ok,
+    ).toBe(true);
+    const heldRevise = await svc.update(held.proposal.id, "revise_entries", {
+      ...author,
+      entries: [
+        sampleEntry({
+          slug: "att-held",
+          updates: [{ field_path: "call_to_action.title", value: "Still held" }],
+        }),
+      ],
+    });
+    expect(heldRevise.ok).toBe(true);
+    if (!heldRevise.ok) return;
+    expect(toProposalSummary(heldRevise.proposal).attention).toBe("blocked");
+
+    expect(svc.stats().needs_review_edits).toBeGreaterThanOrEqual(1);
+    const queue = svc.list({ needs_review: true, status: "finished", kind: "notes", limit: 20 });
+    const titles = queue.proposals.map((p) => p.title);
+    expect(titles).toContain("Rewrite first");
+    expect(titles).not.toContain("Held rewrite");
+    expect(queue.proposals.every((p) => p.kind === "edits")).toBe(true);
+    expect(queue.status_bias_applied).toBe(true);
   });
 
   it("parseProposerActorType accepts enums and rejects invalid", () => {
@@ -791,6 +999,8 @@ describe("content proposals", () => {
     expect(applied.ok).toBe(true);
     if (applied.ok) {
       expect(applied.proposal.status).toBe("finished");
+      expect(applied.proposal.closed_at).toBeTypeOf("number");
+      expect(applied.proposal.closed_by).toBe("bob");
       expect(live["call_to_action.title"]).toBe("New");
     }
     void resolveNoClaim;
@@ -1017,6 +1227,82 @@ describe("content proposals", () => {
     expect(created.proposal.kind).toBe("idea");
     expect(created.proposal.related_entries?.[0]?.slug).toBe("miami-ai-bootcamp-new");
 
+    const withSituations = await svc.create(
+      {
+        kind: "idea",
+        title: "Idea with illegal situations",
+        summary:
+          "Pitch that wrongly declares review situations which are edits-only on this API. ".repeat(2),
+        review_situations: ["body_copy_edit"],
+      },
+      mcpAlice,
+    );
+    expect(withSituations.ok).toBe(false);
+    if (!withSituations.ok) expect(withSituations.code).toBe("review_situations_idea_labels_only");
+
+    const withTwoLabels = await svc.create(
+      {
+        kind: "idea",
+        title: "Idea with two demand labels",
+        summary:
+          "Pitch that wrongly declares two demand labels which must be at most one. ".repeat(2),
+        review_situations: ["anticipated_demand", "broken_url"],
+      },
+      mcpAlice,
+    );
+    expect(withTwoLabels.ok).toBe(false);
+    if (!withTwoLabels.ok) expect(withTwoLabels.code).toBe("review_situations_idea_one_label");
+
+    const withDemand = await svc.create(
+      {
+        kind: "idea",
+        title: "Anticipated demand brief",
+        summary:
+          "New tutor product launch; lasting how-to queries after the announcement fades. ".repeat(2),
+        review_situations: ["anticipated_demand"],
+      },
+      mcpAlice,
+    );
+    expect(withDemand.ok).toBe(true);
+    if (!withDemand.ok) return;
+    expect(withDemand.proposal.review_situations).toEqual(["anticipated_demand"]);
+
+    const incompleteStillCreates = await svc.create(
+      {
+        kind: "idea",
+        title: "Thin brief",
+        summary:
+          "Just a cluster hole story without goal evidence or kill line but still long enough. ".repeat(2),
+      },
+      mcpAlice,
+    );
+    expect(incompleteStillCreates.ok).toBe(true);
+
+    const setDefaultOnIdea = await svc.update(created.proposal.id, "set_review_situations", {
+      ...mcpAlice,
+      review_situations: ["idea_opportunity_harm"],
+    });
+    expect(setDefaultOnIdea.ok).toBe(false);
+    if (!setDefaultOnIdea.ok) {
+      expect(setDefaultOnIdea.code).toBe("review_situations_idea_labels_only");
+    }
+
+    const setDemandOnIdea = await svc.update(created.proposal.id, "set_review_situations", {
+      ...mcpAlice,
+      review_situations: ["broken_url"],
+    });
+    expect(setDemandOnIdea.ok).toBe(true);
+    if (!setDemandOnIdea.ok) return;
+    expect(setDemandOnIdea.proposal.review_situations).toEqual(["broken_url"]);
+
+    const clearDemand = await svc.update(created.proposal.id, "set_review_situations", {
+      ...mcpAlice,
+      review_situations: [],
+    });
+    expect(clearDemand.ok).toBe(true);
+    if (!clearDemand.ok) return;
+    expect(clearDemand.proposal.review_situations ?? []).toEqual([]);
+
     const selfAccept = await svc.update(created.proposal.id, "accept", {
       ...mcpAlice,
       next_step: "Draft the landing hero and CTA in a follow-up edits proposal.",
@@ -1033,12 +1319,23 @@ describe("content proposals", () => {
     const accepted = await svc.update(created.proposal.id, "accept", {
       ...mcpBob,
       next_step: "Open an edits proposal for landing/miami-ai-bootcamp-new after research.",
+      accepted_entry: {
+        contentType: "landing",
+        slug: "miami-ai-bootcamp-new",
+        locale: "en",
+      },
     });
     expect(accepted.ok).toBe(true);
     if (!accepted.ok) return;
     expect(accepted.proposal.status).toBe("finished");
     expect(accepted.proposal.close_reason).toBe("accepted");
     expect(accepted.proposal.close_note).toContain("edits proposal");
+    expect(accepted.proposal.accepted_entry).toEqual({
+      contentType: "landing",
+      slug: "miami-ai-bootcamp-new",
+      locale: "en",
+    });
+    expect(svc.stats().stalled_ideas).toBe(1);
 
     const park = await svc.create(
       {
@@ -1357,6 +1654,171 @@ describe("content proposals", () => {
     }
   });
 
+  it("MCP withdraw requires same proposer username; staff may withdraw others", async () => {
+    const svc = makeService();
+    const summary =
+      "Author-only withdraw gate: same username may close even under a different MCP role. ".repeat(2);
+    const note = "Withdrawing after scope change; will file a corrected proposal next.";
+
+    const created = await svc.create(
+      {
+        title: "Author withdraw gate",
+        summary,
+        entries: [sampleEntry({ slug: "author-withdraw-gate" })],
+      },
+      { username: "alesanchezr", actor: { type: "mcp", role: "copy_editor", model: "xai/grok-4" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const otherMcp = await svc.update(created.proposal.id, "withdraw", {
+      username: "KrilinZ",
+      asStaff: false,
+      actor: { type: "mcp", role: "copy_editor", model: "anthropic/claude" },
+      close_note: note,
+    });
+    expect(otherMcp.ok).toBe(false);
+    if (!otherMcp.ok) expect(otherMcp.code).toBe("not_proposer");
+
+    const sameUserDifferentRole = await svc.update(created.proposal.id, "withdraw", {
+      username: "alesanchezr",
+      asStaff: false,
+      actor: { type: "mcp", role: "seo_specialist", model: "openai/gpt-5" },
+      close_note: note,
+    });
+    expect(sameUserDifferentRole.ok).toBe(true);
+    if (sameUserDifferentRole.ok) {
+      expect(sameUserDifferentRole.proposal.status).toBe("withdrawn");
+      expect(sameUserDifferentRole.proposal.closed_by).toBe("alesanchezr");
+    }
+
+    const forStaff = await svc.create(
+      {
+        title: "Staff withdraw gate",
+        summary,
+        entries: [sampleEntry({ slug: "staff-withdraw-gate" })],
+      },
+      { username: "alesanchezr", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(forStaff.ok).toBe(true);
+    if (!forStaff.ok) return;
+
+    const staffOther = await svc.update(forStaff.proposal.id, "withdraw", {
+      username: "editor@4geeks.com",
+      asStaff: true,
+      actor: { type: "ui" },
+      close_note: note,
+    });
+    expect(staffOther.ok).toBe(true);
+    if (staffOther.ok) {
+      expect(staffOther.proposal.status).toBe("withdrawn");
+      expect(staffOther.proposal.closed_by).toBe("editor@4geeks.com");
+    }
+  });
+
+  it("honors proposal settings for withdraw disabled, any author, and four-eyes off", async () => {
+    const summary =
+      "Policy knobs from Agents Rules: withdraw disabled, any author, and four-eyes toggle. ".repeat(2);
+    const note = "Withdrawing under site policy test for Agents Rules page coverage.";
+
+    const disabledSvc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "disabled", staff: "any_editor" },
+        four_eyes: { enabled: true, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const blocked = await disabledSvc.create(
+      {
+        title: "Withdraw disabled",
+        summary,
+        entries: [sampleEntry({ slug: "withdraw-disabled" })],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    const disabled = await disabledSvc.update(blocked.proposal.id, "withdraw", {
+      username: "alice",
+      actor: { type: "mcp", role: "copy_editor" },
+      close_note: note,
+    });
+    expect(disabled.ok).toBe(false);
+    if (!disabled.ok) expect(disabled.code).toBe("withdraw_disabled");
+
+    const anyAuthorSvc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "any_create_author", staff: "any_editor" },
+        four_eyes: { enabled: true, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const open = await anyAuthorSvc.create(
+      {
+        title: "Any author withdraw",
+        summary,
+        entries: [sampleEntry({ slug: "any-author-withdraw" })],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(open.ok).toBe(true);
+    if (!open.ok) return;
+    const otherOk = await anyAuthorSvc.update(open.proposal.id, "withdraw", {
+      username: "bob",
+      actor: { type: "mcp", role: "seo_specialist" },
+      close_note: note,
+    });
+    expect(otherOk.ok).toBe(true);
+
+    const fourOff = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: (entry) => {
+        const values: Record<string, unknown> = {};
+        for (const u of entry.updates) values[u.field_path] = "Old";
+        return { values };
+      },
+      applyUpdates: async () => ({ ok: true }),
+      getProposalSettings: () => ({
+        withdraw: { mcp: "proposer_only", staff: "any_editor" },
+        four_eyes: { enabled: false, staff_ui_exempt: false },
+        hold: { stewards_only: true },
+        claim: { staff_ui_takeover: true },
+      }),
+    });
+    const selfApply = await fourOff.create(
+      {
+        title: "Self apply allowed",
+        summary,
+        entries: [
+          sampleEntry({
+            slug: "self-apply",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "New" }],
+          }),
+        ],
+      },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(selfApply.ok).toBe(true);
+    if (!selfApply.ok) return;
+    const applied = await fourOff.update(selfApply.proposal.id, "apply", {
+      username: "alice",
+      actor: { type: "mcp", role: "copy_editor" },
+    });
+    expect(applied.ok).toBe(true);
+  });
+
   it("escalates with note, clears claim, freezes MCP, keeps note after deescalate", async () => {
     const svc = makeService();
     const summary =
@@ -1444,5 +1906,885 @@ describe("content proposals", () => {
     expect(withHistory.proposals.some((p) => p.id === created.proposal.id && p.escalated_note === note)).toBe(
       true,
     );
+  });
+
+  it("idea follow-through: accept locks entry, implements gates, stalled resurfaces after reject", async () => {
+    const svc = makeService({
+      liveValues: { "meta.title": "Old" },
+    });
+    const summary =
+      "Brief for a new Grok explainer blog post covering product basics for beginners. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "What is Grok",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+
+    const missingEntry = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+    });
+    expect(missingEntry.ok).toBe(false);
+    if (!missingEntry.ok) expect(missingEntry.code).toBe("accepted_entry_required");
+
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(svc.stats().stalled_ideas).toBe(1);
+    expect(svc.list({ stalled: true }).total).toBe(1);
+
+    const withoutLink = await svc.create(
+      {
+        title: "Grok draft edits",
+        summary: "Implement the accepted Grok brief with a clearer title and intro for EN. ".repeat(2),
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok?" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(withoutLink.ok).toBe(false);
+    if (!withoutLink.ok) expect(withoutLink.code).toBe("implements_required");
+
+    const edits = await svc.create(
+      {
+        title: "Grok draft edits",
+        summary: "Implement the accepted Grok brief with a clearer title and intro for EN. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok?" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(edits.ok).toBe(true);
+    if (!edits.ok) return;
+    expect(edits.proposal.implements_proposal_id).toBe(idea.proposal.id);
+    expect(svc.stats().stalled_ideas).toBe(0);
+
+    const second = await svc.create(
+      {
+        title: "Grok draft edits 2",
+        summary: "Second attempt should join the open implements proposal instead of duplicating. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        confirm_distinct: true,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "Other" }],
+          }),
+        ],
+      },
+      bob,
+    );
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe("idea_already_in_progress");
+
+    const rejected = await svc.update(edits.proposal.id, "reject", {
+      ...bob,
+      confirm_reject: true,
+      reject_kind: "bad_idea",
+      close_note:
+        "This draft invents product claims we do not make and should not ship as written for this brief.",
+    });
+    expect(rejected.ok).toBe(true);
+    expect(svc.stats().stalled_ideas).toBe(1);
+
+    const retry = await svc.create(
+      {
+        title: "Grok draft edits retry",
+        summary: "Retry after reject with a faithful title that matches approved facts only. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        confirm_distinct: true,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [{ field_path: "meta.title", value: "What is Grok" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+
+    const applied = await svc.update(retry.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    expect(svc.stats().stalled_ideas).toBe(0);
+    expect(svc.list({ stalled: true }).total).toBe(0);
+  });
+
+  it("stores author and resolver actors on blockers and clears the resolver on reopen", async () => {
+    const svc = makeService();
+    const summary =
+      "Patch the CTA title on the Spanish blog so the product name is explicit. ".repeat(2);
+    const body =
+      "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.";
+    const created = await svc.create(
+      { title: "Actor blocker", summary, entries: [sampleEntry()] },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const author = { type: "mcp" as const, model: "xai/grok-4", role: "copy_editor", client: "Cursor" };
+    const added = await svc.update(created.proposal.id, "add_blocker", {
+      username: "blake",
+      actor: author,
+      body,
+    });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(added.proposal.blockers[0]!.author).toBe("blake");
+    expect(added.proposal.blockers[0]!.author_actor).toEqual(author);
+    expect(added.proposal.blockers[0]!.resolved_by_actor).toEqual({});
+
+    const resolver = {
+      type: "mcp" as const,
+      model: "claude/sonnet-4.5",
+      role: "copy_editor",
+      client: "Cursor",
+    };
+    const bid = added.proposal.blockers[0]!.id;
+    await svc.update(created.proposal.id, "claim", { username: "alice", actor: resolver });
+    const resolved = await svc.update(created.proposal.id, "resolve_blocker", {
+      username: "alice",
+      actor: resolver,
+      blocker_id: bid,
+      resolve_note: "Updated CTA title to name Coding Bootcamp on the Spanish blog.",
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.proposal.blockers[0]!.resolved_by).toBe("alice");
+    expect(resolved.proposal.blockers[0]!.resolved_by_actor).toEqual(resolver);
+    expect(resolved.proposal.blockers[0]!.author_actor).toEqual(author);
+
+    const reopened = await svc.update(created.proposal.id, "reopen_blocker", {
+      username: "alice",
+      actor: resolver,
+      blocker_id: bid,
+    });
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) return;
+    expect(reopened.proposal.blockers[0]!.status).toBe("open");
+    expect(reopened.proposal.blockers[0]!.resolved_by).toBeNull();
+    expect(reopened.proposal.blockers[0]!.resolve_note).toBeNull();
+    expect(reopened.proposal.blockers[0]!.resolved_by_actor).toEqual({});
+    expect(reopened.proposal.blockers[0]!.author_actor).toEqual(author);
+
+    const staff = await svc.update(created.proposal.id, "add_blocker", {
+      username: "casey",
+      actor: { type: "ui" },
+      body,
+    });
+    expect(staff.ok).toBe(true);
+    if (!staff.ok) return;
+    const uiBlocker = staff.proposal.blockers.find((b) => b.author === "casey");
+    expect(uiBlocker?.author_actor).toEqual({ type: "ui" });
+  });
+});
+
+const ATTACHED_FIELDS = ["title", "description", "content", "category"] as const;
+
+function attachedUpdates(omit?: string) {
+  return ATTACHED_FIELDS.filter((field) => field !== omit).map((field) => ({
+    field_path: field,
+    value: field === "content" ? "Body of the new post." : `value-${field}`,
+  }));
+}
+
+describe("attached entry from an accepted idea", () => {
+  const alice = {
+    username: "alice",
+    actor: { type: "mcp" as const, role: "copy_editor" },
+  };
+  const bob = {
+    username: "bob",
+    actor: { type: "mcp" as const, role: "seo_specialist" },
+  };
+  const summary =
+    "Implement the accepted brief as a new attached blog post with the required fields filled. ".repeat(2);
+
+  beforeEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+    ensurePipelineDb(SITE, { skipBackup: true });
+  });
+
+  afterEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+  });
+
+  function makeAttached(opts?: {
+    live?: "missing" | "exists";
+    draftExists?: boolean;
+    shape?: "attached_file" | "database" | "other";
+    applyOk?: boolean;
+    prepareCode?: string;
+  }) {
+    let live: "missing" | "exists" = opts?.live ?? "missing";
+    const prepared: string[] = [];
+    const discarded: string[] = [];
+    const stamped: string[] = [];
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: { title: "Already there" } }),
+      applyUpdates: async () =>
+        opts?.applyOk === false ? { ok: false, error: "apply boom" } : { ok: true },
+      resolveExistence: (entry) => ({
+        live,
+        draftExists: Boolean(entry.variant?.trim()) && (opts?.draftExists ?? false),
+      }),
+      inspectMissingTarget: () =>
+        opts?.shape === "database"
+          ? { shape: "database" }
+          : opts?.shape === "other"
+            ? { shape: "other" }
+            : { shape: "attached_file", requiredFields: [...ATTACHED_FIELDS] },
+      prepareCreatesEntry: async (entry) => {
+        prepared.push(entry.slug);
+        if (opts?.prepareCode) {
+          return { ok: false, code: opts.prepareCode, error: "needs confirm" };
+        }
+        return { ok: true, seeded: true };
+      },
+      discardSeededEntry: (entry) => {
+        discarded.push(entry.slug);
+      },
+      stampPublishedAt: () => {
+        stamped.push("stamped");
+        return { ok: true };
+      },
+    });
+    return {
+      svc,
+      prepared,
+      discarded,
+      stamped,
+      setLive: (next: "missing" | "exists") => {
+        live = next;
+      },
+    };
+  }
+
+  async function acceptIdea(
+    svc: ReturnType<typeof makeAttached>["svc"],
+    slug = "what-is-grok",
+    contentType = "blog",
+  ) {
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New attached post",
+        summary,
+        related_entries: [{ contentType, slug, locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) throw new Error("idea");
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "File field edits for this reserved slug. Apply will create the files.",
+      accepted_entry: { contentType, slug, locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error("accept");
+    return idea.proposal.id;
+  }
+
+  it("creates edits for a reserved attached slug with no YAML", async () => {
+    const { svc } = makeAttached();
+    const ideaId = await acceptIdea(svc);
+    const stalled = svc.list({ stalled: true });
+    expect(stalled.proposals[0]?.attached_create_entry).toEqual({
+      contentType: "blog",
+      slug: "what-is-grok",
+      locale: "en",
+    });
+
+    const without = await svc.create(
+      {
+        title: "Grok post",
+        summary,
+        review_situations: ["new_public_content"],
+        entries: [sampleEntry({ slug: "what-is-grok", locale: "en", updates: attachedUpdates() })],
+      },
+      alice,
+    );
+    expect(without.ok).toBe(false);
+    if (!without.ok) expect(without.code).toBe("implements_required");
+
+    const edits = await svc.create(
+      {
+        title: "Grok post",
+        summary,
+        implements_proposal_id: ideaId,
+        review_situations: ["new_public_content"],
+        entries: [sampleEntry({ slug: "what-is-grok", locale: "en", updates: attachedUpdates() })],
+      },
+      alice,
+    );
+    expect(edits.ok).toBe(true);
+    if (!edits.ok) return;
+    expect(edits.proposal.entries[0]?.baseline_context.creates_entry).toBe(true);
+    expect(edits.proposal.entries[0]?.baseline_context.values).toEqual({});
+    expect(edits.review_context?.damage_class).toBe("new_public_content");
+    expect(svc.list({ stalled: true }).total).toBe(0);
+  });
+
+  it("refuses sections, missing required fields, drafts, and database rows", async () => {
+    const { svc } = makeAttached();
+    const ideaId = await acceptIdea(svc);
+
+    const sections = await svc.create(
+      {
+        title: "Grok sections",
+        summary,
+        implements_proposal_id: ideaId,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            updates: [...attachedUpdates(), { field_path: "sections[0].title", value: "Hero" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(sections.ok).toBe(false);
+    if (!sections.ok) expect(sections.code).toBe("attached_sections_refused");
+
+    const missing = await svc.create(
+      {
+        title: "Grok missing",
+        summary,
+        implements_proposal_id: ideaId,
+        entries: [
+          sampleEntry({ slug: "what-is-grok", locale: "en", updates: attachedUpdates("category") }),
+        ],
+      },
+      alice,
+    );
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.code).toBe("required_fields_missing");
+      expect(missing.error).toContain("category");
+    }
+    expect(svc.get(ideaId)?.close_reason).toBe("accepted");
+
+    const draft = await svc.create(
+      {
+        title: "Grok draft",
+        summary,
+        implements_proposal_id: ideaId,
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "en",
+            variant: "draft",
+            updates: attachedUpdates(),
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(draft.ok).toBe(false);
+    if (!draft.ok) expect(draft.code).toBe("attached_no_draft");
+  });
+
+  it("refuses a missing database row and still accepts field updates on an existing row", async () => {
+    const missingDb = makeAttached({ shape: "database" });
+    const ideaId = await acceptIdea(missingDb.svc, "cohort-1", "program");
+    const refused = await missingDb.svc.create(
+      {
+        title: "New cohort",
+        summary,
+        implements_proposal_id: ideaId,
+        entries: [
+          sampleEntry({
+            contentType: "program",
+            slug: "cohort-1",
+            locale: "en",
+            updates: [{ field_path: "title", value: "Cohort" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.code).toBe("database_entry_required");
+    expect(missingDb.svc.get(ideaId)?.close_reason).toBe("accepted");
+
+    const existing = makeAttached({ shape: "database", live: "exists" });
+    const updated = await existing.svc.create(
+      {
+        title: "Override title",
+        summary,
+        entries: [
+          sampleEntry({
+            contentType: "program",
+            slug: "cohort-live",
+            locale: "en",
+            updates: [{ field_path: "title", value: "Cohort" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(updated.ok).toBe(true);
+    if (!updated.ok) return;
+    expect(updated.proposal.entries[0]?.baseline_context.creates_entry).toBeUndefined();
+  });
+
+  it("still allows a detached draft, a template variant, and a second-locale promote", async () => {
+    const detached = makeAttached({ shape: "other", draftExists: true });
+    const draftOk = await detached.svc.create(
+      {
+        title: "Detached draft",
+        summary,
+        entries: [
+          sampleEntry({
+            slug: "custom-shell",
+            locale: "en",
+            variant: "draft",
+            updates: [{ field_path: "title", value: "Custom" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(draftOk.ok).toBe(true);
+
+    const template = makeAttached({ shape: "other", draftExists: true });
+    const shell = await template.svc.create(
+      {
+        title: "Shell variant",
+        summary,
+        entries: [
+          sampleEntry({
+            slug: "template",
+            locale: "en",
+            variant: "b",
+            updates: [{ field_path: "title", value: "Shell" }],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(shell.ok).toBe(true);
+
+    const second = makeAttached({ live: "exists", draftExists: true });
+    const promote = await second.svc.create(
+      {
+        title: "Spanish promote",
+        summary,
+        promote_on_apply: true,
+        review_situations: ["locale_translation"],
+        entries: [
+          sampleEntry({
+            slug: "what-is-grok",
+            locale: "es",
+            variant: "draft",
+            updates: [],
+          }),
+        ],
+      },
+      alice,
+    );
+    expect(promote.ok).toBe(true);
+  });
+
+  it("apply seeds then stamps, deletes the new folder only when a later step fails, and stays stale if the file appears", async () => {
+    const happy = makeAttached();
+    const ideaId = await acceptIdea(happy.svc);
+    const edits = await happy.svc.create(
+      {
+        title: "Grok post",
+        summary,
+        implements_proposal_id: ideaId,
+        review_situations: ["new_public_content"],
+        entries: [sampleEntry({ slug: "what-is-grok", locale: "en", updates: attachedUpdates() })],
+      },
+      alice,
+    );
+    expect(edits.ok).toBe(true);
+    if (!edits.ok) return;
+    const applied = await happy.svc.update(edits.proposal.id, "apply", bob);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(happy.prepared).toEqual(["what-is-grok"]);
+    expect(happy.stamped).toEqual(["stamped"]);
+    expect(happy.discarded).toEqual([]);
+    expect(applied.proposal.entries[0]?.status).toBe("done");
+
+    const boom = makeAttached({ applyOk: false });
+    const ideaBoom = await acceptIdea(boom.svc, "boom-slug");
+    const boomEdits = await boom.svc.create(
+      {
+        title: "Boom post",
+        summary,
+        implements_proposal_id: ideaBoom,
+        entries: [sampleEntry({ slug: "boom-slug", locale: "en", updates: attachedUpdates() })],
+      },
+      alice,
+    );
+    expect(boomEdits.ok).toBe(true);
+    if (!boomEdits.ok) return;
+    const failed = await boom.svc.update(boomEdits.proposal.id, "apply", bob);
+    expect(failed.ok).toBe(true);
+    if (!failed.ok) return;
+    expect(boom.discarded).toEqual(["boom-slug"]);
+    expect(failed.proposal.entries[0]?.status).toBe("failed");
+
+    const raced = makeAttached();
+    const ideaRace = await acceptIdea(raced.svc, "raced-slug");
+    const raceEdits = await raced.svc.create(
+      {
+        title: "Raced post",
+        summary,
+        implements_proposal_id: ideaRace,
+        entries: [sampleEntry({ slug: "raced-slug", locale: "en", updates: attachedUpdates() })],
+      },
+      alice,
+    );
+    expect(raceEdits.ok).toBe(true);
+    if (!raceEdits.ok) return;
+    raced.setLive("exists");
+    const stale = await raced.svc.update(raceEdits.proposal.id, "apply", bob);
+    expect(stale.ok).toBe(true);
+    if (!stale.ok) return;
+    expect(raced.prepared).toEqual([]);
+    expect(stale.proposal.entries[0]?.last_error ?? "").toContain("context_stale");
+  });
+
+  it("does not block a normal edits proposal as new content when the live page disappears", async () => {
+    const { svc, setLive } = makeAttached({ live: "exists", shape: "other" });
+    const created = await svc.create(
+      {
+        title: "Existing post",
+        summary,
+        entries: [sampleEntry({ slug: "hello", locale: "en", updates: [{ field_path: "title", value: "Hi" }] })],
+      },
+      alice,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    setLive("missing");
+    const applied = await svc.update(created.proposal.id, "apply", bob);
+    expect(applied.ok).toBe(false);
+    if (!applied.ok) expect(applied.code).toBe("target_missing");
+  });
+
+  it("refuses bundling a selling page with the reserved attached post", async () => {
+    const { svc } = makeAttached();
+    const ideaId = await acceptIdea(svc);
+    const mixed = await svc.create(
+      {
+        title: "Mixed bundle",
+        summary,
+        implements_proposal_id: ideaId,
+        entries: [
+          sampleEntry({
+            contentType: "program",
+            slug: "bootcamp",
+            locale: "en",
+            updates: [{ field_path: "title", value: "Bootcamp" }],
+          }),
+          sampleEntry({ slug: "what-is-grok", locale: "en", updates: attachedUpdates() }),
+        ],
+      },
+      alice,
+    );
+    expect(mixed.ok).toBe(false);
+    if (!mixed.ok) expect(["implements_entry_mismatch", "mixed_risk_bundle"]).toContain(mixed.code);
+  });
+
+  it("seeds one locale and discards only that new folder", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attached-seed-"));
+    try {
+      const seeded = seedAttachedLocaleFiles({
+        contentType: "blog",
+        slug: "fresh-post",
+        locale: "en",
+        contentRoot: root,
+        author: "alice",
+        funnel: { stage: "awareness", products: "all" },
+      });
+      const common = yaml.load(fs.readFileSync(seeded.commonPath, "utf-8")) as {
+        slug: string;
+        funnel?: { stage: string; products: unknown };
+      };
+      const locale = yaml.load(fs.readFileSync(seeded.localePath, "utf-8")) as {
+        slug: string;
+        sections: unknown[];
+      };
+      expect(common.slug).toBe("fresh-post");
+      expect(common.funnel).toEqual({ stage: "awareness", products: "all" });
+      expect(locale.sections).toEqual([]);
+      expect(fs.existsSync(path.join(path.dirname(seeded.localePath), "es.yml"))).toBe(false);
+      expect(fs.existsSync(path.join(root, "blog", "template.en.yml"))).toBe(false);
+      discardSeededAttachedEntry({
+        contentType: "blog",
+        slug: "fresh-post",
+        locale: "en",
+        contentRoot: root,
+      });
+      expect(fs.existsSync(path.dirname(seeded.localePath))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("new-URL idea funnel: warn on create, refuse accept until set, freeze after accept", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+    });
+    const summary =
+      "New article pitch for a Grok explainer covering product basics for beginners who search. ".repeat(
+        2,
+      );
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+
+    const created = await svc.create(
+      {
+        kind: "idea",
+        title: "New article: What is Grok",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }],
+      },
+      alice,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const ctx = await svc.classifyLive(created.proposal);
+    expect(ctx?.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(true);
+
+    const blockedAccept = await svc.update(created.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(blockedAccept.ok).toBe(false);
+    if (!blockedAccept.ok) expect(blockedAccept.code).toBe("idea_funnel_required");
+
+    const badAll = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: { stage: "consideration", products: "all" },
+    });
+    expect(badAll.ok).toBe(false);
+    if (!badAll.ok) expect(badAll.code).toBe("idea_funnel_all_stage");
+
+    const setFunnel = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: { stage: "awareness", products: "all" },
+    });
+    expect(setFunnel.ok).toBe(true);
+    if (!setFunnel.ok) return;
+    expect(setFunnel.proposal.idea_funnel).toEqual({ stage: "awareness", products: "all" });
+
+    const accepted = await svc.update(created.proposal.id, "accept", {
+      ...bob,
+      next_step: "Draft the post body and SERP title in a follow-up edits proposal.",
+      accepted_entry: { contentType: "blog", slug: "what-is-grok", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+
+    const frozen = await svc.update(created.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: {
+        stage: "decision",
+        products: [{ product: "full-stack" }],
+      },
+    });
+    expect(frozen.ok).toBe(false);
+    if (!frozen.ok) expect(frozen.code).toBe("idea_funnel_frozen");
+  });
+
+  it("creates_entry apply seeds idea funnel and refuses conflicting ops", async () => {
+    let seededFunnel: unknown = null;
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      inspectMissingTarget: () => ({
+        shape: "attached_file",
+        requiredFields: ["title"],
+      }),
+      prepareCreatesEntry: async (entry, opts) => {
+        seededFunnel = opts.ideaFunnel ?? null;
+        return { ok: true, seeded: true };
+      },
+      discardSeededEntry: () => {},
+      stampPublishedAt: () => ({ ok: true }),
+    });
+    const summary =
+      "New article pitch for a funnel seed test covering product basics for beginners. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: {
+        type: "mcp" as const,
+        role: "copy_editor",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const bob = {
+      username: "bob",
+      actor: {
+        type: "mcp" as const,
+        role: "seo_specialist",
+        model: "claude/sonnet",
+        client: "Cursor",
+      },
+    };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New article funnel seed",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "funnel-seed-post", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Create the attached post with implements_proposal_id next.",
+      accepted_entry: { contentType: "blog", slug: "funnel-seed-post", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+
+    const conflict = await svc.create(
+      {
+        title: "Conflict funnel create",
+        summary: "Implement accepted idea but with a conflicting funnel stage on the new post. ".repeat(
+          2,
+        ),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: "blog",
+            slug: "funnel-seed-post",
+            locale: "en",
+            updates: [
+              { field_path: "title", value: "Funnel seed" },
+              { field_path: "funnel.stage", value: "decision" },
+              { field_path: "funnel.products", value: [{ product: "full-stack" }] },
+            ],
+          },
+        ],
+      },
+      alice,
+    );
+    expect(conflict.ok).toBe(true);
+    if (!conflict.ok) return;
+    const applyConflict = await svc.update(conflict.proposal.id, "apply", { ...bob });
+    expect(applyConflict.ok).toBe(true);
+    if (!applyConflict.ok) return;
+    const failed = applyConflict.proposal.entries[0];
+    expect(failed?.status).toBe("failed");
+    expect(failed?.last_error).toMatch(/idea_funnel_conflict/);
+
+    await svc.update(conflict.proposal.id, "withdraw", {
+      ...alice,
+      close_note: "Withdrawing conflicting packet so the matching create can apply cleanly.",
+    });
+
+    const okCreate = await svc.create(
+      {
+        title: "Matching funnel create",
+        summary: "Implement accepted idea and let apply auto-seed the frozen idea funnel. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: "blog",
+            slug: "funnel-seed-post",
+            locale: "en",
+            updates: [{ field_path: "title", value: "Funnel seed" }],
+          },
+        ],
+      },
+      alice,
+    );
+    expect(okCreate.ok).toBe(true);
+    if (!okCreate.ok) return;
+    const applied = await svc.update(okCreate.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(seededFunnel).toEqual({ stage: "awareness", products: "all" });
+    expect(applied.proposal.entries[0]?.status).toBe("done");
   });
 });

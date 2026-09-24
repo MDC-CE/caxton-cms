@@ -1,6 +1,6 @@
 ---
 id: organic-page2
-version: 1
+version: 2
 title: Page 2 opportunity
 used_when: >
   Staff clicks Ask Agent on a row in Diagnostics → SEO → Opportunities →
@@ -43,10 +43,11 @@ Target:
 
 Do:
 1. Resolve that URL to contentType/slug/locale via MCP (list_entries / content tools). If you cannot resolve it, stop and say so — no edits.
-2. Read the entry + SEO; strengthen how the page matches the query (body, headings, FAQ) without changing the page’s main topic.
-3. Add 1–3 contextual internal links from stronger related live pages to this URL.
-4. Summarize what you changed and why.
+2. Optionally: get_or_refresh_seo_research action:serp (and/or keyword_ideas with seed=Target query) for SERP/angle context — cache-first; do not invent rankings.
+3. Read the entry + SEO; strengthen how the page matches the query (body, headings, FAQ) without changing the page’s main topic.
+4. Add 1–3 contextual internal links from stronger related live pages to this URL.
+5. Summarize what you changed and why.
 
-Tools: list_entries, get_entry_content, get_entry_seo, update_fields, propose_change (if you cannot edit).
+Tools: list_entries, get_entry_content, get_entry_seo, get_or_refresh_seo_research, update_fields, propose_change (if you cannot edit).
 
 Don’t: rewrite unrelated pages; run diagnostics with confirm:true; locale fan-out unless a tool next_action says so.

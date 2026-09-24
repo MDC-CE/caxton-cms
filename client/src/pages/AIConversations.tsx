@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, Brain, ChevronDown, ChevronRight, Filter, Loader2, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Filter, Loader2, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
+import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Link } from "wouter";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 
 interface ConversationMessage {
@@ -221,11 +221,7 @@ export default function AIConversations() {
     <div className="min-h-screen bg-background">
       <div className="max-w-5xl mx-auto p-6 space-y-6">
         <div className="flex items-center gap-3">
-          <Link href="/">
-            <Button size="icon" variant="ghost" data-testid="button-back-conversations">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          <PrivateHistoryBackButton fallbackHref="/" data-testid="button-back-conversations" iconClassName="h-4 w-4" />
           <div className="flex-1">
             <h1 className="text-2xl font-bold" data-testid="text-conversations-title">Conversation Review</h1>
             <p className="text-sm text-muted-foreground">Review and rate AI chat conversations</p>

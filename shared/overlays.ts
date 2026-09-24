@@ -9,6 +9,14 @@ export interface OverlaySaveCheck {
     buttons?: Array<{ label?: string; variant?: string; href?: string }>;
     image_id?: string;
     image_url?: string;
+    auto_redirect_after_ms?: number;
+    auto_redirect_base_host?: string;
+    auto_redirect_exceptions?: Array<{
+      match?: string;
+      to_path?: string;
+      to_path_en?: string;
+      to_path_es?: string;
+    }>;
   };
   trigger?: unknown;
   targeting?: unknown;
@@ -81,6 +89,15 @@ export function overlayContentSlice(overlay: OverlaySaveCheck): OverlayContentSl
     buttons: Array.isArray(c.buttons) ? c.buttons : [],
     ...(c.image_id !== undefined ? { image_id: c.image_id } : {}),
     ...(c.image_url !== undefined ? { image_url: c.image_url } : {}),
+    ...(typeof c.auto_redirect_after_ms === "number"
+      ? { auto_redirect_after_ms: c.auto_redirect_after_ms }
+      : {}),
+    ...(typeof c.auto_redirect_base_host === "string"
+      ? { auto_redirect_base_host: c.auto_redirect_base_host }
+      : {}),
+    ...(Array.isArray(c.auto_redirect_exceptions)
+      ? { auto_redirect_exceptions: c.auto_redirect_exceptions }
+      : {}),
   };
 }
 

@@ -7,9 +7,11 @@ import { z } from "zod";
 import { api } from "../rate-limit/api";
 import { child } from "../logger";
 import {
+  ANALYTICS_ATTRIBUTIONS,
   ANALYTICS_REPORTS,
   AnalyticsReportValidationError,
   getAnalyticsReport,
+  type AnalyticsAttribution,
   type AnalyticsReportName,
 } from "../analytics/reports";
 
@@ -24,6 +26,10 @@ const reportSchema = z.object({
   slug: z.string().optional(),
   locale: z.string().optional(),
   event_names: z.string().optional(),
+  attribution: z
+    .enum(ANALYTICS_ATTRIBUTIONS as unknown as [AnalyticsAttribution, ...AnalyticsAttribution[]])
+    .optional(),
+  item_id: z.string().optional(),
 });
 
 export function registerAnalyticsRoutes(app: Express): void {
@@ -41,6 +47,8 @@ export function registerAnalyticsRoutes(app: Express): void {
       slug: req.query.slug,
       locale: req.query.locale,
       event_names: req.query.event_names,
+      attribution: req.query.attribution,
+      item_id: req.query.item_id,
     });
     if (!parsed.success) {
       return res.status(400).json({
@@ -49,7 +57,18 @@ export function registerAnalyticsRoutes(app: Express): void {
       });
     }
 
-    const { report, days, limit, path, content_type, slug, locale, event_names } = parsed.data;
+    const {
+      report,
+      days,
+      limit,
+      path,
+      content_type,
+      slug,
+      locale,
+      event_names,
+      attribution,
+      item_id,
+    } = parsed.data;
     const eventList = event_names
       ? event_names
           .split(",")
@@ -67,6 +86,8 @@ export function registerAnalyticsRoutes(app: Express): void {
         slug,
         locale,
         event_names: eventList,
+        attribution,
+        item_id,
       });
       res.json(result);
     } catch (err) {

@@ -230,6 +230,8 @@ function AILearningFeatureTabs({ data }: { data: AiLearningFeatureTabsSection })
                         bordered={displayedFeature.video?.with_shadow_border ?? true}
                         ratio={displayedFeature.video?.ratio}
                         preview_image_url={displayedFeature.video?.preview_image_url}
+                        open_modal_on_click={displayedFeature.video?.open_modal_on_click}
+                        overlay_on_muted={displayedFeature.video?.overlay_on_muted}
                       />
                     </div>
                   ) : videoId ? (
@@ -242,6 +244,8 @@ function AILearningFeatureTabs({ data }: { data: AiLearningFeatureTabsSection })
                         bordered={data.video?.with_shadow_border ?? true}
                         ratio={data.video?.ratio}
                         preview_image_url={data.video?.preview_image_url}
+                        open_modal_on_click={data.video?.open_modal_on_click}
+                        overlay_on_muted={data.video?.overlay_on_muted}
                       />
                     </div>
                   ) : null}
@@ -391,6 +395,8 @@ function AILearningHighlight({ data }: { data: AiLearningHighlightSection }) {
                 bordered={data.video?.with_shadow_border ?? true}
                 ratio={data.video?.ratio}
                 preview_image_url={data.video?.preview_image_url}
+                open_modal_on_click={data.video?.open_modal_on_click}
+                overlay_on_muted={data.video?.overlay_on_muted}
               />
             </div>
           )}

@@ -69,6 +69,7 @@ export const PER_PAGE_VALIDATORS = [
   "schema-completeness",
   "content-quality",
   "section-variants",
+  "nonlocalized-common-locale",
 ];
 
 interface PageErrorsModalProps {
@@ -1307,10 +1308,13 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
                 <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-2" data-testid="text-cached-staleness">
                   <IconClock className="h-3.5 w-3.5" />
                   Validated {formatStaleness(pageDiagnostics.cached.lastRunAt)}
+                  {pageDiagnostics.dirty
+                    ? " — updating after a recent edit (or click Validate to force)."
+                    : " — refreshes automatically when outdated; Validate forces a run now."}
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground mt-2" data-testid="cached-not-yet-validated">
-                  Not yet validated — click &quot;Validate&quot; to refresh this list.
+                  Not yet validated — refreshes automatically when needed; click Validate to force a run now.
                 </p>
               ))
               )}

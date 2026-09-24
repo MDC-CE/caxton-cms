@@ -1,4 +1,5 @@
 import fs from "fs";
+import { createHash } from "crypto";
 import { getDefaultContentRoot } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
@@ -18,6 +19,9 @@ import {
   DEFAULT_AUTH_CONVERSION_EVENTS,
   DEFAULT_LOGIN_EVENT_INTENT,
   DEFAULT_SIGNUP_EVENT_INTENT,
+  isAuthConversionName,
+  isLoginConversionName,
+  isSignupConversionName,
   parseAuthConversionEventConfig,
   validateAuthConversionEventConfig,
   type AuthConversionEventConfig,
@@ -120,6 +124,11 @@ export interface ConversionEventEntry {
   when_to_use?: string;
   /** Confusable neighbors — when not to use this name (required on save). */
   when_not_to_use?: string;
+  /**
+   * When true, this event is included in product journey lead conversion KPIs.
+   * Optional only for legacy YAML until migrated; required on save for non-auth events.
+   */
+  counts_as_lead?: boolean;
   automations?: string;
   tags?: string[];
   consent?: ConsentDefaults;
@@ -445,6 +454,12 @@ export interface OpenRushSettings {
   serp_top_n: number;
   location: string;
   language: string;
+  /** Agent session credit cap (agents only). */
+  session_credit_limit: number;
+  /** Shared daily credit cap (staff + agents). */
+  daily_credit_limit: number;
+  /** Warn band start as percent of limit (1–99); confirm required until 100%. */
+  budget_warn_percent: number;
 }
 
 export const DEFAULT_OPENRUSH_SETTINGS: OpenRushSettings = {
@@ -452,7 +467,16 @@ export const DEFAULT_OPENRUSH_SETTINGS: OpenRushSettings = {
   serp_top_n: 20,
   location: "United States",
   language: "English",
+  session_credit_limit: 50,
+  daily_credit_limit: 200,
+  budget_warn_percent: 80,
 };
+
+function clampPositiveInt(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
 
 export function parseOpenRushSettings(
   raw: unknown,
@@ -471,6 +495,24 @@ export function parseOpenRushSettings(
       typeof o.location === "string" && o.location.trim() ? o.location.trim() : defaults.location,
     language:
       typeof o.language === "string" && o.language.trim() ? o.language.trim() : defaults.language,
+    session_credit_limit: clampPositiveInt(
+      o.session_credit_limit,
+      defaults.session_credit_limit,
+      1,
+      100_000,
+    ),
+    daily_credit_limit: clampPositiveInt(
+      o.daily_credit_limit,
+      defaults.daily_credit_limit,
+      1,
+      1_000_000,
+    ),
+    budget_warn_percent: clampPositiveInt(
+      o.budget_warn_percent,
+      defaults.budget_warn_percent,
+      1,
+      99,
+    ),
   };
 }
 
@@ -494,6 +536,196 @@ export function parseFunnelSettings(
   const o = raw as Record<string, unknown>;
   return {
     enforcement: typeof o.enforcement === "boolean" ? o.enforcement : defaults.enforcement,
+  };
+}
+
+/** MCP withdraw policy for Agents Rules. */
+export const PROPOSAL_WITHDRAW_MCP_MODES = [
+  "proposer_only",
+  "any_create_author",
+  "disabled",
+] as const;
+export type ProposalWithdrawMcpMode = (typeof PROPOSAL_WITHDRAW_MCP_MODES)[number];
+
+/** Staff UI withdraw policy for Agents Rules. */
+export const PROPOSAL_WITHDRAW_STAFF_MODES = [
+  "any_editor",
+  "proposer_only",
+  "steward_only",
+] as const;
+export type ProposalWithdrawStaffMode = (typeof PROPOSAL_WITHDRAW_STAFF_MODES)[number];
+
+/**
+ * Site proposal governance (Agents → Rules). Omitted block → defaults match prior hardcoded behavior.
+ */
+export interface ProposalSettings {
+  withdraw: {
+    mcp: ProposalWithdrawMcpMode;
+    staff: ProposalWithdrawStaffMode;
+  };
+  four_eyes: {
+    enabled: boolean;
+    staff_ui_exempt: boolean;
+  };
+  hold: {
+    stewards_only: boolean;
+  };
+  claim: {
+    staff_ui_takeover: boolean;
+  };
+}
+
+export const DEFAULT_PROPOSAL_SETTINGS: ProposalSettings = {
+  withdraw: {
+    mcp: "proposer_only",
+    staff: "any_editor",
+  },
+  four_eyes: {
+    enabled: true,
+    staff_ui_exempt: false,
+  },
+  hold: {
+    stewards_only: true,
+  },
+  claim: {
+    staff_ui_takeover: true,
+  },
+};
+
+function parseWithdrawMcpMode(
+  raw: unknown,
+  fallback: ProposalWithdrawMcpMode,
+): ProposalWithdrawMcpMode {
+  if (typeof raw !== "string") return fallback;
+  const v = raw.trim() as ProposalWithdrawMcpMode;
+  return (PROPOSAL_WITHDRAW_MCP_MODES as readonly string[]).includes(v) ? v : fallback;
+}
+
+function parseWithdrawStaffMode(
+  raw: unknown,
+  fallback: ProposalWithdrawStaffMode,
+): ProposalWithdrawStaffMode {
+  if (typeof raw !== "string") return fallback;
+  const v = raw.trim() as ProposalWithdrawStaffMode;
+  return (PROPOSAL_WITHDRAW_STAFF_MODES as readonly string[]).includes(v) ? v : fallback;
+}
+
+export function parseProposalSettings(
+  raw: unknown,
+  defaults: ProposalSettings = DEFAULT_PROPOSAL_SETTINGS,
+): ProposalSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      withdraw: { ...defaults.withdraw },
+      four_eyes: { ...defaults.four_eyes },
+      hold: { ...defaults.hold },
+      claim: { ...defaults.claim },
+    };
+  }
+  const o = raw as Record<string, unknown>;
+  const withdrawRaw =
+    o.withdraw && typeof o.withdraw === "object" && !Array.isArray(o.withdraw)
+      ? (o.withdraw as Record<string, unknown>)
+      : {};
+  const fourRaw =
+    o.four_eyes && typeof o.four_eyes === "object" && !Array.isArray(o.four_eyes)
+      ? (o.four_eyes as Record<string, unknown>)
+      : {};
+  const holdRaw =
+    o.hold && typeof o.hold === "object" && !Array.isArray(o.hold)
+      ? (o.hold as Record<string, unknown>)
+      : {};
+  const claimRaw =
+    o.claim && typeof o.claim === "object" && !Array.isArray(o.claim)
+      ? (o.claim as Record<string, unknown>)
+      : {};
+  return {
+    withdraw: {
+      mcp: parseWithdrawMcpMode(withdrawRaw.mcp, defaults.withdraw.mcp),
+      staff: parseWithdrawStaffMode(withdrawRaw.staff, defaults.withdraw.staff),
+    },
+    four_eyes: {
+      enabled:
+        typeof fourRaw.enabled === "boolean" ? fourRaw.enabled : defaults.four_eyes.enabled,
+      staff_ui_exempt:
+        typeof fourRaw.staff_ui_exempt === "boolean"
+          ? fourRaw.staff_ui_exempt
+          : defaults.four_eyes.staff_ui_exempt,
+    },
+    hold: {
+      stewards_only:
+        typeof holdRaw.stewards_only === "boolean"
+          ? holdRaw.stewards_only
+          : defaults.hold.stewards_only,
+    },
+    claim: {
+      staff_ui_takeover:
+        typeof claimRaw.staff_ui_takeover === "boolean"
+          ? claimRaw.staff_ui_takeover
+          : defaults.claim.staff_ui_takeover,
+    },
+  };
+}
+
+/** Strict parse for PUT body — throws on invalid enums. */
+export function parseProposalSettingsStrict(raw: unknown): ProposalSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Request body must be a proposals settings object");
+  }
+  const o = raw as Record<string, unknown>;
+  const withdrawRaw =
+    o.withdraw && typeof o.withdraw === "object" && !Array.isArray(o.withdraw)
+      ? (o.withdraw as Record<string, unknown>)
+      : null;
+  if (!withdrawRaw) throw new Error("proposals.withdraw is required");
+  const mcp = typeof withdrawRaw.mcp === "string" ? withdrawRaw.mcp.trim() : "";
+  const staff = typeof withdrawRaw.staff === "string" ? withdrawRaw.staff.trim() : "";
+  if (!(PROPOSAL_WITHDRAW_MCP_MODES as readonly string[]).includes(mcp)) {
+    throw new Error(
+      `withdraw.mcp must be one of: ${PROPOSAL_WITHDRAW_MCP_MODES.join(", ")}`,
+    );
+  }
+  if (!(PROPOSAL_WITHDRAW_STAFF_MODES as readonly string[]).includes(staff)) {
+    throw new Error(
+      `withdraw.staff must be one of: ${PROPOSAL_WITHDRAW_STAFF_MODES.join(", ")}`,
+    );
+  }
+  const fourRaw =
+    o.four_eyes && typeof o.four_eyes === "object" && !Array.isArray(o.four_eyes)
+      ? (o.four_eyes as Record<string, unknown>)
+      : null;
+  if (!fourRaw) throw new Error("proposals.four_eyes is required");
+  if (typeof fourRaw.enabled !== "boolean") {
+    throw new Error("four_eyes.enabled must be a boolean");
+  }
+  if (typeof fourRaw.staff_ui_exempt !== "boolean") {
+    throw new Error("four_eyes.staff_ui_exempt must be a boolean");
+  }
+  const holdRaw =
+    o.hold && typeof o.hold === "object" && !Array.isArray(o.hold)
+      ? (o.hold as Record<string, unknown>)
+      : null;
+  if (!holdRaw || typeof holdRaw.stewards_only !== "boolean") {
+    throw new Error("hold.stewards_only must be a boolean");
+  }
+  const claimRaw =
+    o.claim && typeof o.claim === "object" && !Array.isArray(o.claim)
+      ? (o.claim as Record<string, unknown>)
+      : null;
+  if (!claimRaw || typeof claimRaw.staff_ui_takeover !== "boolean") {
+    throw new Error("claim.staff_ui_takeover must be a boolean");
+  }
+  return {
+    withdraw: {
+      mcp: mcp as ProposalWithdrawMcpMode,
+      staff: staff as ProposalWithdrawStaffMode,
+    },
+    four_eyes: {
+      enabled: fourRaw.enabled,
+      staff_ui_exempt: fourRaw.staff_ui_exempt,
+    },
+    hold: { stewards_only: holdRaw.stewards_only },
+    claim: { staff_ui_takeover: claimRaw.staff_ui_takeover },
   };
 }
 
@@ -678,6 +910,7 @@ interface SiteSettings {
   search_console: SearchConsoleSettings;
   openrush: OpenRushSettings;
   funnel: FunnelSettings;
+  proposals: ProposalSettings;
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
@@ -772,6 +1005,12 @@ function loadSettings(contentRoot?: string): SiteSettings {
     search_console: { ...DEFAULT_SEARCH_CONSOLE_SETTINGS },
     openrush: { ...DEFAULT_OPENRUSH_SETTINGS },
     funnel: { ...DEFAULT_FUNNEL_SETTINGS },
+    proposals: {
+      withdraw: { ...DEFAULT_PROPOSAL_SETTINGS.withdraw },
+      four_eyes: { ...DEFAULT_PROPOSAL_SETTINGS.four_eyes },
+      hold: { ...DEFAULT_PROPOSAL_SETTINGS.hold },
+      claim: { ...DEFAULT_PROPOSAL_SETTINGS.claim },
+    },
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
     consent: { fallback: null },
@@ -915,6 +1154,9 @@ function loadSettings(contentRoot?: string): SiteSettings {
                 ...(typeof e.when_not_to_use === "string" && e.when_not_to_use.trim()
                   ? { when_not_to_use: e.when_not_to_use.trim() }
                   : {}),
+                ...(typeof e.counts_as_lead === "boolean"
+                  ? { counts_as_lead: e.counts_as_lead }
+                  : {}),
                 ...(typeof e.automations === "string" && e.automations ? { automations: e.automations } : {}),
                 ...(Array.isArray(e.tags) && e.tags.length > 0
                   ? { tags: e.tags.filter((t) => typeof t === "string") as string[] }
@@ -988,6 +1230,7 @@ function loadSettings(contentRoot?: string): SiteSettings {
       search_console: parseSearchConsoleSettings(parsed.search_console),
       openrush: parseOpenRushSettings(parsed.openrush),
       funnel: parseFunnelSettings(parsed.funnel),
+      proposals: parseProposalSettings(parsed.proposals),
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
@@ -1263,6 +1506,47 @@ export function getAuthConversionEventConfig(contentRoot?: string): AuthConversi
   };
 }
 
+/**
+ * True when every conversion event has an explicit counts_as_lead boolean
+ * (site has been configured / migrated). Empty catalog → false.
+ */
+export function isCountsAsLeadConfigured(
+  events: ConversionEventEntry[] | undefined | null,
+): boolean {
+  if (!Array.isArray(events) || events.length === 0) return false;
+  return events.every((e) => typeof e.counts_as_lead === "boolean");
+}
+
+/**
+ * Event names included in product journey lead conversion KPIs.
+ * Missing counts_as_lead → not a lead. Always unions the current canonical
+ * signup_event_name. Login is never forced on.
+ */
+export function getLeadConversionEventNames(contentRoot?: string): string[] {
+  const tracking = getTrackingSettings(contentRoot);
+  const auth = getAuthConversionEventConfig(contentRoot);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of tracking.conversion_events) {
+    if (!e?.name) continue;
+    const name = e.name.trim();
+    if (!name) continue;
+    let counts = e.counts_as_lead === true;
+    if (isSignupConversionName(name, auth)) counts = true;
+    if (isLoginConversionName(name, auth)) counts = false;
+    if (!counts) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  const signup = auth.signup_event_name.trim();
+  if (signup && !seen.has(signup)) {
+    seen.add(signup);
+    out.push(signup);
+  }
+  return out;
+}
+
 export function getRobotsSettings(contentRoot?: string): RobotsSettings {
   return loadSettings(contentRoot).robots;
 }
@@ -1277,6 +1561,10 @@ export function getOpenRushSettings(contentRoot?: string): OpenRushSettings {
 
 export function getFunnelSettings(contentRoot?: string): FunnelSettings {
   return loadSettings(contentRoot).funnel;
+}
+
+export function getProposalSettings(contentRoot?: string): ProposalSettings {
+  return loadSettings(contentRoot).proposals;
 }
 
 export function getEntryPreviewSettings(contentRoot?: string): EntryPreviewSettings {
@@ -1753,13 +2041,17 @@ export function updateOpenRushSettings(
     serp_top_n: merged.serp_top_n,
     location: merged.location,
     language: merged.language,
+    session_credit_limit: merged.session_credit_limit,
+    daily_credit_limit: merged.daily_credit_limit,
+    budget_warn_percent: merged.budget_warn_percent,
   };
 
   const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(
-    `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n}`,
+    `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n} ` +
+      `session=${merged.session_credit_limit} daily=${merged.daily_credit_limit} warn%=${merged.budget_warn_percent}`,
   );
   return merged;
 }
@@ -1790,6 +2082,66 @@ export function updateFunnelSettings(
   return merged;
 }
 
+/** Stable short hash of settings.yml bytes for optimistic concurrency on Rules saves. */
+export function getSettingsFileRevision(contentRoot?: string): string {
+  const settingsPath = getSettingsPath(contentRoot);
+  if (!fs.existsSync(settingsPath)) return "missing";
+  const buf = fs.readFileSync(settingsPath);
+  return createHash("sha256").update(buf).digest("hex").slice(0, 16);
+}
+
+export function updateProposalSettings(
+  input: ProposalSettings,
+  contentRoot?: string,
+  opts?: { expectedRevision?: string },
+): { settings: ProposalSettings; revision: string } {
+  const settingsPath = getSettingsPath(contentRoot);
+  const currentRevision = getSettingsFileRevision(contentRoot);
+  if (opts?.expectedRevision != null && opts.expectedRevision !== currentRevision) {
+    const err = new Error(
+      "Rules changed elsewhere — reload and try again",
+    ) as Error & { code?: string; revision?: string };
+    err.code = "conflict";
+    err.revision = currentRevision;
+    throw err;
+  }
+
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const merged = parseProposalSettingsStrict(input);
+  existing.proposals = {
+    withdraw: {
+      mcp: merged.withdraw.mcp,
+      staff: merged.withdraw.staff,
+    },
+    four_eyes: {
+      enabled: merged.four_eyes.enabled,
+      staff_ui_exempt: merged.four_eyes.staff_ui_exempt,
+    },
+    hold: {
+      stewards_only: merged.hold.stewards_only,
+    },
+    claim: {
+      staff_ui_takeover: merged.claim.staff_ui_takeover,
+    },
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  const revision = getSettingsFileRevision(contentRoot);
+  log.info(
+    `[Settings] Updated proposals withdraw.mcp=${merged.withdraw.mcp} withdraw.staff=${merged.withdraw.staff} four_eyes.enabled=${merged.four_eyes.enabled}`,
+  );
+  return { settings: merged, revision };
+}
+
 export function updateTrackingSettings(input: {
   conversion_events?: ConversionEventEntry[];
   webhook?: {
@@ -1811,6 +2163,21 @@ export function updateTrackingSettings(input: {
   }
 
   if (input.conversion_events !== undefined) {
+    const authForValidate = parseAuthConversionEventConfig(
+      {
+        signup_event_name: input.signup_event_name,
+        login_event_name: input.login_event_name,
+        signup_event_aliases: input.signup_event_aliases,
+        login_event_aliases: input.login_event_aliases,
+      },
+      (() => {
+        try {
+          return getAuthConversionEventConfig(contentRoot);
+        } catch {
+          return DEFAULT_AUTH_CONVERSION_EVENTS;
+        }
+      })(),
+    );
     for (const entry of input.conversion_events) {
       if (typeof entry.name !== "string" || !entry.name.trim()) {
         throw new Error("Each conversion event must have a non-empty name");
@@ -1820,6 +2187,12 @@ export function updateTrackingSettings(input: {
       }
       const intentErr = validateConversionEventIntent(entry);
       if (intentErr) throw new Error(intentErr);
+      const name = entry.name.trim();
+      if (!isAuthConversionName(name, authForValidate) && typeof entry.counts_as_lead !== "boolean") {
+        throw new Error(
+          `Conversion event "${name}" must set counts_as_lead to true or false`,
+        );
+      }
     }
   }
 
@@ -1846,11 +2219,41 @@ export function updateTrackingSettings(input: {
   const nextTracking: Record<string, unknown> = { ...currentTracking };
 
   if (input.conversion_events !== undefined) {
+    const authForSerialize = parseAuthConversionEventConfig(
+      nextTracking as Record<string, unknown>,
+      (() => {
+        try {
+          return getAuthConversionEventConfig(contentRoot);
+        } catch {
+          return DEFAULT_AUTH_CONVERSION_EVENTS;
+        }
+      })(),
+    );
+    // Prefer incoming auth rename fields if present in the same update
+    if (typeof input.signup_event_name === "string" && input.signup_event_name.trim()) {
+      authForSerialize.signup_event_name = input.signup_event_name.trim();
+    }
+    if (typeof input.login_event_name === "string" && input.login_event_name.trim()) {
+      authForSerialize.login_event_name = input.login_event_name.trim();
+    }
+    if (input.signup_event_aliases !== undefined) {
+      authForSerialize.signup_event_aliases = input.signup_event_aliases;
+    }
+    if (input.login_event_aliases !== undefined) {
+      authForSerialize.login_event_aliases = input.login_event_aliases;
+    }
+
     nextTracking.conversion_events = input.conversion_events.map((e) => {
-      const serialized: Record<string, unknown> = { name: e.name.trim() };
+      const name = e.name.trim();
+      let countsAsLead = e.counts_as_lead === true;
+      if (isSignupConversionName(name, authForSerialize)) countsAsLead = true;
+      if (isLoginConversionName(name, authForSerialize)) countsAsLead = false;
+
+      const serialized: Record<string, unknown> = { name };
       if (e.description?.trim()) serialized.description = e.description.trim();
       serialized.when_to_use = e.when_to_use!.trim();
       serialized.when_not_to_use = e.when_not_to_use!.trim();
+      serialized.counts_as_lead = countsAsLead;
       if (e.automations?.trim()) serialized.automations = e.automations.trim();
       if (e.tags && e.tags.length > 0) serialized.tags = e.tags;
       if (e.consent && Object.keys(e.consent).length > 0) serialized.consent = e.consent;

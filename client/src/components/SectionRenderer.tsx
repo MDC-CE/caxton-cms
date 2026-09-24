@@ -21,6 +21,7 @@ import {
   normalizeSectionVariant,
 } from "@/components/sectionRegistry";
 import { SectionRenderErrorBoundary } from "@/components/editing/SectionRenderErrorBoundary";
+import { isSchemaOrgSection } from "@shared/schema-org-sections";
 
 // Spacing presets in pixels (top, bottom)
 const SPACING_PRESETS: Record<string, { top: string; bottom: string }> = {
@@ -770,7 +771,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
     if (!contentType || !slug || !locale) return;
     const result = await sendEditOperation(contentType, slug, locale, [
       { action: "reorder_sections", from, to }
-    ], { variant, version, ...(isSharedTemplate && variant ? { layoutTarget: "type_template" } : {}) });
+    ], { variant, version, ...(isSharedTemplate ? { layoutTarget: "type_template" } : {}) });
     if (result.success) {
       toast({ title: from < to ? "Section moved down" : "Section moved up" });
       emitContentUpdated({ contentType, slug, locale });
@@ -1021,7 +1022,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
 
     const result = await sendEditOperation(contentType, slug, locale, [
       { action: "remove_item", path: "sections", index }
-    ], { variant, version, ...(isSharedTemplate && variant ? { layoutTarget: "type_template" } : {}) });
+    ], { variant, version, ...(isSharedTemplate ? { layoutTarget: "type_template" } : {}) });
 
     if (result.success) {
       // If the lookup failed entirely OR the member removal returned an error,
@@ -1529,6 +1530,11 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
           if (!renderedContent) return null;
           if (!isLocationVisible) return null;
 
+          // Leading schema_org are layout-inert on the public site (JSON-LD is SSR-only).
+          // Skip in-flow wrappers so they do not steal navbar top-cover or add padding gaps.
+          const isSchemaOrg = isSchemaOrgSection(rawSection);
+          if (isSchemaOrg && !isEditMode) return null;
+
           if (!isVisible && isEditMode) {
             return (
               <div key={index}>
@@ -1550,7 +1556,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
             );
           }
 
-          const isFirstVisibleSection = isVisible && !hasAppliedTopCover;
+          const isFirstVisibleSection = isVisible && !hasAppliedTopCover && !isSchemaOrg;
           if (isFirstVisibleSection) hasAppliedTopCover = true;
 
           const topCoverBackground = typeof wrapperStyles.background === "string" ? wrapperStyles.background : undefined;

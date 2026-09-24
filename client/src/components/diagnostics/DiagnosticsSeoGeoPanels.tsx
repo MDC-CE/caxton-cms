@@ -109,16 +109,54 @@ export function DiagnosticsSeoPanel() {
         >
           Overview
         </Link>
-        <Link
-          href="/private/diagnostics/seo/organic"
+        <div
           className={cn(
-            "inline-flex items-center justify-center rounded-sm px-2 py-1.5 text-xs font-medium",
-            organic ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+            "inline-flex items-center gap-0.5 rounded-sm px-2 py-1.5 text-xs font-medium",
+            organic ? "bg-primary text-primary-foreground" : "text-muted-foreground",
           )}
-          data-testid="seo-subnav-organic"
         >
-          Opportunities
-        </Link>
+          <Link
+            href="/private/diagnostics/seo/organic"
+            className={cn(
+              "inline-flex items-center justify-center",
+              !organic && "hover:text-foreground",
+            )}
+            data-testid="seo-subnav-organic"
+          >
+            Opportunities
+          </Link>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "h-5 w-5 shrink-0",
+                  organic
+                    ? "text-primary-foreground/80 hover:bg-primary-foreground/10 hover:text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                aria-label="About Opportunities data"
+                data-testid="seo-subnav-organic-info"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Info className="h-3 w-3" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              className="w-80 space-y-2 text-sm text-muted-foreground leading-relaxed"
+            >
+              <p>
+                Actions from Google Search performance, not total visits. Most cards use the last 7
+                complete days; cannibalization uses 28 days; decay compares 7 or 28 days to the
+                period before. Data lags about 2–3 days — use Search Console for yesterday and live
+                queries.
+              </p>
+            </PopoverContent>
+          </Popover>
+        </div>
       </nav>
       {organic ? <DiagnosticsOrganicPanel /> : <DiagnosticsSeoOverview />}
     </div>

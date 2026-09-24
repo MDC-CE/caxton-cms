@@ -74,12 +74,12 @@ export const SEO_FIELD_DEFS = [
       purpose: "Planning estimate of monthly search volume for seo.main_keyword — not GSC clicks.",
       constraints: [
         "Integer ≥ 0 or omit.",
-        "OpenRush on: use refresh_keyword_metrics (cache); do not invent YAML.",
+        "SEO research on: use get_or_refresh_seo_research action keyword_metrics (cache); do not invent YAML.",
       ],
     },
     system_hints: [
       "Research metrics for seo.main_keyword — not GSC clicks/impressions.",
-      "OpenRush on: use refresh_keyword_metrics (cache); YAML kw_* writes are rejected for agents.",
+      "SEO research on: use get_or_refresh_seo_research action keyword_metrics (cache); YAML kw_* writes are rejected for agents.",
       "OpenRush off: update_fields requires seo_research_source staff_provided|external:<name>. Do not invent.",
       "Integer only (volume ≥ 0). If any of main_keyword|kw_* is in a write, omitted metrics are forced to null.",
       ...SHARED_LOCALE_HINTS,
@@ -97,12 +97,12 @@ export const SEO_FIELD_DEFS = [
       purpose: "Planning estimate of keyword difficulty (0–100) for seo.main_keyword — not live rankings.",
       constraints: [
         "Integer 0–100 or omit.",
-        "OpenRush on: use refresh_keyword_metrics (cache); do not invent YAML.",
+        "SEO research on: use get_or_refresh_seo_research action keyword_metrics (cache); do not invent YAML.",
       ],
     },
     system_hints: [
       "Research metrics for seo.main_keyword — not GSC clicks/impressions.",
-      "OpenRush on: use refresh_keyword_metrics (cache); YAML kw_* writes are rejected for agents.",
+      "SEO research on: use get_or_refresh_seo_research action keyword_metrics (cache); YAML kw_* writes are rejected for agents.",
       "OpenRush off: update_fields requires seo_research_source staff_provided|external:<name>. Do not invent.",
       "Integer only (difficulty 0–100). If any of main_keyword|kw_* is in a write, omitted metrics are forced to null.",
       ...SHARED_LOCALE_HINTS,

@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useSearch } from "wouter";
 import { useInternalNav } from "@/hooks/useInternalNav";
 import { useSession } from "@/contexts/SessionContext";
-import { normalizeLocale, buildContentUrlFromPattern } from "@/lib/locale";
+import { normalizeLocale } from "@/lib/locale";
+import { buildSlugRenamePreviewUrls } from "@/components/DebugBubble/components/seoRedirectHijack";
 import { useContentTypes, getFolderFromType, useContentTypesRaw } from "@/hooks/useContentTypes";
 import { consensusSitemapContentType, contentTypeForSitemapFolder } from "@/lib/content-type-routes";
 import { isSharedLayoutType } from "@/lib/sharedLayoutEntry";
@@ -81,12 +82,20 @@ import { DeletePageModal } from "./components/DeletePageModal";
 import { CreateContentModal } from "./components/CreateContentModal";
 import { PageErrorsModal, PER_PAGE_VALIDATORS, type PageErrorsTab } from "./components/PageErrorsModal";
 import { fetchPageDiagnostics } from "@/lib/fetchPageDiagnostics";
+import {
+  autoRunLoopGuardKey,
+  cacheValidationStamp,
+  staleReason,
+} from "./validationFreshness";
 import { SeoModal } from "./components/SeoModal";
 import { SiteManagerModal } from "./components/SiteManagerModal";
 import { SwitchSiteModal } from "./components/SwitchSiteModal";
 import { McpRequiredForAiModal } from "@/components/mcp/McpRequiredForAiModal";
 import type { McpSetupTabId } from "@/components/mcp/mcpUrlHelpers";
 import type { SolveWithAiAgentId } from "@/components/DebugBubble/solveWithAiPrompt";
+
+const DIRTY_POLL_INTERVAL_MS = 2_000;
+const DIRTY_POLL_TIMEOUT_MS = 90_000;
 
 const componentIconMap: Record<string, typeof Blocks> = {
   hero: Rocket,
@@ -338,6 +347,7 @@ export function DebugBubble() {
     schemaOrg: Record<string, unknown>[];
     title: string;
     slug?: string;
+    livePath?: string;
   } | null>(null);
   const [seoMeta, setSeoMeta] = useState<SeoMeta>({
     page_title: "",
@@ -421,9 +431,9 @@ export function DebugBubble() {
   // Validation cache summary for sitemap badges
   const [validationSummary, setValidationSummary] = useState<Record<string, { errorCount: number; warningCount: number }>>({});
 
-  // URLs already auto-validated this session — ensures the lazy per-page
-  // validation run fires at most once per URL even if the effect re-runs.
-  const autoValidatedUrlsRef = useRef<Set<string>>(new Set());
+  // Failed auto run-page attempts (url@variant::stamp) — avoid immediate retry
+  // loops when run-page does not advance the cache stamp. Dirty / new stamps bypass.
+  const autoRunLoopGuardRef = useRef<Set<string>>(new Set());
 
   // Detect current content info from URL
   const contentInfo = detectContentInfo(pathname, contentTypesMap, homePageSettings ?? null);
@@ -545,16 +555,53 @@ export function DebugBubble() {
       ...(token ? { Authorization: `Token ${token}` } : {}),
     };
 
-    // Lazy validation: if this page has never been validated (no cache entry
-    // at all — a clean run still writes an entry with empty arrays), run the
-    // per-page validators once so issues like missing meta surface on first
-    // visit without a manual "Run validation" click.
-    const autoValidateIfNeverRun = async (data: PageDiagnostics): Promise<PageDiagnostics> => {
+    // Auto validation freshness: missing/expired → run-page; dirty → poll until
+    // background on-save clears dirty (do not compete with Sidequest). Validate
+    // button always forces run-page separately.
+    let cancelled = false;
+
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, ms);
+        // If effect cleans up, still resolve so awaits exit promptly after cancelled check.
+        void t;
+      });
+
+    const pollUntilDirtyClears = async (
+      initial: PageDiagnostics,
+    ): Promise<PageDiagnostics> => {
+      let current = initial;
+      const deadline = Date.now() + DIRTY_POLL_TIMEOUT_MS;
+      while (!cancelled && current.dirty === true && Date.now() < deadline) {
+        await sleep(DIRTY_POLL_INTERVAL_MS);
+        if (cancelled) break;
+        try {
+          current = await fetchPageDiagnostics(url, variant);
+          if (!cancelled) setPageDiagnostics(current);
+        } catch {
+          break;
+        }
+      }
+      return current;
+    };
+
+    const autoValidateIfStale = async (data: PageDiagnostics): Promise<PageDiagnostics> => {
       if (data.validationSkippedReason === "unpublished_variant") return data;
-      if (data.cached || autoValidatedUrlsRef.current.has(url + (variant ? `@${variant}` : ""))) {
+
+      const reason = staleReason({ cached: data.cached, dirty: data.dirty });
+      if (!reason) return data;
+
+      if (reason === "dirty") {
+        return pollUntilDirtyClears(data);
+      }
+
+      // missing | expired → run-page (unless loop guard for this stamp)
+      const stampBefore = cacheValidationStamp(data.cached);
+      const guardKey = autoRunLoopGuardKey(url, variant, stampBefore);
+      if (autoRunLoopGuardRef.current.has(guardKey)) {
         return data;
       }
-      autoValidatedUrlsRef.current.add(url + (variant ? `@${variant}` : ""));
+
       try {
         await fetch("/api/validation/run-page", {
           method: "POST",
@@ -565,9 +612,20 @@ export function DebugBubble() {
             ...(variant ? { variant } : {}),
           }),
         });
-        return await fetchPageDiagnostics(url, variant);
-      } catch {}
-      return data;
+        if (cancelled) return data;
+        const next = await fetchPageDiagnostics(url, variant);
+        const stampAfter = cacheValidationStamp(next.cached);
+        if (stampAfter === stampBefore) {
+          autoRunLoopGuardRef.current.add(guardKey);
+        } else if (stampAfter) {
+          // Stamp advanced — clear any prior failed guard for the old stamp
+          autoRunLoopGuardRef.current.delete(guardKey);
+        }
+        return next;
+      } catch {
+        autoRunLoopGuardRef.current.add(guardKey);
+        return data;
+      }
     };
 
     setPageDiagnosticsLoading(true);
@@ -576,7 +634,12 @@ export function DebugBubble() {
     setPageErrorsModalOpen(false);
     fetchPageDiagnostics(url, variant)
       .then(async (data) => {
-        const finalData = await autoValidateIfNeverRun(data);
+        if (cancelled) return;
+        // Show initial diagnostics immediately (incl. dirty/Stale badge) while settling
+        setPageDiagnostics(data);
+        setPageDiagnosticsLoading(false);
+        const finalData = await autoValidateIfStale(data);
+        if (cancelled) return;
         setPageDiagnostics(finalData);
         // Auto-open from store issues (canonical truth) — not a parallel live list
         const storeErrors = finalData.issues?.filter((i) => i.type === "error").length ?? 0;
@@ -588,9 +651,14 @@ export function DebugBubble() {
         }
       })
       .catch((err) => {
+        if (cancelled) return;
         setPageDiagnosticsError(err instanceof Error ? err.message : "Failed to load diagnostics");
-      })
-      .finally(() => setPageDiagnosticsLoading(false));
+        setPageDiagnosticsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [pathname, isDebugMode, isValidated, contentInfo.type, contentInfo.slug, isPreviewPath]);
 
   const pageErrorCount = !pageDiagnostics
@@ -1244,7 +1312,11 @@ export function DebugBubble() {
       const result = await res.json();
       toast({
         title: "Slug renamed",
-        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}`,
+        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}${
+          result.clusterRewireQueued
+            ? ". Cluster membership for pages that pointed at the old URL updates in the background."
+            : ""
+        }`,
       });
       setSeoModalOpen(false);
       setNewSlugValue("");
@@ -1273,8 +1345,16 @@ export function DebugBubble() {
     const apiType = contentInfo.type;
     const urlLocale = getEffectiveLocale() || "en";
     const pattern = contentTypesMap?.[apiType]?.url_pattern;
-    setSlugOldUrl(buildContentUrlFromPattern(pattern, currentLocaleSlug, urlLocale));
-    setSlugNewUrl(buildContentUrlFromPattern(pattern, newSlugValue, urlLocale));
+    const { oldUrl, newUrl } = buildSlugRenamePreviewUrls({
+      seoData,
+      canonicalUrl: seoMeta.canonical_url,
+      oldSlug: currentLocaleSlug,
+      newSlug: newSlugValue,
+      urlPattern: pattern,
+      locale: urlLocale,
+    });
+    setSlugOldUrl(oldUrl);
+    setSlugNewUrl(newUrl);
     setSlugRedirectPrompt(true);
   };
 

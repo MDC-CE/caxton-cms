@@ -5,7 +5,8 @@ import { useToast } from "@/hooks/use-toast";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { useSeoModalSaves } from "@/hooks/useSeoModalSaves";
 import { useContentTypes } from "@/hooks/useContentTypes";
-import { normalizeLocale, buildContentUrlFromPattern } from "@/lib/locale";
+import { normalizeLocale } from "@/lib/locale";
+import { buildSlugRenamePreviewUrls } from "@/components/DebugBubble/components/seoRedirectHijack";
 import { computeDirtyMetaKeys, liveSnippetClearBlocked } from "@/lib/buildMetaSaveOperations";
 import type { SeoModalSaveArea, SeoModalSavedDetail } from "@/components/editing/seoModalSaved";
 import { buildSeoModalSavedDetail } from "@/components/editing/seoModalSaved";
@@ -67,6 +68,7 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
     schemaOrgDocuments?: Array<{ schema: Record<string, unknown>; source: string }>;
     title: string;
     slug?: string;
+    livePath?: string;
   } | null>(null);
   const [seoMeta, setSeoMeta] = useState<SeoMeta>(EMPTY_SEO_META);
   const [seoLocations, setSeoLocations] = useState<string[]>([]);
@@ -246,7 +248,11 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
       const result = await res.json();
       toast({
         title: "Slug renamed",
-        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}`,
+        description: `${result.oldSlug} → ${result.newSlug}${createRedirect ? " (redirect created)" : ""}${
+          result.clusterRewireQueued
+            ? ". Cluster membership for pages that pointed at the old URL updates in the background."
+            : ""
+        }`,
       });
       onOpenChange(false);
       emitSaved(["slug"]);
@@ -264,8 +270,16 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
   const handleSlugRenameClick = () => {
     if (!target?.contentType || !target?.slug || slugCheckStatus !== "available") return;
     const pattern = contentTypesMap?.[target.contentType]?.url_pattern;
-    setSlugOldUrl(buildContentUrlFromPattern(pattern, currentLocaleSlug, locale));
-    setSlugNewUrl(buildContentUrlFromPattern(pattern, newSlugValue, locale));
+    const { oldUrl, newUrl } = buildSlugRenamePreviewUrls({
+      seoData,
+      canonicalUrl: seoMeta.canonical_url,
+      oldSlug: currentLocaleSlug,
+      newSlug: newSlugValue,
+      urlPattern: pattern,
+      locale,
+    });
+    setSlugOldUrl(oldUrl);
+    setSlugNewUrl(newUrl);
     setSlugRedirectPrompt(true);
   };
 

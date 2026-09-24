@@ -40,8 +40,8 @@ const CLUSTER_GAP_SUGGESTION =
   "Prefer joining an existing hub (seo.pillar_path). List hubs first. Become a hub (seo.is_pillar: true) or opt out (seo.pillar_path: null) only when that is the real intent — not just to clear this warning.";
 
 const KEYWORD_RESEARCH_SUGGESTION =
-  "Prefer OpenRush refresh (MCP refresh_keyword_metrics or staff cluster card) — fills cache, does not invent YAML. " +
-  "When OpenRush is unavailable: write both seo.kw_monthly_volume and seo.kw_difficulty only with seo_research_source staff_provided|external:<name>. " +
+  "Prefer get_or_refresh_seo_research action keyword_metrics (or staff SEO refresh) — fills cache, does not invent YAML. " +
+  "When SEO research is unavailable: write both seo.kw_monthly_volume and seo.kw_difficulty only with seo_research_source staff_provided|external:<name>. " +
   "If you have no reliable source, do not claim / release blocked — do not invent metrics.";
 
 export { KEYWORD_RESEARCH_SUGGESTION };
@@ -49,19 +49,19 @@ export { KEYWORD_RESEARCH_SUGGESTION };
 const KEYWORD_RESEARCH_NEXT_ACTIONS: IssueCodeDefinition["next_actions"] = [
   {
     tool: "get_entry_seo",
-    reason: "Inspect main_keyword and keyword_metrics (OpenRush cache vs YAML).",
+    reason: "Inspect main_keyword and keyword_metrics (research cache vs YAML).",
     priority: "recommended",
   },
   {
-    tool: "refresh_keyword_metrics",
+    tool: "get_or_refresh_seo_research",
     reason:
-      "When OpenRush is on: refresh cache for the existing main_keyword (no YAML kw_* write).",
+      "When SEO research is on: refresh cache for the existing main_keyword (action keyword_metrics; no YAML kw_* write).",
     priority: "recommended",
   },
   {
     tool: "update_fields",
     reason:
-      "Only when OpenRush is off: set both kw_* with seo_research_source staff_provided|external:<name>. Rejected when OpenRush is on.",
+      "Only when SEO research is off: set both kw_* with seo_research_source staff_provided|external:<name>. Rejected when research is on.",
     priority: "optional",
   },
   {
@@ -85,6 +85,36 @@ export const SEO_CLUSTER_ISSUE_CODES: Record<string, IssueCodeDefinition> = {
   },
   INVALID_PILLAR: {
     title: "Invalid pillar path",
+  },
+  STALE_PILLAR_PATH: {
+    title: "Stale cluster hub URL",
+    summary:
+      "This page’s seo.pillar_path still names an old hub URL that only reaches the live hub via redirect. " +
+      "Cluster membership and SEO inventory use the exact path — update pillar_path to the final hub URL.",
+    suggestion:
+      "Set seo.pillar_path to the live hub URL after redirects (suggested in the issue message). Do not leave the pre-rename URL even when it 301s.",
+    next_actions: [
+      {
+        tool: "get_entry_seo",
+        reason: "Confirm current pillar_path vs the suggested hub URL.",
+        priority: "recommended",
+      },
+      {
+        tool: "update_fields",
+        reason: "Write seo.pillar_path to the final hub URL from the issue suggestion.",
+        priority: "recommended",
+      },
+      {
+        tool: "list_seo_cluster_entries",
+        reason: "Confirm the page rejoins the cluster after the write.",
+        priority: "optional",
+      },
+      {
+        tool: "run_entry_diagnostics",
+        reason: "Re-run SEO diagnostics so STALE_PILLAR_PATH can clear.",
+        priority: "optional",
+      },
+    ],
   },
   DUPLICATE_PILLAR: {
     title: "Duplicate hub path",

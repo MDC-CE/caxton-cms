@@ -368,19 +368,38 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
       ] as const)
     : [];
 
+  const showTitleBlock =
+    !!badge ||
+    !!(eventState === "live" && liveNowLabel) ||
+    !!titleHtml ||
+    !!dateLine ||
+    !!durationLabel;
+  const showHostSection = !!(hostHeading || hostName || hostBio);
+  const showAside =
+    showCountdownStrip || hasFormCard || hasSeatsInfo || showCalendarCard;
+
   return (
     <section className="relative" data-testid="section-hero-workshop">
       {/*
-        Force lg two-column tracks via CSS (same as Tailwind
-        lg:grid-cols-[minmax(0,1fr)_minmax(0,23rem)] + lg:gap-x-16).
-        Arbitrary grid-cols utilities have failed to apply in the browser
-        even when the viewport is ≥1024px — same pattern as SplitCardsDefault.
+        Two columns from md (768px). Arbitrary Tailwind grid-cols are unreliable
+        here — same forced-CSS pattern as SplitCardsDefault.
+        Mobile order: title → aside (form/seats/calendar) → description → host.
       */}
       <style>{`
-        @media (min-width: 1024px) {
+        @media (min-width: 768px) {
           [data-workshop-cols] {
             grid-template-columns: minmax(0, 1fr) minmax(0, 23rem) !important;
             column-gap: 4rem !important;
+            align-items: start !important;
+          }
+          [data-workshop-aside] {
+            grid-column: 2 !important;
+            grid-row: 1 / span 3 !important;
+          }
+          [data-workshop-title],
+          [data-workshop-desc],
+          [data-workshop-host] {
+            grid-column: 1 !important;
           }
         }
         @keyframes workshop-live-pulse {
@@ -426,181 +445,90 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
         }
       `}</style>
       <div
-        className="relative z-10 grid grid-cols-1 lg:items-start gap-y-8"
+        className="relative z-10 grid grid-cols-1 gap-y-8"
         data-workshop-cols
       >
-        <div className="min-w-0 space-y-4">
-          {(badge || (eventState === "live" && liveNowLabel)) && (
-            <div
-              className="flex flex-wrap items-center gap-2"
-              data-testid="workshop-badge-row"
-            >
-              {badge ? (
-                <span
-                  className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
-                  data-testid="text-workshop-badge"
-                >
-                  {badge}
-                </span>
-              ) : null}
-              {eventState === "live" && liveNowLabel ? (
-                <span
-                  className="inline-flex items-center gap-2.5 rounded-[18px] bg-[#FFBEBE] text-[#CD0000] px-2.5 py-1 text-xs font-bold leading-none"
-                  data-testid="text-workshop-live-label"
-                >
+        {showTitleBlock ? (
+          <div className="order-1 min-w-0 space-y-4 md:order-none" data-workshop-title>
+            {(badge || (eventState === "live" && liveNowLabel)) && (
+              <div
+                className="flex flex-wrap items-center gap-2"
+                data-testid="workshop-badge-row"
+              >
+                {badge ? (
                   <span
-                    className="workshop-live-dot w-2 h-2 rounded-full shrink-0"
-                    aria-hidden
-                  />
-                  {liveNowLabel}
-                </span>
-              ) : null}
-            </div>
-          )}
+                    className="inline-block bg-primary text-white px-3 py-1 rounded-full text-xs font-bold tracking-wide"
+                    data-testid="text-workshop-badge"
+                  >
+                    {badge}
+                  </span>
+                ) : null}
+                {eventState === "live" && liveNowLabel ? (
+                  <span
+                    className="inline-flex items-center gap-2.5 rounded-[18px] bg-[#FFBEBE] text-[#CD0000] px-2.5 py-1 text-xs font-bold leading-none"
+                    data-testid="text-workshop-live-label"
+                  >
+                    <span
+                      className="workshop-live-dot w-2 h-2 rounded-full shrink-0"
+                      aria-hidden
+                    />
+                    {liveNowLabel}
+                  </span>
+                ) : null}
+              </div>
+            )}
 
-          {titleHtml && (
-            <h1
-              className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
-              data-testid="text-workshop-title"
-            >
+            {titleHtml && (
+              <h1
+                className="font-inter font-extrabold text-foreground [&_em]:text-primary [&_em]:italic"
+                data-testid="text-workshop-title"
+              >
+                <div
+                  className="block md:hidden text-[2.25rem] leading-none"
+                  dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
+                />
+                <div
+                  className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
+                  dangerouslySetInnerHTML={{ __html: titleHtml }}
+                />
+              </h1>
+            )}
+
+            {(dateLine || durationLabel) && (
               <div
-                className="block md:hidden text-[2.25rem] leading-none"
-                dangerouslySetInnerHTML={{ __html: stripTitleForMobile(titleHtml) }}
-              />
-              <div
-                className="hidden md:block text-[2.75rem] lg:text-[3.5rem] leading-[1.03]"
-                dangerouslySetInnerHTML={{ __html: titleHtml }}
-              />
-            </h1>
-          )}
-
-          {(dateLine || durationLabel) && (
-            <div
-              className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
-              data-testid="text-workshop-datetime"
-            >
-              {dateLine && (
-                <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
-                  {DateIcon && (
-                    <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
-                  )}
-                  <span>{dateLine}</span>
-                </div>
-              )}
-              {durationLabel && (
-                <span
-                  className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
-                  data-testid="text-workshop-duration"
-                >
-                  {DurationIcon && (
-                    <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
-                  )}
-                  {durationLabel}
-                  {durationSuffix ? ` ${durationSuffix}` : ""}
-                </span>
-              )}
-            </div>
-          )}
-
-          {paragraphs.length > 0 && (
-            <div className="space-y-3 text-[15px] leading-relaxed text-foreground/70 pt-4" data-testid="text-workshop-description">
-              {paragraphs.map((p, i) => (
-                <p key={i} className="whitespace-pre-line">
-                  {p}
-                </p>
-              ))}
-            </div>
-          )}
-
-          {(hostHeading || hostName || hostBio) && (
-            <div className="space-y-3" data-testid="workshop-host-section">
-              {hostHeading && (
-                <p
-                  className="font-inter text-lg sm:text-2xl mt-8 font-semibold tracking-tight text-foreground"
-                  data-testid="text-workshop-host-heading"
-                >
-                  {hostHeading}
-                </p>
-              )}
-              {(hostName || hostBio || hostAvatarUrl || hostSocials.length > 0) && (
-                <Card
-                  className="w-full rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
-                  data-testid="workshop-host"
-                >
-                  <div className="flex gap-4 items-center p-5">
-                    {hostAvatarUrl ? (
-                      <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full overflow-hidden shrink-0 bg-muted">
-                        <UniversalImage
-                          id={hostAvatarUrl}
-                          alt={hostName || "Host"}
-                          className="w-full h-full object-cover"
-                          fieldContext={{ fieldPath: "host.avatar_url" }}
-                        />
-                      </div>
-                    ) : hostName ? (
-                      <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 bg-muted flex items-center justify-center text-2xl font-bold text-muted-foreground">
-                        {hostName.charAt(0)}
-                      </div>
-                    ) : null}
-                    <div className="min-w-0 flex-1">
-                      {hostName && (
-                        <p
-                          className="font-inter text-[19px] sm:text-[21.5px] font-semibold tracking-tight text-foreground"
-                          data-testid="text-workshop-host-name"
-                        >
-                          {hostName}
-                        </p>
-                      )}
-                      {hostBio && (
-                        <p
-                          className="text-xs sm:text-[14px] text-muted-foreground mt-0.2 leading-snug whitespace-pre-line"
-                          data-testid="text-workshop-host-bio"
-                        >
-                          {hostBio}
-                        </p>
-                      )}
-                      {hostSocials.length > 0 && (
-                        <div
-                          className="flex flex-wrap items-center gap-2.5 mt-2"
-                          data-testid="workshop-host-socials"
-                        >
-                          {hostSocials.map((social, i) => {
-                            const SocialIcon = social.icon
-                              ? getIcon(social.icon)
-                              : null;
-                            const label = social.name || social.url;
-                            return (
-                              <a
-                                key={`${social.url}-${i}`}
-                                href={social.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                title={label}
-                                aria-label={label}
-                                className="inline-flex text-primary hover:opacity-80 transition-opacity"
-                                data-testid={`link-workshop-host-social-${social.name || i}`}
-                              >
-                                {SocialIcon ? (
-                                  <SocialIcon className="h-5 w-5" aria-hidden />
-                                ) : (
-                                  <span className="text-xs font-semibold underline">
-                                    {label}
-                                  </span>
-                                )}
-                              </a>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
+                className="flex flex-col items-start gap-2.5 text-base text-muted-foreground font-medium"
+                data-testid="text-workshop-datetime"
+              >
+                {dateLine && (
+                  <div className="inline-flex items-center gap-2" data-testid="text-workshop-date">
+                    {DateIcon && (
+                      <DateIcon className="w-5 h-5 shrink-0 text-primary" aria-hidden />
+                    )}
+                    <span>{dateLine}</span>
                   </div>
-                </Card>
-              )}
-            </div>
-          )}
-        </div>
+                )}
+                {durationLabel && (
+                  <span
+                    className="inline-flex items-center gap-1.5 bg-primary/5 text-foreground px-3.5 py-1 rounded-full text-sm font-medium tracking-wide"
+                    data-testid="text-workshop-duration"
+                  >
+                    {DurationIcon && (
+                      <DurationIcon className="w-4 h-4 shrink-0 text-primary" aria-hidden />
+                    )}
+                    {durationLabel}
+                    {durationSuffix ? ` ${durationSuffix}` : ""}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        ) : null}
 
-        <div className="flex flex-col gap-4 w-full min-w-0 h-fit lg:self-start shrink-0">
+        {showAside ? (
+          <div
+            className="order-2 flex flex-col gap-4 w-full min-w-0 h-fit shrink-0 md:order-none md:self-start"
+            data-workshop-aside
+          >
           {(showCountdownStrip || hasFormCard) ? (
             <div
               className={`overflow-hidden rounded-[16px] bg-card ${
@@ -917,7 +845,113 @@ export default function HeroWorkshop({ data }: HeroWorkshopProps) {
               </div>
             </Card>
           ) : null}
-        </div>
+          </div>
+        ) : null}
+
+        {paragraphs.length > 0 ? (
+          <div
+            className="order-3 min-w-0 space-y-3 text-[15px] leading-relaxed text-foreground/70 md:order-none md:pt-0"
+            data-workshop-desc
+            data-testid="text-workshop-description"
+          >
+            {paragraphs.map((p, i) => (
+              <p key={i} className="whitespace-pre-line">
+                {p}
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        {showHostSection ? (
+          <div
+            className="order-4 min-w-0 space-y-3 md:order-none"
+            data-workshop-host
+            data-testid="workshop-host-section"
+          >
+            {hostHeading && (
+              <p
+                className="font-inter text-lg sm:text-2xl mt-2 md:mt-8 font-semibold tracking-tight text-foreground"
+                data-testid="text-workshop-host-heading"
+              >
+                {hostHeading}
+              </p>
+            )}
+            {(hostName || hostBio || hostAvatarUrl || hostSocials.length > 0) && (
+              <Card
+                className="w-full rounded-[16px] overflow-hidden bg-card shadow-lg shadow-black/5 border border-border"
+                data-testid="workshop-host"
+              >
+                <div className="flex gap-4 items-center p-5">
+                  {hostAvatarUrl ? (
+                    <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full overflow-hidden shrink-0 bg-muted">
+                      <UniversalImage
+                        id={hostAvatarUrl}
+                        alt={hostName || "Host"}
+                        className="w-full h-full object-cover"
+                        fieldContext={{ fieldPath: "host.avatar_url" }}
+                      />
+                    </div>
+                  ) : hostName ? (
+                    <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 bg-muted flex items-center justify-center text-2xl font-bold text-muted-foreground">
+                      {hostName.charAt(0)}
+                    </div>
+                  ) : null}
+                  <div className="min-w-0 flex-1">
+                    {hostName && (
+                      <p
+                        className="font-inter text-[19px] sm:text-[21.5px] font-semibold tracking-tight text-foreground"
+                        data-testid="text-workshop-host-name"
+                      >
+                        {hostName}
+                      </p>
+                    )}
+                    {hostBio && (
+                      <p
+                        className="text-xs sm:text-[14px] text-muted-foreground mt-0.2 leading-snug whitespace-pre-line"
+                        data-testid="text-workshop-host-bio"
+                      >
+                        {hostBio}
+                      </p>
+                    )}
+                    {hostSocials.length > 0 && (
+                      <div
+                        className="flex flex-wrap items-center gap-2.5 mt-2"
+                        data-testid="workshop-host-socials"
+                      >
+                        {hostSocials.map((social, i) => {
+                          const SocialIcon = social.icon
+                            ? getIcon(social.icon)
+                            : null;
+                          const label = social.name || social.url;
+                          return (
+                            <a
+                              key={`${social.url}-${i}`}
+                              href={social.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={label}
+                              aria-label={label}
+                              className="inline-flex text-primary hover:opacity-80 transition-opacity"
+                              data-testid={`link-workshop-host-social-${social.name || i}`}
+                            >
+                              {SocialIcon ? (
+                                <SocialIcon className="h-5 w-5" aria-hidden />
+                              ) : (
+                                <span className="text-xs font-semibold underline">
+                                  {label}
+                                </span>
+                              )}
+                            </a>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            )}
+          </div>
+        ) : null}
       </div>
     </section>
 

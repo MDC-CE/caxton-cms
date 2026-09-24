@@ -552,6 +552,266 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds proposal_kpi_daily when upgrading from v18-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v18-kpi-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        site TEXT NOT NULL,
+        resource_json TEXT NOT NULL DEFAULT '{}',
+        cause TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        triggered_by_event_id INTEGER,
+        triggered_by_event_ids_json TEXT,
+        attribution_json TEXT NOT NULL DEFAULT '[]',
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        agent_session_id TEXT
+      );
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 18);
+      CREATE TABLE pipeline_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+      CREATE TABLE leases (
+        resource TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        token INTEGER NOT NULL DEFAULT 1,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE event_webhook_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        hook_id TEXT NOT NULL,
+        event_ids_json TEXT NOT NULL DEFAULT '[]',
+        url_host TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        http_status INTEGER,
+        error TEXT,
+        duration_ms INTEGER,
+        batch_size INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'live',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_triggered_by ON events(triggered_by_event_id);
+      CREATE INDEX IF NOT EXISTS idx_events_agent_session
+        ON events(site, agent_session_id, created_at);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposal_kpi_daily'").get(),
+    ).toEqual({ name: "proposal_kpi_daily" });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('proposal_kpi_daily') WHERE name = 'count'").get(),
+    ).toBeDefined();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds idea follow-through columns when upgrading from v19-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v19-followthrough-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        site TEXT NOT NULL,
+        resource_json TEXT NOT NULL DEFAULT '{}',
+        cause TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        triggered_by_event_id INTEGER,
+        triggered_by_event_ids_json TEXT,
+        attribution_json TEXT NOT NULL DEFAULT '[]',
+        published INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        agent_session_id TEXT
+      );
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 19);
+      CREATE TABLE pipeline_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+      CREATE TABLE leases (
+        resource TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        token INTEGER NOT NULL DEFAULT 1,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        category TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        rationale TEXT,
+        documentation_json TEXT NOT NULL DEFAULT '{}',
+        related_issue_ids_json TEXT NOT NULL DEFAULT '[]',
+        proposer_username TEXT NOT NULL,
+        proposer_actor_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        claim_json TEXT,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        search_text TEXT NOT NULL DEFAULT '',
+        created_agent_session_id TEXT,
+        promote_on_apply INTEGER NOT NULL DEFAULT 0,
+        no_auto_retry INTEGER NOT NULL DEFAULT 0,
+        close_reason TEXT,
+        close_note TEXT,
+        closed_by TEXT,
+        closed_at INTEGER,
+        related_entries_json TEXT NOT NULL DEFAULT '[]',
+        review_context_snapshot_json TEXT,
+        supersedes_proposal_id TEXT,
+        replaced_by_proposal_id TEXT,
+        escalated INTEGER NOT NULL DEFAULT 0,
+        escalated_at INTEGER,
+        escalated_by TEXT,
+        escalated_note TEXT,
+        decision_debug_json TEXT,
+        review_situations_json TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE proposal_kpi_daily (
+        site TEXT NOT NULL,
+        day TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (site, day, kind, status)
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_triggered_by ON events(triggered_by_event_id);
+      CREATE INDEX IF NOT EXISTS idx_events_agent_session
+        ON events(site, agent_session_id, created_at);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'accepted_entry_json'").get(),
+    ).toBeDefined();
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'implements_proposal_id'").get(),
+    ).toBeDefined();
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_content_proposals_implements'").get(),
+    ).toEqual({ name: "idx_content_proposals_implements" });
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds blocker actor columns when upgrading from v20-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v20-blocker-actor-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 20);
+      CREATE TABLE content_proposal_blockers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'blocker',
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        author TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        resolve_note TEXT,
+        agent_session_id TEXT
+      );
+      INSERT INTO content_proposal_blockers (
+        proposal_id, kind, body, status, author, created_at
+      ) VALUES ('prop-1', 'blocker', 'Needs a clearer CTA', 'open', 'alesanchezr', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposal_blockers') WHERE name = 'author_actor_json'").get(),
+    ).toBeDefined();
+    expect(
+      db
+        .prepare(
+          "SELECT 1 FROM pragma_table_info('content_proposal_blockers') WHERE name = 'resolved_by_actor_json'",
+        )
+        .get(),
+    ).toBeDefined();
+    const row = db
+      .prepare(
+        `SELECT author, author_actor_json, resolved_by_actor_json FROM content_proposal_blockers WHERE proposal_id = 'prop-1'`,
+      )
+      .get() as { author: string; author_actor_json: string | null; resolved_by_actor_json: string | null };
+    expect(row.author).toBe("alesanchezr");
+    expect(row.author_actor_json).toBeNull();
+    expect(row.resolved_by_actor_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds attention stamp columns when upgrading from v21-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v21-attention-stamps-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 21);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at)
+      VALUES ('prop-1', 'site_test', 'open', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'author_content_at'").get(),
+    ).toBeDefined();
+    expect(
+      db.prepare("SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = 'reviewer_action_at'").get(),
+    ).toBeDefined();
+    const row = db
+      .prepare(`SELECT author_content_at, reviewer_action_at FROM content_proposals WHERE id = 'prop-1'`)
+      .get() as { author_content_at: number | null; reviewer_action_at: number | null };
+    expect(row.author_content_at).toBeNull();
+    expect(row.reviewer_action_at).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

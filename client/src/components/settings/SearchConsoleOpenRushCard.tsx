@@ -24,6 +24,9 @@ type OpenRushConfigResponse = {
     serp_top_n: number;
     location: string;
     language: string;
+    session_credit_limit: number;
+    daily_credit_limit: number;
+    budget_warn_percent: number;
   };
 };
 
@@ -33,6 +36,9 @@ export function SearchConsoleOpenRushCard({ canEdit }: { canEdit: boolean }) {
   const [serpTopN, setSerpTopN] = useState(20);
   const [location, setLocation] = useState("United States");
   const [language, setLanguage] = useState("English");
+  const [sessionLimit, setSessionLimit] = useState(50);
+  const [dailyLimit, setDailyLimit] = useState(200);
+  const [warnPercent, setWarnPercent] = useState(80);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -53,6 +59,9 @@ export function SearchConsoleOpenRushCard({ canEdit }: { canEdit: boolean }) {
     setSerpTopN(data.settings.serp_top_n || 20);
     setLocation(data.settings.location || "United States");
     setLanguage(data.settings.language || "English");
+    setSessionLimit(data.settings.session_credit_limit ?? 50);
+    setDailyLimit(data.settings.daily_credit_limit ?? 200);
+    setWarnPercent(data.settings.budget_warn_percent ?? 80);
   }, [data, dirty]);
 
   async function save() {
@@ -63,6 +72,9 @@ export function SearchConsoleOpenRushCard({ canEdit }: { canEdit: boolean }) {
         serp_top_n: serpTopN,
         location: location.trim(),
         language: language.trim(),
+        session_credit_limit: sessionLimit,
+        daily_credit_limit: dailyLimit,
+        budget_warn_percent: warnPercent,
       });
       setDirty(false);
       toast({ title: "OpenRush settings saved" });
@@ -196,6 +208,71 @@ export function SearchConsoleOpenRushCard({ canEdit }: { canEdit: boolean }) {
             />
           </div>
         </div>
+
+        <div className="space-y-2 rounded-md border border-border p-3">
+          <p className="text-sm font-medium text-foreground">SEO research budgets</p>
+          <p className="text-xs text-muted-foreground">
+            Agents share a daily credit pot with staff refreshes. Each agent session also has its own
+            cap. At the warn %, agents must confirm before more paid research; at 100% research is
+            blocked until the next day or session. Cache hits do not spend credits. Staff refreshes
+            count toward the daily limit only.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-foreground" htmlFor="seo-research-session">
+                Agent session limit
+              </label>
+              <Input
+                id="seo-research-session"
+                type="number"
+                min={1}
+                value={sessionLimit}
+                disabled={!canEdit}
+                onChange={(e) => {
+                  setSessionLimit(Number(e.target.value) || 50);
+                  setDirty(true);
+                }}
+                data-testid="input-seo-research-session-limit"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-foreground" htmlFor="seo-research-daily">
+                Daily site limit
+              </label>
+              <Input
+                id="seo-research-daily"
+                type="number"
+                min={1}
+                value={dailyLimit}
+                disabled={!canEdit}
+                onChange={(e) => {
+                  setDailyLimit(Number(e.target.value) || 200);
+                  setDirty(true);
+                }}
+                data-testid="input-seo-research-daily-limit"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-foreground" htmlFor="seo-research-warn">
+                Warn at %
+              </label>
+              <Input
+                id="seo-research-warn"
+                type="number"
+                min={1}
+                max={99}
+                value={warnPercent}
+                disabled={!canEdit}
+                onChange={(e) => {
+                  setWarnPercent(Number(e.target.value) || 80);
+                  setDirty(true);
+                }}
+                data-testid="input-seo-research-warn-percent"
+              />
+            </div>
+          </div>
+        </div>
+
         <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
@@ -231,9 +308,10 @@ export function SearchConsoleOpenRushCard({ canEdit }: { canEdit: boolean }) {
           <CollapsibleContent className="mt-3 space-y-1 text-xs font-mono text-muted-foreground">
             <p>settings.yml → openrush</p>
             <p>OPENRUSH_API_KEY (env only)</p>
-            <p>.cache/{"{site}"}/openrush-serp.json</p>
-            <p>POST https://api.openrush.com/v1/tools/inspect_serp</p>
-            <p>Per-query cache, 7-day TTL. Credits per inspect. Does not start GSC export or change URL Inspection.</p>
+            <p>.cache/{"{site}"}/openrush-serp.json · openrush-keywords.json</p>
+            <p>.cache/{"{site}"}/seo-research-{"{ideas|competitors|gaps}"}.json</p>
+            <p>.cache/{"{site}"}/seo-research-budget.json</p>
+            <p>Keyword/SERP/ideas TTL 7d; competitors/gaps 14d. Market (location+language) in cache keys.</p>
           </CollapsibleContent>
         </Collapsible>
       </CardContent>

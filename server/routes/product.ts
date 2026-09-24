@@ -7,7 +7,6 @@ import { z } from "zod";
 import { requireCapability } from "./_helpers";
 import { getDefaultContentRoot } from "../site-config";
 import { markFileAsModified } from "../sync-state";
-import { productManager } from "../product/product-manager";
 import {
   listProductRows,
   readEntryProduct,
@@ -17,6 +16,7 @@ import {
 import {
   getPersonaFunnelUsage,
   getProductPersonaUsageMap,
+  listFunnelBindingsForProduct,
 } from "../product/product-audience-io";
 import { child } from "../logger";
 import { api } from "../rate-limit/api";
@@ -102,16 +102,20 @@ export function registerProductRoutes(app: Express): void {
   api.get(app, "/api/product", { rate: "publicRead" }, async (req, res) => {
     try {
       const includePaused = String(req.query.include_paused ?? "true") !== "false";
+      const includeRemoved = String(req.query.include_removed ?? "false") === "true";
       const contentType = typeof req.query.content_type === "string" ? req.query.content_type.trim() : undefined;
+      const contentRoot = getContentRoot(res);
       const products = listProductRows({
         includePaused,
+        includeRemoved,
+        contentRoot,
         ...(contentType ? { content_type: contentType } : {}),
       });
       res.json({
         products,
         education: {
           summary:
-            "Purchasable CMS products (paused included by default). Audience status is missing|minimal|complete. Persona ids only — use GET /api/product/:slug for offer/avatar depth.",
+            "CMS products. Paused included by default. Removed (not sellable) hidden unless include_removed=true. Audience status is missing|minimal|complete.",
           advanced_paths: ["programs/{slug}/_product.yml", "server/product/product-io.ts"],
         },
       });
@@ -128,9 +132,18 @@ export function registerProductRoutes(app: Express): void {
       const contentRoot = getContentRoot(res);
       const snapshot = readEntryProduct(contentType, slug, contentRoot);
       if (!snapshot) {
-        return res.status(404).json({ error: `No purchasable product for slug "${slug}"` });
+        return res.status(404).json({ error: `No product for slug "${slug}"` });
       }
       const persona_usage = getProductPersonaUsageMap(slug, contentRoot);
+      const funnel_binding_pages = listFunnelBindingsForProduct(slug, contentRoot);
+      const warnings: { code: string; message: string }[] = [];
+      if (!snapshot.purchasable) {
+        warnings.push({
+          code: "not_sellable",
+          message:
+            "This product is not sellable right now (removed from the store index). Audience can still be edited. Make sellable again to restore selling. Distinct from paused.",
+        });
+      }
       res.json({
         product: snapshot,
         audience: snapshot.offer || snapshot.personas
@@ -138,9 +151,12 @@ export function registerProductRoutes(app: Express): void {
           : null,
         status: snapshot.audience_status,
         persona_usage,
+        funnel_binding_pages,
+        warnings,
         education: {
-          summary:
-            "Product sidecar: offer, personas (avatar), and store visibility. Persona id is editable only when no funnel page binds it (creating a persona is not a binding). Label is always editable. Saving audience does not change page copy.",
+          summary: snapshot.purchasable
+            ? "Product sidecar: offer, personas (avatar), and store visibility. Persona id is editable only when no funnel page binds it. Label is always editable."
+            : "Product is not sellable (removed). Offer/personas remain. Make sellable to restore store index. Not the same as paused.",
           advanced_paths: [
             snapshot.relative_path,
             "shared/productAudience.ts",
@@ -169,7 +185,7 @@ export function registerProductRoutes(app: Express): void {
         const contentRoot = getContentRoot(res);
         const snapshot = readEntryProduct(contentType, slug, contentRoot);
         if (!snapshot) {
-          return res.status(404).json({ error: `No purchasable product for slug "${slug}"` });
+          return res.status(404).json({ error: `No product for slug "${slug}"` });
         }
         const usage = getPersonaFunnelUsage(contentType, slug, personaId, contentRoot);
         res.json(usage);
@@ -209,6 +225,14 @@ export function registerProductRoutes(app: Express): void {
           });
         }
         markFileAsModified(result.relativePath, auth.author ?? "staff", undefined, contentRoot);
+        const warnings = [...(result.warnings ?? [])];
+        if (!result.product.purchasable) {
+          warnings.push({
+            code: "not_sellable",
+            message:
+              "Audience saved, but this product is not sellable right now. Make sellable again to restore the store index.",
+          });
+        }
         return res.json({
           success: true,
           product: result.product,
@@ -218,7 +242,7 @@ export function registerProductRoutes(app: Express): void {
           },
           status: result.product.audience_status,
           relativePath: result.relativePath,
-          warnings: result.warnings,
+          warnings,
         });
       } catch (err) {
         log.error({ err }, "PUT product audience replace");
@@ -231,8 +255,28 @@ export function registerProductRoutes(app: Express): void {
       return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
     }
     const contentType = parsed.data.content_type || "program";
-    const auth = await requireCapability(req, res, "content_edit_structure", contentType);
-    if (!auth.authorized) return;
+    const touchesSellable =
+      parsed.data.purchasable !== undefined || parsed.data.actively_selling !== undefined;
+    const touchesAudienceOrMeta =
+      parsed.data.offer !== undefined ||
+      parsed.data.personas !== undefined ||
+      (parsed.data.clear_personas !== undefined && parsed.data.clear_personas.length > 0) ||
+      parsed.data.replace_personas === true ||
+      parsed.data.name !== undefined ||
+      parsed.data.description !== undefined ||
+      parsed.data.product_id !== undefined;
+
+    let author = "staff";
+    if (touchesSellable) {
+      const auth = await requireCapability(req, res, "product_manage", contentType);
+      if (!auth.authorized) return;
+      author = auth.author ?? author;
+    }
+    if (touchesAudienceOrMeta || !touchesSellable) {
+      const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+      if (!auth.authorized) return;
+      author = auth.author ?? author;
+    }
 
     try {
       const contentRoot = getContentRoot(res);
@@ -255,14 +299,15 @@ export function registerProductRoutes(app: Express): void {
         contentRoot,
       );
       if (!result.ok) {
-        const status = result.code === "not_a_product" ? 404 : 400;
+        const status =
+          result.code === "not_a_product" || result.code === "missing_entry" ? 404 : 400;
         return res.status(status).json({
           error: result.error,
           code: result.code,
           details: result.details,
         });
       }
-      markFileAsModified(result.relativePath, auth.author ?? "staff", undefined, contentRoot);
+      markFileAsModified(result.relativePath, author, undefined, contentRoot);
       res.json({
         success: true,
         product: result.product,

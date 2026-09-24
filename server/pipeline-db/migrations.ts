@@ -8,7 +8,7 @@ import {
   type SystemJobFollowUpType,
 } from "../events/types";
 
-export const PIPELINE_SCHEMA_VERSION = 18;
+export const PIPELINE_SCHEMA_VERSION = 23;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -390,6 +390,80 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
         CREATE INDEX idx_event_webhook_deliveries_site_type_hook
           ON event_webhook_deliveries (site, event_type, hook_id, created_at DESC);
       `);
+    },
+  },
+  {
+    version: 19,
+    name: "proposal_kpi_daily",
+    up(db) {
+      if (tableExists(db, "proposal_kpi_daily")) return;
+      db.exec(`
+        CREATE TABLE proposal_kpi_daily (
+          site TEXT NOT NULL,
+          day TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          count INTEGER NOT NULL,
+          PRIMARY KEY (site, day, kind, status)
+        );
+        CREATE INDEX idx_proposal_kpi_daily_site_day
+          ON proposal_kpi_daily(site, day);
+      `);
+    },
+  },
+  {
+    version: 20,
+    name: "content_proposals_idea_followthrough",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "accepted_entry_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN accepted_entry_json TEXT");
+      }
+      if (!tableHasColumn(db, "content_proposals", "implements_proposal_id")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN implements_proposal_id TEXT");
+      }
+      if (!indexExists(db, "idx_content_proposals_implements")) {
+        db.exec(
+          `CREATE INDEX idx_content_proposals_implements
+           ON content_proposals(site, implements_proposal_id)`,
+        );
+      }
+    },
+  },
+  {
+    version: 21,
+    name: "content_proposal_blockers_actor",
+    up(db) {
+      if (!tableExists(db, "content_proposal_blockers")) return;
+      if (!tableHasColumn(db, "content_proposal_blockers", "author_actor_json")) {
+        db.exec("ALTER TABLE content_proposal_blockers ADD COLUMN author_actor_json TEXT");
+      }
+      if (!tableHasColumn(db, "content_proposal_blockers", "resolved_by_actor_json")) {
+        db.exec("ALTER TABLE content_proposal_blockers ADD COLUMN resolved_by_actor_json TEXT");
+      }
+    },
+  },
+  {
+    version: 22,
+    name: "content_proposals_attention_stamps",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "author_content_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN author_content_at INTEGER");
+      }
+      if (!tableHasColumn(db, "content_proposals", "reviewer_action_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_at INTEGER");
+      }
+    },
+  },
+  {
+    version: 23,
+    name: "content_proposals_idea_funnel",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "idea_funnel_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN idea_funnel_json TEXT");
+      }
     },
   },
 ];

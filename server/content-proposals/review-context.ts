@@ -11,9 +11,14 @@ import {
   MIXED_SERP_AND_BODY,
   TITLE_DESCRIPTION_STAFF_NOTE,
   INTERNAL_LINKS_STAFF_NOTE,
+  FUNNEL_CLASSIFICATION_STAFF_NOTE,
+  LOCALE_TRANSLATION_STAFF_NOTE,
+  IDEA_OPPORTUNITY_HARM_STAFF_NOTE,
+  ANTICIPATED_DEMAND_STAFF_NOTE,
+  EXISTING_DEMAND_STAFF_NOTE,
+  FAST_DECAY_NEWS_STAFF_NOTE,
+  BROKEN_URL_STAFF_NOTE,
   worseDamageClass,
-  isSellingContentType,
-  isPublicContentType,
   hasTitleDescriptionOps,
   isTitleDescriptionOnlyOps,
   type ChecklistId,
@@ -27,9 +32,28 @@ import {
   inferSituationsFromOps,
   mergeSituations,
   staffNotesForSituations,
+  IDEA_DEFAULT_SITUATION_ID,
+  isIdeaAuthorSituationId,
+  looksLikeExistingDemandPitch,
+  EXISTING_DEMAND_UNDECLARED,
   type ReviewSituationId,
   type SituationSource,
 } from "./review-situations";
+import {
+  IDEA_FUNNEL_MISSING_WARN,
+  ideaFunnelComplete,
+  ideaRequiresStructuredFunnel,
+} from "./idea-funnel";
+import {
+  collectClaimCueTextFromOps,
+  evaluateClaimCues,
+  hasClaimRelevantPendingOps,
+  type ClaimCueVerdict,
+} from "./claim-cues";
+import {
+  DECISION_ID_TOUCHES_OUTCOME_FIGURES,
+  type TouchesOutcomeFiguresOutcome,
+} from "../ai/decisions";
 
 export type ReviewWarning = { code: string; message: string };
 
@@ -78,6 +102,22 @@ export type ReviewContext = {
   block_apply: boolean;
   situation_changed_since_filed?: boolean;
   filed_damage_class?: string;
+  /**
+   * Ambiguous claim cues — caller should run Jev and re-classify with claimCueJevOutcome.
+   * Sync classify never attaches figures for this alone.
+   */
+  needs_jev_claim_check?: boolean;
+  /** Text sent / to send to Jev for outcome-figure detection. */
+  claim_cue_text?: string;
+  /** Soft Count-as-lead form caution (never alone attaches figures). */
+  counts_as_lead_hint?: boolean;
+  /** Persisted when Jev enrichment ran. */
+  jev?: {
+    called: true;
+    outcome: TouchesOutcomeFiguresOutcome;
+    decision_id: string;
+    at: string;
+  };
 };
 
 export type EntryExistenceLookup = {
@@ -105,12 +145,27 @@ export type ClassifyProposalReviewOpts = {
     | "title"
     | "promote_on_apply"
     | "review_situations"
-  >;
+  > & {
+    accepted_entry?: ProposalRecord["accepted_entry"];
+    idea_funnel?: ProposalRecord["idea_funnel"];
+  };
   /** Per entry / related target existence. */
   lookups: EntryExistenceLookup[];
   relatedOpen?: RelatedOpenProposal[];
   /** Snapshot from DB for change detection. */
   snapshot?: { damage_class?: string } | null;
+  /**
+   * Extra text to scan for claim cues (e.g. promote draft body loaded by caller).
+   * Combined with pending claim-relevant op values.
+   */
+  promoteDraftText?: string | null;
+  /**
+   * When claim cues were ambiguous, pass Jev result so classify can attach figures.
+   * Omit on first pass — sets needs_jev_claim_check instead.
+   */
+  claimCueJevOutcome?: TouchesOutcomeFiguresOutcome | null;
+  /** Best-effort: page has a Count-as-lead conversion form (soft hint only). */
+  countsAsLeadForm?: boolean;
 };
 
 const MAX_THINK = 6;
@@ -144,33 +199,91 @@ export function damageClassForTarget(opts: {
   contentType: string;
   category?: ProposalCategory;
   existence: ExistenceState;
-  /** Live missing but draft present → new content path. */
+  /** Live missing but draft present, or a reserved attached create → new content path. */
   draftExists?: boolean;
-  /** For ideas: missing slug is new content when public type. */
+  /** Edits that will create a file-based attached entry on apply. */
+  createsEntry?: boolean;
+  /** For ideas: missing slug is new public content (any type). */
   forIdea?: boolean;
 }): DamageClass {
-  const ct = opts.contentType;
-  if (isSellingContentType(ct)) return "selling_page";
-
   if (opts.existence === "missing") {
-    if (opts.draftExists) return "new_public_content";
-    if (opts.forIdea && (isPublicContentType(ct) || !ct)) return "new_public_content";
-    if (opts.forIdea) return isSellingContentType(ct) ? "selling_page" : "existing_content";
-    // Edits with missing live and no draft — caller marks target_missing; class stays content-type based for badge but never new_public
-    if (isPublicContentType(ct)) return "existing_content";
+    if (opts.draftExists || opts.createsEntry) return "new_public_content";
+    if (opts.forIdea) return "new_public_content";
+    // Edits with missing live and no draft — caller marks target_missing; never new_public
     return opts.category === "content.seo" ? "existing_metadata" : "existing_content";
   }
 
   if (opts.existence === "unknown") {
-    if (isSellingContentType(ct)) return "selling_page";
     return opts.category === "content.seo" ? "existing_metadata" : "existing_content";
   }
 
-  // exists
-  if (opts.category === "content.seo" && !isSellingContentType(ct)) {
+  // exists — outcome figures upgrade happens in classify after claim-cue eval
+  if (opts.category === "content.seo") {
     return "existing_metadata";
   }
   return "existing_content";
+}
+
+/**
+ * Whether outcome-figures checklist should attach (sync path).
+ * Ambiguous without claimCueJevOutcome → needs Jev (caller re-classifies).
+ */
+export function resolveOutcomeFiguresAttachment(opts: {
+  entries: Array<{
+    status?: string | null;
+    ops?: Array<{ field_path?: string; value?: unknown }> | null;
+  }>;
+  reviewSituations?: string[] | null;
+  promoteDraftText?: string | null;
+  claimCueJevOutcome?: TouchesOutcomeFiguresOutcome | null;
+}): {
+  figuresActive: boolean;
+  needsJev: boolean;
+  claimCueText: string;
+  verdict: ClaimCueVerdict;
+} {
+  const declared = (opts.reviewSituations ?? []).includes("selling_figures");
+  const opText = collectClaimCueTextFromOps(opts.entries);
+  const promote = typeof opts.promoteDraftText === "string" ? opts.promoteDraftText : "";
+  const claimCueText = [opText, promote].filter((s) => s.trim()).join("\n");
+  const hasRelevant =
+    declared ||
+    hasClaimRelevantPendingOps(opts.entries) ||
+    Boolean(promote.trim());
+
+  if (declared) {
+    return {
+      figuresActive: true,
+      needsJev: false,
+      claimCueText,
+      verdict: "clear_yes",
+    };
+  }
+
+  if (!hasRelevant && !claimCueText.trim()) {
+    return {
+      figuresActive: false,
+      needsJev: false,
+      claimCueText,
+      verdict: "clear_no",
+    };
+  }
+
+  const verdict = evaluateClaimCues(claimCueText);
+  if (verdict === "clear_yes") {
+    return { figuresActive: true, needsJev: false, claimCueText, verdict };
+  }
+  if (verdict === "clear_no") {
+    return { figuresActive: false, needsJev: false, claimCueText, verdict };
+  }
+  // ambiguous
+  if (opts.claimCueJevOutcome === "yes") {
+    return { figuresActive: true, needsJev: false, claimCueText, verdict };
+  }
+  if (opts.claimCueJevOutcome === "no" || opts.claimCueJevOutcome === "unavailable") {
+    return { figuresActive: false, needsJev: false, claimCueText, verdict };
+  }
+  return { figuresActive: false, needsJev: true, claimCueText, verdict };
 }
 
 export function undoCostFor(kind: ProposalKind, reviewMode: ReviewMode): UndoCost {
@@ -205,7 +318,15 @@ function findLookup(
 }
 
 export function classifyProposalReview(opts: ClassifyProposalReviewOpts): ReviewContext {
-  const { proposal, lookups, relatedOpen = [], snapshot } = opts;
+  const {
+    proposal,
+    lookups,
+    relatedOpen = [],
+    snapshot,
+    promoteDraftText,
+    claimCueJevOutcome,
+    countsAsLeadForm,
+  } = opts;
   const warnings: ReviewWarning[] = [];
   const checklists = new Set<ChecklistId>();
   const entryContexts: ReviewEntryContext[] = [];
@@ -213,6 +334,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   let liveSituations: ReviewSituationId[] = [];
   let filedReviewSituations: ReviewSituationId[] = [];
   let situationSource: SituationSource = "inferred";
+  let needs_jev_claim_check = false;
+  let claim_cue_text: string | undefined;
+  let figuresActive = false;
 
   const review_mode_operative = proposal.kind === "edits";
   const undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
@@ -227,6 +351,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   let damage_class: DamageClass = "none";
+  let createsAttached = false;
 
   if (proposal.kind === "edits") {
     const workEntries = proposal.entries.filter(
@@ -239,18 +364,28 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       const existence: ExistenceState = lu?.existence ?? "unknown";
       const draftExists = Boolean(e.variant?.trim() && lu?.draftExists);
       const liveMissing = existence === "missing";
-      const target_missing = liveMissing && !draftExists;
+      const createsEntry =
+        e.baseline_context?.creates_entry === true && !e.variant?.trim();
+      if (createsEntry && liveMissing) createsAttached = true;
+      const target_missing = liveMissing && !draftExists && !createsEntry;
 
       let dc = damageClassForTarget({
         contentType: e.contentType,
         category: proposal.category,
         existence,
         draftExists,
+        createsEntry: createsEntry && liveMissing,
       });
+      if (createsEntry && liveMissing) {
+        warnings.push({
+          code: "creates_attached_entry",
+          message: `Applying creates ${e.contentType}/${e.slug} (${e.locale}). No draft. The shared template does not change.`,
+        });
+      }
       if (target_missing) {
         // Never label deleted target as new public content
         if (dc === "new_public_content") {
-          dc = isSellingContentType(e.contentType) ? "selling_page" : "existing_content";
+          dc = "existing_content";
         }
         block_apply = true;
         checklists.add("target_missing");
@@ -281,8 +416,59 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       damage_class = worseDamageClass(damage_class, dc);
     }
 
-    if (damage_class === "selling_page") checklists.add("selling_page_figures");
+    const figures = resolveOutcomeFiguresAttachment({
+      entries: toClassify,
+      reviewSituations: proposal.review_situations,
+      promoteDraftText,
+      claimCueJevOutcome,
+    });
+    claim_cue_text = figures.claimCueText || undefined;
+    needs_jev_claim_check = figures.needsJev;
+    figuresActive = figures.figuresActive;
+
+    if (figuresActive) {
+      checklists.add("selling_page_figures");
+      if (damage_class !== "new_public_content") {
+        damage_class = worseDamageClass(damage_class, "selling_page");
+        for (const ec of entryContexts) {
+          if (ec.damage_class !== "new_public_content" && !ec.target_missing) {
+            ec.damage_class = worseDamageClass(ec.damage_class, "selling_page");
+          }
+        }
+      }
+    }
     if (damage_class === "new_public_content") checklists.add("new_content_brand");
+
+    if (needs_jev_claim_check) {
+      warnings.push({
+        code: "claim_cue_ambiguous",
+        message:
+          "Proposed text may contain outcome figures (hire rate, salary, tuition, price) but local cues were inconclusive — awaiting automated claim check.",
+      });
+    }
+    if (claimCueJevOutcome === "yes" || claimCueJevOutcome === "no") {
+      warnings.push({
+        code: "jev_claim_cue",
+        message:
+          claimCueJevOutcome === "yes"
+            ? "Automated claim check (Jev) flagged outcome figures — verify sources before apply."
+            : "Automated claim check (Jev) did not treat this as an outcome-figure change.",
+      });
+    } else if (claimCueJevOutcome === "unavailable") {
+      warnings.push({
+        code: "jev_claim_cue_unavailable",
+        message:
+          "Automated claim check was unavailable — figures checklist left off (fail-open). Authors may declare review_situations:[\"selling_figures\"] if needed.",
+      });
+    }
+
+    if (countsAsLeadForm) {
+      warnings.push({
+        code: "counts_as_lead_form",
+        message:
+          "This page has a form whose conversion counts as a lead — treat commercial claims carefully. This hint alone does not require the outcome-figures checklist.",
+      });
+    }
 
     const workForOps = toClassify;
     const hasSerp = hasTitleDescriptionOps(workForOps);
@@ -294,10 +480,12 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       title: proposal.title,
       promoteOnApply: proposal.promote_on_apply,
       damageClass: damage_class === "none" ? null : damage_class,
+      outcomeFigures: figuresActive,
     });
     const mergedSit = mergeSituations(filedSituations, inferred, workForOps, {
       promoteOnApply: proposal.promote_on_apply,
       damageClass: damage_class === "none" ? null : damage_class,
+      outcomeFigures: figuresActive,
     });
     liveSituations = mergedSit.situations;
     filedReviewSituations = filedSituations;
@@ -311,18 +499,26 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     const linkOnly =
       mergedSit.situations.includes("internal_links") &&
       !mergedSit.situations.includes("body_copy_edit");
+    const funnelOnly =
+      mergedSit.situations.includes("funnel_classification") &&
+      !mergedSit.situations.includes("body_copy_edit") &&
+      !mergedSit.situations.includes("internal_links");
+    const translationOnly =
+      mergedSit.situations.includes("locale_translation") &&
+      !mergedSit.situations.includes("body_copy_edit") &&
+      !mergedSit.situations.includes("internal_links");
 
     if (hasSerp) {
       checklists.add("title_description_ctr");
       if (!serpOnly) {
-        if (!linkOnly) checklists.add("verify_copy");
+        if (!linkOnly && !funnelOnly && !translationOnly) checklists.add("verify_copy");
         warnings.push({
           code: MIXED_SERP_AND_BODY,
           message:
             "This proposal mixes search title/description with other field updates. Prefer separate proposals next time; for now run both the title/description harm scorecard and body packs. Create still succeeds. Per-situation ship: drop failing SERP ops via revise_entries before apply.",
         });
       }
-    } else if (!linkOnly) {
+    } else if (!linkOnly && !funnelOnly && !translationOnly) {
       checklists.add("verify_copy");
     }
 
@@ -336,31 +532,79 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
     checklists.add("disposition");
   } else if (proposal.kind === "idea") {
+    const filedRaw = (proposal.review_situations ?? []) as string[];
+    const filedDemand = filedRaw.filter(isIdeaAuthorSituationId) as ReviewSituationId[];
+    liveSituations = [IDEA_DEFAULT_SITUATION_ID, ...filedDemand];
+    filedReviewSituations = filedDemand;
+    situationSource = filedDemand.length ? "author" : "inferred";
+    for (const c of checklistIdsForSituations(liveSituations)) {
+      checklists.add(c);
+    }
+
+    if (
+      filedDemand.length === 0 &&
+      looksLikeExistingDemandPitch(proposal.title, proposal.summary)
+    ) {
+      warnings.push({
+        code: EXISTING_DEMAND_UNDECLARED,
+        message:
+          "This brief looks like a current-demand rank/cite pitch. Retag with set_review_situations:[\"existing_demand\"] (or change the goal to assist-only). existing_demand is not auto-attached.",
+      });
+    }
+
     const related = proposal.related_entries ?? [];
+    const relatedWithEx = related.map((r) => {
+      const locale = r.locale?.trim() || "en";
+      const lu = findLookup(lookups, r.contentType, r.slug, locale);
+      return {
+        contentType: r.contentType,
+        slug: r.slug,
+        locale,
+        existence: (lu?.existence ?? "unknown") as ExistenceState,
+      };
+    });
+    const needsIdeaFunnel = ideaRequiresStructuredFunnel({
+      title: proposal.title,
+      summary: proposal.summary,
+      related_entries: relatedWithEx,
+      accepted_entry: proposal.accepted_entry
+        ? {
+            ...proposal.accepted_entry,
+            existence:
+              findLookup(
+                lookups,
+                proposal.accepted_entry.contentType,
+                proposal.accepted_entry.slug,
+                proposal.accepted_entry.locale,
+              )?.existence ?? "missing",
+          }
+        : null,
+    });
+    if (needsIdeaFunnel && !ideaFunnelComplete(proposal.idea_funnel)) {
+      warnings.push({
+        code: IDEA_FUNNEL_MISSING_WARN,
+        message:
+          "New-URL idea is missing structured idea_funnel (stage + products). Create still succeeds — set via set_idea_funnel before accept. Reviewer: add_blocker until the author fills it. products \"all\" only with stage awareness.",
+      });
+    }
+
     if (related.length === 0) {
       damage_class = "none";
     } else {
-      for (const r of related) {
-        const locale = r.locale?.trim() || "en";
-        const lu = findLookup(lookups, r.contentType, r.slug, locale);
-        const existence: ExistenceState = lu?.existence ?? "unknown";
+      for (const r of relatedWithEx) {
+        const existence = r.existence;
         const dc = damageClassForTarget({
           contentType: r.contentType,
           existence,
           forIdea: true,
           draftExists: false,
         });
-        // Missing public → new_public_content
-        const resolved =
-          existence === "missing"
-            ? isSellingContentType(r.contentType)
-              ? "selling_page"
-              : "new_public_content"
-            : dc;
+        // Missing → new_public_content (any type)
+        const resolved = existence === "missing" ? "new_public_content" : dc;
         entryContexts.push({
           contentType: r.contentType,
           slug: r.slug,
-          locale,
+          locale: r.locale,
           existence,
           damage_class: resolved,
         });
@@ -369,8 +613,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           checklists.add("existence_unknown");
         }
       }
-      if (damage_class === "selling_page") checklists.add("selling_page_figures");
-      if (damage_class === "new_public_content") checklists.add("new_content_brand");
+      // Brand / selling-figure ship gates stay on follow-up edits — not on idea accept.
     }
   }
 
@@ -426,23 +669,51 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   const summaryParts = [meta.situation_description];
+  if (proposal.kind === "idea") {
+    if (liveSituations.includes("broken_url")) {
+      summaryParts[0] = BROKEN_URL_STAFF_NOTE;
+    } else if (liveSituations.includes("existing_demand")) {
+      summaryParts[0] = EXISTING_DEMAND_STAFF_NOTE;
+    } else if (liveSituations.includes("anticipated_demand")) {
+      summaryParts[0] = ANTICIPATED_DEMAND_STAFF_NOTE;
+    } else if (liveSituations.includes("fast_decay_news")) {
+      summaryParts[0] = FAST_DECAY_NEWS_STAFF_NOTE;
+    } else {
+      summaryParts[0] = IDEA_OPPORTUNITY_HARM_STAFF_NOTE;
+    }
+  }
   if (block_apply) summaryParts.push("Apply is blocked — target no longer exists.");
   if (situation_changed_since_filed) {
     summaryParts.push(`Changed since filed (was ${snapshot!.damage_class}).`);
   }
   const hasTitleDescChecklist = orderedIds.some((t) => t.id === "title_description_ctr");
   const hasInternalLinksChecklist = orderedIds.some((t) => t.id === "internal_links");
+  const hasFunnelChecklist = orderedIds.some((t) => t.id === "funnel_persona_product_stage");
+  const hasLocaleTranslationChecklist = orderedIds.some((t) => t.id === "locale_translation");
   if (hasTitleDescChecklist && !block_apply) {
     summaryParts.push(TITLE_DESCRIPTION_STAFF_NOTE);
   }
   if (hasInternalLinksChecklist && !block_apply) {
     summaryParts.push(INTERNAL_LINKS_STAFF_NOTE);
   }
+  if (hasFunnelChecklist && !block_apply) {
+    summaryParts.push(FUNNEL_CLASSIFICATION_STAFF_NOTE);
+  }
+  if (hasLocaleTranslationChecklist && !block_apply) {
+    summaryParts.push(LOCALE_TRANSLATION_STAFF_NOTE);
+  }
   for (const note of staffNotesForSituations(liveSituations)) {
     if (
       !block_apply &&
       note !== TITLE_DESCRIPTION_STAFF_NOTE &&
       note !== INTERNAL_LINKS_STAFF_NOTE &&
+      note !== FUNNEL_CLASSIFICATION_STAFF_NOTE &&
+      note !== LOCALE_TRANSLATION_STAFF_NOTE &&
+      note !== IDEA_OPPORTUNITY_HARM_STAFF_NOTE &&
+      note !== ANTICIPATED_DEMAND_STAFF_NOTE &&
+      note !== EXISTING_DEMAND_STAFF_NOTE &&
+      note !== FAST_DECAY_NEWS_STAFF_NOTE &&
+      note !== BROKEN_URL_STAFF_NOTE &&
       !summaryParts.includes(note)
     ) {
       summaryParts.push(note);
@@ -451,12 +722,30 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
-    : meta.situation_description;
+    : createsAttached
+      ? "Applying creates this post. The slug was reserved by the accepted idea. The shared template does not change."
+      : proposal.kind === "idea"
+        ? liveSituations.includes("broken_url")
+          ? BROKEN_URL_STAFF_NOTE
+          : liveSituations.includes("existing_demand")
+            ? EXISTING_DEMAND_STAFF_NOTE
+            : liveSituations.includes("anticipated_demand")
+              ? ANTICIPATED_DEMAND_STAFF_NOTE
+              : liveSituations.includes("fast_decay_news")
+                ? FAST_DECAY_NEWS_STAFF_NOTE
+                : IDEA_OPPORTUNITY_HARM_STAFF_NOTE
+        : meta.situation_description;
   if (hasTitleDescChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${TITLE_DESCRIPTION_STAFF_NOTE}`;
   }
   if (hasInternalLinksChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${INTERNAL_LINKS_STAFF_NOTE}`;
+  }
+  if (hasFunnelChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${FUNNEL_CLASSIFICATION_STAFF_NOTE}`;
+  }
+  if (hasLocaleTranslationChecklist && !block_apply) {
+    staffSituation = `${staffSituation} ${LOCALE_TRANSLATION_STAFF_NOTE}`;
   }
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
@@ -474,9 +763,17 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     ...(siblings.length ? { related_open_proposals: siblings } : {}),
     summary: summaryParts.join(" "),
     staff_summary: {
-      badge_label: block_apply ? "Target missing" : meta.badge_label,
+      badge_label: block_apply
+        ? "Target missing"
+        : proposal.kind === "idea"
+          ? "Idea brief"
+          : meta.badge_label,
       situation_description: staffSituation,
-      risk: block_apply ? "Apply blocked — target gone." : meta.risk,
+      risk: block_apply
+        ? "Apply blocked — target gone."
+        : proposal.kind === "idea"
+          ? "Accept locks a brief only — no live YAML until a later edits proposal."
+          : meta.risk,
       undo: UNDO_COPY[undo_cost],
       ...(relatedStaff ? { related: relatedStaff } : {}),
     },
@@ -485,13 +782,37 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         id: t.id,
         title: t.title,
         why: t.why,
-        look_for: t.look_for,
+        look_for: (() => {
+          const base = [...t.look_for];
+          if (
+            countsAsLeadForm &&
+            (t.id === "selling_page_figures" || t.id === "disposition" || t.id === "verify_copy")
+          ) {
+            base.push(
+              "soft: page has a Count-as-lead conversion form — commercial caution only; does not alone require figure verification",
+            );
+          }
+          return base;
+        })(),
       })),
       warnings,
     },
     block_apply,
     ...(situation_changed_since_filed
       ? { situation_changed_since_filed: true, filed_damage_class: snapshot!.damage_class }
+      : {}),
+    ...(needs_jev_claim_check ? { needs_jev_claim_check: true } : {}),
+    ...(claim_cue_text ? { claim_cue_text } : {}),
+    ...(countsAsLeadForm ? { counts_as_lead_hint: true } : {}),
+    ...(claimCueJevOutcome
+      ? {
+          jev: {
+            called: true as const,
+            outcome: claimCueJevOutcome,
+            decision_id: DECISION_ID_TOUCHES_OUTCOME_FIGURES,
+            at: new Date().toISOString(),
+          },
+        }
       : {}),
   };
 }
@@ -504,16 +825,22 @@ export function collectDamageClassesForMixedCheck(
     existence: ExistenceState;
     draftExists?: boolean;
     forIdea?: boolean;
+    createsEntry?: boolean;
+    /** When true, existing targets count as selling_page (outcome figures). */
+    outcomeFigures?: boolean;
   }>,
 ): DamageClass[] {
   const set = new Set<DamageClass>();
   for (const t of targets) {
     let dc = damageClassForTarget(t);
-    if (t.forIdea && t.existence === "missing" && !isSellingContentType(t.contentType)) {
+    if (t.forIdea && t.existence === "missing") {
       dc = "new_public_content";
     }
-    if (t.existence === "missing" && t.draftExists) {
+    if (t.existence === "missing" && (t.draftExists || t.createsEntry)) {
       dc = "new_public_content";
+    }
+    if (t.outcomeFigures && dc !== "new_public_content") {
+      dc = "selling_page";
     }
     set.add(dc);
   }
@@ -545,6 +872,8 @@ export function snapshotFromReviewContext(ctx: ReviewContext): Record<string, un
     review_situations: ctx.review_situations,
     filed_review_situations: ctx.filed_review_situations,
     situation_source: ctx.situation_source,
+    ...(ctx.jev ? { jev: ctx.jev } : {}),
+    ...(ctx.counts_as_lead_hint ? { counts_as_lead_hint: true } : {}),
   };
 }
 

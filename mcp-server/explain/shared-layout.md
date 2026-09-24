@@ -6,7 +6,7 @@ Use this topic before creating or restructuring entries for types with `single_t
 
 - **Shell** (hero, article wrapper, CTA, FAQ, breadcrumb, …) lives in `{directory}/template.{locale}.yml` (plus `_common.template.yml` defaults). Legacy `single.{locale}.yml` / `_common.single.yml` still load if present. New writes create `template.*` only. It applies to **all attached** entries of that type in that locale.
 - **Entry fields** live in `{directory}/{slug}/_common.yml` + `{locale}.yml` — `title`, `description`, `content`, `category`, `meta`, etc. Attached entries normally use `sections: []`.
-- **`db_backed` ≠ `single_template`.** Static blog is YAML + `single_template` and **is** creatable via MCP `create_entry`. DB-backed types are not (`create_via: null` from `get_content_type_info`).
+- **`db_backed` ≠ `single_template`.** Static blog is YAML + `single_template`. Specialist agents create a new attached post through an accepted idea, then field edits (no variant). `create_entry` still exists as a staff/live path: it writes immediately and is **not** on specialist connectors. DB-backed types are not creatable that way (`create_via: null`); a missing database row cannot be created by an edits proposal.
 - **Missing slug → 404**, not an empty shared shell. Public delivery requires `{slug}/{locale}.yml` (static) or a DB row; soft-match redirects only rewrite when that slug already exists (e.g. wrong `:category`).
 
 Example (blog): body is **`content`** on the locale file (Markdown, including fenced mermaid charts via geekchart — same pipeline as `article.content`); `{{ entry.content }}` is bound inside `blog/template.es.yml`. Do **not** paste a page shell (hero/breadcrumb/article) into the entry. Blog CTA copy/conversion/tags come from entry field `call_to_action` (bound in `template.*.yml`); before setting `conversion_name` or `tags`, call `explain_site` topic `component-behaviors`. See `explain_site` topic `sections` → Article body format.
@@ -23,12 +23,23 @@ When a type does **not** yet use shared layout and you need to turn it on:
 4. If a usable template already exists and you use `from_entry`, first call without `confirm` → `action_required: confirm_template_replace` with preview; re-call with `confirm: true`.
 5. Success returns `side_effects.paths` for written `template.*.yml` / `_common.template.yml` and dissolves section bindings for the type.
 
-## Playbook (create)
+## Playbook (new attached post)
+
+Specialist roles do **not** use `create_entry` for a new attached post. The slug is required; the folder need not exist.
+
+1. `propose_change` `kind: "idea"` with `related_entries: [{ contentType, slug, locale }]`.
+2. A different role accepts with that same `accepted_entry` and `next_step`. No YAML.
+3. `propose_change` edits: `implements_proposal_id`, `review_situations: ["new_public_content"]`, field `updates[]` only — **no** `variant`. Required live fields must be in the ops.
+4. A different role `update_proposal` `action: "apply"`. New URL-param values also need `confirm_new_values: true`. Apply writes `{slug}/_common.yml` and one `{locale}.yml` (`sections: []`) and does not read or write `template.{locale}.yml`.
+
+`create_entry` remains the staff/live shortcut (one locale, `sections: []`, URL params on the locale object, `confirm_new_values` for a new peer value). It writes live immediately.
+
+## Playbook (create — staff / live)
 
 1. `list_sites` — if multi-site, pick a domain and pass `site` on every later call.
 2. `get_content_type_info` with `contentType` + `site` — read `field_mapping`, `editor` / `editor_required_modes`, URL params, observed values, `create_via`.
-3. `create_entry` with **exactly one** locale (all content types); put required fields on the locale object; `sections: []` (or omit) for shared-layout; put **URL pattern params on the locale object** (never `_common.yml` — they are language-specific when slugs differ).
-4. If a URL-param/select value is **not** in observed peers **for that locale** → stop; get approval from the **principal** (human or orchestrator/reviewer), then re-call with `confirm_new_values: true`.
+3. Staff `create_entry` with **exactly one** locale; put required fields on the locale object; `sections: []` (or omit) for shared-layout; put **URL pattern params on the locale object** (never `_common.yml`).
+4. If a URL-param/select value is **not** in observed peers **for that locale** → stop; get approval from the **principal**, then re-call with `confirm_new_values: true`.
 5. Fill SEO via `update_fields` or multi-entry `update_entry_attributes` if needed; verify with `get_entry_content` / `get_entry_seo`.
 6. Add another locale with `translate_entry` (optional `url_slug`; fields while attached → draft → promote). Do **not** detach for field translation.
 7. `run_entry_diagnostics` when ready.
@@ -41,7 +52,7 @@ Only when this entry must diverge from `template.{locale}.yml`: `set_entry_attac
 
 ## Anti-patterns
 
-- Treating `single_template` types as DB-backed and skipping `create_entry`.
+- Treating a new attached post as something specialist roles create with `create_entry` or a draft. Use the accepted-idea field-edits path. `create_entry` is the staff/live shortcut and writes immediately.
 - Authoring breadcrumb/hero/article shells on the entry locale file (while attached).
 - Detaching only to add a translation — use `translate_entry` with fields instead.
 - Calling `list_entry_seo` without `slugs` expecting a full dump (unfiltered returns a **minimal sample** only).
