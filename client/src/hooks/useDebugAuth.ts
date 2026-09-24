@@ -22,6 +22,11 @@ export interface CapabilityGrant {
 
 const DEFAULT_CAPABILITIES: CapabilityGrant[] = [];
 
+/** Browser storage available (SSR / Node often have no localStorage even if location is shimmed). */
+function canUseBrowserStorage(): boolean {
+  return typeof window !== "undefined" && typeof localStorage !== "undefined";
+}
+
 /** Pure precedence for tests and isDebugModeActive side-effect wrapper. */
 export function resolveDebugModeActive(input: {
   debugParam: string | null;
@@ -40,7 +45,7 @@ export function resolveDebugModeActive(input: {
 }
 
 function hasNonExpiredStaffToken(): boolean {
-  if (typeof window === "undefined") return false;
+  if (!canUseBrowserStorage()) return false;
   const cachedToken = localStorage.getItem(DEBUG_TOKEN_KEY);
   const cachedExpiry = localStorage.getItem(DEBUG_SESSION_EXPIRY_KEY);
   if (!cachedToken || !cachedExpiry) return false;
@@ -49,12 +54,12 @@ function hasNonExpiredStaffToken(): boolean {
 }
 
 function isDebugUiDismissed(): boolean {
-  if (typeof window === "undefined") return false;
+  if (!canUseBrowserStorage()) return false;
   return localStorage.getItem(DEBUG_UI_DISMISSED_KEY) === "true";
 }
 
 function setDebugUiDismissed(dismissed: boolean): void {
-  if (typeof window === "undefined") return;
+  if (!canUseBrowserStorage()) return;
   if (dismissed) {
     localStorage.setItem(DEBUG_UI_DISMISSED_KEY, "true");
   } else {
@@ -65,10 +70,11 @@ function setDebugUiDismissed(dismissed: boolean): void {
 /**
  * Sync gate for DebugBubble / staff UI.
  * Precedence: ?debug=false → dismiss → ?debug=true → DEV → debug_mode flag → staff token.
+ * Safe on SSR: always false when browser storage / location are unavailable.
  */
 export function isDebugModeActive(): boolean {
-  if (typeof window === "undefined") return false;
-  const urlParams = new URLSearchParams(window.location.search);
+  if (!canUseBrowserStorage() || !window.location) return false;
+  const urlParams = new URLSearchParams(window.location.search ?? "");
   const debugParam = urlParams.get("debug");
 
   if (debugParam === "true") {
@@ -89,7 +95,7 @@ export function isDebugModeActive(): boolean {
 }
 
 export function getDebugToken(): string | null {
-  if (typeof window === "undefined") return null;
+  if (!canUseBrowserStorage()) return null;
   const cachedToken = localStorage.getItem(DEBUG_TOKEN_KEY);
   const cachedExpiry = localStorage.getItem(DEBUG_SESSION_EXPIRY_KEY);
 
@@ -104,7 +110,7 @@ export function getDebugToken(): string | null {
 }
 
 export function getCachedCapabilities(): CapabilityGrant[] {
-  if (typeof window === 'undefined') return DEFAULT_CAPABILITIES;
+  if (!canUseBrowserStorage()) return DEFAULT_CAPABILITIES;
   try {
     const cached = localStorage.getItem(DEBUG_CAPABILITIES_KEY);
     if (cached) {
@@ -122,7 +128,7 @@ export function getCachedCapabilities(): CapabilityGrant[] {
 }
 
 export function getCachedRoles(): string[] {
-  if (typeof window === "undefined") return [];
+  if (!canUseBrowserStorage()) return [];
   try {
     const cached = localStorage.getItem(DEBUG_ROLES_KEY);
     if (cached) {
@@ -140,25 +146,28 @@ function rolesFromResponse(raw: unknown): string[] {
 }
 
 function cacheRoles(roles: string[]) {
+  if (!canUseBrowserStorage()) return;
   localStorage.setItem(DEBUG_ROLES_KEY, JSON.stringify(roles));
 }
 
 function clearRolesCache() {
+  if (!canUseBrowserStorage()) return;
   localStorage.removeItem(DEBUG_ROLES_KEY);
 }
 
 export function getDebugUserName(): string {
-  if (typeof window === 'undefined') return '';
+  if (!canUseBrowserStorage()) return '';
   return localStorage.getItem(DEBUG_USERNAME_KEY) || "";
 }
 
 /** Immutable staff id used in `_label.requester` / `owner`. */
 export function getDebugStaffId(): string {
-  if (typeof window === "undefined") return "";
+  if (!canUseBrowserStorage()) return "";
   return localStorage.getItem(DEBUG_STAFF_ID_KEY) || "";
 }
 
 export async function resolveAuthorName(): Promise<string> {
+  if (!canUseBrowserStorage()) return "Unknown";
   const cached = localStorage.getItem(DEBUG_USERNAME_KEY);
   if (cached) return cached;
 
@@ -200,8 +209,10 @@ export async function resolveStaffId(): Promise<string | null> {
     });
     const data = await response.json();
     if (data.valid && typeof data.staffId === "string" && data.staffId) {
-      localStorage.setItem(DEBUG_STAFF_ID_KEY, data.staffId);
-      if (data.userName) localStorage.setItem(DEBUG_USERNAME_KEY, data.userName);
+      if (canUseBrowserStorage()) {
+        localStorage.setItem(DEBUG_STAFF_ID_KEY, data.staffId);
+        if (data.userName) localStorage.setItem(DEBUG_USERNAME_KEY, data.userName);
+      }
       return data.staffId;
     }
   } catch {
@@ -247,6 +258,7 @@ function capabilityGrantsFromResponse(raw: unknown): CapabilityGrant[] {
 }
 
 function cacheStaffIdentity(data: { userName?: string; staffId?: string }) {
+  if (!canUseBrowserStorage()) return;
   if (data.userName) localStorage.setItem(DEBUG_USERNAME_KEY, data.userName);
   if (typeof data.staffId === "string" && data.staffId) {
     localStorage.setItem(DEBUG_STAFF_ID_KEY, data.staffId);
@@ -254,6 +266,7 @@ function cacheStaffIdentity(data: { userName?: string; staffId?: string }) {
 }
 
 function clearStaffIdentity() {
+  if (!canUseBrowserStorage()) return;
   localStorage.removeItem(DEBUG_USERNAME_KEY);
   localStorage.removeItem(DEBUG_STAFF_ID_KEY);
 }
@@ -290,19 +303,21 @@ function applyValidSessionLocally(data: {
   staffId?: string;
   expiresAt?: string | null;
 }) {
-  localStorage.setItem(DEBUG_SESSION_KEY, "true");
   const expiryTime = data.expiresAt
     ? new Date(data.expiresAt).getTime()
     : Date.now() + 7 * 24 * 60 * 60 * 1000;
-  localStorage.setItem(DEBUG_SESSION_EXPIRY_KEY, String(expiryTime));
-  localStorage.setItem(DEBUG_TOKEN_KEY, data.token);
-  setAuthToken(data.token);
-  if (data.capabilities) {
-    localStorage.setItem(
-      DEBUG_CAPABILITIES_KEY,
-      JSON.stringify(capabilityGrantsFromResponse(data.capabilities)),
-    );
+  if (canUseBrowserStorage()) {
+    localStorage.setItem(DEBUG_SESSION_KEY, "true");
+    localStorage.setItem(DEBUG_SESSION_EXPIRY_KEY, String(expiryTime));
+    localStorage.setItem(DEBUG_TOKEN_KEY, data.token);
+    if (data.capabilities) {
+      localStorage.setItem(
+        DEBUG_CAPABILITIES_KEY,
+        JSON.stringify(capabilityGrantsFromResponse(data.capabilities)),
+      );
+    }
   }
+  setAuthToken(data.token);
   const nextRoles = rolesFromResponse(data.roles);
   cacheRoles(nextRoles);
   if (data.userName || data.staffId) {
@@ -329,7 +344,8 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
   const [capabilities, setCapabilities] = useState<CapabilityGrant[]>(DEFAULT_CAPABILITIES);
   const [roles, setRoles] = useState<string[]>([]);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isDebugMode, setIsDebugMode] = useState(() => isDebugModeActive());
+  // SSR-safe: never read localStorage during the initial render (window may be shimmed).
+  const [isDebugMode, setIsDebugMode] = useState(false);
   
   const isDevelopment = import.meta.env.DEV;
 
@@ -337,8 +353,13 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
     setIsDebugMode(isDebugModeActive());
   };
 
+  useEffect(() => {
+    setIsDebugMode(isDebugModeActive());
+  }, []);
+
   const validateToken = async (skipCache = false) => {
-    const urlParams = new URLSearchParams(window.location.search);
+    if (!canUseBrowserStorage() || !window.location) return;
+    const urlParams = new URLSearchParams(window.location.search ?? "");
     const staffSessionCode = urlParams.get("staff_session_code");
     const staffAuthError = urlParams.get("staff_auth");
     const staffAuthMessage = urlParams.get("message");

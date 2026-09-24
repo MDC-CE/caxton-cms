@@ -35,6 +35,10 @@ import { applyEntryModulePreload } from "./utils/html-transforms";
 import { getEntryAssets, buildEntryPreloadTags, buildEntryLinkHeader } from "./utils/vite-manifest";
 import { isMeaningfulSsrAppHtml } from "./utils/ssr-html";
 import {
+  logSlowHtmlIfNeeded,
+  type SlowHtmlOutcome,
+} from "./utils/request-health";
+import {
   buildHtmlCacheKey,
   setCachedHtml,
   shouldBypassHtmlCache,
@@ -66,6 +70,21 @@ function maybeRecordPublicNotFound(req: Request, res: Response, status: number):
 }
 
 const ssrLogger = loggerChild({ module: "ssr" });
+
+/** Verbose SSR diagnostics: on in development, or when SSR_DIAG=1. */
+function ssrDiagEnabled(): boolean {
+  return process.env.SSR_DIAG === "1" || process.env.NODE_ENV !== "production";
+}
+
+function ssrDiag(
+  fields: Record<string, unknown>,
+  message: string,
+  level: "info" | "warn" = "info",
+): void {
+  if (!ssrDiagEnabled() && level === "info") return;
+  if (level === "warn") ssrLogger.warn(fields, `[SSR-diag] ${message}`);
+  else ssrLogger.info(fields, `[SSR-diag] ${message}`);
+}
 
 async function getInitialDataForRequest(
   url: string,
@@ -223,7 +242,9 @@ export async function setupVite(app: Express, server: Server): Promise<ViteDevSe
       let appHtml = "";
       const cleanUrlForSsr = url.split("?")[0].split("#")[0];
       const skipSsr = cleanUrlForSsr.startsWith("/private/");
+      let ssrOutcome: "ok" | "skipped" | "empty" | "error" = skipSsr ? "skipped" : "ok";
       if (!skipSsr) {
+        const t0 = Date.now();
         try {
           const entryServerAbs = path.resolve(
             import.meta.dirname,
@@ -233,27 +254,68 @@ export async function setupVite(app: Express, server: Server): Promise<ViteDevSe
             "entry-server.tsx",
           );
           const { render } = await vite.ssrLoadModule(entryServerAbs);
-          appHtml = await render(url, initialDataPayload);
-          if (!isMeaningfulSsrAppHtml(appHtml)) {
-            ssrLogger.warn(
-              { url, appHtmlLength: appHtml?.length ?? 0 },
-              "SSR returned empty body, retrying once",
+          if (typeof render !== "function") {
+            ssrOutcome = "error";
+            ssrDiag(
+              { url, renderType: typeof render },
+              "dev ssrLoadModule did not export render()",
+              "warn",
             );
+          } else {
             appHtml = await render(url, initialDataPayload);
-          }
-          if (!isMeaningfulSsrAppHtml(appHtml)) {
-            ssrLogger.warn(
-              { url, appHtmlLength: appHtml?.length ?? 0 },
-              "SSR returned empty body after retry, falling back to client-only",
-            );
-            appHtml = "";
+            if (!isMeaningfulSsrAppHtml(appHtml)) {
+              ssrDiag(
+                { url, appHtmlLength: appHtml?.length ?? 0, ms: Date.now() - t0 },
+                "SSR returned empty body, retrying once",
+                "warn",
+              );
+              appHtml = await render(url, initialDataPayload);
+            }
+            if (!isMeaningfulSsrAppHtml(appHtml)) {
+              ssrOutcome = "empty";
+              ssrDiag(
+                {
+                  url,
+                  appHtmlLength: appHtml?.length ?? 0,
+                  ms: Date.now() - t0,
+                  preview: String(appHtml ?? "").slice(0, 120),
+                },
+                "SSR returned empty body after retry, falling back to client-only",
+                "warn",
+              );
+              appHtml = "";
+            } else {
+              ssrDiag(
+                { url, appHtmlLength: appHtml.length, ms: Date.now() - t0 },
+                "dev SSR ok — injecting into #root",
+              );
+            }
           }
         } catch (ssrErr) {
-          ssrLogger.warn({ err: ssrErr, url }, "render failed, falling back to client-only");
+          ssrOutcome = "error";
+          ssrDiag(
+            {
+              err: ssrErr,
+              url,
+              ms: Date.now() - t0,
+              errMessage: ssrErr instanceof Error ? ssrErr.message : String(ssrErr),
+            },
+            "render failed, falling back to client-only",
+            "warn",
+          );
         }
       }
 
-      let html = isMeaningfulSsrAppHtml(appHtml)
+      const injected = isMeaningfulSsrAppHtml(appHtml);
+      if (!injected && ssrOutcome !== "skipped") {
+        ssrDiag(
+          { url, ssrOutcome, rootInjected: false },
+          "serving empty #root (client will first-paint)",
+          "warn",
+        );
+      }
+
+      let html = injected
         ? page.replace('<div id="root"></div>', `<div id="root">${appHtml}</div>`)
         : page;
 
@@ -304,16 +366,37 @@ let ssrRenderFn: ((url: string, payload: unknown) => Promise<string>) | null = n
 let ssrModuleLoaded = false;
 
 async function getSsrRender() {
-  if (ssrModuleLoaded) return ssrRenderFn;
+  if (ssrModuleLoaded) {
+    if (process.env.SSR_DIAG === "1") {
+      ssrDiag(
+        { cached: true, hasRender: typeof ssrRenderFn === "function" },
+        "reusing cached SSR render fn",
+      );
+    }
+    return ssrRenderFn;
+  }
   ssrModuleLoaded = true;
+  const ssrBundlePath = path.resolve(import.meta.dirname, "server", "entry-server.js");
+  const exists = fs.existsSync(ssrBundlePath);
+  ssrDiag({ ssrBundlePath, exists }, "loading SSR bundle");
   try {
-    const ssrBundlePath = path.resolve(import.meta.dirname, "server", "entry-server.js");
-    if (fs.existsSync(ssrBundlePath)) {
-      const mod = await import(ssrBundlePath);
-      ssrRenderFn = mod.render;
+    if (!exists) {
+      ssrDiag({ ssrBundlePath }, "SSR bundle file missing — public pages will be client-only", "warn");
+      return ssrRenderFn;
+    }
+    const mod = await import(ssrBundlePath);
+    ssrRenderFn = typeof mod.render === "function" ? mod.render : null;
+    if (!ssrRenderFn) {
+      ssrDiag(
+        { ssrBundlePath, exportKeys: Object.keys(mod ?? {}) },
+        "SSR bundle loaded but mod.render is not a function",
+        "warn",
+      );
+    } else {
+      ssrDiag({ ssrBundlePath }, "SSR bundle loaded OK");
     }
   } catch (e) {
-    ssrLogger.warn({ err: e }, "could not load SSR bundle");
+    ssrDiag({ err: e, ssrBundlePath }, "could not load SSR bundle", "warn");
   }
   return ssrRenderFn;
 }
@@ -371,6 +454,26 @@ export function serveStatic(app: Express) {
     }
 
     const url = _req.originalUrl;
+    const tHtml = Date.now();
+    const htmlMeta: {
+      cache: "HIT" | "MISS" | "BYPASS" | "NONE";
+      outcome: SlowHtmlOutcome;
+      appHtmlLength?: number;
+    } = {
+      cache: "NONE",
+      outcome: "other",
+    };
+    res.on("finish", () => {
+      logSlowHtmlIfNeeded({
+        url,
+        ms: Date.now() - tHtml,
+        status: res.statusCode,
+        cache: htmlMeta.cache,
+        outcome: htmlMeta.outcome,
+        appHtmlLength: htmlMeta.appHtmlLength,
+      });
+    });
+
     let status = resolvePublicHtmlStatus({
       url,
       contentIndex: siteContentIndex(res),
@@ -387,6 +490,7 @@ export function serveStatic(app: Express) {
       site?.domain ||
       "default";
     const bypassCache = skipSsr || shouldBypassHtmlCache(_req);
+    if (bypassCache) htmlMeta.cache = "BYPASS";
 
     try {
       // Ensure variant key is resolved before MISS populate
@@ -400,6 +504,13 @@ export function serveStatic(app: Express) {
         (res.locals as any).htmlVariantKey || "live",
       );
       const render = !skipSsr ? await getSsrRender() : null;
+      if (!skipSsr && !render) {
+        ssrDiag(
+          { url },
+          "no SSR render fn available — falling back to empty #root",
+          "warn",
+        );
+      }
       if (render) {
         const indexHtml = await fs.promises.readFile(indexHtmlPath, "utf-8");
         const initialDataPayload = await getInitialDataForRequest(url, res);
@@ -412,21 +523,36 @@ export function serveStatic(app: Express) {
               : undefined,
           contentIndex: siteContentIndex(res),
         });
+        const t0 = Date.now();
         let appHtml = await render(url, initialDataPayload);
         if (!isMeaningfulSsrAppHtml(appHtml)) {
-          ssrLogger.warn(
-            { url, appHtmlLength: appHtml?.length ?? 0 },
+          ssrDiag(
+            { url, appHtmlLength: appHtml?.length ?? 0, ms: Date.now() - t0 },
             "SSR returned empty body, retrying once",
+            "warn",
           );
           appHtml = await render(url, initialDataPayload);
         }
         if (!isMeaningfulSsrAppHtml(appHtml)) {
-          ssrLogger.warn(
-            { url, appHtmlLength: appHtml?.length ?? 0 },
+          ssrDiag(
+            {
+              url,
+              appHtmlLength: appHtml?.length ?? 0,
+              ms: Date.now() - t0,
+              preview: String(appHtml ?? "").slice(0, 120),
+            },
             "SSR returned empty body after retry — not caching empty #root",
+            "warn",
           );
+          htmlMeta.outcome = "ssr_empty_fallback";
+          htmlMeta.appHtmlLength = appHtml?.length ?? 0;
           throw new Error("empty_ssr_app_html");
         }
+
+        ssrDiag(
+          { url, appHtmlLength: appHtml.length, ms: Date.now() - t0 },
+          "prod SSR ok — injecting into #root",
+        );
 
         let html = indexHtml.replace(
           '<div id="root"></div>',
@@ -463,15 +589,35 @@ export function serveStatic(app: Express) {
         if (!bypassCache && status === 200) {
           setCachedHtml(cacheKey, htmlForCache, status);
           res.setHeader("X-HTML-Cache", "MISS");
+          htmlMeta.cache = "MISS";
         }
+        htmlMeta.outcome = "ssr_ok";
+        htmlMeta.appHtmlLength = appHtml.length;
 
         maybeRecordPublicNotFound(_req, res, status);
         res.status(status).set({ "Content-Type": "text/html" }).send(html);
         return;
       }
     } catch (e) {
-      ssrLogger.warn({ err: e, url }, "production render failed, falling back");
+      if (htmlMeta.outcome === "other") {
+        htmlMeta.outcome =
+          e instanceof Error && e.message === "empty_ssr_app_html"
+            ? "ssr_empty_fallback"
+            : "ssr_error_fallback";
+      }
+      ssrDiag(
+        {
+          err: e,
+          url,
+          errMessage: e instanceof Error ? e.message : String(e),
+        },
+        "production render failed, falling back (empty #root)",
+        "warn",
+      );
     }
+
+    ssrDiag({ url, hasSchema: Boolean(ssrSchemaHtml) }, "serving client-only HTML fallback", "warn");
+    if (htmlMeta.outcome === "other") htmlMeta.outcome = "client_fallback";
 
     if (ssrSchemaHtml) {
       try {

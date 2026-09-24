@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { IS_SERVER } from "@/lib/initialData";
+import { IS_SERVER, shouldSuppressFullPageLoader, isSsrHydrateWindow } from "@/lib/initialData";
 import { useParams, useLocation, useSearch } from "wouter";
 import { useTranslation } from "react-i18next";
 import { SectionRenderer } from "@/components/SectionRenderer";
@@ -115,7 +115,16 @@ export default function Page() {
     page?.settings as { loading?: { eager_count?: number } } | undefined,
   );
 
-  if (((isPending || isLoading) || (page && !sectionsReady)) && !IS_SERVER) {
+  const waitingForData = isPending || isLoading;
+  // Suppress only when we already have page data (SSR HTML is meaningful) and
+  // are warming eager sections — never hide the spinner while the page query
+  // itself is still empty.
+  const showLoader =
+    !IS_SERVER &&
+    (waitingForData ||
+      (!!page && !sectionsReady && !shouldSuppressFullPageLoader()));
+
+  if (showLoader) {
     return (
       <div 
         className="min-h-screen flex items-center justify-center"
@@ -133,6 +142,17 @@ export default function Page() {
   }
 
   if (error || !page) {
+    // Still settling / hydrate window: spinner, never a fake 404.
+    if (!IS_SERVER && !error && (waitingForData || isSsrHydrateWindow())) {
+      return (
+        <div 
+          className="min-h-screen flex items-center justify-center"
+          data-testid="loading-page"
+        >
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        </div>
+      );
+    }
     return (
       <>
         <div 

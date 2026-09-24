@@ -69,6 +69,7 @@ export const PER_PAGE_VALIDATORS = [
   "schema-completeness",
   "content-quality",
   "section-variants",
+  "nonlocalized-common-locale",
 ];
 
 interface PageErrorsModalProps {

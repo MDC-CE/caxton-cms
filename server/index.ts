@@ -255,6 +255,17 @@ app.use((req, res, next) => {
       }
 
       log(logLine);
+      if (duration >= 1000) {
+        logger.warn(
+          {
+            method: req.method,
+            path,
+            status: res.statusCode,
+            ms: duration,
+          },
+          "slow API response",
+        );
+      }
     }
   });
 
@@ -428,6 +439,7 @@ app.use((req, res, next) => {
       const cached = getCachedHtml(buildHtmlCacheKey(siteId, cleanUrl, variantKey));
       if (!cached) return next();
 
+      const tHit = Date.now();
       const { injectGtmWebContainerId } = await import("./gtm-web-inject");
       const html = injectGtmWebContainerId(cached.html, site?.contentRoot);
 
@@ -435,6 +447,17 @@ app.use((req, res, next) => {
         .status(cached.status)
         .set({ "Content-Type": "text/html", "X-HTML-Cache": "HIT" })
         .send(html);
+
+      void import("./utils/request-health").then(({ logSlowHtmlIfNeeded }) => {
+        logSlowHtmlIfNeeded({
+          url: cleanUrl,
+          ms: Date.now() - tHit,
+          status: cached.status,
+          cache: "HIT",
+          outcome: "cache_hit",
+          appHtmlLength: cached.html?.length,
+        });
+      });
     });
   }
 
@@ -503,7 +526,7 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on port ${port}`);
 
-    // ─── Periodic memory usage logging ───────────────────────────────────────
+    // ─── Periodic memory + event-loop health ─────────────────────────────────
     const memLogger = logger.child({ module: "memory" });
     setInterval(() => {
       const mem = process.memoryUsage();
@@ -514,6 +537,9 @@ app.use((req, res, next) => {
       const logFn = heapRatio > 0.80 ? memLogger.warn.bind(memLogger) : memLogger.info.bind(memLogger);
       logFn({ heapUsedMb, heapTotalMb, rssMb }, `high memory usage: heap ${heapUsedMb}/${heapTotalMb} MB (${Math.round(heapRatio * 100)}% used), rss ${rssMb} MB`);
     }, 5 * 60 * 1000).unref();
+    void import("./utils/request-health").then(({ startProcessHealthMonitor }) => {
+      startProcessHealthMonitor();
+    });
     // ─────────────────────────────────────────────────────────────────────────
 
     // All deferred background tasks fire here — server is already ready to handle requests.

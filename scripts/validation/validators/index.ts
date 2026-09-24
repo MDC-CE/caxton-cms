@@ -45,6 +45,7 @@ import { unknownKeysValidator } from "./unknown-keys";
 import { relationTargetsValidator } from "./relation-targets";
 import { updatedAtValidator } from "./updated-at";
 import { urlParamLocaleValidator } from "./url-param-locale";
+import { nonlocalizedCommonLocaleValidator } from "./nonlocalized-common-locale";
 import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
 import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
@@ -84,6 +85,7 @@ export const validators: Validator[] = [
   relationTargetsValidator,
   staticFieldOverridesValidator,
   urlParamLocaleValidator,
+  nonlocalizedCommonLocaleValidator,
   localeSlugUniquenessValidator,
   orphanedFilesValidator,
   formsValidator,

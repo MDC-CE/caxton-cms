@@ -65,6 +65,7 @@ import {
 import {
   LeadFormFieldControl,
   type LeadFormComponentRenderer,
+  type LeadFormCardsLayout,
   type LeadFormOption,
 } from "@/components/lead_form/LeadFormFieldControl";
 import {
@@ -122,10 +123,12 @@ function mergeLeadFormOptions(
     return {
       value: p.value,
       label: typeof ov.label === "string" && ov.label.trim() ? ov.label : p.label,
+      title: typeof ov.title === "string" && ov.title.trim() ? ov.title.trim() : undefined,
       description: ov.description ?? p.description,
       group: ov.group ?? p.group,
       cta: ov.cta,
       icon: ov.icon,
+      badge: ov.badge,
     };
   });
 
@@ -135,10 +138,12 @@ function mergeLeadFormOptions(
     merged.push({
       value: ov.value,
       label: typeof ov.label === "string" && ov.label.trim() ? ov.label : ov.value,
+      title: typeof ov.title === "string" && ov.title.trim() ? ov.title.trim() : undefined,
       description: ov.description,
       group: ov.group,
       cta: ov.cta,
       icon: ov.icon,
+      badge: ov.badge,
     });
   }
 
@@ -172,14 +177,20 @@ interface FieldConfig {
   source?: FormFieldSourceInput;
   /** Omitting uses `defaultComponentRenderer(fieldName)` at runtime. */
   component_renderer?: LeadFormComponentRenderer | string;
+  /** Cards only: `grid` (default) or `showcase`. */
+  layout?: LeadFormCardsLayout | string;
   /** Merged by `value` over pool options (programs/locations/source). */
   options?: Array<{
     value: string;
     label?: string;
+    /** Cards only: card heading; falls back to `label`. Closed input uses `label`. */
+    title?: string;
     description?: string;
     group?: string;
     cta?: string;
     icon?: string;
+    /** Cards renderer: chip top-right on the option card. */
+    badge?: string;
     [key: string]: unknown;
   }>;
 }
@@ -1172,6 +1183,14 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       return raw.trim() as LeadFormComponentRenderer;
     }
     return defaultComponentRenderer(fieldName as string);
+  };
+
+  const resolveFieldCardsLayout = (
+    fieldName: keyof NonNullable<LeadFormData["fields"]>,
+  ): LeadFormCardsLayout | undefined => {
+    const raw = getFieldConfig(fieldName).layout;
+    if (raw === "showcase" || raw === "grid") return raw;
+    return undefined;
   };
 
   const resolveDefault = (
@@ -2737,6 +2756,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
                         testId="select-program"
                         dialogTitle={getFieldConfig("program").label || (locale === "es" ? "Programas" : "Programs")}
                         dialogDescription={getFieldConfig("program").helper_text}
+                        layout={resolveFieldCardsLayout("program")}
                       />
                     </FormControl>
                     {getFieldConfig("program").helper_text &&
@@ -2780,6 +2800,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
                         }
                         testId={planChoiceOptions.length > 0 ? "select-plan" : "input-plan"}
                         dialogTitle={getFieldConfig("plan").label || (locale === "es" ? "Plan" : "Plan")}
+                        layout={resolveFieldCardsLayout("plan")}
                         selectEmptyFallback={
                           <Input
                             placeholder={

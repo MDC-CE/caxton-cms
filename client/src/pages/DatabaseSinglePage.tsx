@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
-import { IS_SERVER } from "@/lib/initialData";
+import { IS_SERVER, shouldSuppressFullPageLoader, isSsrHydrateWindow } from "@/lib/initialData";
 import { useLocation } from "wouter";
 import { SectionRenderer } from "@/components/SectionRenderer";
 import { apiFetch } from "@/lib/queryClient";
@@ -67,6 +67,7 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
   const {
     data: page,
     isLoading,
+    isPending,
     error,
     refetch,
     failureReason,
@@ -152,9 +153,16 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
     page?.settings as { loading?: { eager_count?: number } } | undefined,
   );
 
-  // Cold CSR / client nav miss: wait for eager section modules before Header+Footer.
-  // During SSR hydrate, useEagerSectionsReady stays true so we do not blank SSR HTML.
-  if ((isLoading || (page && !sectionsReady)) && !IS_SERVER) {
+  const waitingForData = isLoading || isPending;
+  // Cold CSR / client nav: spinner while page query is empty.
+  // During SSR hydrate with page data already present, suppress only the
+  // sections-warming loader so we do not blank SSR HTML with Loader2.
+  const showLoader =
+    !IS_SERVER &&
+    (waitingForData ||
+      (!!page && !sectionsReady && !shouldSuppressFullPageLoader()));
+
+  if (showLoader) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"
@@ -170,6 +178,16 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
   }
 
   if (error || !page) {
+    if (!IS_SERVER && !error && (waitingForData || isSsrHydrateWindow())) {
+      return (
+        <div
+          className="min-h-screen flex items-center justify-center"
+          data-testid="loading-database-single"
+        >
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        </div>
+      );
+    }
     return (
       <div data-testid="error-database-single">
         <Header menuConfig={defaultHeaderMenuConfig} isLoading={isDefaultHeaderLoading} />

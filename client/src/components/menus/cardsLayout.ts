@@ -1,8 +1,13 @@
 export type CardsLayoutMode = "fixed" | "max";
 
+/** Form/menu cards arrangement. `showcase` = first item full-width, rest in a row below. */
+export type CardsLayoutArrangement = "grid" | "showcase";
+
 export type CardsLayoutConfig = {
   mode?: CardsLayoutMode;
   count?: number;
+  /** Lead-form / picker arrangement. Navbar column layout ignores this. */
+  arrangement?: CardsLayoutArrangement;
 };
 
 export type ResolvedCardsLayout = {
