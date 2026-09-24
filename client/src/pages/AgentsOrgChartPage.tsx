@@ -54,7 +54,7 @@ const AGENTS_TABS: {
   Icon: ComponentType<{ className?: string }>;
 }[] = [
   { id: "orgchart", href: "/private/agents/orgchart", label: "Org Chart", Icon: Bot },
-  { id: "proposals", href: AGENTS_PROPOSALS_BASE, label: "Proposals", Icon: IconClipboardList },
+  { id: "proposals", href: AGENTS_PROPOSALS_BASE, label: "Agent Swarm Proposals", Icon: IconClipboardList },
   { id: "rules", href: "/private/agents/rules", label: "Rules", Icon: IconScale },
 ];
 

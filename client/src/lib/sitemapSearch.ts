@@ -75,6 +75,30 @@ export function dedupeSitemapEntries<T extends SitemapSearchEntry>(entries: T[])
   return out;
 }
 
+/** Stable key for a CMS entry (locale-agnostic). Null when type or slug is missing. */
+export function sitemapContentEntryKey(entry: SitemapSearchEntry): string | null {
+  const ct = entry.content_type?.trim();
+  const slug = entry.slug?.trim();
+  if (!ct || !slug) return null;
+  return `${ct}/${slug}`;
+}
+
+/**
+ * Keep the first row per content_type + slug (product / entry pickers).
+ * Drops rows missing content_type or slug.
+ */
+export function dedupeByContentEntry<T extends SitemapSearchEntry>(entries: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const entry of entries) {
+    const key = sitemapContentEntryKey(entry);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
 function tokenize(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }

@@ -1,10 +1,13 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconShoppingBag, IconCheck, IconX } from "@tabler/icons-react";
+import { IconShoppingBag, IconCheck, IconX, IconPlus } from "@tabler/icons-react";
 import { Link } from "wouter";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { AddProductModal } from "@/components/store/AddProductModal";
 import { isActivelySelling } from "@/lib/ecommerceProductMap";
 
 interface EcommerceProduct {
@@ -40,6 +43,7 @@ function ProductSkeleton() {
 }
 
 export default function StoreProductsPage() {
+  const [addOpen, setAddOpen] = useState(false);
   const { data, isLoading, isError } = useQuery<EcommerceResponse>({
     queryKey: ["/api/ecommerce/products"],
   });
@@ -49,20 +53,31 @@ export default function StoreProductsPage() {
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center gap-3 mb-6 flex-wrap">
           <PrivateHistoryBackButton data-testid="button-back" iconClassName="h-4 w-4 text-muted-foreground" />
-          <div className="flex items-center gap-2">
-            <IconShoppingBag className="h-5 w-5 text-muted-foreground" />
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <IconShoppingBag className="h-5 w-5 text-muted-foreground shrink-0" />
             <h1 className="text-xl font-semibold" data-testid="heading-products">
               Products
             </h1>
+            {!isLoading && (
+              <Badge variant="secondary" data-testid="badge-product-count">
+                {products.length}
+              </Badge>
+            )}
           </div>
-          {!isLoading && (
-            <Badge variant="secondary" data-testid="badge-product-count">
-              {products.length}
-            </Badge>
-          )}
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setAddOpen(true)}
+            data-testid="button-add-product"
+          >
+            <IconPlus className="h-4 w-4 mr-1.5" />
+            Add product
+          </Button>
         </div>
+
+        <AddProductModal open={addOpen} onOpenChange={setAddOpen} />
 
         {isError && (
           <Card data-testid="error-state">
@@ -84,14 +99,22 @@ export default function StoreProductsPage() {
 
         {!isLoading && !isError && products.length === 0 && (
           <Card data-testid="empty-state">
-            <CardContent className="py-12 text-center">
-              <IconShoppingBag className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
-              <p className="text-sm font-medium mb-1">No products found</p>
-              <p className="text-xs text-muted-foreground">
-                Add an <code className="bg-muted px-1 rounded">_product.yml</code> file with{" "}
-                <code className="bg-muted px-1 rounded">purchasable: true</code> to a content entry
-                to create a product.
+            <CardContent className="py-12 text-center space-y-3">
+              <IconShoppingBag className="h-10 w-10 text-muted-foreground mx-auto" />
+              <p className="text-sm font-medium">No products yet</p>
+              <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                Use Add product to pick a page and make it sellable. Audience can be filled on the
+                product page afterward.
               </p>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setAddOpen(true)}
+                data-testid="button-add-product-empty"
+              >
+                <IconPlus className="h-4 w-4 mr-1.5" />
+                Add product
+              </Button>
             </CardContent>
           </Card>
         )}
@@ -121,7 +144,12 @@ export default function StoreProductsPage() {
                         </p>
                       </div>
                       <Badge
-                        variant={isActivelySelling(product) ? "default" : "secondary"}
+                        variant="secondary"
+                        className={
+                          isActivelySelling(product)
+                            ? "pointer-events-none border-transparent bg-emerald-500/15 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 shadow-none"
+                            : "pointer-events-none"
+                        }
                         data-testid={`badge-product-active-${product.product_id}`}
                       >
                         {isActivelySelling(product) ? (

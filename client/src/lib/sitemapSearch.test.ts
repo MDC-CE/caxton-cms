@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  dedupeByContentEntry,
   dedupeSitemapEntries,
   filterSitemapEntries,
+  sitemapContentEntryKey,
   sitemapEntryKey,
   sitemapMatchScore,
   sitemapPathname,
@@ -72,6 +74,49 @@ describe("dedupeSitemapEntries", () => {
     const deduped = dedupeSitemapEntries(duplicateLandings);
     expect(deduped).toHaveLength(1);
     expect(deduped[0].slug).toBe("ai-engineering");
+  });
+});
+
+describe("dedupeByContentEntry", () => {
+  it("keeps one row per content_type + slug across locales", () => {
+    const rows: SitemapSearchEntry[] = [
+      entry("https://4geeks.com/us/coding-bootcamp", "Full Stack (EN)", {
+        content_type: "program",
+        slug: "full-stack",
+        locale: "en",
+      }),
+      entry("https://4geeks.com/es/coding-bootcamp", "Full Stack (ES)", {
+        content_type: "program",
+        slug: "full-stack",
+        locale: "es",
+      }),
+      entry("https://4geeks.com/us/data-science", "Data Science", {
+        content_type: "program",
+        slug: "data-science",
+        locale: "en",
+      }),
+    ];
+    const deduped = dedupeByContentEntry(rows);
+    expect(deduped).toHaveLength(2);
+    expect(deduped.map((e) => sitemapContentEntryKey(e))).toEqual([
+      "program/full-stack",
+      "program/data-science",
+    ]);
+    expect(deduped[0].locale).toBe("en");
+  });
+
+  it("drops rows missing content_type or slug", () => {
+    const rows: SitemapSearchEntry[] = [
+      entry("https://4geeks.com/us/x", "No type", { slug: "x", locale: "en" }),
+      entry("https://4geeks.com/us/y", "No slug", { content_type: "program", locale: "en" }),
+      entry("https://4geeks.com/us/z", "Ok", {
+        content_type: "program",
+        slug: "z",
+        locale: "en",
+      }),
+    ];
+    expect(dedupeByContentEntry(rows)).toHaveLength(1);
+    expect(sitemapContentEntryKey(rows[2])).toBe("program/z");
   });
 });
 

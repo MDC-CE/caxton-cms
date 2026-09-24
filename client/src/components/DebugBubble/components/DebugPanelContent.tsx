@@ -1115,7 +1115,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={ClipboardList}
-                label="Proposals"
+                label="Agent Swarm Proposals"
                 href="/private/agents/proposals"
                 indicator="arrow"
                 testId="link-proposals"
