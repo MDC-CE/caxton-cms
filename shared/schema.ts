@@ -103,6 +103,7 @@ export {
   heroOrbitBadgeSchema,
   heroOrbitDiagramSchema,
   heroOrbitSchema,
+  heroAutoVideoRightSchema,
   type TrustBar,
   type AwardBadge,
   type HeroImage,
@@ -120,6 +121,7 @@ export {
   type HeroOrbitBadge,
   type HeroOrbitDiagram,
   type HeroOrbit,
+  type HeroAutoVideoRight,
 } from "./component-registry/hero/v1.0/schema";
 
 // Variant types for type narrowing (schemas are internal to component registry)

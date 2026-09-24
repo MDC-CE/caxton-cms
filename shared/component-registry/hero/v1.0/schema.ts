@@ -426,6 +426,20 @@ export const heroOrbitSchema = z.object({
   orbit_diagram: heroOrbitDiagramSchema.optional(),
 }).passthrough();
 
+/** Copy on the left, muted autoplaying video on the right, faded into the text. */
+export const heroAutoVideoRightSchema = z.object({
+  type: z.literal("hero"),
+  version: z.string().optional(),
+  variant: z.literal("autoVideoRight"),
+  eyebrow: z.string().optional(),
+  title: z.string(),
+  body: z.string().optional(),
+  stat: z.string().optional(),
+  background: z.string().optional(),
+  cta_buttons: z.array(ctaButtonSchema).optional(),
+  video: videoConfigSchema.optional(),
+}).passthrough();
+
 // ─── HeroCredibility sub-schemas ─────────────────────────────────────────────
 
 export const heroCredibilityPillLogoSchema = z.object({
@@ -625,6 +639,7 @@ export const heroSectionSchema = z.union([
   heroApplyFormProductShowcaseSchema,
   heroCredibilitySchema,
   heroOrbitSchema,
+  heroAutoVideoRightSchema,
   heroExerciseSchema,
   heroWorkshopSchema,
 ]);
@@ -656,6 +671,7 @@ export type HeroCredibility = z.infer<typeof heroCredibilitySchema>;
 export type HeroOrbitBadge = z.infer<typeof heroOrbitBadgeSchema>;
 export type HeroOrbitDiagram = z.infer<typeof heroOrbitDiagramSchema>;
 export type HeroOrbit = z.infer<typeof heroOrbitSchema>;
+export type HeroAutoVideoRight = z.infer<typeof heroAutoVideoRightSchema>;
 export type HeroExercise = z.infer<typeof heroExerciseSchema>;
 export type HeroWorkshop = z.infer<typeof heroWorkshopSchema>;
 export type HeroSection = z.infer<typeof heroSectionSchema>;

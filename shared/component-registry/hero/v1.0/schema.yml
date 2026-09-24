@@ -41,6 +41,11 @@ image_sizes:
   simpleTwoColumn.image.src: 300px
 variants:
   ApplyFormProductShowcase: {}
+  autoVideoRight:
+    description: >-
+      Two-column hero with copy on the left and a muted autoplaying video on the right. The video fades into the text.
+      Top-right and bottom-right corners are rounded.
+    best_for: Homepage heroes that need a film on the right instead of a diagram
   blogHero:
     description: Left-aligned blog post hero with updated date, reading time, title, subtitle, and author avatars
     best_for: Blog shared templates and article detail pages
@@ -241,6 +246,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -316,6 +327,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -391,6 +408,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -466,6 +489,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -541,6 +570,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -616,6 +651,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -691,6 +732,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -766,6 +813,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -841,6 +894,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -916,6 +975,12 @@ variant_props:
                     - cards
                     - simple-list
                     - grouped-list
+                layout:
+                  type: string
+                  required: false
+                  options:
+                    - grid
+                    - showcase
                 options:
                   type: array
                   required: false
@@ -958,7 +1023,7 @@ variant_props:
                     - contains
                 value:
                   type: string
-                  required: true
+                  required: false
             conversion_name:
               type: string
               required: false
@@ -1273,6 +1338,105 @@ variant_props:
         gradientWidth:
           type: number
           required: false
+  autoVideoRight:
+    eyebrow:
+      type: string
+      required: false
+    body:
+      type: string
+      required: false
+    stat:
+      type: string
+      required: false
+    background:
+      type: string
+      required: false
+    cta_buttons:
+      type: array
+      required: false
+      items:
+        text:
+          type: string
+          required: true
+        url:
+          type: string
+          required: true
+        variant:
+          type: string
+          required: true
+          options:
+            - primary
+            - secondary
+            - outline
+        tracking:
+          type: string
+          required: false
+          options:
+            - none
+            - add_to_cart
+            - click_begin_checkout
+        button_variant:
+          type: string
+          required: false
+        text_color:
+          type: string
+          required: false
+        icon:
+          type: string
+          required: false
+        us_only:
+          type: boolean
+          required: false
+    video:
+      type: object
+      required: false
+      properties:
+        url:
+          type: string
+          required: false
+        ratio:
+          type: string
+          required: false
+        mobile_ratio:
+          type: string
+          required: false
+        width:
+          type: string
+          required: false
+        muted:
+          type: boolean
+          required: false
+        autoplay:
+          type: boolean
+          required: false
+        loop:
+          type: boolean
+          required: false
+        preview_image_url:
+          type: string
+          required: false
+        with_shadow_border:
+          type: boolean
+          required: false
+        open_modal_on_click:
+          type: boolean
+          required: false
+        overlay_on_muted:
+          type: object
+          required: false
+          properties:
+            title:
+              type: string
+              required: false
+            subtitle:
+              type: string
+              required: false
+            icon:
+              type: string
+              required: false
+            restart_video_on_click:
+              type: boolean
+              required: false
   blogHero:
     subtitle:
       type: string
@@ -1600,6 +1764,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -1675,6 +1845,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -1750,6 +1926,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -1825,6 +2007,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -1900,6 +2088,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -1975,6 +2169,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -2050,6 +2250,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -2125,6 +2331,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -2200,6 +2412,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -2275,6 +2493,12 @@ variant_props:
                         - cards
                         - simple-list
                         - grouped-list
+                    layout:
+                      type: string
+                      required: false
+                      options:
+                        - grid
+                        - showcase
                     options:
                       type: array
                       required: false
@@ -2317,7 +2541,7 @@ variant_props:
                         - contains
                     value:
                       type: string
-                      required: true
+                      required: false
                 conversion_name:
                   type: string
                   required: false

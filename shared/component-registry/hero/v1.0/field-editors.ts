@@ -26,6 +26,10 @@ export const fieldEditors: Record<string, EditorType> = {
   "orbit:orbit_diagram.badges.inner[].url": "link-picker",
   "orbit:orbit_diagram.badges.middle[].url": "link-picker",
   "orbit:orbit_diagram.badges.outer[].url": "link-picker",
+  "autoVideoRight:title": "rich-text-editor:custom-font-size,custom-letter-spacing,custom-line-height,custom-font-weight",
+  "autoVideoRight:body": "rich-text-editor",
+  "autoVideoRight:cta_buttons[].url": "link-picker",
+  "autoVideoRight:video.url": "video-picker",
 
   // Variant-specific - prefixed with variant name
   "productShowcase:image": "image-with-style-picker",

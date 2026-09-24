@@ -1,0 +1,27 @@
+name: "Auto video on the right"
+description: "Copy on the left. A muted looping video on the right fades into the text. Top-right and bottom-right corners are rounded."
+yaml: |
+  - type: hero
+    version: "1.0"
+    variant: autoVideoRight
+    eyebrow: MDC CONTINUING EDUCATION
+    title: "<span>Jobs with a future.<br><em>Certificates that get you there.</em></span>"
+    body: See what's hiring in Miami-Dade, what those jobs pay, and the short certificate people usually start with.
+    stat: <strong>3 tracks</strong> first — health, tech, and skilled trades.
+    cta_buttons:
+      - text: See the three tracks
+        url: "#careers"
+        variant: primary
+        icon: ChevronRight
+        tracking: none
+      - text: Official CE catalog
+        url: https://ce.mdc.edu/
+        variant: outline
+        tracking: none
+    video:
+      url: /site_learning-mdc-edu/images/MDC-Desktop-24s.mp4
+      muted: true
+      autoplay: true
+      loop: true
+      open_modal_on_click: false
+    background: linear-gradient(to bottom left, hsl(210 90% 45% / 0.16), transparent 62%)
