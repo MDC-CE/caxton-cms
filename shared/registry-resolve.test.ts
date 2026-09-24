@@ -10,6 +10,7 @@ import {
 } from "./registry-resolve";
 
 const ORIGINAL_CWD = process.cwd();
+const ORIGINAL_PACKAGE_ROOT = process.env.WEBLIFY_PACKAGE_ROOT;
 let tempDir: string;
 
 function writeType(registryRoot: string, type: string) {
@@ -21,12 +22,16 @@ function writeType(registryRoot: string, type: string) {
 beforeEach(() => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "registry-resolve-"));
   process.chdir(tempDir);
+  // Shared registry is resolved from the package root, not process.cwd().
+  process.env.WEBLIFY_PACKAGE_ROOT = tempDir;
   fs.mkdirSync(path.join(tempDir, "shared", "component-registry"), { recursive: true });
   writeType(path.join(tempDir, "shared", "component-registry"), "text_block");
 });
 
 afterEach(() => {
   process.chdir(ORIGINAL_CWD);
+  if (ORIGINAL_PACKAGE_ROOT === undefined) delete process.env.WEBLIFY_PACKAGE_ROOT;
+  else process.env.WEBLIFY_PACKAGE_ROOT = ORIGINAL_PACKAGE_ROOT;
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
