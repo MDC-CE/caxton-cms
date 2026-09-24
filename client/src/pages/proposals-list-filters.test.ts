@@ -35,7 +35,9 @@ describe("parseProposalListSearch", () => {
         proposerActorType: "all",
         proposerActorRole: "",
         agentSessionId: "",
+        reviewerUsername: "",
         escalatedOnly: false,
+        badOutcomeOnly: false,
         attention: "all",
         stalledOnly: false,
         needsReviewOnly: false,
@@ -59,10 +61,33 @@ describe("parseProposalListSearch", () => {
     expect(view.filters.agentSessionId).toBe("sess-1");
   });
 
+  it("parses reviewer_username and maps it to the API", () => {
+    const view = parseProposalListSearch("reviewer_username=blake%40x.com");
+    expect(view.filters.reviewerUsername).toBe("blake@x.com");
+    expect(serializeProposalListSearch(view)).toBe("reviewer_username=blake%40x.com");
+    expect(toProposalListApiQuery(view.filters, "").reviewer_username).toBe("blake@x.com");
+    expect(
+      new URLSearchParams(proposalListApiSearchParams(toProposalListApiQuery(view.filters, ""))).get(
+        "reviewer_username",
+      ),
+    ).toBe("blake@x.com");
+    expect(countActiveProposalFilters(view.filters)).toBe(1);
+    expect(clearProposalListFilters(view.filters).reviewerUsername).toBe("");
+  });
+
   it("parses escalated=1 as escalatedOnly", () => {
     expect(parseProposalListSearch("escalated=1").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("escalated=true").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("").filters.escalatedOnly).toBe(false);
+  });
+
+  it("parses outcome_review=bad_open as badOutcomeOnly and maps it to the API", () => {
+    const view = parseProposalListSearch("status=all&outcome_review=bad_open");
+    expect(view.filters.badOutcomeOnly).toBe(true);
+    expect(parseProposalListSearch("outcome_review=bad").filters.badOutcomeOnly).toBe(false);
+    expect(serializeProposalListSearch(view)).toContain("outcome_review=bad_open");
+    expect(toProposalListApiQuery(view.filters, "").outcome_review).toBe("bad_open");
+    expect(countActiveProposalFilters(view.filters)).toBe(2);
   });
 
   it("parses stalled=1 as stalledOnly", () => {
@@ -120,7 +145,9 @@ describe("serializeProposalListSearch", () => {
         proposerActorType: "ui" as const,
         proposerActorRole: "copy_editor",
         agentSessionId: "sess-9",
+        reviewerUsername: "dana@x.com",
         escalatedOnly: true,
+        badOutcomeOnly: false,
         attention: "blocked" as const,
         stalledOnly: false,
         needsReviewOnly: false,
@@ -196,7 +223,9 @@ describe("clearProposalListFilters", () => {
       proposerActorType: "all",
       proposerActorRole: "",
       agentSessionId: "",
+      reviewerUsername: "",
       escalatedOnly: false,
+      badOutcomeOnly: false,
       attention: "all",
       stalledOnly: false,
       needsReviewOnly: false,

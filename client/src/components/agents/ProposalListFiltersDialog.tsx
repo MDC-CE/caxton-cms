@@ -51,9 +51,24 @@ export type ProposalListFilterDims = Pick<
   | "proposerActorType"
   | "proposerActorRole"
   | "agentSessionId"
+  | "reviewerUsername"
   | "escalatedOnly"
+  | "badOutcomeOnly"
   | "attention"
 >;
+
+const PEOPLE_POPOVER_SELECTORS = [
+  '[data-testid="popover-proposal-proposer-filter"]',
+  '[data-testid="popover-proposal-reviewer-filter"]',
+];
+
+function isNestedPickerTarget(target: HTMLElement): boolean {
+  return Boolean(
+    target.closest("[data-radix-popper-content-wrapper]") ||
+      target.closest('[data-testid="dialog-agent-session-picker"]') ||
+      PEOPLE_POPOVER_SELECTORS.some((sel) => target.closest(sel)),
+  );
+}
 
 const ROLE_ANY = "__any__";
 const SESSION_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
@@ -66,7 +81,9 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     proposerActorType: filters.proposerActorType,
     proposerActorRole: filters.proposerActorRole,
     agentSessionId: filters.agentSessionId,
+    reviewerUsername: filters.reviewerUsername,
     escalatedOnly: filters.escalatedOnly,
+    badOutcomeOnly: filters.badOutcomeOnly,
     attention: filters.attention,
   };
 }
@@ -100,6 +117,7 @@ export function ProposalListFiltersDialog({
   const [draft, setDraft] = useState<ProposalListFilterDims>(() => dimsFromFilters(filters));
   const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
   const [proposerPickerOpen, setProposerPickerOpen] = useState(false);
+  const [reviewerPickerOpen, setReviewerPickerOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -113,7 +131,9 @@ export function ProposalListFiltersDialog({
     filters.proposerActorType,
     filters.proposerActorRole,
     filters.agentSessionId,
+    filters.reviewerUsername,
     filters.escalatedOnly,
+    filters.badOutcomeOnly,
     filters.attention,
   ]);
 
@@ -139,7 +159,7 @@ export function ProposalListFiltersDialog({
   });
 
   const sessions = sessionsQuery.data ?? [];
-  const nestedOpen = sessionPickerOpen || proposerPickerOpen;
+  const nestedOpen = sessionPickerOpen || proposerPickerOpen || reviewerPickerOpen;
 
   const patchDraft = (patch: Partial<ProposalListFilterDims>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
@@ -151,6 +171,7 @@ export function ProposalListFiltersDialog({
       proposerUsername: draft.proposerUsername.trim(),
       proposerActorRole: draft.proposerActorRole.trim(),
       agentSessionId: draft.agentSessionId.trim(),
+      reviewerUsername: draft.reviewerUsername.trim(),
     });
     onOpenChange(false);
   }
@@ -197,6 +218,7 @@ export function ProposalListFiltersDialog({
           if (!next) {
             setSessionPickerOpen(false);
             setProposerPickerOpen(false);
+            setReviewerPickerOpen(false);
           }
         }}
       >
@@ -205,40 +227,20 @@ export function ProposalListFiltersDialog({
           className="max-h-[85vh] overflow-y-auto"
           data-testid="dialog-proposal-filters"
           onPointerDownOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
           onFocusOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
           onInteractOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
         >
           <DialogHeader>
             <DialogTitle>Filters</DialogTitle>
             <DialogDescription>
-              Narrow which proposals appear in the list by status, kind, attention, or who filed them.
+              Narrow which proposals appear in the list by status, kind, attention, or who filed or
+              reviewed them.
               Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
               to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
               Ready for re-check means reviewers should look again: blockers are cleared, or the author
@@ -347,6 +349,23 @@ export function ProposalListFiltersDialog({
               <p className="text-[11px] text-muted-foreground">
                 People with a proposal touched in the last 30 days. Type a full username if they’re not
                 listed (exact match).
+              </p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="proposal-reviewer-username-filter" className="text-xs text-muted-foreground">
+                Reviewer
+              </Label>
+              <ProposalProposerCombobox
+                source="reviewers"
+                value={draft.reviewerUsername}
+                onChange={(reviewerUsername) => patchDraft({ reviewerUsername })}
+                enabled={open}
+                onOpenChange={setReviewerPickerOpen}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Person who gave the latest feedback, or who finished or rejected the proposal (last 30
+                days). Earlier reviewers don’t match. Type a full username if they’re not listed (exact
+                match).
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -459,6 +478,29 @@ export function ProposalListFiltersDialog({
                 checked={draft.escalatedOnly}
                 onCheckedChange={(checked) => patchDraft({ escalatedOnly: checked })}
                 data-testid="switch-proposal-escalated-only-filter"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <div className="space-y-0.5">
+                <Label htmlFor="proposal-bad-outcome-filter" className="text-xs text-foreground">
+                  Bad outcome (needs lesson)
+                </Label>
+                <p className="text-[11px] text-muted-foreground">
+                  Closed proposals a steward marked as a bad outcome, with no lesson captured yet.
+                </p>
+              </div>
+              <Switch
+                id="proposal-bad-outcome-filter"
+                checked={draft.badOutcomeOnly}
+                onCheckedChange={(checked) =>
+                  patchDraft({
+                    badOutcomeOnly: checked,
+                    ...(checked && (draft.status === "open" || draft.status === "partial")
+                      ? { status: "all" as const }
+                      : {}),
+                  })
+                }
+                data-testid="switch-proposal-bad-outcome-filter"
               />
             </div>
           </div>

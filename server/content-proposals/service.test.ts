@@ -5,6 +5,7 @@ import path from "path";
 import yaml from "js-yaml";
 import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
+import { listEvents } from "../events/event-store";
 import { fingerprintEdits, fingerprintNotes } from "./fingerprint";
 import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-attached-entry";
 import {
@@ -1908,6 +1909,138 @@ describe("content proposals", () => {
     );
   });
 
+  it("outcome review: closed-only, staff-only, bad needs notes, history, clear, lesson, filters", async () => {
+    const svc = makeService();
+    const summary =
+      "Update the landing CTA copy so the product name matches the live funnel offer. ".repeat(2);
+    const created = await svc.create(
+      { title: "CTA outcome", summary, entries: [sampleEntry()] },
+      { username: "alice", actor: { type: "mcp", role: "copy_editor" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.proposal.id;
+    const steward = { username: "steward", actor: { type: "ui" as const } };
+    const wentWrong = "Agent applied copy that named the wrong product on a selling page.";
+    const expected = "Reviewer should have blocked until the product name matched the funnel.";
+
+    const whileOpen = await svc.update(id, "review_outcome", { ...steward, outcome_review: "good" });
+    expect(whileOpen.ok).toBe(false);
+    if (!whileOpen.ok) expect(whileOpen.code).toBe("not_closed");
+
+    const withdrawn = await svc.update(id, "withdraw", {
+      username: "alice",
+      close_note: "Pulling back to refile with a corrected product name scope.",
+    });
+    expect(withdrawn.ok).toBe(true);
+
+    const mcp = await svc.update(id, "review_outcome", {
+      username: "grok",
+      actor: { type: "mcp", role: "proposal_reviewer" },
+      outcome_review: "good",
+    });
+    expect(mcp.ok).toBe(false);
+    if (!mcp.ok) expect(mcp.code).toBe("steward_ui_only");
+
+    const badNoNotes = await svc.update(id, "review_outcome", {
+      ...steward,
+      outcome_review: "bad",
+      outcome_review_note: "short",
+    });
+    expect(badNoNotes.ok).toBe(false);
+    if (!badNoNotes.ok) expect(badNoNotes.code).toBe("outcome_review_note_required");
+
+    const lessonTooEarly = await svc.update(id, "set_outcome_lesson", {
+      ...steward,
+      outcome_lesson_captured: true,
+    });
+    expect(lessonTooEarly.ok).toBe(false);
+    if (!lessonTooEarly.ok) expect(lessonTooEarly.code).toBe("not_bad");
+
+    const good = await svc.update(id, "review_outcome", { ...steward, outcome_review: "good" });
+    expect(good.ok).toBe(true);
+    if (!good.ok) return;
+    expect(good.proposal.outcome_review).toBe("good");
+    expect(good.proposal.outcome_review_history).toEqual([]);
+    expect(good.proposal.status).toBe("withdrawn");
+
+    const bad = await svc.update(id, "review_outcome", {
+      ...steward,
+      outcome_review: "bad",
+      outcome_review_note: wentWrong,
+      outcome_review_expected: expected,
+    });
+    expect(bad.ok).toBe(true);
+    if (!bad.ok) return;
+    expect(bad.proposal.outcome_review).toBe("bad");
+    expect(bad.proposal.outcome_review_note).toBe(wentWrong);
+    expect(bad.proposal.outcome_review_expected).toBe(expected);
+    expect(bad.proposal.outcome_review_by).toBe("steward");
+    expect(bad.proposal.outcome_review_history).toHaveLength(1);
+    expect(bad.proposal.outcome_review_history[0]).toMatchObject({
+      outcome: "good",
+      replaced_with: "bad",
+      replaced_by: "steward",
+    });
+
+    expect(svc.list({ outcome_review: "bad_open" }).proposals.map((p) => p.id)).toEqual([id]);
+    expect(svc.list({ outcome_review: "none" }).total).toBe(0);
+
+    const lesson = await svc.update(id, "set_outcome_lesson", {
+      ...steward,
+      outcome_lesson_captured: true,
+      outcome_lesson_note: "Added a selling-page product name checklist item.",
+    });
+    expect(lesson.ok).toBe(true);
+    if (!lesson.ok) return;
+    expect(lesson.proposal.outcome_lesson_captured_by).toBe("steward");
+    expect(lesson.proposal.outcome_lesson_note).toBe(
+      "Added a selling-page product name checklist item.",
+    );
+    expect(svc.list({ outcome_review: "bad_open" }).total).toBe(0);
+    expect(svc.list({ outcome_review: "bad" }).total).toBe(1);
+
+    const editedBad = await svc.update(id, "review_outcome", {
+      ...steward,
+      outcome_review: "bad",
+      outcome_review_note: wentWrong,
+      outcome_review_expected: `${expected} Also check the CTA link.`,
+    });
+    expect(editedBad.ok).toBe(true);
+    if (editedBad.ok) expect(editedBad.proposal.outcome_lesson_captured_at).not.toBeNull();
+
+    const toGood = await svc.update(id, "review_outcome", { ...steward, outcome_review: "good" });
+    expect(toGood.ok).toBe(true);
+    if (toGood.ok) {
+      expect(toGood.proposal.outcome_lesson_captured_at).toBeNull();
+      expect(toGood.proposal.outcome_review_expected).toBeNull();
+    }
+
+    const cleared = await svc.update(id, "review_outcome", { ...steward, outcome_review: "clear" });
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.proposal.outcome_review).toBeNull();
+    expect(cleared.proposal.outcome_review_note).toBeNull();
+    expect(cleared.proposal.outcome_review_history).toHaveLength(4);
+    expect(cleared.proposal.outcome_review_history.at(-1)?.replaced_with).toBe("cleared");
+    expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).toEqual([id]);
+
+    const clearAgain = await svc.update(id, "review_outcome", { ...steward, outcome_review: "clear" });
+    expect(clearAgain.ok).toBe(false);
+    if (!clearAgain.ok) expect(clearAgain.code).toBe("not_reviewed");
+
+    const events = listEvents({ site: SITE, type: "proposal_outcome_reviewed", limit: 50 }).filter(
+      (e) => e.payload?.proposal_id === id,
+    );
+    expect(events).toHaveLength(5);
+    const lessonEvents = listEvents({
+      site: SITE,
+      type: "proposal_outcome_lesson_set",
+      limit: 50,
+    }).filter((e) => e.payload?.proposal_id === id);
+    expect(lessonEvents).toHaveLength(1);
+  });
+
   it("idea follow-through: accept locks entry, implements gates, stalled resurfaces after reject", async () => {
     const svc = makeService({
       liveValues: { "meta.title": "Old" },
@@ -2119,6 +2252,136 @@ describe("content proposals", () => {
     if (!staff.ok) return;
     const uiBlocker = staff.proposal.blockers.find((b) => b.author === "casey");
     expect(uiBlocker?.author_actor).toEqual({ type: "ui" });
+  });
+
+  it("stamps reviewer_action_by on non-author add/resolve/reopen and never for the author", async () => {
+    const svc = makeService();
+    const summary =
+      "Patch the CTA title on the Spanish blog so the product name is explicit. ".repeat(2);
+    const body =
+      "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.";
+    const resolveNote = "Updated CTA title to name Coding Bootcamp on the Spanish blog.";
+    const authorActor = { type: "mcp" as const, role: "copy_editor", model: "claude/sonnet-4.5" };
+    const created = await svc.create(
+      { title: "Reviewer stamp", summary, entries: [sampleEntry()] },
+      { username: "alice", actor: authorActor },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.proposal.id;
+
+    const selfAdd = await svc.update(id, "add_blocker", { username: "alice", actor: authorActor, body });
+    expect(selfAdd.ok).toBe(true);
+    if (!selfAdd.ok) return;
+    expect(selfAdd.proposal.reviewer_action_at).toBeNull();
+    expect(selfAdd.proposal.reviewer_action_by).toBeNull();
+    expect(toProposalSummary(selfAdd.proposal).reviewer_action_by).toBeNull();
+
+    const reviewerActor = { type: "ui" as const };
+    const added = await svc.update(id, "add_blocker", { username: "blake", actor: reviewerActor, body });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(added.proposal.reviewer_action_by).toBe("blake");
+    expect(added.proposal.reviewer_action_by_actor).toEqual(reviewerActor);
+    expect(added.proposal.reviewer_action_at).not.toBeNull();
+    const summaryRow = toProposalSummary(added.proposal);
+    expect(summaryRow.reviewer_action_by).toBe("blake");
+    expect(summaryRow.reviewer_action_at).toBe(added.proposal.reviewer_action_at);
+
+    const blakeBlocker = added.proposal.blockers.find((b) => b.author === "blake")!;
+    await svc.update(id, "claim", { username: "alice", actor: authorActor });
+    const authorResolve = await svc.update(id, "resolve_blocker", {
+      username: "alice",
+      actor: authorActor,
+      blocker_id: blakeBlocker.id,
+      resolve_note: resolveNote,
+    });
+    expect(authorResolve.ok).toBe(true);
+    if (!authorResolve.ok) return;
+    expect(authorResolve.proposal.reviewer_action_by).toBe("blake");
+    expect(authorResolve.proposal.reviewer_action_at).toBe(added.proposal.reviewer_action_at);
+
+    const reopened = await svc.update(id, "reopen_blocker", {
+      username: "casey",
+      actor: { type: "mcp", role: "seo_specialist" },
+      blocker_id: blakeBlocker.id,
+    });
+    expect(reopened.ok).toBe(true);
+    if (!reopened.ok) return;
+    expect(reopened.proposal.reviewer_action_by).toBe("casey");
+    expect(reopened.proposal.reviewer_action_by_actor).toEqual({ type: "mcp", role: "seo_specialist" });
+    const caseyAt = reopened.proposal.reviewer_action_at;
+
+    await svc.update(id, "resolve_blocker", {
+      username: "alice",
+      actor: authorActor,
+      blocker_id: blakeBlocker.id,
+      resolve_note: resolveNote,
+    });
+    const selfReopen = await svc.update(id, "reopen_blocker", {
+      username: "alice",
+      actor: authorActor,
+      blocker_id: blakeBlocker.id,
+    });
+    expect(selfReopen.ok).toBe(true);
+    if (!selfReopen.ok) return;
+    expect(selfReopen.proposal.reviewer_action_by).toBe("casey");
+    expect(selfReopen.proposal.reviewer_action_at).toBe(caseyAt);
+  });
+
+  it("list filters by reviewer_username: last feedback or finished/rejected closer", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const body =
+      "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.";
+    const mk = async (slug: string) => {
+      const r = await svc.create(
+        { title: `Reviewer filter ${slug}`, summary, entries: [sampleEntry({ slug })] },
+        { username: "alice", actor: { type: "ui" } },
+      );
+      if (!r.ok) throw new Error("create failed");
+      return r.proposal.id;
+    };
+
+    const openReviewed = await mk("open-reviewed");
+    await svc.update(openReviewed, "add_blocker", { username: "Blake", actor: { type: "ui" }, body });
+
+    const replaced = await mk("replaced");
+    await svc.update(replaced, "add_blocker", { username: "blake", actor: { type: "ui" }, body });
+    await svc.update(replaced, "add_blocker", { username: "dana", actor: { type: "ui" }, body });
+
+    const rejected = await mk("rejected");
+    const rej = await svc.update(rejected, "reject", {
+      username: "blake",
+      actor: { type: "ui" },
+      confirm_reject: true,
+      reject_kind: "bad_idea",
+      close_note:
+        "This approach is fundamentally wrong for brand and SEO and must not ship even if polished.",
+    });
+    expect(rej.ok).toBe(true);
+
+    const withdrawn = await mk("withdrawn");
+    const wd = await svc.update(withdrawn, "withdraw", {
+      username: "alice",
+      actor: { type: "ui" },
+      close_note: "No longer needed after the campaign ended last week.",
+    });
+    expect(wd.ok).toBe(true);
+
+    const ids = (u: string) =>
+      svc
+        .list({ reviewer_username: u })
+        .proposals.map((p) => p.id)
+        .sort();
+    expect(ids("blake")).toEqual([openReviewed, rejected].sort());
+    expect(ids("BLAKE")).toEqual([openReviewed, rejected].sort());
+    expect(ids("dana")).toEqual([replaced]);
+    expect(ids("alice")).toEqual([]);
+
+    const reviewers = svc.listRecentReviewers({ days: 30 });
+    expect(reviewers.map((u) => u.toLowerCase()).sort()).toEqual(["blake", "dana"]);
   });
 });
 
@@ -2664,6 +2927,87 @@ describe("attached entry from an accepted idea", () => {
     });
     expect(frozen.ok).toBe(false);
     if (!frozen.ok) expect(frozen.code).toBe("idea_funnel_frozen");
+  });
+
+  it("proposal_idea_funnel_set: fires on create with funnel, skips unchanged saves, carries actor", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+    });
+    const summary =
+      "New article pitch for a Grok explainer covering product basics for beginners who search. ".repeat(
+        2,
+      );
+    const alice = {
+      username: "alice",
+      actor: { type: "mcp" as const, role: "copy_editor", model: "grok-4", client: "Cursor" },
+    };
+    const funnelEvents = (proposalId: string) =>
+      listEvents({ site: SITE, type: "proposal_idea_funnel_set", limit: 50 }).filter(
+        (e) => e.payload?.proposal_id === proposalId,
+      );
+
+    const withFunnel = await svc.create(
+      {
+        kind: "idea",
+        title: "New article: Grok for career changers",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "grok-career", locale: "en" }],
+        idea_funnel: {
+          stage: "consideration",
+          products: [{ product: "ai-engineering" }, { product: "full-stack" }],
+        },
+      },
+      alice,
+    );
+    expect(withFunnel.ok).toBe(true);
+    if (!withFunnel.ok) return;
+    const onCreate = funnelEvents(withFunnel.proposal.id);
+    expect(onCreate).toHaveLength(1);
+    expect(onCreate[0]?.attribution?.[0]?.actor).toMatchObject({ type: "mcp", model: "grok-4" });
+    const created = listEvents({ site: SITE, type: "proposal_created", limit: 50 }).find(
+      (e) => e.payload?.proposal_id === withFunnel.proposal.id,
+    );
+    expect(created).toBeDefined();
+    expect(onCreate[0]!.id).toBeGreaterThan(created!.id);
+
+    const bare = await svc.create(
+      {
+        kind: "idea",
+        title: "New article: Grok basics",
+        summary: summary.replace("career", "basics") + " Different angle.",
+        related_entries: [{ contentType: "blog", slug: "grok-basics", locale: "en" }],
+      },
+      alice,
+    );
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(funnelEvents(bare.proposal.id)).toHaveLength(0);
+
+    const beforeUpdatedAt = withFunnel.proposal.updated_at;
+    const same = await svc.update(withFunnel.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: {
+        stage: "consideration",
+        products: [{ product: "full-stack" }, { product: "ai-engineering" }],
+      },
+    });
+    expect(same.ok).toBe(true);
+    if (!same.ok) return;
+    expect(same.proposal.updated_at).toBe(beforeUpdatedAt);
+    expect(funnelEvents(withFunnel.proposal.id)).toHaveLength(1);
+
+    const changed = await svc.update(withFunnel.proposal.id, "set_idea_funnel", {
+      ...alice,
+      idea_funnel: { stage: "decision", products: [{ product: "ai-engineering" }] },
+    });
+    expect(changed.ok).toBe(true);
+    const afterChange = funnelEvents(withFunnel.proposal.id);
+    expect(afterChange).toHaveLength(2);
+    expect(afterChange[0]?.attribution?.[0]?.actor).toMatchObject({ type: "mcp", model: "grok-4" });
   });
 
   it("creates_entry apply seeds idea funnel and refuses conflicting ops", async () => {

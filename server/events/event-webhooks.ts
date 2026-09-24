@@ -14,6 +14,8 @@ import { sanitizeWebhookHeaders } from "../../shared/webhookHeaders";
 import { child } from "../logger";
 import type { ContentEvent, EventType } from "./types";
 import { getEventById } from "./event-store";
+import { FUNNEL_STAGES, type FunnelStage } from "@shared/funnel";
+import { parseIdeaFunnel } from "../content-proposals/idea-funnel";
 
 const log = child({ module: "event-webhooks" });
 
@@ -28,6 +30,7 @@ export const EVENT_WEBHOOK_ALLOWLIST = [
   "proposal_withdrawn",
   "proposal_escalated",
   "proposal_deescalated",
+  "proposal_idea_funnel_set",
 ] as const;
 
 export type EventWebhookAllowlistedType = (typeof EVENT_WEBHOOK_ALLOWLIST)[number];
@@ -80,6 +83,12 @@ export type EventWebhookFilter = {
   exclude_content_types?: string[];
   locales?: string[];
   exclude_locales?: string[];
+  /** Idea proposals only: `idea_funnel.stage`. No funnel → include fails. */
+  funnel_stages?: FunnelStage[];
+  exclude_funnel_stages?: FunnelStage[];
+  /** Idea proposals only: product slugs. An `"all"` idea matches any include; excluded only by `all`. */
+  funnel_products?: string[];
+  exclude_funnel_products?: string[];
 };
 
 const FILTER_STRING_LIST_KEYS = [
@@ -98,16 +107,25 @@ const FILTER_STRING_LIST_KEYS = [
   "exclude_content_types",
   "locales",
   "exclude_locales",
+  "funnel_products",
+  "exclude_funnel_products",
 ] as const;
 
 const FILTER_ACTOR_TYPE_KEYS = ["event_actor_types", "proposal_actor_types"] as const;
 const FILTER_KIND_KEYS = ["kinds", "exclude_kinds"] as const;
+const FILTER_FUNNEL_STAGE_KEYS = ["funnel_stages", "exclude_funnel_stages"] as const;
 
 const ALL_FILTER_KEYS = new Set<string>([
   ...FILTER_STRING_LIST_KEYS,
   ...FILTER_ACTOR_TYPE_KEYS,
   ...FILTER_KIND_KEYS,
+  ...FILTER_FUNNEL_STAGE_KEYS,
 ]);
+
+export type EventWebhookProposalFunnel = {
+  stage: FunnelStage;
+  products: string[] | "all";
+};
 
 export type EventWebhookProposalSummary = {
   id: string;
@@ -116,6 +134,8 @@ export type EventWebhookProposalSummary = {
   proposer_actor: Record<string, unknown>;
   content_types: string[];
   locales: string[];
+  /** Structured `idea_funnel` (ideas only); null when unset or non-idea. */
+  funnel: EventWebhookProposalFunnel | null;
 };
 
 export type EventWebhookHook = {
@@ -309,6 +329,21 @@ function parseFilter(
     if (normalized.length > 0) (filter as Record<string, string[]>)[key] = normalized;
   }
 
+  for (const key of FILTER_FUNNEL_STAGE_KEYS) {
+    if (obj[key] === undefined) continue;
+    const list = normalizeStringList(obj[key], key, hookId, eventType);
+    const allowed = new Set<string>(FUNNEL_STAGES);
+    for (const v of list) {
+      if (!allowed.has(v.toLowerCase())) {
+        throw new Error(
+          `Hook "${hookId}" under ${eventType}: filter.${key} invalid value "${v}" (${FUNNEL_STAGES.join("|")})`,
+        );
+      }
+    }
+    const normalized = [...new Set(list.map((v) => v.toLowerCase() as FunnelStage))];
+    if (normalized.length > 0) (filter as Record<string, string[]>)[key] = normalized;
+  }
+
   return Object.keys(filter).length > 0 ? filter : undefined;
 }
 
@@ -346,7 +381,11 @@ export function filterNeedsProposal(filter: EventWebhookFilter | undefined): boo
       filter.content_types?.length ||
       filter.exclude_content_types?.length ||
       filter.locales?.length ||
-      filter.exclude_locales?.length,
+      filter.exclude_locales?.length ||
+      filter.funnel_stages?.length ||
+      filter.exclude_funnel_stages?.length ||
+      filter.funnel_products?.length ||
+      filter.exclude_funnel_products?.length,
   );
 }
 
@@ -396,6 +435,21 @@ function entryKeyContentType(entryKey: string): string {
   return i > 0 ? entryKey.slice(0, i) : entryKey;
 }
 
+function proposalFunnelFromJson(json: string | null): EventWebhookProposalFunnel | null {
+  if (!json) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  const funnel = parseIdeaFunnel(raw);
+  if (!funnel) return null;
+  const products =
+    funnel.products === "all" ? ("all" as const) : [...new Set(funnel.products.map((b) => b.product))];
+  return { stage: funnel.stage, products };
+}
+
 /** Slim proposal load for filter match + delivery summary (no circular import). */
 export function getProposalForWebhookFilter(
   site: string,
@@ -406,7 +460,7 @@ export function getProposalForWebhookFilter(
     const db = getSiteSqlite(site);
     const row = db
       .prepare(
-        `SELECT id, kind, proposer_username, proposer_actor_json
+        `SELECT id, kind, proposer_username, proposer_actor_json, idea_funnel_json
          FROM content_proposals WHERE id = ? AND site = ?`,
       )
       .get(proposalId, site) as
@@ -415,6 +469,7 @@ export function getProposalForWebhookFilter(
           kind: string;
           proposer_username: string;
           proposer_actor_json: string | null;
+          idea_funnel_json: string | null;
         }
       | undefined;
     if (!row) return null;
@@ -454,6 +509,7 @@ export function getProposalForWebhookFilter(
       proposer_actor,
       content_types,
       locales,
+      funnel: row.kind === "idea" ? proposalFunnelFromJson(row.idea_funnel_json) : null,
     };
   } catch (err) {
     log.warn({ err, site, proposalId }, "[EventWebhooks] proposal load for filter failed");
@@ -468,6 +524,32 @@ function actorField(
   if (!actor || typeof actor !== "object") return undefined;
   const v = actor[key];
   return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function funnelMatches(
+  funnel: EventWebhookProposalFunnel | null,
+  filter: EventWebhookFilter,
+): boolean {
+  if (filter.funnel_stages?.length) {
+    if (!funnel || !filter.funnel_stages.includes(funnel.stage)) return false;
+  }
+  if (filter.exclude_funnel_stages?.length && funnel) {
+    if (filter.exclude_funnel_stages.includes(funnel.stage)) return false;
+  }
+  if (filter.funnel_products?.length) {
+    if (!funnel) return false;
+    if (funnel.products !== "all" && !anyIncludeMatches(funnel.products, filter.funnel_products)) {
+      return false;
+    }
+  }
+  if (filter.exclude_funnel_products?.length && funnel) {
+    const hit =
+      funnel.products === "all"
+        ? filter.exclude_funnel_products.some((p) => p.toLowerCase() === "all")
+        : anyExcludeHits(funnel.products, filter.exclude_funnel_products);
+    if (hit) return false;
+  }
+  return true;
 }
 
 export function hookMatchesEvent(
@@ -555,6 +637,9 @@ export function hookMatchesEvent(
       return { ok: false, reason: "no_match" };
     }
     if (anyExcludeHits(proposal.locales, filter.exclude_locales)) {
+      return { ok: false, reason: "no_match" };
+    }
+    if (!funnelMatches(proposal.funnel, filter)) {
       return { ok: false, reason: "no_match" };
     }
     return { ok: true, proposal };
@@ -1190,6 +1275,7 @@ export function slimEventForWebhook(
       proposer_actor: proposal.proposer_actor,
       content_types: proposal.content_types,
       locales: proposal.locales,
+      funnel: proposal.funnel,
     };
   }
   return out;

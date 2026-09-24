@@ -130,6 +130,65 @@ describe("product-io", () => {
     if (!result.ok) return;
     expect(result.product.purchasable).toBe(true);
     expect(result.product.product_id).toBe("program-data-science");
+    expect(result.product.audience_status).toBe("missing");
+    expect(result.warnings.map((w) => w.code)).toContain("thin_create");
+  });
+
+  it("creates sellable product with offer and personas in the same call", () => {
+    const dir = path.join(tmp, "programs", "esol");
+    fs.mkdirSync(dir, { recursive: true });
+    const result = writeEntryProduct(
+      "program",
+      "esol",
+      {
+        purchasable: true,
+        actively_selling: false,
+        offer: { one_liner: "English for work", who_its_for: "New arrivals" },
+        personas: [
+          {
+            id: "new-arrival-job-seeker",
+            role: "Job seeker",
+            avatar: {
+              fears: ["Interviews"],
+              internal_dialogue: "Will they understand me?",
+              objections: ["No time"],
+            },
+          },
+          { id: "citizenship-candidate", role: "Citizenship applicant" },
+        ],
+      },
+      tmp,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.product.purchasable).toBe(true);
+    expect(result.product.actively_selling).toBe(false);
+    expect(result.product.offer?.one_liner).toBe("English for work");
+    expect(result.product.personas?.map((p) => p.id)).toEqual([
+      "new-arrival-job-seeker",
+      "citizenship-candidate",
+    ]);
+    expect(result.product.audience_status).not.toBe("missing");
+    expect(result.warnings.map((w) => w.code)).not.toContain("thin_create");
+  });
+
+  it("rejects create with invalid audience and writes nothing", () => {
+    const dir = path.join(tmp, "programs", "esol");
+    fs.mkdirSync(dir, { recursive: true });
+    const result = writeEntryProduct(
+      "program",
+      "esol",
+      {
+        purchasable: true,
+        offer: { one_liner: "English for work", who_its_for: "New arrivals" },
+        personas: [{ id: "  ", role: "Job seeker" }],
+      },
+      tmp,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("invalid_persona");
+    expect(fs.existsSync(path.join(dir, "_product.yml"))).toBe(false);
   });
 
   it("fails create when product_id collides", () => {

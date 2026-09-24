@@ -251,6 +251,22 @@ export type ProposalBlocker = {
   resolved_by_actor: Record<string, unknown>;
 };
 
+export type ProposalOutcomeVerdict = "good" | "bad";
+
+export type ProposalOutcomeHistoryEntry = {
+  outcome: ProposalOutcomeVerdict;
+  note: string | null;
+  expected: string | null;
+  at: number | null;
+  by: string | null;
+  /** When and by whom this verdict was replaced or cleared. */
+  replaced_at: number;
+  replaced_by: string;
+  replaced_with: ProposalOutcomeVerdict | "cleared";
+};
+
+export const OUTCOME_REVIEW_HISTORY_MAX = 20;
+
 export type ProposalRecord = {
   id: string;
   site: string;
@@ -309,6 +325,20 @@ export type ProposalRecord = {
   author_content_at: number | null;
   /** Last reviewer add/reopen/non-author resolve. */
   reviewer_action_at: number | null;
+  /** Who made the `reviewer_action_at` action (never the proposer). Not approval. */
+  reviewer_action_by: string | null;
+  reviewer_action_by_actor: Record<string, unknown>;
+  /** Steward retro verdict on a closed proposal. Human-only; informational for agents. */
+  outcome_review: ProposalOutcomeVerdict | null;
+  outcome_review_note: string | null;
+  outcome_review_expected: string | null;
+  outcome_review_at: number | null;
+  outcome_review_by: string | null;
+  /** Earlier verdicts (newest last, capped at OUTCOME_REVIEW_HISTORY_MAX). */
+  outcome_review_history: ProposalOutcomeHistoryEntry[];
+  outcome_lesson_captured_at: number | null;
+  outcome_lesson_captured_by: string | null;
+  outcome_lesson_note: string | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
@@ -362,6 +392,10 @@ export type ProposalSummary = {
   close_note: string | null;
   closed_by: string | null;
   closed_at: number | null;
+  /** Last non-author blocker add/reopen/resolve — latest feedback, not approval. */
+  reviewer_action_at: number | null;
+  reviewer_action_by: string | null;
+  reviewer_action_by_actor: Record<string, unknown>;
   related_entries: RelatedEntryRef[];
   /** Author-declared review situation ids (edits triage). */
   review_situations: string[];
@@ -377,6 +411,14 @@ export type ProposalSummary = {
    * Computed on read — not stored. Author follow-up is edits with no variant.
    */
   attached_create_entry?: AcceptedEntry | null;
+  outcome_review: ProposalOutcomeVerdict | null;
+  outcome_review_note: string | null;
+  outcome_review_expected: string | null;
+  outcome_review_at: number | null;
+  outcome_review_by: string | null;
+  outcome_lesson_captured_at: number | null;
+  outcome_lesson_captured_by: string | null;
+  outcome_lesson_note: string | null;
   entry_count: number;
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
@@ -438,6 +480,9 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     close_note: record.close_note,
     closed_by: record.closed_by,
     closed_at: record.closed_at,
+    reviewer_action_at: record.reviewer_action_at,
+    reviewer_action_by: record.reviewer_action_by,
+    reviewer_action_by_actor: record.reviewer_action_by_actor,
     related_entries: record.related_entries,
     review_situations: record.review_situations ?? [],
     review_context_snapshot: record.review_context_snapshot,
@@ -447,6 +492,14 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     idea_funnel: record.idea_funnel,
     implements_proposal_id: record.implements_proposal_id,
     attached_create_entry: record.attached_create_entry ?? null,
+    outcome_review: record.outcome_review,
+    outcome_review_note: record.outcome_review_note,
+    outcome_review_expected: record.outcome_review_expected,
+    outcome_review_at: record.outcome_review_at,
+    outcome_review_by: record.outcome_review_by,
+    outcome_lesson_captured_at: record.outcome_lesson_captured_at,
+    outcome_lesson_captured_by: record.outcome_lesson_captured_by,
+    outcome_lesson_note: record.outcome_lesson_note,
     entry_count: record.entries.length,
     field_paths,
     entries: record.entries.map((e) => ({
@@ -504,6 +557,17 @@ type ProposalRow = {
   implements_proposal_id?: string | null;
   author_content_at?: number | null;
   reviewer_action_at?: number | null;
+  reviewer_action_by?: string | null;
+  reviewer_action_by_actor_json?: string | null;
+  outcome_review?: string | null;
+  outcome_review_note?: string | null;
+  outcome_review_expected?: string | null;
+  outcome_review_at?: number | null;
+  outcome_review_by?: string | null;
+  outcome_review_history_json?: string | null;
+  outcome_lesson_captured_at?: number | null;
+  outcome_lesson_captured_by?: string | null;
+  outcome_lesson_note?: string | null;
 };
 
 type EntryDbRow = {
@@ -591,7 +655,9 @@ export type ProposalUpdateAction =
   | "set_review_situations"
   | "set_idea_funnel"
   | "escalate"
-  | "deescalate";
+  | "deescalate"
+  | "review_outcome"
+  | "set_outcome_lesson";
 
 export type ProposalUpdateCaller = {
   username: string;
@@ -631,6 +697,15 @@ export type ProposalUpdateCaller = {
   idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
   /** escalate: required steward note (min MIN_CLOSE_NOTE). */
   escalated_note?: string;
+  /** review_outcome: good | bad | clear. */
+  outcome_review?: string;
+  /** review_outcome: what went wrong (bad: required) or optional note (good). */
+  outcome_review_note?: string;
+  /** review_outcome bad: what should have happened instead. */
+  outcome_review_expected?: string;
+  /** set_outcome_lesson: true marks the lesson as captured; false unmarks. */
+  outcome_lesson_captured?: boolean;
+  outcome_lesson_note?: string;
 };
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -775,9 +850,27 @@ function mapProposal(
     implements_proposal_id: row.implements_proposal_id ?? null,
     author_content_at: row.author_content_at ?? null,
     reviewer_action_at: row.reviewer_action_at ?? null,
+    reviewer_action_by: row.reviewer_action_by ?? null,
+    reviewer_action_by_actor: parseJson(row.reviewer_action_by_actor_json ?? null, {}),
+    outcome_review: parseOutcomeVerdict(row.outcome_review),
+    outcome_review_note: row.outcome_review_note ?? null,
+    outcome_review_expected: row.outcome_review_expected ?? null,
+    outcome_review_at: row.outcome_review_at ?? null,
+    outcome_review_by: row.outcome_review_by ?? null,
+    outcome_review_history: parseJson(
+      row.outcome_review_history_json ?? null,
+      [] as ProposalOutcomeHistoryEntry[],
+    ),
+    outcome_lesson_captured_at: row.outcome_lesson_captured_at ?? null,
+    outcome_lesson_captured_by: row.outcome_lesson_captured_by ?? null,
+    outcome_lesson_note: row.outcome_lesson_note ?? null,
     entries,
     blockers,
   };
+}
+
+function parseOutcomeVerdict(raw: string | null | undefined): ProposalOutcomeVerdict | null {
+  return raw === "good" || raw === "bad" ? raw : null;
 }
 
 function dbFor(site: string): Database.Database {
@@ -807,6 +900,29 @@ function loadProposal(db: Database.Database, id: string): ProposalRecord | null 
   const row = db.prepare(`SELECT * FROM content_proposals WHERE id = ?`).get(id) as ProposalRow | undefined;
   if (!row) return null;
   return mapProposal(row, loadEntries(db, id), loadBlockers(db, id));
+}
+
+function callerIsProposer(proposal: ProposalRecord, caller: ProposalUpdateCaller): boolean {
+  return sameAgentIdentity(
+    proposal.proposer_username,
+    asAgentActor(proposal.proposer_actor),
+    caller.username,
+    asAgentActor(caller.actor),
+  );
+}
+
+/** Author actions never reach here — the proposer is not their own reviewer. */
+function stampReviewerAction(
+  db: Database.Database,
+  id: string,
+  now: number,
+  caller: ProposalUpdateCaller,
+): void {
+  db.prepare(
+    `UPDATE content_proposals
+     SET updated_at = ?, reviewer_action_at = ?, reviewer_action_by = ?, reviewer_action_by_actor_json = ?
+     WHERE id = ?`,
+  ).run(now, now, caller.username, JSON.stringify(caller.actor ?? {}), id);
 }
 
 function persistRollup(
@@ -912,6 +1028,8 @@ function emitProposalEvent(
     | "proposal_revised"
     | "proposal_escalated"
     | "proposal_deescalated"
+    | "proposal_outcome_reviewed"
+    | "proposal_outcome_lesson_set"
     | "proposal_review_situations_set"
     | "proposal_idea_funnel_set",
   proposalId: string,
@@ -1140,6 +1258,29 @@ export function parseEscalatedQuery(
   };
 }
 
+export function isClosedProposalStatus(status: ProposalStatus): boolean {
+  return status === "finished" || status === "rejected" || status === "withdrawn";
+}
+
+export const OUTCOME_REVIEW_FILTERS = ["good", "bad", "none", "bad_open"] as const;
+export type OutcomeReviewFilter = (typeof OUTCOME_REVIEW_FILTERS)[number];
+
+/** Empty/missing → undefined. `bad_open` = bad with no lesson captured. `none` = closed and unreviewed. */
+export function parseOutcomeReviewQuery(
+  raw?: string | null,
+): { ok: true; outcome_review: OutcomeReviewFilter | undefined } | { ok: false; error: string } {
+  if (raw == null || String(raw).trim() === "") {
+    return { ok: true, outcome_review: undefined };
+  }
+  const trimmed = String(raw).trim().toLowerCase();
+  if ((OUTCOME_REVIEW_FILTERS as readonly string[]).includes(trimmed)) {
+    return { ok: true, outcome_review: trimmed as OutcomeReviewFilter };
+  }
+  return {
+    ok: false,
+    error: `Invalid outcome_review '${raw}'. Allowed: ${OUTCOME_REVIEW_FILTERS.join(", ")}`,
+  };
+}
 function compareProposalsBySort(
   a: ProposalRecord,
   b: ProposalRecord,
@@ -1962,6 +2103,34 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return rows.map((r) => r.username).filter((u) => Boolean(u?.trim()));
   }
 
+  /** Distinct latest-feedback reviewers and finished/rejected closers active in the last `days`. */
+  function listRecentReviewers(opts?: { days?: number; limit?: number }): string[] {
+    const days = Math.min(Math.max(opts?.days ?? 30, 1), 365);
+    const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 500);
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const db = dbFor(site);
+    const rows = db
+      .prepare(
+        `SELECT username FROM (
+           SELECT reviewer_action_by AS username, reviewer_action_at AS at
+           FROM content_proposals
+           WHERE site = ? AND reviewer_action_by IS NOT NULL AND TRIM(reviewer_action_by) != ''
+             AND reviewer_action_at >= ?
+           UNION ALL
+           SELECT closed_by AS username, closed_at AS at
+           FROM content_proposals
+           WHERE site = ? AND status IN ('finished', 'rejected')
+             AND closed_by IS NOT NULL AND TRIM(closed_by) != ''
+             AND closed_at >= ?
+         )
+         GROUP BY LOWER(username)
+         ORDER BY MAX(at) DESC, LOWER(username) ASC
+         LIMIT ?`,
+      )
+      .all(site, since, site, since, limit) as Array<{ username: string }>;
+    return rows.map((r) => r.username).filter((u) => Boolean(u?.trim()));
+  }
+
   function exportAll(): ProposalRecord[] {
     return exportAllProposals(site);
   }
@@ -1976,8 +2145,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
     proposer_actor_type?: ProposerActorType;
     proposer_actor_role?: string;
     agent_session_id?: string;
+    /** Latest non-author feedback, or the finished/rejected closer (exact, case-insensitive). */
+    reviewer_username?: string;
     escalated?: boolean;
     attention?: ProposalAttention;
+    /** Steward outcome review on closed proposals. */
+    outcome_review?: OutcomeReviewFilter;
     /** Accepted ideas with no successful implements follow-up. */
     stalled?: boolean;
     /** Open|partial edits that still need a reviewer (re-check or no feedback). */
@@ -2015,7 +2188,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const sortForRank: ProposalSortField = needsReview ? "attention" : sort;
     const useAttentionPath = sortForRank === "attention" || opts.attention != null || needsReview;
     const statusBiasApplied =
-      needsReview || (useAttentionPath && opts.status == null && !stalled);
+      needsReview ||
+      (useAttentionPath && opts.status == null && !stalled && opts.outcome_review == null);
     const tableAlias = stalled ? "p" : "";
     const fromSql = tableAlias ? `content_proposals ${tableAlias}` : `content_proposals`;
     const col = (name: string) => (tableAlias ? `${tableAlias}.${name}` : name);
@@ -2066,10 +2240,24 @@ export function createProposalService(deps: ProposalServiceDeps) {
       where += ` AND ${col("created_agent_session_id")} = ?`;
       params.push(agentSessionId);
     }
+    const reviewerUsername = opts.reviewer_username?.trim();
+    if (reviewerUsername) {
+      where += ` AND (LOWER(${col("reviewer_action_by")}) = LOWER(?)
+        OR (${col("status")} IN ('finished', 'rejected') AND LOWER(${col("closed_by")}) = LOWER(?)))`;
+      params.push(reviewerUsername, reviewerUsername);
+    }
     if (opts.escalated === true) {
       where += ` AND ${col("escalated")} = 1`;
     } else if (opts.escalated === false) {
       where += ` AND ${col("escalated")} = 0`;
+    }
+    if (opts.outcome_review === "good" || opts.outcome_review === "bad") {
+      where += ` AND ${col("outcome_review")} = ?`;
+      params.push(opts.outcome_review);
+    } else if (opts.outcome_review === "bad_open") {
+      where += ` AND ${col("outcome_review")} = 'bad' AND ${col("outcome_lesson_captured_at")} IS NULL`;
+    } else if (opts.outcome_review === "none") {
+      where += ` AND ${col("status")} IN ('finished', 'rejected', 'withdrawn') AND ${col("outcome_review")} IS NULL`;
     }
 
     const mapRow = (r: ProposalRow) =>
@@ -2697,11 +2885,23 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const proposal = get(id)!;
     const reviewCtx = await classifyLive(proposal, { refreshSnapshot: true });
     const withSnap = get(id)!;
+    const proposerEventActor =
+      proposer.actor && typeof proposer.actor === "object" && "type" in proposer.actor
+        ? (proposer.actor as EventActor)
+        : undefined;
     emitProposalEvent(site, "proposal_created", id, proposer.username, {
       ...(supersedesId ? { supersedes_proposal_id: supersedesId } : {}),
-    }, proposer.actor && typeof proposer.actor === "object" && "type" in proposer.actor
-      ? (proposer.actor as EventActor)
-      : undefined);
+    }, proposerEventActor);
+    if (withSnap.kind === "idea" && withSnap.idea_funnel) {
+      emitProposalEvent(
+        site,
+        "proposal_idea_funnel_set",
+        id,
+        proposer.username,
+        { idea_funnel: withSnap.idea_funnel },
+        proposerEventActor,
+      );
+    }
     if (deps.indexSearch) {
       deps.indexSearch(withSnap).catch((err) => log.warn({ err }, "proposal index failed"));
     }
@@ -2740,6 +2940,145 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     const report = caller.report?.trim() ?? "";
     const now = Date.now();
+
+    if (action === "review_outcome" || action === "set_outcome_lesson") {
+      if (caller.actor?.type === "mcp") {
+        return {
+          ok: false,
+          code: "steward_ui_only",
+          error:
+            "Outcome reviews are set by staff stewards in the UI only — agents can read outcome_review fields but cannot set them.",
+          proposal,
+        };
+      }
+      if (!isClosedProposalStatus(proposal.status)) {
+        return {
+          ok: false,
+          code: "not_closed",
+          error: "Outcome reviews are only for closed proposals (finished, rejected, or withdrawn).",
+          proposal,
+        };
+      }
+    }
+
+    if (action === "review_outcome") {
+      const outcome = (caller.outcome_review ?? "").trim();
+      if (outcome !== "good" && outcome !== "bad" && outcome !== "clear") {
+        return {
+          ok: false,
+          code: "invalid_outcome_review",
+          error: "outcome_review must be good, bad, or clear",
+        };
+      }
+      const note = (caller.outcome_review_note ?? "").trim();
+      const expected = (caller.outcome_review_expected ?? "").trim();
+      if (outcome === "bad") {
+        if (note.length < MIN_CLOSE_NOTE || expected.length < MIN_CLOSE_NOTE) {
+          return {
+            ok: false,
+            code: "outcome_review_note_required",
+            error: `A bad outcome needs outcome_review_note (what went wrong) and outcome_review_expected (what should have happened), each min ${MIN_CLOSE_NOTE} characters`,
+          };
+        }
+      }
+      if (outcome === "clear" && !proposal.outcome_review) {
+        return { ok: false, code: "not_reviewed", error: "Proposal has no outcome review", proposal };
+      }
+      const history = [...proposal.outcome_review_history];
+      if (proposal.outcome_review) {
+        history.push({
+          outcome: proposal.outcome_review,
+          note: proposal.outcome_review_note,
+          expected: proposal.outcome_review_expected,
+          at: proposal.outcome_review_at,
+          by: proposal.outcome_review_by,
+          replaced_at: now,
+          replaced_by: caller.username,
+          replaced_with: outcome === "clear" ? "cleared" : outcome,
+        });
+      }
+      const trimmedHistory = history.slice(-OUTCOME_REVIEW_HISTORY_MAX);
+      const keepLesson = outcome === "bad" && proposal.outcome_review === "bad";
+      if (outcome === "clear") {
+        db.prepare(
+          `UPDATE content_proposals
+           SET outcome_review = NULL, outcome_review_note = NULL, outcome_review_expected = NULL,
+               outcome_review_at = NULL, outcome_review_by = NULL, outcome_review_history_json = ?,
+               outcome_lesson_captured_at = NULL, outcome_lesson_captured_by = NULL,
+               outcome_lesson_note = NULL, updated_at = ?
+           WHERE id = ?`,
+        ).run(JSON.stringify(trimmedHistory), now, id);
+      } else {
+        db.prepare(
+          `UPDATE content_proposals
+           SET outcome_review = ?, outcome_review_note = ?, outcome_review_expected = ?,
+               outcome_review_at = ?, outcome_review_by = ?, outcome_review_history_json = ?,
+               outcome_lesson_captured_at = ?, outcome_lesson_captured_by = ?,
+               outcome_lesson_note = ?, updated_at = ?
+           WHERE id = ?`,
+        ).run(
+          outcome,
+          note || null,
+          outcome === "bad" ? expected : null,
+          now,
+          caller.username,
+          JSON.stringify(trimmedHistory),
+          keepLesson ? proposal.outcome_lesson_captured_at : null,
+          keepLesson ? proposal.outcome_lesson_captured_by : null,
+          keepLesson ? proposal.outcome_lesson_note : null,
+          now,
+          id,
+        );
+      }
+      emitProposalEvent(
+        site,
+        "proposal_outcome_reviewed",
+        id,
+        caller.username,
+        {
+          outcome: outcome === "clear" ? "cleared" : outcome,
+          previous: proposal.outcome_review,
+          ...(note ? { note } : {}),
+          ...(outcome === "bad" ? { expected } : {}),
+        },
+        caller.actor,
+      );
+      return { ok: true, proposal: get(id)! };
+    }
+
+    if (action === "set_outcome_lesson") {
+      if (proposal.outcome_review !== "bad") {
+        return {
+          ok: false,
+          code: "not_bad",
+          error: "Lesson captured can only be set on a proposal marked as a bad outcome",
+          proposal,
+        };
+      }
+      const captured = caller.outcome_lesson_captured === true;
+      const lessonNote = (caller.outcome_lesson_note ?? "").trim();
+      db.prepare(
+        `UPDATE content_proposals
+         SET outcome_lesson_captured_at = ?, outcome_lesson_captured_by = ?,
+             outcome_lesson_note = ?, updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        captured ? now : null,
+        captured ? caller.username : null,
+        captured ? lessonNote || null : null,
+        now,
+        id,
+      );
+      emitProposalEvent(
+        site,
+        "proposal_outcome_lesson_set",
+        id,
+        caller.username,
+        { captured, ...(captured && lessonNote ? { note: lessonNote } : {}) },
+        caller.actor,
+      );
+      return { ok: true, proposal: get(id)! };
+    }
 
     if (action === "escalate" || action === "deescalate") {
       if (caller.actor?.type === "mcp") {
@@ -3210,6 +3549,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (!funnelCheck.ok) {
         return { ok: false, code: funnelCheck.code, error: funnelCheck.error };
       }
+      if (proposal.idea_funnel && ideaFunnelsEqual(proposal.idea_funnel, funnelCheck.funnel)) {
+        return { ok: true, proposal: get(id)! };
+      }
       db.prepare(`UPDATE content_proposals SET idea_funnel_json = ?, updated_at = ? WHERE id = ?`).run(
         JSON.stringify(funnelCheck.funnel),
         now,
@@ -3217,9 +3559,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
       );
       const after = getRaw(id)!;
       await classifyLive(after, { refreshSnapshot: true });
-      emitProposalEvent(site, "proposal_idea_funnel_set", id, caller.username, {
-        idea_funnel: funnelCheck.funnel,
-      });
+      emitProposalEvent(
+        site,
+        "proposal_idea_funnel_set",
+        id,
+        caller.username,
+        { idea_funnel: funnelCheck.funnel },
+        caller.actor,
+      );
       return { ok: true, proposal: get(id)! };
     }
 
@@ -3682,9 +4029,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
         caller.agent_session_id?.trim() || null,
         JSON.stringify(caller.actor ?? {}),
       );
-      db.prepare(
-        `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
-      ).run(now, now, id);
+      if (callerIsProposer(proposal, caller)) {
+        db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
+      } else {
+        stampReviewerAction(db, id, now, caller);
+      }
       return { ok: true, proposal: get(id)! };
     }
 
@@ -3730,20 +4079,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
              resolved_by_actor_json = ?
          WHERE id = ? AND proposal_id = ?`,
       ).run(now, caller.username, resolveNote, JSON.stringify(caller.actor ?? {}), blockerId, id);
-      const authorFixed = sameAgentIdentity(
-        proposal.proposer_username,
-        asAgentActor(proposal.proposer_actor),
-        caller.username,
-        asAgentActor(caller.actor),
-      );
-      if (authorFixed) {
+      if (callerIsProposer(proposal, caller)) {
         db.prepare(
           `UPDATE content_proposals SET updated_at = ?, author_content_at = ? WHERE id = ?`,
         ).run(now, now, id);
       } else {
-        db.prepare(
-          `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
-        ).run(now, now, id);
+        stampReviewerAction(db, id, now, caller);
       }
       const fresh = get(id)!;
       const warnings =
@@ -3773,9 +4114,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
              resolved_by_actor_json = NULL
          WHERE id = ? AND proposal_id = ?`,
       ).run(blockerId, id);
-      db.prepare(
-        `UPDATE content_proposals SET updated_at = ?, reviewer_action_at = ? WHERE id = ?`,
-      ).run(now, now, id);
+      if (callerIsProposer(proposal, caller)) {
+        db.prepare(`UPDATE content_proposals SET updated_at = ? WHERE id = ?`).run(now, id);
+      } else {
+        stampReviewerAction(db, id, now, caller);
+      }
       return { ok: true, proposal: get(id)! };
     }
 
@@ -4190,7 +4533,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
-  return { get, list, stats, kpiHistory, listRecentProposers, exportAll, create, update, classifyLive };
+  return {
+    get,
+    list,
+    stats,
+    kpiHistory,
+    listRecentProposers,
+    listRecentReviewers,
+    exportAll,
+    create,
+    update,
+    classifyLive,
+  };
 }
 
 /** Full site dump for production → local pull (includes entries + blockers). */
@@ -4239,8 +4593,12 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
       escalated, escalated_at, escalated_by, escalated_note, decision_debug_json,
       review_situations_json, accepted_entry_json, implements_proposal_id,
-      author_content_at, reviewer_action_at, idea_funnel_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      author_content_at, reviewer_action_at, idea_funnel_json,
+      outcome_review, outcome_review_note, outcome_review_expected, outcome_review_at,
+      outcome_review_by, outcome_review_history_json, outcome_lesson_captured_at,
+      outcome_lesson_captured_by, outcome_lesson_note,
+      reviewer_action_by, reviewer_action_by_actor_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -4308,6 +4666,17 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.author_content_at ?? null,
         p.reviewer_action_at ?? null,
         p.idea_funnel ? JSON.stringify(p.idea_funnel) : null,
+        p.outcome_review ?? null,
+        p.outcome_review_note ?? null,
+        p.outcome_review_expected ?? null,
+        p.outcome_review_at ?? null,
+        p.outcome_review_by ?? null,
+        JSON.stringify(p.outcome_review_history ?? []),
+        p.outcome_lesson_captured_at ?? null,
+        p.outcome_lesson_captured_by ?? null,
+        p.outcome_lesson_note ?? null,
+        p.reviewer_action_by ?? null,
+        p.reviewer_action_by ? JSON.stringify(p.reviewer_action_by_actor ?? {}) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

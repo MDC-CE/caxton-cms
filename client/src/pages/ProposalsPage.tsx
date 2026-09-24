@@ -96,6 +96,11 @@ import {
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import {
+  ProposalOutcomeReview,
+  type OutcomeHistoryEntry,
+  type OutcomeVerdict,
+} from "@/components/agents/ProposalOutcomeReview";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import {
   ProposalKindBadge,
@@ -203,6 +208,9 @@ type Proposal = {
   close_note?: string | null;
   closed_by?: string | null;
   closed_at?: number | null;
+  reviewer_action_at?: number | null;
+  reviewer_action_by?: string | null;
+  reviewer_action_by_actor?: Record<string, unknown>;
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
   accepted_entry?: { contentType: string; slug: string; locale: string } | null;
@@ -233,13 +241,26 @@ type Proposal = {
     action?: string;
     source?: string;
     actor?: { username?: string; type?: string; role?: string };
+    agent_session_id?: string | null;
     review_context?: {
       damage_class?: string;
+      undo_cost?: string;
+      summary?: string;
       active_checklists?: string[];
       think_items?: Array<{ id: string; title: string; why: string; look_for: string[] }>;
+      warnings?: Array<{ code: string; message: string }>;
     };
-    discovery_path?: unknown;
+    discovery_path?: { goal?: string } | null;
   } | null;
+  outcome_review?: OutcomeVerdict | null;
+  outcome_review_note?: string | null;
+  outcome_review_expected?: string | null;
+  outcome_review_at?: number | null;
+  outcome_review_by?: string | null;
+  outcome_review_history?: OutcomeHistoryEntry[];
+  outcome_lesson_captured_at?: number | null;
+  outcome_lesson_captured_by?: string | null;
+  outcome_lesson_note?: string | null;
 };
 
 function headers(): Record<string, string> {
@@ -564,7 +585,10 @@ export function ProposalListPanel() {
     if (session) {
       parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
     }
+    const reviewer = view.filters.reviewerUsername.trim();
+    if (reviewer) parts.push(`Reviewer ${reviewer}`);
     if (view.filters.escalatedOnly) parts.push("Escalated");
+    if (view.filters.badOutcomeOnly) parts.push("Bad outcome (needs lesson)");
     if (view.filters.attention !== "all") {
       parts.push(
         PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === view.filters.attention)?.label ??
@@ -579,7 +603,9 @@ export function ProposalListPanel() {
     view.filters.proposerActorType,
     view.filters.proposerActorRole,
     view.filters.agentSessionId,
+    view.filters.reviewerUsername,
     view.filters.escalatedOnly,
+    view.filters.badOutcomeOnly,
     view.filters.attention,
   ]);
 
@@ -779,15 +805,7 @@ export function ProposalListPanel() {
         stats={data?.stats}
         onApply={(dims) =>
           writeView({
-            filters: {
-              ...view.filters,
-              status: dims.status,
-              kind: dims.kind,
-              proposerUsername: dims.proposerUsername,
-              proposerActorType: dims.proposerActorType,
-              proposerActorRole: dims.proposerActorRole,
-              agentSessionId: dims.agentSessionId,
-            },
+            filters: { ...view.filters, ...dims },
             q: view.q,
           })
         }
@@ -1107,6 +1125,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         proposerUsername: p.proposer_username,
         proposerActor: p.proposer_actor,
         claim: p.claim,
+        status: p.status,
+        closeReason: p.close_reason,
+        closedBy: p.closed_by,
+        reviewer: p.reviewer_action_by,
+        reviewerActor: p.reviewer_action_by_actor,
+        reviewerAt: p.reviewer_action_at,
       })
     : null;
   const progress = p && p.kind === "edits" ? proposalEntryProgress(p.entries ?? []) : null;
@@ -1186,6 +1210,17 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       detailMeta.push({
         key: "expired",
         node: <span className="text-muted-foreground/70">{attribution.expiredLine}</span>,
+      });
+    }
+    // Terminal proposals already show the closer in the decision banner below.
+    if (attribution.reviewLine && !isTerminal) {
+      detailMeta.push({
+        key: "review",
+        node: (
+          <span title={attribution.reviewLine.title} data-testid="text-proposal-detail-review">
+            {attribution.reviewLine.text}
+          </span>
+        ),
       });
     }
     if (progress) {
@@ -1342,6 +1377,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 ) : null}
                 {isTerminal && p.decision_debug ? (
                   <DecisionDebugPanel debug={p.decision_debug} />
+                ) : null}
+                {isTerminal ? (
+                  <ProposalOutcomeReview
+                    proposal={p}
+                    isSteward={isSteward}
+                    saving={mut.isPending}
+                    onAction={(action, body, onSuccess) =>
+                      mut.mutate({ action, body }, onSuccess ? { onSuccess } : undefined)
+                    }
+                  />
                 ) : null}
                 <div
                   className="flex flex-wrap items-center gap-2"

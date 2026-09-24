@@ -57,6 +57,14 @@ import { EventWebhookLogsPanel } from "@/components/pipeline/EventWebhookLogsPan
 import type { StaffDirectoryEntry } from "@/components/editing";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
+import { FUNNEL_STAGES, type FunnelStage } from "@shared/funnel";
+import {
+  FUNNEL_STAGE_ICON,
+  FUNNEL_STAGE_ICON_TONE,
+  FUNNEL_STAGE_LABEL,
+  FUNNEL_STAGE_TAPER,
+  FUNNEL_STAGE_TONE,
+} from "@/lib/funnel-stage-ui";
 
 export type EventWebhookFilter = {
   event_authors?: string[];
@@ -78,6 +86,10 @@ export type EventWebhookFilter = {
   exclude_content_types?: string[];
   locales?: string[];
   exclude_locales?: string[];
+  funnel_stages?: FunnelStage[];
+  exclude_funnel_stages?: FunnelStage[];
+  funnel_products?: string[];
+  exclude_funnel_products?: string[];
 };
 
 export type EventWebhookHook = {
@@ -359,6 +371,52 @@ function ActorTypeChips({
   );
 }
 
+function FunnelStageChips({
+  values,
+  onChange,
+  testId,
+}: {
+  values: string[];
+  onChange: (v: FunnelStage[]) => void;
+  testId?: string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5" data-testid={testId}>
+      {FUNNEL_STAGES.map((s) => {
+        const on = values.includes(s);
+        const taper = FUNNEL_STAGE_TAPER[s];
+        const StageIcon = FUNNEL_STAGE_ICON[s];
+        const iconClass = FUNNEL_STAGE_ICON_TONE[taper];
+        return (
+          <button
+            key={s}
+            type="button"
+            aria-pressed={on}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs transition-colors",
+              on
+                ? cn(FUNNEL_STAGE_TONE[taper], "text-foreground")
+                : "border-border bg-background text-muted-foreground hover:text-foreground",
+            )}
+            data-testid={`chip-funnel-stage-${s}`}
+            onClick={() => {
+              onChange(
+                on
+                  ? (values.filter((x) => x !== s) as FunnelStage[])
+                  : ([...values, s] as FunnelStage[]),
+              );
+            }}
+          >
+            {on ? <IconCheck className={cn("h-3 w-3 shrink-0", iconClass)} aria-hidden /> : null}
+            <StageIcon className={cn("h-3 w-3 shrink-0", iconClass)} aria-hidden />
+            {FUNNEL_STAGE_LABEL[s]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Matches server test body shape (triggered_at refreshes at send time). */
 function buildTestPayloadPreview(opts: {
   site: string;
@@ -528,6 +586,34 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
     enabled: filtersDialogOpen,
     staleTime: 60_000,
   });
+
+  const productsQuery = useQuery({
+    queryKey: ["/api/ecommerce/products", "webhook-filter"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/ecommerce/products");
+      if (!res.ok) return [] as Array<{ name: string; content_slug: string }>;
+      const data = (await res.json()) as {
+        products?: Array<{ name: string; content_slug: string }>;
+      };
+      return Array.isArray(data.products) ? data.products : [];
+    },
+    enabled: filtersDialogOpen,
+    staleTime: 60_000,
+  });
+
+  const funnelProductOptions = useMemo(() => {
+    const seen = new Set<string>(["all"]);
+    const opts: Array<{ value: string; label?: string }> = [
+      { value: "all", label: "All products (awareness ideas)" },
+    ];
+    for (const p of productsQuery.data ?? []) {
+      const slug = p.content_slug?.trim();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      opts.push({ value: slug, label: p.name && p.name !== slug ? p.name : undefined });
+    }
+    return opts;
+  }, [productsQuery.data]);
 
   const proposerOptions = useMemo(
     () => (proposersQuery.data ?? []).map((u) => ({ value: u })),
@@ -1484,6 +1570,47 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                   </div>
                 </div>
                 <div className="space-y-1.5">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>Funnel stage</Label>
+                      <FunnelStageChips
+                        values={editing.hook.filter?.funnel_stages ?? []}
+                        onChange={(funnel_stages) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { funnel_stages }),
+                          })
+                        }
+                        testId="chips-filter-funnel-stages"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Funnel product</Label>
+                      <SearchableMultiCombobox
+                        values={editing.hook.filter?.funnel_products ?? []}
+                        onChange={(funnel_products) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { funnel_products }),
+                          })
+                        }
+                        options={funnelProductOptions}
+                        isLoading={productsQuery.isLoading}
+                        placeholder="Any product"
+                        searchPlaceholder="Search products…"
+                        emptyMessage="No products"
+                        onOpenChange={setNestedComboboxOpen}
+                        testId="filter-funnel-products"
+                        mono
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground" data-testid="text-funnel-filter-help">
+                    Only idea proposals have a funnel. Edits, notes, and ideas without a funnel
+                    won&apos;t match. Ideas for all products match any product.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
                   <Label>Event source</Label>
                   <ActorTypeChips
                     values={editing.hook.filter?.event_actor_types ?? []}
@@ -1570,6 +1697,38 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                         searchPlaceholder="Search locales…"
                         onOpenChange={setNestedComboboxOpen}
                         testId="filter-exclude-locales"
+                        mono
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Exclude funnel stages</Label>
+                      <FunnelStageChips
+                        values={editing.hook.filter?.exclude_funnel_stages ?? []}
+                        onChange={(exclude_funnel_stages) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_funnel_stages }),
+                          })
+                        }
+                        testId="chips-filter-exclude-funnel-stages"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Exclude funnel products</Label>
+                      <SearchableMultiCombobox
+                        values={editing.hook.filter?.exclude_funnel_products ?? []}
+                        onChange={(exclude_funnel_products) =>
+                          setEditing({
+                            ...editing,
+                            hook: patchFilter(editing.hook, { exclude_funnel_products }),
+                          })
+                        }
+                        options={funnelProductOptions}
+                        isLoading={productsQuery.isLoading}
+                        placeholder="None excluded"
+                        searchPlaceholder="Search products…"
+                        onOpenChange={setNestedComboboxOpen}
+                        testId="filter-exclude-funnel-products"
                         mono
                       />
                     </div>

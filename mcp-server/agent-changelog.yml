@@ -6,6 +6,44 @@ window_days: 6
 
 entries:
   - date: "2026-09-24"
+    summary: "create_or_update_product: creating a new sellable product now keeps offer + personas from the same call"
+    agent_impact:
+      - "Bug fix: purchasable: true on an entry with no _product.yml used to write only selling fields and drop offer/personas (audience_status: missing). One call now creates the sidecar with the audience — no second call needed."
+      - "Invalid audience on create (e.g. empty persona id, duplicate ids) rejects the whole call; no _product.yml is written. Same error codes as updates (invalid_persona, invalid_audience, duplicate_persona_id)."
+      - "thin_create warning now fires only when the created product really has no audience (status missing). Personas without role are still silently dropped by the parser — check personas in the response."
+    tools_changed: false
+    paths:
+      - server/product/product-io.ts
+
+  - date: "2026-09-24"
+    summary: "list_proposals: who last reviewed (reviewer_action_by) + reviewer_username filter; author actions never count as review"
+    agent_impact:
+      - "Summary rows now include reviewer_action_at, reviewer_action_by, reviewer_action_by_actor = latest non-author blocker add/reopen/resolve (not approval; null when only the author acted). Terminal decisions stay closed_by + close_reason."
+      - "New list_proposals filter reviewer_username: exact case-insensitive; matches reviewer_action_by OR closed_by on finished|rejected. Withdrawn closers and earlier reviewers replaced by a later one never match. Username only."
+      - "Behavior change: proposer add_blocker / reopen_blocker on their own proposal no longer stamps reviewer_action_at (resolve already didn't). After an author rewrite, an author-added blocker no longer counts as reviewer feedback — cleared blockers still read awaiting_rereview."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/pipeline-db/migrations.ts
+      - server/routes/proposals.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+      - mcp-server/explain/reading-proposals.md
+
+  - date: "2026-09-24"
+    summary: "list_proposals: read-only steward outcome review on closed proposals"
+    agent_impact:
+      - "Proposal rows now carry outcome_review (good|bad|null), outcome_review_note, outcome_review_expected, outcome_review_at/by, and outcome_lesson_captured_at/by/note. Full detail also has outcome_review_history."
+      - "New list_proposals filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured). Closed proposals only — open/partial never match."
+      - "Human-only and informational: agents cannot set outcomes (not an update_proposal action), no warnings are emitted, and other proposals are unaffected. Use it for retros when staff ask."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/list-proposals-mcp.ts
+
+  - date: "2026-09-24"
     summary: "list_proposals kpi_history is per-period flow, not stock"
     agent_impact:
       - "kpi_history series now restart at 0 each bucket (metric:\"flow\"): open = created in bucket (partial counts), finished/rejected = closed into that status in bucket (closed_at, updated_at fallback). Withdrawn omitted."

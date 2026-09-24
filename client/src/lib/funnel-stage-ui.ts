@@ -1,3 +1,10 @@
+import type { ComponentType } from "react";
+import {
+  IconSchool,
+  IconShoppingCart,
+  IconSpeakerphone,
+  IconTarget,
+} from "@tabler/icons-react";
 import type { FunnelStage } from "@shared/funnel";
 
 export type FunnelStageTaper = "full" | "mid" | "narrow" | "tight";
@@ -7,6 +14,20 @@ export const FUNNEL_STAGE_TAPER: Record<FunnelStage, FunnelStageTaper> = {
   consideration: "mid",
   decision: "narrow",
   "post-enrollment": "tight",
+};
+
+export const FUNNEL_STAGE_LABEL: Record<FunnelStage, string> = {
+  awareness: "Awareness",
+  consideration: "Consideration",
+  decision: "Decision",
+  "post-enrollment": "Post-enrollment",
+};
+
+export const FUNNEL_STAGE_ICON: Record<FunnelStage, ComponentType<{ className?: string }>> = {
+  awareness: IconSpeakerphone,
+  consideration: IconTarget,
+  decision: IconShoppingCart,
+  "post-enrollment": IconSchool,
 };
 
 /** Background + border tones for funnel stage blocks (product journey + Funnel tab). */

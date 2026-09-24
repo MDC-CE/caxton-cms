@@ -56,6 +56,11 @@ export type ProposalCardData = {
   related_issue_ids: string[];
   entries: Array<{ status: string; variant: string | null }>;
   claim?: { by: string; expiresAt: string; actor?: Record<string, unknown> } | null;
+  reviewer_action_at?: number | null;
+  reviewer_action_by?: string | null;
+  reviewer_action_by_actor?: Record<string, unknown>;
+  closed_by?: string | null;
+  close_reason?: string | null;
   created_at: number;
   updated_at?: number;
   review_context_snapshot?: Record<string, unknown> | null;
@@ -189,6 +194,12 @@ export function ProposalListCard({
     proposerUsername: p.proposer_username,
     proposerActor: p.proposer_actor,
     claim: p.claim,
+    status: p.status,
+    closeReason: p.close_reason,
+    closedBy: p.closed_by,
+    reviewer: p.reviewer_action_by,
+    reviewerActor: p.reviewer_action_by_actor,
+    reviewerAt: p.reviewer_action_at,
   });
   const progress = p.kind === "edits" ? proposalEntryProgress(p.entries ?? []) : null;
   const blockers = p.open_blocker_count ?? 0;
@@ -256,6 +267,20 @@ export function ProposalListCard({
   }
   for (const line of attribution.lines) {
     meta.push({ key: `attr-${line}`, node: <span className="truncate">{line}</span> });
+  }
+  if (attribution.reviewLine) {
+    meta.push({
+      key: "review",
+      node: (
+        <span
+          className="truncate"
+          title={attribution.reviewLine.title}
+          data-testid={`text-proposal-review-${p.id}`}
+        >
+          {attribution.reviewLine.text}
+        </span>
+      ),
+    });
   }
   if (attribution.expiredLine) {
     meta.push({

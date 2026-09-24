@@ -58,6 +58,17 @@ function baseProposal(
     idea_funnel: null,
     author_content_at: null,
     reviewer_action_at: null,
+    reviewer_action_by: null,
+    reviewer_action_by_actor: {},
+    outcome_review: null,
+    outcome_review_note: null,
+    outcome_review_expected: null,
+    outcome_review_at: null,
+    outcome_review_by: null,
+    outcome_review_history: [],
+    outcome_lesson_captured_at: null,
+    outcome_lesson_captured_by: null,
+    outcome_lesson_note: null,
     ...overrides,
   };
 }

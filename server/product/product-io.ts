@@ -417,9 +417,10 @@ export function writeEntryProduct(
   const existing = readProductDoc(contentType, slug, contentRoot);
   const wasRemoved = existing?.doc.purchasable === false;
   const isIndexed = !!indexed;
+  const isCreate = !isIndexed && !existing && patch.purchasable === true;
 
-  // Create new sellable product
-  if (!isIndexed && !existing && patch.purchasable === true) {
+  let doc: Record<string, unknown>;
+  if (isCreate) {
     if (!contentTypeAllowsSellableEntries(contentType, contentRoot)) {
       return {
         ok: false,
@@ -444,53 +445,25 @@ export function writeEntryProduct(
       typeof patch.name === "string" && patch.name.trim()
         ? patch.name.trim()
         : humanizeSlug(slug);
-    const doc: Record<string, unknown> = {
+    doc = {
       purchasable: true,
       actively_selling: patch.actively_selling !== false,
       product_id: productId,
       name,
     };
-    if (typeof patch.description === "string") doc.description = patch.description;
-
-    const writePath = productSidecarWritePath(dir);
-    const dumped = yaml.dump(doc, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
-    fs.writeFileSync(writePath, dumped.endsWith("\n") ? dumped : `${dumped}\n`, "utf-8");
-    scanProductContent(contentRootAbs(contentRoot));
-    const snapshot = readEntryProduct(contentType, slug, contentRoot);
-    if (!snapshot || !snapshot.purchasable) {
+  } else {
+    // Need a sidecar for any further patch
+    if (!existing && !isIndexed) {
       return {
         ok: false,
-        code: "write_verify_failed",
-        error: "Wrote product sidecar but could not re-read product from index",
+        code: "not_a_product",
+        error: `No product sidecar for ${contentType}/${slug}. Pass purchasable: true to create one (requires products.allow_sellable_entries and product_manage).`,
       };
     }
-    const root = contentRootAbs(contentRoot);
-    return {
-      ok: true,
-      product: snapshot,
-      relativePath: path.relative(root, writePath).split(path.sep).join("/"),
-      warnings: [
-        {
-          code: "thin_create",
-          message:
-            "Product is sellable. Audience (offer + personas) is still missing — set it next so funnel landings can bind personas.",
-        },
-      ],
-    };
-  }
-
-  // Need a sidecar for any further patch
-  if (!existing && !isIndexed) {
-    return {
-      ok: false,
-      code: "not_a_product",
-      error: `No product sidecar for ${contentType}/${slug}. Pass purchasable: true to create one (requires products.allow_sellable_entries and product_manage).`,
-    };
-  }
-
-  const doc: Record<string, unknown> = existing?.doc ? { ...existing.doc } : {};
-  if (typeof doc.purchasable !== "boolean") {
-    doc.purchasable = true;
+    doc = existing?.doc ? { ...existing.doc } : {};
+    if (typeof doc.purchasable !== "boolean") {
+      doc.purchasable = true;
+    }
   }
 
   // Soft-remove
@@ -506,7 +479,7 @@ export function writeEntryProduct(
   }
 
   // Re-enable removed or create from existing sidecar
-  if (patch.purchasable === true) {
+  if (patch.purchasable === true && !isCreate) {
     if (!contentTypeAllowsSellableEntries(contentType, contentRoot)) {
       return {
         ok: false,
@@ -647,12 +620,21 @@ export function writeEntryProduct(
   const root = contentRootAbs(contentRoot);
   const relativePath = path.relative(root, writePath).split(path.sep).join("/");
   const snapshot = readEntryProduct(contentType, slug, contentRoot);
-  if (!snapshot) {
+  if (!snapshot || (isCreate && !snapshot.purchasable)) {
     return {
       ok: false,
       code: "write_verify_failed",
-      error: "Wrote product sidecar but could not re-read product",
+      error: isCreate
+        ? "Wrote product sidecar but could not re-read product from index"
+        : "Wrote product sidecar but could not re-read product",
     };
+  }
+  if (isCreate && snapshot.audience_status === "missing") {
+    warnings.push({
+      code: "thin_create",
+      message:
+        "Product is sellable. Audience (offer + personas) is still missing — set it next so funnel landings can bind personas.",
+    });
   }
 
   return {

@@ -812,6 +812,134 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds outcome review columns when upgrading from v23-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v23-outcome-review-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 23);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        idea_funnel_json TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at)
+      VALUES ('prop-1', 'site_test', 'finished', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    for (const col of [
+      "outcome_review",
+      "outcome_review_note",
+      "outcome_review_expected",
+      "outcome_review_at",
+      "outcome_review_by",
+      "outcome_review_history_json",
+      "outcome_lesson_captured_at",
+      "outcome_lesson_captured_by",
+      "outcome_lesson_note",
+    ]) {
+      expect(
+        db.prepare(`SELECT 1 FROM pragma_table_info('content_proposals') WHERE name = ?`).get(col),
+      ).toBeDefined();
+    }
+    const row = db
+      .prepare(
+        `SELECT outcome_review, outcome_review_history_json FROM content_proposals WHERE id = 'prop-1'`,
+      )
+      .get() as { outcome_review: string | null; outcome_review_history_json: string };
+    expect(row.outcome_review).toBeNull();
+    expect(row.outcome_review_history_json).toBe("[]");
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds reviewer_action_by and backfills from blockers when upgrading from v24-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v24-reviewer-by-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 24);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        proposer_username TEXT NOT NULL,
+        proposer_actor_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL,
+        author_content_at INTEGER,
+        reviewer_action_at INTEGER
+      );
+      CREATE TABLE content_proposal_blockers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'blocker',
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        author TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        resolve_note TEXT,
+        agent_session_id TEXT,
+        author_actor_json TEXT,
+        resolved_by_actor_json TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, proposer_username, proposer_actor_json, updated_at, reviewer_action_at)
+      VALUES
+        ('prop-reviewed', 'site_test', 'open', 'author@x.com', '{"type":"mcp","role":"copy_editor"}', 1, 300),
+        ('prop-self', 'site_test', 'open', 'author@x.com', '{"type":"mcp","role":"copy_editor"}', 1, 200),
+        ('prop-unreviewed', 'site_test', 'open', 'author@x.com', '{}', 1, NULL);
+      INSERT INTO content_proposal_blockers (proposal_id, body, status, author, created_at, resolved_at, resolved_by, author_actor_json, resolved_by_actor_json)
+      VALUES
+        ('prop-reviewed', 'Needs a clearer CTA', 'resolved', 'reviewer@x.com', 100, 250, 'author@x.com', '{"type":"ui"}', '{"type":"mcp","role":"copy_editor"}'),
+        ('prop-reviewed', 'Wrong locale link', 'open', 'second@x.com', 280, NULL, NULL, '{"type":"mcp","role":"seo"}', NULL),
+        ('prop-self', 'Self note on my own proposal', 'open', 'author@x.com', 150, NULL, NULL, '{"type":"mcp","role":"copy_editor"}', NULL),
+        ('prop-unreviewed', 'Reviewer note', 'open', 'reviewer@x.com', 50, NULL, NULL, '{"type":"ui"}', NULL);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const rows = db
+      .prepare(
+        `SELECT id, reviewer_action_at, reviewer_action_by, reviewer_action_by_actor_json FROM content_proposals ORDER BY id`,
+      )
+      .all() as Array<{
+      id: string;
+      reviewer_action_at: number | null;
+      reviewer_action_by: string | null;
+      reviewer_action_by_actor_json: string | null;
+    }>;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId["prop-reviewed"]!.reviewer_action_by).toBe("second@x.com");
+    expect(JSON.parse(byId["prop-reviewed"]!.reviewer_action_by_actor_json!)).toEqual({
+      type: "mcp",
+      role: "seo",
+    });
+    expect(byId["prop-reviewed"]!.reviewer_action_at).toBe(300);
+    expect(byId["prop-self"]!.reviewer_action_by).toBeNull();
+    expect(byId["prop-unreviewed"]!.reviewer_action_by).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

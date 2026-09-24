@@ -125,6 +125,79 @@ export function buildSolveWithAiPrefillUrl(
   return `${prefillUrlPrefix}${encodeURIComponent(prompt)}`;
 }
 
+export type ProposalBadOutcomePromptInput = {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  close_reason?: string | null;
+  outcome_review_note?: string | null;
+  outcome_review_expected?: string | null;
+  outcome_review_by?: string | null;
+  outcome_review_at?: number | null;
+  decision_debug?: {
+    action?: string;
+    source?: string;
+    actor?: { username?: string; type?: string; role?: string };
+    agent_session_id?: string | null;
+    review_context?: {
+      damage_class?: string;
+      undo_cost?: string;
+      summary?: string;
+      think_items?: Array<{ title: string }>;
+      warnings?: Array<{ code: string; message: string }>;
+    };
+    discovery_path?: { goal?: string } | null;
+  } | null;
+};
+
+const NO_DECISION_RECORD =
+  "- No decision record — reason from the proposal and the staff notes only.";
+
+function formatDecisionBlock(debug: ProposalBadOutcomePromptInput["decision_debug"]): string {
+  if (!debug) return NO_DECISION_RECORD;
+  const lines: string[] = [];
+  const who = debug.actor?.username ?? "unknown";
+  const how = [debug.source, debug.actor?.type, debug.actor?.role].filter(Boolean).join(", ");
+  lines.push(`- decided: ${debug.action ?? "unknown"} by ${who}${how ? ` (${how})` : ""}`);
+  if (debug.agent_session_id) lines.push(`- agent session: ${debug.agent_session_id}`);
+  const ctx = debug.review_context;
+  if (ctx) {
+    const damage = [
+      ctx.damage_class ? `damage class: ${ctx.damage_class}` : null,
+      ctx.undo_cost ? `undo cost: ${ctx.undo_cost}` : null,
+    ].filter(Boolean);
+    if (damage.length) lines.push(`- ${damage.join(" · ")}`);
+    if (ctx.summary) lines.push(`- situation: ${ctx.summary}`);
+    const think = (ctx.think_items ?? []).map((t) => t.title).filter(Boolean);
+    lines.push(`- think items: ${think.length ? think.join("; ") : "(none)"}`);
+    const warnings = (ctx.warnings ?? []).map((w) => `${w.code}: ${w.message}`);
+    lines.push(`- warnings: ${warnings.length ? warnings.slice(0, 5).join("; ") : "(none)"}`);
+  }
+  if (debug.discovery_path?.goal) lines.push(`- discovery goal: ${debug.discovery_path.goal}`);
+  return lines.join("\n");
+}
+
+export function buildProposalBadOutcomePrompt(p: ProposalBadOutcomePromptInput): string {
+  const mcpUrl = typeof window !== "undefined" ? getMcpServerUrl() : "/mcp";
+  const reviewedAt = p.outcome_review_at
+    ? ` on ${new Date(p.outcome_review_at).toISOString().slice(0, 10)}`
+    : "";
+
+  return renderAskAgentPrompt("proposal-bad-outcome", {
+    proposal_id: p.id,
+    title: p.title,
+    kind: p.kind,
+    status: p.status,
+    close_reason: p.close_reason || "none",
+    mcp_url: mcpUrl,
+    what_went_wrong: p.outcome_review_note?.trim() || "(not provided)",
+    expected: p.outcome_review_expected?.trim() || "(not provided)",
+    reviewed_by: `${p.outcome_review_by ?? "unknown"}${reviewedAt}`,
+    decision_block: formatDecisionBlock(p.decision_debug),
+  });
+}
+
 export function buildDraftFeedbackAiPrompt(opts: {
   shareUrl: string;
   contentType: string;

@@ -12,6 +12,7 @@ import pageDiagnostics from "@shared/ask-agent-prompts/page-diagnostics.md?raw";
 import draftFeedback from "@shared/ask-agent-prompts/draft-feedback.md?raw";
 import redirectOverwritesContent from "@shared/ask-agent-prompts/redirect-overwrites-content.md?raw";
 import resolvedIssueContext from "@shared/ask-agent-prompts/resolved-issue-context.md?raw";
+import proposalBadOutcome from "@shared/ask-agent-prompts/proposal-bad-outcome.md?raw";
 import polishAskAgentPrompt from "@shared/ask-agent-prompts/polish-ask-agent-prompt.md?raw";
 
 const RAW: Record<AskAgentPromptId, string> = {
@@ -23,6 +24,7 @@ const RAW: Record<AskAgentPromptId, string> = {
   "draft-feedback": draftFeedback,
   "redirect-overwrites-content": redirectOverwritesContent,
   "resolved-issue-context": resolvedIssueContext,
+  "proposal-bad-outcome": proposalBadOutcome,
   "polish-ask-agent-prompt": polishAskAgentPrompt,
 };
 

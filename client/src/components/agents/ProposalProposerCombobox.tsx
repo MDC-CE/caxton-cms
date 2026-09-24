@@ -14,19 +14,43 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 
-async function fetchRecentProposers(): Promise<string[]> {
-  const res = await apiFetch("/api/admin/proposals/proposers?days=30");
+export type ProposalPeopleSource = "proposers" | "reviewers";
+
+const SOURCE_CONFIG: Record<
+  ProposalPeopleSource,
+  { endpoint: string; key: string; noun: string; testId: string }
+> = {
+  proposers: {
+    endpoint: "/api/admin/proposals/proposers",
+    key: "proposers",
+    noun: "proposers",
+    testId: "proposer",
+  },
+  reviewers: {
+    endpoint: "/api/admin/proposals/reviewers",
+    key: "reviewers",
+    noun: "reviewers",
+    testId: "reviewer",
+  },
+};
+
+async function fetchRecentPeople(source: ProposalPeopleSource): Promise<string[]> {
+  const cfg = SOURCE_CONFIG[source];
+  const res = await apiFetch(`${cfg.endpoint}?days=30`);
   if (!res.ok) {
-    throw new Error(`Failed to load proposers (${res.status})`);
+    throw new Error(`Failed to load ${cfg.noun} (${res.status})`);
   }
-  const data = (await res.json()) as { proposers?: string[] };
-  return Array.isArray(data.proposers) ? data.proposers : [];
+  const data = (await res.json()) as Record<string, unknown>;
+  const list = data[cfg.key];
+  return Array.isArray(list) ? (list as string[]) : [];
 }
 
 export type ProposalProposerComboboxProps = {
   value: string;
   onChange: (next: string) => void;
-  /** When true, load recent proposers (e.g. while filters dialog is open). */
+  /** Which people list to load; defaults to proposers. */
+  source?: ProposalPeopleSource;
+  /** When true, load recent people (e.g. while filters dialog is open). */
   enabled?: boolean;
   /** Nested-popover open callback so the parent dialog can avoid closing. */
   onOpenChange?: (open: boolean) => void;
@@ -35,25 +59,27 @@ export type ProposalProposerComboboxProps = {
 export function ProposalProposerCombobox({
   value,
   onChange,
+  source = "proposers",
   enabled = true,
   onOpenChange,
 }: ProposalProposerComboboxProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const cfg = SOURCE_CONFIG[source];
 
-  const proposersQuery = useQuery({
-    queryKey: ["/api/admin/proposals/proposers", 30],
-    queryFn: fetchRecentProposers,
+  const peopleQuery = useQuery({
+    queryKey: [cfg.endpoint, 30],
+    queryFn: () => fetchRecentPeople(source),
     enabled,
     staleTime: 30_000,
   });
 
-  const proposers = proposersQuery.data ?? [];
+  const people = peopleQuery.data ?? [];
   const trimmedSearch = search.trim();
   const knownValues = useMemo(() => {
-    const set = new Set(proposers.map((p) => p.toLowerCase()));
+    const set = new Set(people.map((p) => p.toLowerCase()));
     return set;
-  }, [proposers]);
+  }, [people]);
 
   const showCustom =
     Boolean(trimmedSearch) && !knownValues.has(trimmedSearch.toLowerCase());
@@ -80,9 +106,9 @@ export function ProposalProposerCombobox({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          id="proposal-proposer-username-filter"
+          id={`proposal-${cfg.testId}-username-filter`}
           className="h-8 w-full justify-between px-2 font-normal text-sm"
-          data-testid="button-proposal-proposer-filter"
+          data-testid={`button-proposal-${cfg.testId}-filter`}
         >
           <span className={cn("min-w-0 truncate", !value.trim() && "text-muted-foreground")}>
             {triggerLabel}
@@ -95,11 +121,11 @@ export function ProposalProposerCombobox({
         // Above Dialog (z-[10000]); SelectContent uses the same stack.
         className="z-[10001] w-[--radix-popover-trigger-width] min-w-[16rem] p-0 bg-popover"
         sideOffset={4}
-        data-testid="popover-proposal-proposer-filter"
+        data-testid={`popover-proposal-${cfg.testId}-filter`}
       >
         <Command shouldFilter={true}>
           <CommandInput
-            placeholder="Search proposers…"
+            placeholder={`Search ${cfg.noun}…`}
             value={search}
             onValueChange={setSearch}
             onKeyDown={(e) => {
@@ -108,21 +134,21 @@ export function ProposalProposerCombobox({
                 commit(trimmedSearch);
               }
             }}
-            data-testid="input-proposal-proposer-filter"
+            data-testid={`input-proposal-${cfg.testId}-filter`}
           />
           <CommandList className="max-h-64">
             <CommandEmpty>
               {trimmedSearch
                 ? `Press Enter to use “${trimmedSearch}”`
-                : proposersQuery.isLoading
+                : peopleQuery.isLoading
                   ? "Loading…"
-                  : "No proposers in the last 30 days"}
+                  : `No ${cfg.noun} in the last 30 days`}
             </CommandEmpty>
             <CommandGroup>
               <CommandItem
-                value="anyone-all-proposers"
+                value={`anyone-all-${cfg.noun}`}
                 onSelect={() => commit("")}
-                data-testid="option-proposal-proposer-anyone"
+                data-testid={`option-proposal-${cfg.testId}-anyone`}
               >
                 <IconCheck
                   className={cn(
@@ -139,22 +165,22 @@ export function ProposalProposerCombobox({
                   value={`custom-${trimmedSearch}`}
                   onSelect={() => commit(trimmedSearch)}
                   className="font-mono text-xs"
-                  data-testid="option-proposal-proposer-custom"
+                  data-testid={`option-proposal-${cfg.testId}-custom`}
                 >
                   <IconPlus className="mr-2 h-3.5 w-3.5 shrink-0" />
                   Use “{trimmedSearch}”
                 </CommandItem>
               </CommandGroup>
             ) : null}
-            {proposers.length > 0 ? (
+            {people.length > 0 ? (
               <CommandGroup heading="Last 30 days">
-                {proposers.map((username) => (
+                {people.map((username) => (
                   <CommandItem
                     key={username}
                     value={username}
                     onSelect={() => commit(username)}
                     className="font-mono text-xs"
-                    data-testid={`option-proposal-proposer-${username}`}
+                    data-testid={`option-proposal-${cfg.testId}-${username}`}
                   >
                     <IconCheck
                       className={cn(

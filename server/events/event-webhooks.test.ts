@@ -65,6 +65,7 @@ function insertProposal(opts: {
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
   entries?: Array<{ entry_key: string; locale: string }>;
+  idea_funnel?: unknown;
 }) {
   const now = Date.now();
   const db = getSiteSqlite(TEST_SITE);
@@ -72,8 +73,8 @@ function insertProposal(opts: {
     `INSERT INTO content_proposals (
       id, site, fingerprint, status, kind, category, title, summary,
       documentation_json, related_issue_ids_json, proposer_username, proposer_actor_json,
-      created_at, updated_at, tags_json, search_text
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      created_at, updated_at, tags_json, search_text, idea_funnel_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     opts.id,
     TEST_SITE,
@@ -91,6 +92,7 @@ function insertProposal(opts: {
     now,
     "[]",
     "",
+    opts.idea_funnel === undefined ? null : JSON.stringify(opts.idea_funnel),
   );
   for (const e of opts.entries ?? []) {
     db.prepare(
@@ -685,6 +687,7 @@ describe("event-webhooks", () => {
       proposer_actor: { type: "mcp", model: "grok-4" },
       content_types: ["landing", "blog"],
       locales: ["en", "es"],
+      funnel: null,
     };
     const event = baseEvent({
       attribution: [{ author: "reviewer", actor: { type: "ui" } }],
@@ -934,6 +937,7 @@ describe("event-webhooks", () => {
       proposer_actor: { type: "mcp", model: "grok" },
       content_types: ["landing"],
       locales: ["en"],
+      funnel: null,
     });
     expect(slim.proposal).toEqual({
       id: "p1",
@@ -942,6 +946,121 @@ describe("event-webhooks", () => {
       proposer_actor: { type: "mcp", model: "grok" },
       content_types: ["landing"],
       locales: ["en"],
+      funnel: null,
+    });
+  });
+
+  describe("funnel filters", () => {
+    const ideaBase: EventWebhookProposalSummary = {
+      id: "idea-1",
+      kind: "idea",
+      proposer_username: "writer",
+      proposer_actor: { type: "mcp", model: "grok-4" },
+      content_types: [],
+      locales: [],
+      funnel: { stage: "decision", products: ["ai-engineering"] },
+    };
+    const ev = baseEvent({ type: "proposal_created", payload: { proposal_id: "idea-1" } });
+    const match = (
+      filter: EventWebhookHook["filter"],
+      proposal: EventWebhookProposalSummary = ideaBase,
+    ) => hookMatchesEvent(ev, hook({ id: "h", url: "https://x.com", filter }), proposal, true).ok;
+
+    it("stage include / exclude", () => {
+      expect(match({ funnel_stages: ["decision"] })).toBe(true);
+      expect(match({ funnel_stages: ["awareness", "consideration"] })).toBe(false);
+      expect(match({ exclude_funnel_stages: ["decision"] })).toBe(false);
+      expect(match({ exclude_funnel_stages: ["awareness"] })).toBe(true);
+    });
+
+    it("product include / exclude on named bindings", () => {
+      expect(match({ funnel_products: ["ai-engineering"] })).toBe(true);
+      expect(match({ funnel_products: ["ai-*"] })).toBe(true);
+      expect(match({ funnel_products: ["full-stack"] })).toBe(false);
+      expect(match({ exclude_funnel_products: ["ai-engineering"] })).toBe(false);
+      expect(match({ exclude_funnel_products: ["full-stack"] })).toBe(true);
+    });
+
+    it("no funnel fails include filters (edits or idea without funnel)", () => {
+      const edits = { ...ideaBase, kind: "edits", funnel: null };
+      const bareIdea = { ...ideaBase, funnel: null };
+      expect(match({ funnel_stages: ["decision"] }, edits)).toBe(false);
+      expect(match({ funnel_products: ["ai-engineering"] }, bareIdea)).toBe(false);
+      expect(match({ exclude_funnel_stages: ["decision"] }, bareIdea)).toBe(true);
+    });
+
+    it("all-products ideas match any product include; excluded only by all", () => {
+      const allIdea = { ...ideaBase, funnel: { stage: "awareness" as const, products: "all" as const } };
+      expect(match({ funnel_products: ["ai-engineering"] }, allIdea)).toBe(true);
+      expect(match({ exclude_funnel_products: ["all"] }, allIdea)).toBe(false);
+      expect(match({ exclude_funnel_products: ["ai-engineering"] }, allIdea)).toBe(true);
+    });
+
+    it("parses funnel filters and proposal_idea_funnel_set subscriptions; rejects bad stage", () => {
+      const cfg = parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          proposal_idea_funnel_set: [
+            {
+              id: "fs",
+              enabled: true,
+              url: "https://example.com/fs",
+              filter: {
+                funnel_stages: ["Decision", "decision"],
+                funnel_products: ["ai-engineering"],
+              },
+            },
+          ],
+        },
+      });
+      const f = cfg.subscriptions.proposal_idea_funnel_set?.[0]?.filter;
+      expect(f?.funnel_stages).toEqual(["decision"]);
+      expect(f?.funnel_products).toEqual(["ai-engineering"]);
+
+      expect(() =>
+        parseEventWebhookConfig({
+          version: 1,
+          subscriptions: {
+            proposal_created: [
+              {
+                id: "bad-stage",
+                enabled: true,
+                url: "https://example.com/f",
+                filter: { funnel_stages: ["buy-now"] },
+              },
+            ],
+          },
+        }),
+      ).toThrow(/invalid value/);
+    });
+
+    it("getProposalForWebhookFilter parses idea_funnel; slimEventForWebhook includes it", () => {
+      insertProposal({
+        id: "idea-funnel",
+        kind: "idea",
+        proposer_username: "writer",
+        idea_funnel: {
+          stage: "consideration",
+          products: [
+            { product: "ai-engineering", persona: "the-career-changer" },
+            { product: "full-stack" },
+          ],
+        },
+      });
+      insertProposal({ id: "idea-bare", kind: "idea", proposer_username: "writer" });
+
+      const loaded = getProposalForWebhookFilter(TEST_SITE, "idea-funnel");
+      expect(loaded?.funnel).toEqual({
+        stage: "consideration",
+        products: ["ai-engineering", "full-stack"],
+      });
+      expect(getProposalForWebhookFilter(TEST_SITE, "idea-bare")?.funnel).toBeNull();
+
+      const slim = slimEventForWebhook(
+        baseEvent({ payload: { proposal_id: "idea-funnel" } }),
+        loaded,
+      );
+      expect((slim.proposal as { funnel: unknown }).funnel).toEqual(loaded?.funnel);
     });
   });
 });

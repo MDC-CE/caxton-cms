@@ -119,3 +119,14 @@ After mixed-risk refuse, a surviving idea has one class: worst of related target
 ## Partial proposals
 
 On `partial`, only pending/failed entries count toward the situation; already-applied entries are history. `title_description_ctr` drops once no remaining title/description ops.
+
+## Who reviewed (list rows + detail)
+
+| Field | Meaning |
+|---|---|
+| `reviewer_action_by` / `reviewer_action_by_actor` / `reviewer_action_at` | **Latest non-author feedback**: last blocker add, reopen, or resolve by someone other than the proposer (same username + role = author). Null when only the author has acted. **Not approval** — open blockers may still be pending. Only the latest reviewer is kept. |
+| `closed_by` + `close_reason` | Terminal decision. `finished` with no reason = edits applied; `accepted` = idea accepted; `wont_fix` / `fixed_elsewhere` / `tracked_elsewhere` / `other` = closed without shipping; `rejected` + reject kind. Withdrawn is the author pulling back. |
+
+**Author actions never count as review.** When the proposer adds, reopens, or resolves a blocker on their own proposal, neither `reviewer_action_at` nor `reviewer_action_by` moves. Attention effect: after an author rewrite, an author-added blocker no longer counts as "reviewer looked" — once blockers clear, the proposal still reads `awaiting_rereview`. Open blockers still read `blocked` regardless of who filed them.
+
+**Filter `reviewer_username`** (`list_proposals`): exact case-insensitive username; matches `reviewer_action_by`, **or** `closed_by` when status is `finished` | `rejected`. Withdrawn closers and earlier reviewers replaced by a later one never match. Username only — agents acting as a staff subject match that subject. Omit `status` to include closed proposals.

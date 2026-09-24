@@ -80,6 +80,20 @@ export const ASK_AGENT_PROMPT_FIXTURES: Record<AskAgentPromptId, Record<string, 
     resolved_by: "staff@example.com",
     reopened_line: "",
   },
+  "proposal-bad-outcome": {
+    proposal_id: "prop-abc123",
+    title: "Tighten meta description on /en/blog/example",
+    kind: "edits",
+    status: "finished",
+    close_reason: "applied",
+    mcp_url: "http://localhost:5000/mcp",
+    what_went_wrong:
+      "Applied a description that dropped the primary keyword; CTR fell the following week.",
+    expected: "Reviewer should have kept the keyword in the first 120 characters or rejected.",
+    reviewed_by: "steward@example.com on 2026-09-20",
+    decision_block:
+      "- decided: apply by reviewer@example.com (staff, ui)\n- damage class: live_copy · undo cost: low\n- think items: Keyword retention; Recent writes\n- warnings: (none)",
+  },
   "polish-ask-agent-prompt": {
     target_id: "organic-page2",
     target_title: "Page 2 opportunity",

@@ -751,8 +751,9 @@ export function registerProposalTools(
     "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only " +
       "(by_attention, by_kind_status = live KPI strip Ideas/Edits/Notes × Open/Done/Rej with zeros filled, stalled_ideas, needs_review_edits). " +
       "kpi_history is opt-in only (never default). Event Webhooks are not included. " +
-      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, attention, stalled, or needs_review for paginated summary rows " +
-      "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, slim stubs — no ops/values/baselines). " +
+      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, reviewer_username, escalated, attention, stalled, or needs_review for paginated summary rows " +
+      "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, " +
+      "reviewer_action_by/_at = latest non-author feedback (not approval), closed_by/close_reason, slim stubs — no ops/values/baselines). " +
       "Filtered calls still return site-wide by_kind_status (warning proposal_stats_site_wide) — not counts for this page. " +
       "stalled:true → accepted ideas with a locked page and no open/partial/finished implements follow-up (legacy accepts without a lock are excluded). " +
       "needs_review:true → open|partial edits whose attention is awaiting_rereview or no_feedback (author rewrite or cleared blockers, nothing still waiting on the author). Excludes blocked and escalated. Forces that queue even if status/kind differ. " +
@@ -766,6 +767,8 @@ export function registerProposalTools(
       "week = last 12 Monday-start UTC weeks + current week. Last point partial:true when its bucket contains now. " +
       "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
+      "outcome_review* / outcome_lesson* fields = human-only steward retro on closed proposals (good|bad, what went wrong, what should have happened, lesson captured). " +
+      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured). " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
@@ -807,10 +810,25 @@ export function registerProposalTools(
           "Exact match on created_agent_session_id. Copy from agent_session start or a proposal row. " +
             "Staff-UI proposals are usually null and never match.",
         ),
+      reviewer_username: z
+        .string()
+        .optional()
+        .describe(
+          "Exact case-insensitive username match on row.reviewer_action_by (latest non-author blocker add/resolve/reopen) " +
+            "OR closed_by when status is finished|rejected. Withdrawn closers never match; earlier reviewers replaced by a later one never match. " +
+            "Username only — agents acting as a staff subject match that subject. Combine with status to narrow; omit status to include closed.",
+        ),
       escalated: z
         .boolean()
         .optional()
         .describe("When true, only proposals with a steward escalate hold. When false, only non-escalated."),
+      outcome_review: z
+        .enum(["good", "bad", "none", "bad_open"])
+        .optional()
+        .describe(
+          "Steward outcome review on closed proposals (finished|rejected|withdrawn). good | bad; bad_open = bad with no lesson captured yet; " +
+            "none = closed and not reviewed. Omit status (or use a closed status) — open/partial never match.",
+        ),
       attention: z
         .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked"])
         .optional()
@@ -895,7 +913,7 @@ export function registerProposalTools(
           message:
             "Unscoped list_proposals returns proposal_stats only (by_kind_status = live KPI strip counts; " +
             "kpi_history not included unless requested). Pass status, kind, query, issue_id, proposal_id, " +
-            "proposer_username, proposer_actor, agent_session_id, escalated, attention, or stalled to load proposals[].",
+            "proposer_username, proposer_actor, agent_session_id, reviewer_username, escalated, outcome_review, attention, or stalled to load proposals[].",
         });
         if (args.limit != null || args.offset != null) {
           warnings.push({
@@ -945,8 +963,10 @@ export function registerProposalTools(
           qs.set("proposer_actor_role", args.proposer_actor.role.trim());
         }
         if (args.agent_session_id?.trim()) qs.set("agent_session_id", args.agent_session_id.trim());
+        if (args.reviewer_username?.trim()) qs.set("reviewer_username", args.reviewer_username.trim());
         if (args.escalated === true) qs.set("escalated", "1");
         if (args.escalated === false) qs.set("escalated", "0");
+        if (args.outcome_review) qs.set("outcome_review", args.outcome_review);
         if (args.attention) qs.set("attention", args.attention);
         if (args.stalled === true) qs.set("stalled", "1");
         if (args.stalled === false) qs.set("stalled", "0");

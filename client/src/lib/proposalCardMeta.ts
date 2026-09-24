@@ -3,6 +3,7 @@ import {
   type IssueActorRef,
 } from "@/lib/formatIssueActor";
 import { sameAgentIdentity } from "@shared/agent-identity";
+import { PROPOSAL_CLOSE_REASON_OPTIONS } from "@/lib/proposalCloseReason";
 
 export type ProposalClaimLike = {
   by: string;
@@ -92,26 +93,75 @@ export type ProposalAttributionLines = {
   lines: string[];
   /** Muted expired-claim line, if any */
   expiredLine: string | null;
+  /** Last feedback (open/partial) or closer (finished/rejected) line; null when nothing to show. */
+  reviewLine: { text: string; title: string } | null;
 };
+
+export const PROPOSAL_LAST_FEEDBACK_TITLE =
+  "Last person other than the author who added, resolved, or reopened a needs-changes note.";
+
+const CLOSE_REASON_LABEL: Record<string, string> = Object.fromEntries(
+  PROPOSAL_CLOSE_REASON_OPTIONS.map((o) => [o.value, o.label.toLowerCase()]),
+);
+
+function closerLine(opts: {
+  status?: string;
+  closeReason?: string | null;
+  closedBy?: string | null;
+}): { text: string; title: string } | null {
+  const by = opts.closedBy?.trim() || "";
+  const withBy = (verb: string) => (by ? `${verb} by ${by}` : verb);
+  if (opts.status === "rejected") {
+    return { text: withBy("Rejected"), title: "Who rejected this proposal." };
+  }
+  if (opts.status !== "finished") return null;
+  const reason = opts.closeReason?.trim() || "";
+  if (!reason) return { text: withBy("Applied"), title: "Who applied the last change." };
+  if (reason === "accepted") return { text: withBy("Accepted"), title: "Who accepted this idea." };
+  const label = CLOSE_REASON_LABEL[reason] ?? reason.replace(/_/g, " ");
+  return { text: `${withBy("Closed")} · ${label}`, title: "Who closed this proposal, and why." };
+}
 
 /**
  * Build attribution lines for list/detail.
  * Collapse propose+claim when same staff author and same agent identity (username + role).
  * Expired claims stay visible (not a lock).
+ * Closed proposals show the closer instead of last feedback; withdrawn shows neither.
  */
 export function proposalAttributionLines(opts: {
   proposerUsername: string;
   proposerActor?: unknown;
   claim?: ProposalClaimLike | null;
+  status?: string;
+  closeReason?: string | null;
+  closedBy?: string | null;
+  reviewer?: string | null;
+  reviewerActor?: unknown;
+  reviewerAt?: number | null;
   nowMs?: number;
 }): ProposalAttributionLines {
   const now = opts.nowMs ?? Date.now();
   const proposerActor = asIssueActor(opts.proposerActor);
   const proposeLine = `Proposed by ${formatIssueActorLine(opts.proposerUsername, proposerActor)}`;
 
+  const isOpen = !opts.status || opts.status === "open" || opts.status === "partial";
+  const reviewer = isOpen ? opts.reviewer?.trim() || "" : "";
+  const reviewerActor = asIssueActor(opts.reviewerActor);
+  const feedbackWhen =
+    opts.reviewerAt != null && Number.isFinite(opts.reviewerAt)
+      ? formatProposalRelativeUpdatedAt(opts.reviewerAt, now)
+      : null;
+  const feedbackLine = reviewer
+    ? {
+        text: `Last feedback from ${formatIssueActorLine(reviewer, reviewerActor)}${feedbackWhen ? ` · ${feedbackWhen}` : ""}`,
+        title: PROPOSAL_LAST_FEEDBACK_TITLE,
+      }
+    : null;
+  const reviewLine = isOpen ? feedbackLine : closerLine(opts);
+
   const claim = opts.claim;
   if (!claim?.by) {
-    return { lines: [proposeLine], expiredLine: null };
+    return { lines: [proposeLine], expiredLine: null, reviewLine };
   }
 
   const claimActor = asIssueActor(claim.actor);
@@ -123,6 +173,7 @@ export function proposalAttributionLines(opts: {
     return {
       lines: [proposeLine],
       expiredLine: `Claim expired · ${claimFmt}`,
+      reviewLine,
     };
   }
 
@@ -132,11 +183,24 @@ export function proposalAttributionLines(opts: {
     return {
       lines: [`Proposed & claimed by ${claimFmt}`],
       expiredLine: null,
+      reviewLine,
+    };
+  }
+
+  if (feedbackLine && sameAgentIdentity(reviewer, reviewerActor, claim.by, claimActor)) {
+    return {
+      lines: [
+        proposeLine,
+        `Claimed by ${claimFmt}${feedbackWhen ? ` · last feedback ${feedbackWhen}` : " · last feedback"}`,
+      ],
+      expiredLine: null,
+      reviewLine: null,
     };
   }
 
   return {
     lines: [proposeLine, `Claimed by ${claimFmt}`],
     expiredLine: null,
+    reviewLine,
   };
 }
