@@ -228,7 +228,7 @@ export async function processImageBuffer(
       let vUrl: string;
 
       if (gcsKey) {
-        vUrl = await gcs.upload(vKey, resized, contentTypeForExt(outExt));
+        vUrl = await gcs.upload(vKey, resized, contentTypeForExt(outExt), { publicRead: true });
       } else {
         const diskPath = path.resolve(process.cwd(), vKey);
         const dir = path.dirname(diskPath);

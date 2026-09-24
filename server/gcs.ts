@@ -333,7 +333,7 @@ class GCSClient {
     key: string,
     data: Buffer,
     contentType?: string,
-    options?: { cacheControl?: string }
+    options?: { cacheControl?: string; publicRead?: boolean }
   ): Promise<string> {
     if (!this.storage) throw new Error("[GCS] Not initialized");
 
@@ -356,6 +356,16 @@ class GCSClient {
     while (true) {
       try {
         await file.save(data, saveOpts);
+        if (options?.publicRead) {
+          try {
+            await file.makePublic();
+          } catch (err: any) {
+            const detail = err?.message || String(err);
+            throw new Error(
+              `Saved "${key}" but could not make it public for the website. Public access prevention on the bucket must be off. ${detail}`,
+            );
+          }
+        }
         return this.getPublicUrl(key);
       } catch (err: any) {
         const is429 = err?.code === 429 || err?.response?.statusCode === 429;

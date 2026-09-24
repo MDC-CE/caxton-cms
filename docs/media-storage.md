@@ -17,11 +17,9 @@ The platform supports a pluggable media storage system. By default, images are s
    gsutil mb -p YOUR_PROJECT_ID gs://YOUR_BUCKET_NAME
    ```
 
-2. **Make the bucket publicly readable** so images can be served directly:
+2. **Leave the bucket private.** Do not grant `allUsers` on the whole bucket: it also stores sync state, user records, and auth tokens. Gallery uploads mark each image, video, and PDF public on its own. Turn off **public access prevention** on the bucket, or those public links return Access denied.
 
-   ```bash
-   gsutil iam ch allUsers:objectViewer gs://YOUR_BUCKET_NAME
-   ```
+   Optimized image variants are marked public the same way. JSON files next to them (AI prompts, preview metadata) stay private.
 
 3. **Create a service account** and download its key:
 

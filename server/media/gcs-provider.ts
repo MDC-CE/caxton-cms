@@ -50,7 +50,9 @@ export class GCSProvider implements StorageProvider {
   }
 
   async upload(key: string, data: Buffer, contentType?: string): Promise<string> {
-    return gcs.upload(this.fullKey(key), data, contentType);
+    // Gallery files are embedded on public pages. JSON sidecars (AI prompts, preview meta) stay private.
+    const publicRead = contentType !== "application/json";
+    return gcs.upload(this.fullKey(key), data, contentType, { publicRead });
   }
 
   async delete(key: string): Promise<void> {
