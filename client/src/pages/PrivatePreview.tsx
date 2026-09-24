@@ -471,7 +471,7 @@ export default function PrivatePreview() {
           meta={(content as any).meta}
           param={(content as any).param}
           allowEntryStructuralOverrides={!isSharedLayout || pageDetached}
-          onEditYaml={() => setShowRawEditor(true)}
+          allowErrorYamlEdit
         />
       </MenuVisualContextProvider>
       <div className="group relative">
