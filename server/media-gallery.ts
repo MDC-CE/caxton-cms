@@ -944,6 +944,62 @@ export class MediaGallery {
     return crypto.createHash("sha256").update(data).digest("hex");
   }
 
+  /**
+   * True when the registry src can be read. A check that throws is treated as
+   * present so a flaky storage call does not rewrite a healthy asset.
+   */
+  private async primaryBytesExist(src: string): Promise<boolean> {
+    try {
+      return await media.exists(src);
+    } catch (err) {
+      log.warn({ err, src }, "[MediaGallery] Existence check failed; leaving the registry entry unchanged");
+      return true;
+    }
+  }
+
+  /**
+   * Registry row exists but the bytes are gone. Write them to the current
+   * upload storage (cloud when configured), keep the same ID, and point YAML
+   * references at the new location.
+   */
+  private async rehomeMissingEntry(
+    id: string,
+    entry: ImageEntry,
+    filename: string,
+    data: Buffer,
+    contentType: string,
+  ): Promise<{ src: string; yamlFilesUpdated: string[] }> {
+    const ext = extensionFromPath(filename) || extensionFromPath(entry.src) || "";
+    const provider = this.getDefaultStorageProvider();
+    const newSrc = await this.uploadPrimaryFile(provider, `${id}${ext}`, data, contentType);
+    const oldSrc = entry.src;
+
+    this.register(id, {
+      src: newSrc,
+      alt: entry.alt,
+      tags: entry.tags || [],
+      focal_point: entry.focal_point,
+      ...(entry.protected ? { protected: true } : {}),
+      parentId: entry.parentId,
+      ...(entry.quality_override != null ? { quality_override: entry.quality_override } : {}),
+      hash: this.computeBufferHash(data),
+      ...(entry.format ? { format: entry.format } : {}),
+      usage_count: entry.usage_count || 0,
+      ...(entry.origin ? { origin: entry.origin } : {}),
+      ...(entry.ai ? { ai: entry.ai } : {}),
+      ...(entry.source_url ? { source_url: entry.source_url } : {}),
+      ...(entry.last_impression_at ? { last_impression_at: entry.last_impression_at } : {}),
+      registered_at: entry.registered_at || new Date().toISOString(),
+    });
+
+    const yamlFilesUpdated =
+      newSrc !== oldSrc ? this.replacePathsInYamlFiles(oldSrc, newSrc) : [];
+    for (const file of yamlFilesUpdated) markFileAsModified(file);
+    this.existenceCache.clear();
+    log.info({ id, oldSrc, newSrc }, "[MediaGallery] Restored missing media onto current storage");
+    return { src: newSrc, yamlFilesUpdated };
+  }
+
   private resolveLocalPath(src: string): string | null {
     const diskPath = resolveUrlStyleDiskPath(src.startsWith("/") ? src : `/${src}`);
     if (fs.existsSync(diskPath)) return diskPath;
@@ -1527,7 +1583,7 @@ export class MediaGallery {
         aspect_ratio?: string;
       };
     }
-  ): Promise<{ id: string; src: string; alt: string; duplicate?: boolean; existingId?: string }> {
+  ): Promise<{ id: string; src: string; alt: string; duplicate?: boolean; existingId?: string; restored?: boolean; yamlFilesUpdated?: string[] }> {
     const registry = this.getRegistry();
     if (!registry) throw new Error("Failed to load registry");
 
@@ -1539,12 +1595,28 @@ export class MediaGallery {
     const hash = this.computeBufferHash(data);
     const existing = this.findByHash(hash);
     if (existing) {
+      if (await this.primaryBytesExist(existing.entry.src)) {
+        return {
+          id: existing.id,
+          src: existing.entry.src,
+          alt: existing.entry.alt,
+          duplicate: true,
+          existingId: existing.id,
+        };
+      }
+      const restored = await this.rehomeMissingEntry(
+        existing.id,
+        existing.entry,
+        filename,
+        data,
+        contentType,
+      );
       return {
         id: existing.id,
-        src: existing.entry.src,
+        src: restored.src,
         alt: existing.entry.alt,
-        duplicate: true,
-        existingId: existing.id,
+        restored: true,
+        yamlFilesUpdated: restored.yamlFilesUpdated,
       };
     }
 
@@ -1658,6 +1730,8 @@ export class MediaGallery {
         srcChanged: boolean;
         childIds: string[];
         noop?: boolean;
+        restored?: boolean;
+        yamlFilesUpdated?: string[];
       }
     | {
         ok: false;
@@ -1714,14 +1788,33 @@ export class MediaGallery {
 
     const hash = this.computeBufferHash(storeBuffer);
     if (imageEntry.hash && imageEntry.hash === hash) {
+      if (await this.primaryBytesExist(imageEntry.src)) {
+        return {
+          ok: true,
+          id,
+          src: imageEntry.src,
+          alt: imageEntry.alt,
+          srcChanged: false,
+          childIds,
+          noop: true,
+        };
+      }
+      const restored = await this.rehomeMissingEntry(
+        id,
+        imageEntry,
+        filename,
+        storeBuffer,
+        storeContentType,
+      );
       return {
         ok: true,
         id,
-        src: imageEntry.src,
+        src: restored.src,
         alt: imageEntry.alt,
-        srcChanged: false,
+        srcChanged: restored.src !== imageEntry.src,
         childIds,
-        noop: true,
+        restored: true,
+        yamlFilesUpdated: restored.yamlFilesUpdated,
       };
     }
 

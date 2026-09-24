@@ -1064,6 +1064,7 @@ export function SectionEditorPanel({
           alt: string;
           duplicate?: boolean;
           existingId?: string;
+          restored?: boolean;
         };
         await refetchRegistry();
         const fieldName =
@@ -1076,7 +1077,12 @@ export function SectionEditorPanel({
           currentRegistryId: result.id,
         });
         setImagePickerMode("browse");
-        if (result.duplicate) {
+        if (result.restored) {
+          toast({
+            title: "Image saved again",
+            description: `The gallery already had this file as "${result.id}", but the stored copy was missing. It was saved again under the same ID, and pages that used the old location now point at the new one.`,
+          });
+        } else if (result.duplicate) {
           toast({
             title: "Image already exists",
             description: `This image is already registered as "${result.existingId}". Using the existing one.`,
@@ -1128,6 +1134,7 @@ export function SectionEditorPanel({
           alt: string;
           duplicate?: boolean;
           existingId?: string;
+          restored?: boolean;
         };
         await refetchRegistry();
         setVideoPickerTarget({
@@ -1135,7 +1142,12 @@ export function SectionEditorPanel({
           currentUrl: result.src,
         });
         setVideoPickerMode("url");
-        if (result.duplicate) {
+        if (result.restored) {
+          toast({
+            title: "Video saved again",
+            description: `The gallery already had this file as "${result.id}", but the stored copy was missing. It was saved again under the same ID, and pages that used the old location now point at the new one.`,
+          });
+        } else if (result.duplicate) {
           toast({
             title: "Video already exists",
             description: `This video is already registered as "${result.existingId}". Using the existing one.`,

@@ -584,14 +584,21 @@ export function ImagePickerDialog({
           alt: string;
           duplicate?: boolean;
           existingId?: string;
+          restored?: boolean;
         };
         await queryClient.invalidateQueries({ queryKey: ["/api/image-registry"] });
         const noun = doctype === "pdf" ? "PDF" : doctype === "video" ? "Video" : "Image";
         toast({
-          title: result.duplicate ? `${noun} already exists` : `${noun} uploaded`,
-          description: result.duplicate
-            ? `Already registered as "${result.existingId}". Using the existing one.`
-            : `Registered as "${result.id}"`,
+          title: result.restored
+            ? `${noun} saved again`
+            : result.duplicate
+              ? `${noun} already exists`
+              : `${noun} uploaded`,
+          description: result.restored
+            ? `The gallery already had this file as "${result.id}", but the stored copy was missing. It was saved again under the same ID, and pages that used the old location now point at the new one.`
+            : result.duplicate
+              ? `Already registered as "${result.existingId}". Using the existing one.`
+              : `Registered as "${result.id}"`,
         });
         if (closeOnSuccessfulUpload) {
           await onSave(result.src, result.alt, result.id);
@@ -663,9 +670,15 @@ export function ImagePickerDialog({
           alt: string;
           duplicate?: boolean;
           existingId?: string;
+          restored?: boolean;
         };
         await queryClient.invalidateQueries({ queryKey: ["/api/image-registry"] });
-        if (result.duplicate) {
+        if (result.restored) {
+          toast({
+            title: "Image saved again",
+            description: `The gallery already had this file as "${result.id}", but the stored copy was missing. It was saved again under the same ID, and pages that used the old location now point at the new one.`,
+          });
+        } else if (result.duplicate) {
           toast({
             title: "Image already exists",
             description: `Already registered as "${result.existingId}". Using the existing one.`,

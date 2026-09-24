@@ -503,7 +503,7 @@ async function uploadBytesToGallery(opts: {
   agentSessionId?: string;
   ai?: { generated: true; model?: string; prompt?: string; generated_at?: string };
 }): Promise<
-  | { ok: true; id: string; src?: string; alt?: string; duplicate?: boolean; existingId?: string }
+  | { ok: true; id: string; src?: string; alt?: string; duplicate?: boolean; existingId?: string; restored?: boolean; yamlFilesUpdated?: string[] }
   | { ok: false; message: string; code: string }
 > {
   const form = new FormData();
@@ -546,6 +546,8 @@ async function uploadBytesToGallery(opts: {
     alt?: string;
     duplicate?: boolean;
     existingId?: string;
+    restored?: boolean;
+    yamlFilesUpdated?: string[];
   };
 
   if (!uploadRes.ok || !uploadData.id) {
@@ -563,6 +565,8 @@ async function uploadBytesToGallery(opts: {
     alt: uploadData.alt,
     duplicate: uploadData.duplicate,
     existingId: uploadData.existingId,
+    restored: uploadData.restored,
+    yamlFilesUpdated: uploadData.yamlFilesUpdated,
   };
 }
 
@@ -804,7 +808,14 @@ export async function handleGetOrSetMediaToGallery(
     const regPath = registryRelativePath(contentFolder);
     const warnings: McpWarning[] = [NO_YAML_ATTACH, PUBLIC_URL_ONLY];
     const side_effects: McpSideEffect[] = [];
-    if (!uploaded.duplicate) {
+    const touchedPaths = [regPath, ...(uploaded.yamlFilesUpdated ?? [])];
+    if (uploaded.restored) {
+      side_effects.push({
+        kind: "gallery_register",
+        summary: `Restored missing file for gallery id ${mediaId} onto current storage. Same id. YAML that embedded the old src was rewritten.`,
+        paths: touchedPaths,
+      });
+    } else if (!uploaded.duplicate) {
       side_effects.push({
         kind: "gallery_register",
         summary: `Registered imported media ${mediaId} in gallery`,
@@ -825,9 +836,12 @@ export async function handleGetOrSetMediaToGallery(
         src: uploaded.src,
         alt: uploaded.alt ?? alt,
         duplicate: !!uploaded.duplicate,
-        message: uploaded.duplicate
-          ? `Imported URL matched existing gallery asset "${mediaId}".`
-          : `Imported and registered gallery media "${mediaId}".`,
+        restored: !!uploaded.restored,
+        message: uploaded.restored
+          ? `Gallery id "${mediaId}" had no stored file. Bytes were written to current storage and the src was updated.`
+          : uploaded.duplicate
+            ? `Imported URL matched existing gallery asset "${mediaId}".`
+            : `Imported and registered gallery media "${mediaId}".`,
       },
       {
         warnings,
@@ -907,7 +921,14 @@ export async function handleGetOrSetMediaToGallery(
     const regPath = registryRelativePath(contentFolder);
     const warnings: McpWarning[] = [NO_YAML_ATTACH];
     const side_effects: McpSideEffect[] = [];
-    if (!uploaded.duplicate) {
+    const touchedPaths = [regPath, ...(uploaded.yamlFilesUpdated ?? [])];
+    if (uploaded.restored) {
+      side_effects.push({
+        kind: "gallery_register",
+        summary: `Restored missing file for gallery id ${mediaId} onto current storage. Same id. YAML that embedded the old src was rewritten.`,
+        paths: touchedPaths,
+      });
+    } else if (!uploaded.duplicate) {
       side_effects.push({
         kind: "gallery_register",
         summary: `Registered uploaded media ${mediaId} in gallery`,
@@ -927,9 +948,12 @@ export async function handleGetOrSetMediaToGallery(
         src: uploaded.src,
         alt: uploaded.alt ?? alt,
         duplicate: !!uploaded.duplicate,
-        message: uploaded.duplicate
-          ? `Upload matched existing gallery asset "${mediaId}".`
-          : `Uploaded and registered gallery media "${mediaId}".`,
+        restored: !!uploaded.restored,
+        message: uploaded.restored
+          ? `Gallery id "${mediaId}" had no stored file. Bytes were written to current storage and the src was updated.`
+          : uploaded.duplicate
+            ? `Upload matched existing gallery asset "${mediaId}".`
+            : `Uploaded and registered gallery media "${mediaId}".`,
       },
       {
         warnings,
@@ -1019,13 +1043,15 @@ export async function handleGetOrSetMediaToGallery(
   const side_effects: McpSideEffect[] = [
     {
       kind: "gallery_register",
-      summary: uploaded.duplicate
-        ? `Reused existing gallery media ${mediaId} (hash duplicate)`
-        : `Registered AI image ${mediaId} in gallery`,
-      paths: [regPath],
+      summary: uploaded.restored
+        ? `Restored missing file for gallery id ${mediaId} onto current storage. Same id.`
+        : uploaded.duplicate
+          ? `Reused existing gallery media ${mediaId} (hash duplicate)`
+          : `Registered AI image ${mediaId} in gallery`,
+      paths: [regPath, ...(uploaded.yamlFilesUpdated ?? [])],
     },
   ];
-  if (!uploaded.duplicate) {
+  if (!uploaded.duplicate && !uploaded.restored) {
     side_effects.push({
       kind: "enqueue_ai_image_gc",
       summary: "Scheduled AI unused-image GC after grace window",
@@ -1033,7 +1059,7 @@ export async function handleGetOrSetMediaToGallery(
   }
 
   const warnings: McpWarning[] = [NO_YAML_ATTACH, AI_GC_WARNING];
-  if (uploaded.duplicate) {
+  if (uploaded.duplicate && !uploaded.restored) {
     warnings.push({
       code: "hash_duplicate",
       message: `Bytes already registered as "${uploaded.existingId ?? mediaId}"; no new file written.`,
@@ -1047,10 +1073,13 @@ export async function handleGetOrSetMediaToGallery(
       src: uploaded.src,
       alt: uploaded.alt ?? alt,
       duplicate: !!uploaded.duplicate,
+      restored: !!uploaded.restored,
       model: parsed.model ?? null,
-      message: uploaded.duplicate
-        ? `Generated image matched existing gallery asset "${mediaId}".`
-        : `Generated and registered gallery image "${mediaId}".`,
+      message: uploaded.restored
+        ? `Gallery id "${mediaId}" had no stored file. Bytes were written to current storage and the src was updated.`
+        : uploaded.duplicate
+          ? `Generated image matched existing gallery asset "${mediaId}".`
+          : `Generated and registered gallery image "${mediaId}".`,
     },
     {
       warnings,

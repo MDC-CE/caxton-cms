@@ -6,6 +6,16 @@ window_days: 6
 
 entries:
   - date: "2026-09-24"
+    summary: "Re-upload restores a gallery asset whose file is missing"
+    agent_impact:
+      - "get_or_set_media_to_gallery still refuses a second ID when the bytes match an existing gallery hash and the file is on disk (duplicate, no write)."
+      - "If that hash matches but the stored file is missing, the same upload writes the bytes to current storage, keeps the same media_id, updates src, and rewrites YAML that embedded the old src. Response includes restored: true. Content sync still has to publish image-registry.json and those YAML paths."
+    tools_changed: false
+    paths:
+      - server/media-gallery.ts
+      - mcp-server/tools/media.ts
+
+  - date: "2026-09-24"
     summary: "Outcome figures claim-based (not landing allowlist); Jev on ambiguous cues"
     agent_impact:
       - "Damage class selling_page badge is now Outcome figures — attach selling_page_figures when ops/promote text add or change hire rates, salaries, tuition, or prices (any content type), or review_situations includes selling_figures."

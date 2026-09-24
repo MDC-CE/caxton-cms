@@ -692,10 +692,12 @@ export default function MediaGallery() {
         return next;
       });
       toast({
-        title: data.noop ? "Already up to date" : "Replaced",
-        description: data.noop
-          ? `"${id}" already has this file`
-          : `"${id}" updated${data.srcChanged ? " (storage path changed)" : ""}. Srcsets regenerating in the background.`,
+        title: data.restored ? "Saved again" : data.noop ? "Already up to date" : "Replaced",
+        description: data.restored
+          ? `"${id}" was still in the gallery, but the file was missing. It was saved again under the same ID, and pages that used the old location now point at the new one.`
+          : data.noop
+            ? `"${id}" already has this file`
+            : `"${id}" updated${data.srcChanged ? " (storage path changed)" : ""}. Srcsets regenerating in the background.`,
       });
       setReplaceConfirmOpen(false);
       setReplaceFile(null);
