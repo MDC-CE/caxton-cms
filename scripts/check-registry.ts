@@ -98,7 +98,7 @@ if (isMain) {
     if (!quiet) {
       const reason = siteComponentRegistryExists()
         ? "WEBLIFY_SITE_SCHEMAS_STUB is set"
-        : "site_4geeks-com/component-registry not found";
+        : "site_learning-mdc-edu/component-registry not found";
       console.log(
         `✓ site schema stub mode (${reason}) — skipping live registry import check`,
       );

@@ -1,4 +1,4 @@
-import { TestimonialsSection } from "@/components/testimonials/variants/TestimonialsDefault";
+import { TestimonialsSection } from "../../../../site_learning-mdc-edu/component-registry/testimonials/variants/TestimonialsDefault";
 
 export default function TestimonialsSectionExample() {
   const testimonials = [

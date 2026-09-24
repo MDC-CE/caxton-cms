@@ -7,7 +7,7 @@
 import type { ComponentServerHooks } from "./_common/server-hooks";
 
 const LOADERS: Record<string, () => Promise<{ hooks: ComponentServerHooks }>> = {
-  geekchart: () => import("./geekchart/v1.0/server"),
+  geekchart: () => import("../../site_learning-mdc-edu/component-registry/geekchart/v1.0/server"),
 };
 
 const cache = new Map<string, Promise<ComponentServerHooks>>();

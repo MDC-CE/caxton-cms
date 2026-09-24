@@ -19,7 +19,7 @@ function shouldUseStub() {
   const flag = process.env.WEBLIFY_SITE_SCHEMAS_STUB?.trim();
   if (flag === "1" || flag?.toLowerCase() === "true") return true;
   if (flag === "0" || flag?.toLowerCase() === "false") return false;
-  const registry = path.join(projectRoot(), "site_4geeks-com", "component-registry");
+  const registry = path.join(projectRoot(), "site_learning-mdc-edu", "component-registry");
   return !fs.existsSync(registry);
 }
 
@@ -55,7 +55,7 @@ const siteSchemaStubPlugin = {
       throw new Error(`site-component-schemas stub missing: ${stubSchemas}`);
     }
     console.warn(
-      "[esbuild] site_4geeks-com registry absent (or WEBLIFY_SITE_SCHEMAS_STUB=1) — aliasing site-component-schemas → stub",
+      "[esbuild] site_learning-mdc-edu registry absent (or WEBLIFY_SITE_SCHEMAS_STUB=1) — aliasing site-component-schemas → stub",
     );
     build.onResolve({ filter: /site-component-schemas/ }, (args) => {
       if (!isSiteComponentSchemasImport(args.path, args.resolveDir)) return null;

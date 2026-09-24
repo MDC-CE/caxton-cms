@@ -2,7 +2,7 @@ import fs from "fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { validateSectionOperations } from "./section-save-validation";
 import { createDemo, demoFilePath } from "./component-section-demos";
-import { geometryViolations } from "@shared/component-registry/geekchart/v1.0/server";
+import { geometryViolations } from "../site_learning-mdc-edu/component-registry/geekchart/v1.0/server";
 
 const HUMAN = { isMcpAuthor: false };
 const AGENT = { isMcpAuthor: true };

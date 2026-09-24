@@ -1,5 +1,5 @@
 /**
- * Node customize hooks: when site_4geeks-com registry is absent (or
+ * Node customize hooks: when site_learning-mdc-edu registry is absent (or
  * WEBLIFY_SITE_SCHEMAS_STUB=1), redirect site-component-schemas → stub.
  * Mirrors scripts/esbuild-site-schema-stub-plugin.mjs / vite stub plugin for tsx.
  */
@@ -23,7 +23,7 @@ function shouldUseStub() {
   const flag = process.env.WEBLIFY_SITE_SCHEMAS_STUB?.trim();
   if (flag === "1" || flag?.toLowerCase() === "true") return true;
   if (flag === "0" || flag?.toLowerCase() === "false") return false;
-  return !fs.existsSync(path.join(projectRoot(), "site_4geeks-com", "component-registry"));
+  return !fs.existsSync(path.join(projectRoot(), "site_learning-mdc-edu", "component-registry"));
 }
 
 function resolvesToReal(specifier, parentURL) {

@@ -1,5 +1,5 @@
 
-import { resolveColorVar, hslColor, hslColorRaw } from "@/components/course_selector/shared";
+import { resolveColorVar, hslColor, hslColorRaw } from "../../../site_learning-mdc-edu/component-registry/course_selector/shared";
 
 interface BarChartProps {
   years?: string[];

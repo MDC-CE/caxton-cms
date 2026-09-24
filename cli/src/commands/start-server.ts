@@ -135,7 +135,7 @@ export async function startServer(
     const tsxBin = path.join(packageRoot, "node_modules", ".bin", "tsx");
     const runner = fs.existsSync(tsxBin) ? tsxBin : "npx";
     const tsxArgs = ["--tsconfig", tsconfig];
-    // Vite/esbuild already stub site Zod when site_4geeks-com is absent; tsx needs
+    // Vite/esbuild already stub site Zod when site_learning-mdc-edu is absent; tsx needs
     // the same remap or it loads site-component-schemas.ts → missing site_* paths.
     if (shouldUseSiteSchemaStub(projectRoot)) {
       tsxArgs.push(

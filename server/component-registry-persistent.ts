@@ -24,7 +24,7 @@ export function isComponentRegistryContentPath(filePath: string): boolean {
 }
 
 /**
- * site_4geeks-com/component-registry/hero/... -> site_4geeks-com
+ * site_learning-mdc-edu/component-registry/hero/... -> site_learning-mdc-edu
  */
 export function contentFolderFromRegistryPath(filePath: string): string | null {
   const n = filePath.replace(/\\/g, "/");

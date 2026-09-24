@@ -53,7 +53,7 @@ const useSiteSchemaStub = shouldUseSiteSchemaStub();
 const siteSchemaPaths = getSiteComponentSchemasPaths(getPackageRoot());
 
 /**
- * Warns at build time when site_4geeks-com/component-registry is absent.
+ * Warns at build time when site_learning-mdc-edu/component-registry is absent.
  * The build still succeeds — only shared /client components will be bundled.
  * Also notes when site Zod schemas are aliased to the stub bridge.
  */
@@ -64,7 +64,7 @@ function componentRegistryGuardPlugin(): Plugin {
     buildStart() {
       if (!siteComponentRegistryExists()) {
         this.warn(
-          "site_4geeks-com/component-registry not found — registry TSX files will not be bundled. " +
+          "site_learning-mdc-edu/component-registry not found — registry TSX files will not be bundled. " +
           "Build continues with shared /client components only.",
         );
       }

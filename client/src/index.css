@@ -218,7 +218,28 @@
 @tailwind utilities;
 
 /* Above-fold article typography on critical path (avoids CLS when article chunk loads). */
-@import "./components/article/article-prose.css";
+@import "../../site_learning-mdc-edu/component-registry/article/article-prose.css";
+
+/* Hero autoVideoRight clip. Must live in the first stylesheet: a <style> tag
+   inside the section chunk applies after the video's first frame, so the
+   picture flashes square and then rounds. */
+[data-testid="hero-auto-video-right"] .hero-auto-video-frame {
+  border-top-right-radius: 20px;
+  border-bottom-right-radius: 20px;
+  overflow: hidden;
+}
+[data-testid="hero-auto-video-right"] video {
+  border-top-right-radius: 20px;
+  border-bottom-right-radius: 20px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 32%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 32%);
+}
+@media (min-width: 768px) {
+  [data-testid="hero-auto-video-right"] video {
+    -webkit-mask-image: linear-gradient(to right, transparent 0%, black 46%);
+    mask-image: linear-gradient(to right, transparent 0%, black 46%);
+  }
+}
 
 @keyframes blink {
   0%, 100% { opacity: 1; }

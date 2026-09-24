@@ -1,6 +1,6 @@
 // Single coupling point for site registry Zod schemas.
-// Monorepo/dev with site_4geeks-com present: this file re-exports real site Zod.
-// Pack/CI without site content: Vite + esbuild alias this module to
+// Dev with site_learning-mdc-edu present: this file re-exports real site Zod.
+// Pack/CI without that registry: Vite + esbuild alias this module to
 // site-component-schemas.stub.ts (see shared/site-schema-stub-mode.ts,
 // WEBLIFY_SITE_SCHEMAS_STUB=1). prepack also swaps stub into this path for the tarball.
 
@@ -16,13 +16,13 @@ export {
   type AiFlexPathCourseColorSelector,
   type AiFlexPathSimplified,
   type AiFlexPathSection,
-} from "../site_4geeks-com/component-registry/ai_flex_path/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/ai_flex_path/v1.0/schema";
 
 // ai_flex_selector
 export {
   aiFlexSelectorDefaultSchema,
   type AiFlexSelectorDefault,
-} from "../site_4geeks-com/component-registry/ai_flex_selector/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/ai_flex_selector/v1.0/schema";
 
 // ai_learning
 export {
@@ -36,17 +36,17 @@ export {
   type AiLearningFeatureTabsSection,
   type AiLearningHighlightSection,
   type AiLearningSection,
-} from "../site_4geeks-com/component-registry/ai_learning/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/ai_learning/v1.0/schema";
 
 // apply_form
 export {
   applyFormSectionSchema,
-} from "../site_4geeks-com/component-registry/apply_form/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/apply_form/v1.0/schema";
 
 // award_badges
 export {
   awardBadgesSectionSchema,
-} from "../site_4geeks-com/component-registry/award_badges/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/award_badges/v1.0/schema";
 
 // banner
 export {
@@ -55,7 +55,7 @@ export {
   bannerMarqueeBadgesSchema,
   type BannerSection,
   type BannerMarqueeBadges,
-} from "../site_4geeks-com/component-registry/banner/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/banner/v1.0/schema";
 
 // bento_cards
 export {
@@ -63,14 +63,14 @@ export {
   bentoCardsSectionSchema,
   type BentoCardItem,
   type BentoCardsSection,
-} from "../site_4geeks-com/component-registry/bento_cards/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/bento_cards/v1.0/schema";
 
 // bullet_tabs_showcase
 export {
   bulletTabsShowcaseSectionSchema,
   type BulletTabsShowcaseSection,
   type BulletTab,
-} from "../site_4geeks-com/component-registry/bullet_tabs_showcase/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/bullet_tabs_showcase/v1.0/schema";
 
 // career_support_explain
 export {
@@ -83,13 +83,13 @@ export {
   type CareerSupportLogo,
   type CareerSupportTestimonial,
   type CareerSupportTestimonialLogo,
-} from "../site_4geeks-com/component-registry/career_support_explain/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/career_support_explain/v1.0/schema";
 
 // certificate
 export {
   certificateSectionSchema,
   type CertificateSection,
-} from "../site_4geeks-com/component-registry/certificate/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/certificate/v1.0/schema";
 
 // comparison_table
 export {
@@ -105,21 +105,21 @@ export {
   type ComparisonTableColumn,
   type ComparisonTableRow,
   type ComparisonTableSection,
-} from "../site_4geeks-com/component-registry/comparison_table/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/comparison_table/v1.0/schema";
 
 // contact_bubble
 export {
   contactBubbleSectionSchema,
   type ContactBubbleSection,
   type ContactBubbleImage,
-} from "../site_4geeks-com/component-registry/contact_bubble/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/contact_bubble/v1.0/schema";
 
 // contact_us_info
 export {
   contactUsInfoSectionSchema,
   type ContactUsInfoSection,
   type ContactLocation,
-} from "../site_4geeks-com/component-registry/contact_us_info/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/contact_us_info/v1.0/schema";
 
 // course_selector
 export {
@@ -128,7 +128,7 @@ export {
   type CourseItem,
   type CourseBadge,
   type CourseTag,
-} from "../site_4geeks-com/component-registry/course_selector/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/course_selector/v1.0/schema";
 
 // credibility_strip
 export {
@@ -136,7 +136,7 @@ export {
   type CredibilityStripSection,
   type CredibilityStripItem,
   type CredibilityStripLogo,
-} from "../site_4geeks-com/component-registry/credibility_strip/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/credibility_strip/v1.0/schema";
 
 // cta_banner
 export {
@@ -152,7 +152,7 @@ export {
   type CtaBannerStrip,
   type CtaBannerResourceShowcase,
   type CtaBannerPromotion,
-} from "../site_4geeks-com/component-registry/cta_banner/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/cta_banner/v1.0/schema";
 
 // double_cta
 export {
@@ -160,7 +160,7 @@ export {
   type DoubleCTASection,
   type DoubleCTABox,
   type DoubleCTABullet,
-} from "../site_4geeks-com/component-registry/double_cta/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/double_cta/v1.0/schema";
 
 // dynamic_table
 export {
@@ -168,7 +168,7 @@ export {
   type DynamicTableSection,
   type DynamicTableColumn,
   type DynamicTableAction,
-} from "../site_4geeks-com/component-registry/dynamic_table/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/dynamic_table/v1.0/schema";
 
 // enrollment_selector
 export {
@@ -183,7 +183,7 @@ export {
   type EnrollmentSelectorPlan,
   type EnrollmentSummary,
   type EnrollmentQueryComponentItem,
-} from "../site_4geeks-com/component-registry/enrollment_selector/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/enrollment_selector/v1.0/schema";
 
 // features_grid
 export {
@@ -209,13 +209,13 @@ export {
   type FeaturesGridStatsChartsCardBars,
   type FeaturesGridStatsChartsCardGauge,
   type FeaturesGridStatsChartsCardTrend,
-} from "../site_4geeks-com/component-registry/features_grid/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/features_grid/v1.0/schema";
 
 // footer
 export {
   footerSectionSchema,
   type FooterSection,
-} from "../site_4geeks-com/component-registry/footer/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/footer/v1.0/schema";
 
 // geeks_vs_others_comparison
 export {
@@ -225,7 +225,7 @@ export {
   type GeeksVsOthersColumn,
   type GeeksVsOthersRow,
   type GeeksVsOthersComparisonSection,
-} from "../site_4geeks-com/component-registry/geeks_vs_others_comparison/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/geeks_vs_others_comparison/v1.0/schema";
 
 // graduates_stats
 export {
@@ -236,7 +236,7 @@ export {
   type GraduatesCollageImage,
   type GraduatesFeaturedImage,
   type GraduatesStatsAsymmetric,
-} from "../site_4geeks-com/component-registry/graduates_stats/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/graduates_stats/v1.0/schema";
 
 // image_row
 export {
@@ -245,7 +245,7 @@ export {
   type ImageRowSlide,
   type ImageRowImage,
   type ImageRowHighlight,
-} from "../site_4geeks-com/component-registry/image_row/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/image_row/v1.0/schema";
 
 // list_press_mentions
 export {
@@ -254,13 +254,13 @@ export {
   type ListPressMentionsSection,
   type PressMentionItem,
   type PressMentionsSection,
-} from "../site_4geeks-com/component-registry/list_press_mentions/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/list_press_mentions/v1.0/schema";
 
 // list_single_press_mention
 export {
   listSinglePressMentionSectionSchema,
   type ListSinglePressMentionSection,
-} from "../site_4geeks-com/component-registry/list_single_press_mention/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/list_single_press_mention/v1.0/schema";
 
 // list_workshops_carousel
 export {
@@ -268,13 +268,13 @@ export {
   workshopCarouselItemSchema,
   type ListWorkshopsCarouselSection,
   type WorkshopCarouselItem,
-} from "../site_4geeks-com/component-registry/list_workshops_carousel/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/list_workshops_carousel/v1.0/schema";
 
 // mentorship
 export {
   mentorshipSectionSchema,
   type MentorshipSection,
-} from "../site_4geeks-com/component-registry/mentorship/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/mentorship/v1.0/schema";
 
 // modal
 export {
@@ -284,7 +284,7 @@ export {
   type ModalSection,
   type ModalDefaultSection,
   type ModalTwoColumnSection,
-} from "../site_4geeks-com/component-registry/modal/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/modal/v1.0/schema";
 
 // numbered_steps
 export {
@@ -295,20 +295,20 @@ export {
   type NumberedStepsDefaultSection,
   type NumberedStepsBubbleTextSection,
   type NumberedStepsVerticalCardsSection,
-} from "../site_4geeks-com/component-registry/numbered_steps/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/numbered_steps/v1.0/schema";
 
 // og_image_preview
 export {
   ogImagePreviewSectionSchema,
   type OgImagePreviewSection,
-} from "../site_4geeks-com/component-registry/og_image_preview/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/og_image_preview/v1.0/schema";
 
 // partnership_carousel
 export {
   partnershipCarouselSectionSchema,
   type PartnershipCarouselSection,
   type PartnershipSlide,
-} from "../site_4geeks-com/component-registry/partnership_carousel/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/partnership_carousel/v1.0/schema";
 
 // pricing
 export {
@@ -331,21 +331,21 @@ export {
   type PricingPlanCardsPlanFeature,
   type PricingPlanCardsNewPlan,
   type PricingPlanCardsNewSection,
-} from "../site_4geeks-com/component-registry/pricing/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/pricing/v1.0/schema";
 
 // profiles_carousel
 export {
   profilesCarouselSectionSchema,
   type ProfilesCarouselSection,
   type ProfileCard,
-} from "../site_4geeks-com/component-registry/profiles_carousel/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/profiles_carousel/v1.0/schema";
 
 // programs_showcase
 export {
   programsShowcaseSectionSchema,
   type ProgramsShowcaseSection,
   type ProgramItem,
-} from "../site_4geeks-com/component-registry/programs_showcase/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/programs_showcase/v1.0/schema";
 
 // project_showcase
 export {
@@ -359,7 +359,7 @@ export {
   type ProjectShowcaseItem,
   type ProjectShowcaseSection,
   type ProjectsShowcaseSection,
-} from "../site_4geeks-com/component-registry/project_showcase/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/project_showcase/v1.0/schema";
 
 // projects
 export {
@@ -367,7 +367,7 @@ export {
   projectsSectionSchema,
   type ProjectItem,
   type ProjectsSection,
-} from "../site_4geeks-com/component-registry/projects/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/projects/v1.0/schema";
 
 // split_cards
 export {
@@ -377,19 +377,19 @@ export {
   type ToolIcon,
   type SplitCardsBenefit,
   type SplitCardsSection,
-} from "../site_4geeks-com/component-registry/split_cards/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/split_cards/v1.0/schema";
 
 // sticky_cta
 export {
   stickyCtaSectionSchema,
   type StickyCtaSection,
-} from "../site_4geeks-com/component-registry/sticky_cta/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/sticky_cta/v1.0/schema";
 
 // survey
 export {
   surveyDefaultSchema,
   type SurveyDefault,
-} from "../site_4geeks-com/component-registry/survey/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/survey/v1.0/schema";
 
 // syllabus
 export {
@@ -415,7 +415,7 @@ export {
   type SyllabusTimelineModule,
   type SyllabusTimeline,
   type SyllabusSection,
-} from "../site_4geeks-com/component-registry/syllabus/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/syllabus/v1.0/schema";
 
 // testimonials_grid
 export {
@@ -423,7 +423,7 @@ export {
   testimonialsGridSectionSchema,
   type TestimonialsGridItem,
   type TestimonialsGridSection,
-} from "../site_4geeks-com/component-registry/testimonials_grid/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/testimonials_grid/v1.0/schema";
 
 // testimonials_slide
 export {
@@ -431,7 +431,7 @@ export {
   testimonialsSlideSectionSchema,
   type TestimonialsSlideTestimonial,
   type TestimonialsSlideSection,
-} from "../site_4geeks-com/component-registry/testimonials_slide/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/testimonials_slide/v1.0/schema";
 
 // testimonials
 export {
@@ -439,14 +439,14 @@ export {
   testimonialsSectionSchema,
   type TestimonialItem,
   type TestimonialsSection,
-} from "../site_4geeks-com/component-registry/testimonials/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/testimonials/v1.0/schema";
 
 // trust_cards
 export {
   trustCardsSectionSchema,
   type TrustCardsSection,
   type TrustCardItem,
-} from "../site_4geeks-com/component-registry/trust_cards/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/trust_cards/v1.0/schema";
 
 // two_column_accordion_card
 export {
@@ -454,7 +454,7 @@ export {
   twoColumnAccordionCardBulletSchema,
   type TwoColumnAccordionCardSection,
   type TwoColumnAccordionCardBullet,
-} from "../site_4geeks-com/component-registry/two_column_accordion_card/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/two_column_accordion_card/v1.0/schema";
 
 // two_column
 export {
@@ -468,7 +468,7 @@ export {
   type BenefitItem,
   type TwoColumnColumn,
   type TwoColumnSection,
-} from "../site_4geeks-com/component-registry/two_column/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/two_column/v1.0/schema";
 
 // value_proof_panel
 export {
@@ -478,17 +478,119 @@ export {
   type EvidenceItem,
   type ValueProofPanelMedia,
   type ValueProofPanelSection,
-} from "../site_4geeks-com/component-registry/value_proof_panel/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/value_proof_panel/v1.0/schema";
 
 // whos_hiring
 export {
   whosHiringSectionSchema,
   type WhosHiringSection,
-} from "../site_4geeks-com/component-registry/whos_hiring/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/whos_hiring/v1.0/schema";
 
 // why_learn_ai
 export {
   whyLearnAISectionSchema,
   type WhyLearnAISection,
-} from "../site_4geeks-com/component-registry/why_learn_ai/v1.0/schema";
+} from "../site_learning-mdc-edu/component-registry/why_learn_ai/v1.0/schema";
+
+// hero (moved out of shared/component-registry)
+export {
+  trustBarSchema,
+  awardBadgeSchema,
+  heroImageSchema,
+  brandMarkSchema,
+  reviewLogoSchema,
+  productShowcaseTrustBarSchema,
+  bulletItemSchema,
+  heroCourseTutorSchema,
+  heroCourseFeatureSchema,
+  heroSectionSchema,
+  heroCredibilityPillLogoSchema,
+  heroCredibilityPillSchema,
+  heroCredibilityMarqueeItemSchema,
+  heroCredibilitySchema,
+  heroOrbitBadgeSchema,
+  heroOrbitDiagramSchema,
+  heroOrbitSchema,
+  heroAutoVideoRightSchema,
+  type TrustBar,
+  type AwardBadge,
+  type HeroImage,
+  type BrandMark,
+  type ReviewLogo,
+  type ProductShowcaseTrustBar,
+  type BulletItem,
+  type HeroCourseTutor,
+  type HeroCourseFeature,
+  type HeroSection,
+  type HeroCredibilityPillLogo,
+  type HeroCredibilityPill,
+  type HeroCredibilityMarqueeItem,
+  type HeroCredibility,
+  type HeroOrbitBadge,
+  type HeroOrbitDiagram,
+  type HeroOrbit,
+  type HeroAutoVideoRight,
+} from "../site_learning-mdc-edu/component-registry/hero/v1.0/schema";
+
+export type {
+  HeroSingleColumn,
+  HeroBlogHero,
+  HeroShowcase,
+  HeroProductShowcase,
+  HeroSimpleTwoColumn,
+  HeroSimpleStacked,
+  HeroTwoColumn,
+  HeroCourse,
+  HeroApplyFormProductShowcase,
+  HeroExercise,
+  HeroWorkshop,
+} from "../site_learning-mdc-edu/component-registry/hero/v1.0/schema";
+
+// text_block
+export {
+  textBlockSectionSchema,
+  type TextBlockSection,
+} from "../site_learning-mdc-edu/component-registry/text_block/v1.0/schema";
+
+// faq
+export {
+  faqItemSchema,
+  faqSectionSchema,
+  type FaqItem,
+  type FaqSection,
+  type FAQ,
+} from "../site_learning-mdc-edu/component-registry/faq/v1.0/schema";
+
+// breadcrumb
+export {
+  breadcrumbItemSchema,
+  breadcrumbSectionSchema,
+  type BreadcrumbItem,
+  type BreadcrumbSection,
+} from "../site_learning-mdc-edu/component-registry/breadcrumb/v1.0/schema";
+
+// geekchart
+export {
+  geekchartSectionSchema,
+  type GeekchartSection,
+} from "../site_learning-mdc-edu/component-registry/geekchart/v1.0/schema";
+
+// schema_org
+export {
+  schemaOrgSectionSchema,
+  type SchemaOrgSection,
+} from "../site_learning-mdc-edu/component-registry/schema_org/v1.0/schema";
+
+// awards_marquee
+export {
+  awardsMarqueeSectionSchema,
+  type AwardsMarqueeSection,
+  type AwardsMarqueeItem,
+} from "../site_learning-mdc-edu/component-registry/awards_marquee/v1.0/schema";
+
+// article
+export {
+  articleSectionSchema,
+  type ArticleSection,
+} from "../site_learning-mdc-edu/component-registry/article/v1.0/schema";
 

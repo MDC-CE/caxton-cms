@@ -1,9 +1,0 @@
-name: text_block - default
-yaml: |
-  - type: text_block
-    version: "1.0"
-    eyebrow: Our Mission
-    heading: Empowering the Next Generation of AI Professionals
-    body: "<p>At 4Geeks Academy we believe that access to quality education should never be a barrier to building a meaningful career in technology. Our curriculum is designed by practitioners, updated continuously, and delivered with the personal mentorship every learner deserves.</p><p>Whether you are switching careers or deepening existing skills, our structured learning paths help you move from zero to job-ready in months — not years.</p>"
-    alignment: left
-    max_width: default

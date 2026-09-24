@@ -1452,7 +1452,7 @@ export function SeoModal({
                     </button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="pt-2 space-y-0.5 font-mono text-[11px]">
-                    <p>shared/component-registry/schema_org/v1.0/</p>
+                    <p>site_learning-mdc-edu/component-registry/schema_org/v1.0/</p>
                     <p>server/schema-components/</p>
                     <p>shared/schema-org-sections.ts</p>
                     <p>server/schema-org-seed.ts</p>

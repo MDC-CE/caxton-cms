@@ -545,7 +545,7 @@ export function FaqSectionEditorField({
               <p>
                 Field editor:{" "}
                 <span className="text-foreground">
-                  shared/component-registry/faq/v1.0/field-editors.ts
+                  site_learning-mdc-edu/component-registry/faq/v1.0/field-editors.ts
                 </span>
               </p>
               <p>

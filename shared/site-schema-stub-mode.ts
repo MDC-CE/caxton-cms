@@ -4,15 +4,15 @@
  *
  * - WEBLIFY_SITE_SCHEMAS_STUB=1 → always stub (pack / publish CI)
  * - WEBLIFY_SITE_SCHEMAS_STUB=0 → always real bridge (must have site content)
- * - default → stub when site_4geeks-com/component-registry is missing under PROJECT_ROOT
+ * - default → stub when site_learning-mdc-edu/component-registry is missing under PROJECT_ROOT
  */
 
 import fs from "fs";
 import path from "path";
 import { getPackageRoot, getProjectRoot } from "./paths";
 
-/** Canonical site folder used by the legacy compile-time bridge. */
-export const SITE_SCHEMA_BRIDGE_FOLDER = "site_4geeks-com";
+/** Site folder the compile-time schema bridge reads. */
+export const SITE_SCHEMA_BRIDGE_FOLDER = "site_learning-mdc-edu";
 
 export function getSiteComponentRegistryPath(
   projectRoot: string = getProjectRoot(),

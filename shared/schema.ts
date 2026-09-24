@@ -5,11 +5,10 @@ import { z } from "zod";
 /**
  * Boot-critical schemas.
  *
- * Shared platform components: import from shared/component-registry only.
- * Do NOT add new re-exports from site_ folders under component-registry — site-only Zod
- * must be resolved via the site-aware registry (shared union site) at runtime.
- * Site registry Zod schemas are re-exported via ./site-component-schemas
- * (single coupling point; see site-component-schemas.stub.ts for pack-without-content).
+ * Primitives (button, video, image) stay in shared/component-registry/_common.
+ * Section Zod schemas are re-exported via ./site-component-schemas, which reads
+ * site_learning-mdc-edu/component-registry. Pack/CI without that folder uses
+ * site-component-schemas.stub.ts.
  */
 
 // ============================================
@@ -122,7 +121,7 @@ export {
   type HeroOrbitDiagram,
   type HeroOrbit,
   type HeroAutoVideoRight,
-} from "./component-registry/hero/v1.0/schema";
+} from "./site-component-schemas";
 
 // Variant types for type narrowing (schemas are internal to component registry)
 export type {
@@ -137,7 +136,7 @@ export type {
   HeroApplyFormProductShowcase,
   HeroExercise,
   HeroWorkshop,
-} from "./component-registry/hero/v1.0/schema";
+} from "./site-component-schemas";
 
 // HeroCredibility is already exported via the re-export block above
 
@@ -214,7 +213,7 @@ export {
 export {
   textBlockSectionSchema,
   type TextBlockSection,
-} from "../shared/component-registry/text_block/v1.0/schema";
+} from "./site-component-schemas";
 
 // ============================================
 // Re-export Why Learn AI Schemas from Component Registry
@@ -258,23 +257,23 @@ export {
   type FaqItem,
   type FaqSection,
   type FAQ,
-} from "./component-registry/faq/v1.0/schema";
+} from "./site-component-schemas";
 
 export {
   breadcrumbItemSchema,
   breadcrumbSectionSchema,
   type BreadcrumbItem,
   type BreadcrumbSection,
-} from "./component-registry/breadcrumb/v1.0/schema";
+} from "./site-component-schemas";
 
 export {
   geekchartSectionSchema,
   type GeekchartSection,
-} from "./component-registry/geekchart/v1.0/schema";
+} from "./site-component-schemas";
 
 // Type alias for backward compatibility
-export type FAQItem = import("./component-registry/faq/v1.0/schema").FaqItem;
-export type FAQSection = import("./component-registry/faq/v1.0/schema").FaqSection;
+export type FAQItem = import("./site-component-schemas").FaqItem;
+export type FAQSection = import("./site-component-schemas").FaqSection;
 
 // ============================================
 // Re-export Testimonials Schemas from Component Registry
@@ -878,17 +877,17 @@ export { twoColumnAccordionCardSectionSchema, twoColumnAccordionCardBulletSchema
 // Section Schema Union
 // Import unified section schemas for use in union
 // ============================================
-import { heroSectionSchema as heroSchema } from "./component-registry/hero/v1.0/schema";
+import { heroSectionSchema as heroSchema } from "./site-component-schemas";
 import { aiLearningSectionSchema } from "./site-component-schemas";
 import { mentorshipSectionSchema } from "./site-component-schemas";
 import { certificateSectionSchema } from "./site-component-schemas";
 import { whyLearnAISectionSchema } from "./site-component-schemas";
 import { pricingSectionSchema } from "./site-component-schemas";
-import { faqSectionSchema } from "./component-registry/faq/v1.0/schema";
-import { breadcrumbSectionSchema } from "./component-registry/breadcrumb/v1.0/schema";
-import { geekchartSectionSchema } from "./component-registry/geekchart/v1.0/schema";
-import { schemaOrgSectionSchema } from "./component-registry/schema_org/v1.0/schema";
-export { schemaOrgSectionSchema, type SchemaOrgSection } from "./component-registry/schema_org/v1.0/schema";
+import { faqSectionSchema } from "./site-component-schemas";
+import { breadcrumbSectionSchema } from "./site-component-schemas";
+import { geekchartSectionSchema } from "./site-component-schemas";
+import { schemaOrgSectionSchema } from "./site-component-schemas";
+export { schemaOrgSectionSchema, type SchemaOrgSection } from "./site-component-schemas";
 import { testimonialsSectionSchema } from "./site-component-schemas";
 import { whosHiringSectionSchema } from "./site-component-schemas";
 import { footerSectionSchema } from "./site-component-schemas";
@@ -910,7 +909,7 @@ import { splitCardsSectionSchema } from "./site-component-schemas";
 export { graduatesStatsSectionSchema, graduatesFeaturedImageSchema, type GraduatesStatsSection, type GraduatesStatItem, type GraduatesCollageImage, type GraduatesFeaturedImage, type GraduatesStatsAsymmetric };
 import { applyFormSectionSchema } from "./site-component-schemas";
 import { awardBadgesSectionSchema } from "./site-component-schemas";
-import { awardsMarqueeSectionSchema, type AwardsMarqueeSection, type AwardsMarqueeItem } from "./component-registry/awards_marquee/v1.0/schema";
+import { awardsMarqueeSectionSchema, type AwardsMarqueeSection, type AwardsMarqueeItem } from "./site-component-schemas";
 export { awardsMarqueeSectionSchema, type AwardsMarqueeSection, type AwardsMarqueeItem };
 import { listPressMentionsSectionSchema, type ListPressMentionsSection, type PressMentionItem, pressMentionsSectionSchema, type PressMentionsSection } from "./site-component-schemas";
 export { listPressMentionsSectionSchema, type ListPressMentionsSection, type PressMentionItem };
@@ -966,7 +965,7 @@ export {
   type EnrollmentSummary,
   type EnrollmentQueryComponentItem,
 };
-import { articleSectionSchema, type ArticleSection } from "../shared/component-registry/article/v1.0/schema";
+import { articleSectionSchema, type ArticleSection } from "./site-component-schemas";
 export { articleSectionSchema, type ArticleSection };
 import { partnershipCarouselSectionSchema, type PartnershipCarouselSection, type PartnershipSlide } from "./site-component-schemas";
 export { partnershipCarouselSectionSchema, type PartnershipCarouselSection, type PartnershipSlide };

@@ -166,7 +166,7 @@ export function SchemaOrgTab() {
               <p>schema-org.yml</p>
               <p>server/schema-org.ts</p>
               <p>server/schema-components/</p>
-              <p>shared/component-registry/schema_org/v1.0/</p>
+              <p>site_learning-mdc-edu/component-registry/schema_org/v1.0/</p>
               <p>client/src/components/DebugBubble/components/SeoModal.tsx</p>
             </CollapsibleContent>
           </Collapsible>

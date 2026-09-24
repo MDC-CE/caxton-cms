@@ -3,7 +3,7 @@
  * Pipeline SQLite migration preflight (dry-run) or manual apply.
  *
  * Run via `npm run ensure:pipeline-db` (registers site-schema stub hooks for
- * deploys without site_4geeks-com/component-registry). Direct `tsx` without
+ * deploys without site_learning-mdc-edu/component-registry). Direct `tsx` without
  * `--import ./shared/register-site-schema-stub.mjs` will fail in that case.
  *
  * Usage:

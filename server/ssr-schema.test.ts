@@ -15,7 +15,7 @@ import {
 import { applyIgnoredEntries } from "@shared/faq-listing";
 import { contentIndex } from "./content-index";
 import { validateFaqListingSections } from "@shared/validateFaqListing";
-import { faqSectionSchema } from "../shared/component-registry/faq/v1.0/schema";
+import { faqSectionSchema } from "../site_learning-mdc-edu/component-registry/faq/v1.0/schema";
 
 let tempDir: string;
 let contentRoot: string;

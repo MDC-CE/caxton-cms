@@ -39,7 +39,7 @@ if (!fs.existsSync(real)) {
 
 // Already stubbed (e.g. re-entrant prepack) — detect by lack of site_ imports.
 const current = fs.readFileSync(real, "utf8");
-if (!current.includes("site_4geeks-com") && !fs.existsSync(backup)) {
+if (!/from ["']\.\.\/site_/.test(current) && !fs.existsSync(backup)) {
   console.log("site-component-schemas.ts already has no site_* imports — pack-ready.");
   process.exit(0);
 }

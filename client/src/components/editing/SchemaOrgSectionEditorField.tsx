@@ -155,7 +155,7 @@ export function SchemaOrgSectionEditorField({
               <p>
                 Field editor:{" "}
                 <span className="text-foreground">
-                  shared/component-registry/schema_org/v1.0/field-editors.ts
+                  site_learning-mdc-edu/component-registry/schema_org/v1.0/field-editors.ts
                 </span>
               </p>
               <p>

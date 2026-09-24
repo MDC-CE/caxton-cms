@@ -1,6 +1,6 @@
 /**
- * Stub Zod schemas / types for Weblify pack when site_4geeks-com content is absent.
- * Mirror named exports of site-component-schemas.ts.
+ * Stub Zod schemas / types for Weblify pack when site_learning-mdc-edu
+ * component-registry is absent. Mirror named exports of site-component-schemas.ts.
  */
 import { z } from "zod";
 
@@ -295,3 +295,72 @@ export type ValueProofPanelSection = any;
 export type WhosHiringSection = any;
 export type WhyLearnAISection = any;
 export type WorkshopCarouselItem = any;
+
+export const trustBarSchema = stubSchema;
+export const awardBadgeSchema = stubSchema;
+export const heroImageSchema = stubSchema;
+export const brandMarkSchema = stubSchema;
+export const reviewLogoSchema = stubSchema;
+export const productShowcaseTrustBarSchema = stubSchema;
+export const bulletItemSchema = stubSchema;
+export const heroCourseTutorSchema = stubSchema;
+export const heroCourseFeatureSchema = stubSchema;
+export const heroSectionSchema = stubSchema;
+export const heroCredibilityPillLogoSchema = stubSchema;
+export const heroCredibilityPillSchema = stubSchema;
+export const heroCredibilityMarqueeItemSchema = stubSchema;
+export const heroCredibilitySchema = stubSchema;
+export const heroOrbitBadgeSchema = stubSchema;
+export const heroOrbitDiagramSchema = stubSchema;
+export const heroOrbitSchema = stubSchema;
+export const heroAutoVideoRightSchema = stubSchema;
+export const textBlockSectionSchema = stubSchema;
+export const faqItemSchema = stubSchema;
+export const faqSectionSchema = stubSchema;
+export const breadcrumbItemSchema = stubSchema;
+export const breadcrumbSectionSchema = stubSchema;
+export const geekchartSectionSchema = stubSchema;
+export const schemaOrgSectionSchema = stubSchema;
+export const awardsMarqueeSectionSchema = stubSchema;
+export const articleSectionSchema = stubSchema;
+
+export type TrustBar = any;
+export type AwardBadge = any;
+export type HeroImage = any;
+export type BrandMark = any;
+export type ReviewLogo = any;
+export type ProductShowcaseTrustBar = any;
+export type BulletItem = any;
+export type HeroCourseTutor = any;
+export type HeroCourseFeature = any;
+export type HeroSection = any;
+export type HeroCredibilityPillLogo = any;
+export type HeroCredibilityPill = any;
+export type HeroCredibilityMarqueeItem = any;
+export type HeroCredibility = any;
+export type HeroOrbitBadge = any;
+export type HeroOrbitDiagram = any;
+export type HeroOrbit = any;
+export type HeroAutoVideoRight = any;
+export type HeroSingleColumn = any;
+export type HeroBlogHero = any;
+export type HeroShowcase = any;
+export type HeroProductShowcase = any;
+export type HeroSimpleTwoColumn = any;
+export type HeroSimpleStacked = any;
+export type HeroTwoColumn = any;
+export type HeroCourse = any;
+export type HeroApplyFormProductShowcase = any;
+export type HeroExercise = any;
+export type HeroWorkshop = any;
+export type TextBlockSection = any;
+export type FaqItem = any;
+export type FaqSection = any;
+export type FAQ = any;
+export type BreadcrumbItem = any;
+export type BreadcrumbSection = any;
+export type GeekchartSection = any;
+export type SchemaOrgSection = any;
+export type AwardsMarqueeSection = any;
+export type AwardsMarqueeItem = any;
+export type ArticleSection = any;

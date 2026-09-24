@@ -8,6 +8,8 @@ module.exports = {
     files: [
       "./client/index.html",
       "./client/src/**/*.{js,jsx,ts,tsx}",
+      // Section components live with site content, not under client/src.
+      "./site_*/component-registry/**/*.{js,jsx,ts,tsx}",
     ],
   },
   theme: {

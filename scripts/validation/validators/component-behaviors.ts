@@ -21,7 +21,7 @@ function findRegistryRoots(): string[] {
     const siteReg = path.join(contentRoot, "component-registry");
     if (fs.existsSync(siteReg)) roots.push(siteReg);
   } catch {
-    const fallback = path.join(getProjectRoot(), "site_4geeks-com/component-registry");
+    const fallback = path.join(getProjectRoot(), "site_learning-mdc-edu/component-registry");
     if (fs.existsSync(fallback)) roots.push(fallback);
   }
   return roots;
