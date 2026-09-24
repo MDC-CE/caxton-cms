@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { editContent } from "@/lib/contentApi";
+import { readFailedResponseMessage } from "@/lib/readFailedResponse";
 import { emitContentUpdated, registerEditorDirtyCheck } from "@/lib/contentEvents";
 import {
   listArticlesOnPage,
@@ -1059,8 +1060,7 @@ export function SectionEditorPanel({
           body: formData,
         });
         if (!resp.ok) {
-          const err = await resp.json();
-          throw new Error(err.error || "Upload failed");
+          throw new Error(await readFailedResponseMessage(resp, "Upload failed"));
         }
         const result = (await resp.json()) as {
           id: string;
@@ -1124,8 +1124,7 @@ export function SectionEditorPanel({
           body: formData,
         });
         if (!resp.ok) {
-          const err = await resp.json();
-          throw new Error(err.error || "Upload failed");
+          throw new Error(await readFailedResponseMessage(resp, "Upload failed"));
         }
         const result = (await resp.json()) as {
           id: string;

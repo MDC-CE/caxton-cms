@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { readFailedResponseMessage } from "@/lib/readFailedResponse";
 import type { ImageRegistry, ImageEntry } from "@shared/schema";
 import { normalizePromptAlt } from "@shared/ai-image-gc";
 import {
@@ -575,8 +576,7 @@ export function ImagePickerDialog({
           body: formData,
         });
         if (!resp.ok) {
-          const errData = (await resp.json()) as { error?: string };
-          throw new Error(errData.error ?? "Upload failed");
+          throw new Error(await readFailedResponseMessage(resp, "Upload failed"));
         }
         const result = (await resp.json()) as {
           id: string;
