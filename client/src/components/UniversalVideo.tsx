@@ -298,10 +298,11 @@ export function UniversalVideo({
             <p className="text-sm font-semibold leading-snug md:text-base">{title}</p>
           ) : null}
           {IconComponent ? (
-            createElement(IconComponent, {
-              className: "h-10 w-10 md:h-12 md:w-12",
-              "aria-hidden": true,
-            })
+            <span aria-hidden className="inline-flex">
+              {createElement(IconComponent, {
+                className: "h-10 w-10 md:h-12 md:w-12",
+              })}
+            </span>
           ) : (
             <VolumeX className="h-10 w-10 md:h-12 md:w-12" aria-hidden />
           )}

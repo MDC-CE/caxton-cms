@@ -64,7 +64,7 @@ type TypeConfigResponse = {
   products?: { allow_sellable_entries?: boolean; coerced_from_inventory?: boolean } | null;
 };
 
-export function useContentTypeAllowsSellable(contentType: string | undefined) {
+export function useContentTypeAllowsSellable(contentType: string | null | undefined) {
   return useQuery({
     queryKey: ["/api/content-types", contentType, "config"],
     queryFn: async () => {

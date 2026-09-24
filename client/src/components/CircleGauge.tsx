@@ -1,5 +1,5 @@
 
-import { resolveColorVar, hslColor, hslColorRaw } from "../../../site_learning-mdc-edu/component-registry/course_selector/shared";
+import { resolveColorVar, hslColor, hslColorRaw } from "@/lib/resolve-color-var";
 
 interface CircleGaugeProps {
   /** Value shown inside the circle and fills the arc. Optional — circle hidden when absent. */
