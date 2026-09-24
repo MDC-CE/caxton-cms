@@ -17,12 +17,13 @@ import {
   type ProposalKpiCardKind,
   type ProposalKpiCardStatus,
   type ProposalListKind,
+  proposalKpiLiveCount,
   type ProposalListStats,
   type ProposalListStatus,
 } from "@/pages/proposals-list-filters";
 
 type KpiGranularity = "today" | "day" | "week";
-type KpiPoint = { day: string; count: number };
+type KpiPoint = { day: string; count: number; partial?: boolean };
 type KpiSeries = {
   kind: ProposalKpiCardKind;
   status: ProposalKpiCardStatus;
@@ -30,6 +31,8 @@ type KpiSeries = {
 };
 type KpiHistoryResponse = {
   granularity: KpiGranularity;
+  /** open = created in bucket; finished/rejected = closed in bucket. */
+  metric?: "flow";
   from: string;
   to: string;
   series: KpiSeries[];
@@ -49,30 +52,82 @@ const STATUS_TEXT: Record<ProposalKpiCardStatus, string> = {
   rejected: "text-destructive",
 };
 
-const WINDOW_CAPTION: Record<KpiGranularity, string> = {
-  today: "Today · by hour · UTC",
-  day: "Last ~28 days · through yesterday · UTC",
-  week: "Last 7 days · through yesterday · UTC",
+/** Line labels for the per-period chart (open series = created in the period). */
+const LINE_LABEL: Record<ProposalKpiCardStatus, string> = {
+  open: "new",
+  finished: "done",
+  rejected: "rejected",
 };
 
-function pathForSeries(
+const WINDOW_CAPTION: Record<KpiGranularity, string> = {
+  today: "Today · per hour · UTC",
+  day: "Last 28 days · per day · UTC",
+  week: "Last 12 weeks · per week (Mon) · UTC",
+};
+
+type SeriesPaths = { solid: string; tail: string | null };
+
+/** Completed points as a solid path; the in-progress last point (if any) as a separate tail segment. */
+function pathsForSeries(
   points: KpiPoint[],
   n: number,
   max: number,
   pad: { t: number; r: number; b: number; l: number },
   innerW: number,
   innerH: number,
-): string {
-  if (points.length === 0) return "";
+): SeriesPaths {
+  if (points.length === 0) return { solid: "", tail: null };
   const midY = pad.t + innerH / 2;
   const empty = max <= 0;
-  return points
-    .map((p, i) => {
-      const x = n <= 1 ? pad.l + innerW / 2 : pad.l + (i / (n - 1)) * innerW;
-      const y = empty ? midY : pad.t + (1 - p.count / max) * innerH;
-      return `${i === 0 ? "M" : "L"} ${x} ${y}`;
-    })
-    .join(" ");
+  const coords = points.map((p, i) => ({
+    x: n <= 1 ? pad.l + innerW / 2 : pad.l + (i / (n - 1)) * innerW,
+    y: empty ? midY : pad.t + (1 - p.count / max) * innerH,
+  }));
+  const toPath = (cs: Array<{ x: number; y: number }>) =>
+    cs.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x} ${c.y}`).join(" ");
+
+  const lastPartial = points[points.length - 1]?.partial === true && coords.length >= 2;
+  if (!lastPartial) return { solid: toPath(coords), tail: null };
+  return {
+    solid: coords.length > 2 ? toPath(coords.slice(0, -1)) : "",
+    tail: toPath(coords.slice(-2)),
+  };
+}
+
+function SeriesLines({
+  paths,
+  status,
+  strokeWidth,
+}: {
+  paths: SeriesPaths;
+  status: ProposalKpiCardStatus;
+  strokeWidth: string;
+}) {
+  return (
+    <>
+      {paths.solid ? (
+        <path
+          d={paths.solid}
+          fill="none"
+          className={STATUS_STROKE[status]}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : null}
+      {paths.tail ? (
+        <path
+          d={paths.tail}
+          fill="none"
+          className={STATUS_STROKE[status]}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeDasharray="3 3"
+          opacity="0.55"
+        />
+      ) : null}
+    </>
+  );
 }
 
 function MiniTripleSpark({
@@ -121,14 +176,11 @@ function MiniTripleSpark({
         />
       ) : (
         visible.map((status) => (
-          <path
+          <SeriesLines
             key={status}
-            d={pathForSeries(byStatus[status] ?? [], n, max, pad, innerW, innerH)}
-            fill="none"
-            className={STATUS_STROKE[status]}
+            paths={pathsForSeries(byStatus[status] ?? [], n, max, pad, innerW, innerH)}
+            status={status}
             strokeWidth="1.75"
-            strokeLinecap="round"
-            strokeLinejoin="round"
           />
         ))
       )}
@@ -160,7 +212,7 @@ function MultiStatusLineChart({
   return (
     <div className="space-y-2" data-testid={testId}>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto max-h-40" role="img">
-        <title>Open, finished, and rejected stock over time</title>
+        <title>Created, finished, and rejected per period</title>
         <line
           x1={pad.l}
           y1={pad.t + innerH}
@@ -170,14 +222,11 @@ function MultiStatusLineChart({
           strokeWidth="1"
         />
         {visible.map((status) => (
-          <path
+          <SeriesLines
             key={status}
-            d={pathForSeries(seriesByStatus[status] ?? [], n, max, pad, innerW, innerH)}
-            fill="none"
-            className={STATUS_STROKE[status]}
+            paths={pathsForSeries(seriesByStatus[status] ?? [], n, max, pad, innerW, innerH)}
+            status={status}
             strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
           />
         ))}
       </svg>
@@ -192,7 +241,7 @@ function MultiStatusLineChart({
             )}
           >
             <span className="inline-block h-0.5 w-3 rounded-full bg-current" />
-            {s}
+            {LINE_LABEL[s]}
           </span>
         ))}
       </div>
@@ -288,16 +337,6 @@ function StatusBadgeButton({
   );
 }
 
-function latestCount(
-  history: KpiHistoryResponse | undefined,
-  kind: ProposalKpiCardKind,
-  status: ProposalKpiCardStatus,
-): number | null {
-  const points = history?.series.find((s) => s.kind === kind && s.status === status)?.points;
-  if (!points || points.length === 0) return null;
-  return Number(points[points.length - 1]?.count ?? 0) || 0;
-}
-
 function KpiNumberDisplay({
   value,
   loading,
@@ -383,8 +422,6 @@ export function ProposalKpiStrip({
 
   const {
     data: history,
-    isLoading,
-    isError,
     isFetching,
     refetch,
   } = useQuery({
@@ -401,11 +438,10 @@ export function ProposalKpiStrip({
       if (!res.ok) throw new Error("Failed to load proposal KPIs");
       return res.json() as Promise<KpiHistoryResponse>;
     },
-    staleTime: granularity === "today" ? 15 * 60 * 1000 : 60_000,
+    staleTime: 60_000,
   });
 
-  const awaitingFirst = isLoading && !history;
-  const showDash = isError && !history;
+  const statsLoading = stats == null;
 
   const seriesForKind = (kind: ProposalKpiCardKind): Record<ProposalKpiCardStatus, KpiPoint[]> => {
     const pick = (status: ProposalKpiCardStatus) =>
@@ -439,10 +475,10 @@ export function ProposalKpiStrip({
 
   const chartCaption =
     granularity === "today"
-      ? "by hour · UTC"
+      ? "per hour · UTC"
       : granularity === "week"
-        ? "last 7 days · through yesterday · UTC"
-        : "through yesterday · UTC";
+        ? "per week (Mon) · last 12 weeks · UTC"
+        : "per day · last 28 days · UTC";
 
   return (
     <div className="space-y-3" data-testid="proposal-kpi-strip">
@@ -465,24 +501,22 @@ export function ProposalKpiStrip({
             Weekly
           </ToggleButtonBarTrigger>
         </ToggleButtonBar>
-        {granularity === "today" ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            aria-label="Refresh today’s counts"
-            title="Refresh today’s counts"
-            disabled={isFetching}
-            data-testid="button-proposal-kpi-today-refresh"
-            onClick={() => {
-              forceFreshRef.current = true;
-              void refetch();
-            }}
-          >
-            <IconRefresh className={cn("h-4 w-4 text-muted-foreground", isFetching && "animate-spin")} />
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          aria-label="Refresh chart counts"
+          title="Refresh chart counts"
+          disabled={isFetching}
+          data-testid="button-proposal-kpi-today-refresh"
+          onClick={() => {
+            forceFreshRef.current = true;
+            void refetch();
+          }}
+        >
+          <IconRefresh className={cn("h-4 w-4 text-muted-foreground", isFetching && "animate-spin")} />
+        </Button>
         <Popover>
           <PopoverTrigger asChild>
             <Button
@@ -501,16 +535,20 @@ export function ProposalKpiStrip({
           >
             <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
             <p>
-              Card numbers follow the selected window (latest sample). Today is near-live stock by
-              hour (UTC), cached up to 15 minutes and cleared when proposals change — use refresh to
-              force a recompute. Daily is ~28 days through yesterday; Weekly is the last 7 completed
-              days (not an ISO week). Open includes in-progress. Withdrawn is left out. Retention is
-              90 days. Stalled stays live. Needs review on Edits is live too: open edits that still need a
-              reviewer (ready for re-check or no feedback yet).
+              The lines show what happened in each period and start again from zero every hour
+              (Today), day (Daily) or week (Weekly, starting Monday): new proposals created, finished,
+              and rejected. The faded dashed end is the period still in progress. Times are UTC.
             </p>
             <p>
-              Hover a status chip to preview that line on that card. The list status filter isolates
-              the same line on every card. Click a chip to set or clear the list filter.
+              Card numbers and chips are the live current pile, not the lines: how many are open right
+              now (including in-progress), finished, and rejected. Withdrawn is left out. Stalled and
+              Needs review are live too.
+            </p>
+            <p>
+              Hover a chip to preview that line on that card (Open previews the new line). The list
+              status filter isolates the same line on every card. Click a chip to set or clear the
+              list filter. Line counts are cached up to 15 minutes and cleared when proposals change;
+              refresh forces a recompute.
             </p>
           </PopoverContent>
         </Popover>
@@ -524,15 +562,15 @@ export function ProposalKpiStrip({
       >
         {cards.map((card) => {
           const counts = {
-            open: showDash ? null : latestCount(history, card.kind, "open"),
-            finished: showDash ? null : latestCount(history, card.kind, "finished"),
-            rejected: showDash ? null : latestCount(history, card.kind, "rejected"),
+            open: statsLoading ? null : proposalKpiLiveCount(stats, card.kind, "open"),
+            finished: statsLoading ? null : proposalKpiLiveCount(stats, card.kind, "finished"),
+            rejected: statsLoading ? null : proposalKpiLiveCount(stats, card.kind, "rejected"),
           };
           const total =
             counts.open != null && counts.finished != null && counts.rejected != null
               ? counts.open + counts.finished + counts.rejected
               : null;
-          const loadingNums = awaitingFirst;
+          const loadingNums = statsLoading;
           return (
             <Card
               key={card.kind}
@@ -636,7 +674,7 @@ export function ProposalKpiStrip({
           <CardContent className="pt-4 pb-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs text-muted-foreground">
-                {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} · stock{" "}
+                {focusedKind === "idea" ? "Ideas" : focusedKind === "edits" ? "Edits" : "Notes"} ·{" "}
                 {chartCaption}
               </p>
               <Button

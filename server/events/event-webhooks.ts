@@ -5,17 +5,15 @@
 
 import fs from "fs";
 import path from "path";
-import { createRequire } from "node:module";
 import yaml from "js-yaml";
 import { getSiteSqlite } from "../db";
+import { getSiteConfigs } from "../site-config";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { enqueueJob } from "../jobs/queue";
 import { sanitizeWebhookHeaders } from "../../shared/webhookHeaders";
 import { child } from "../logger";
 import type { ContentEvent, EventType } from "./types";
 import { getEventById } from "./event-store";
-
-const requireFromEsm = createRequire(import.meta.url);
 
 const log = child({ module: "event-webhooks" });
 
@@ -1520,15 +1518,17 @@ export function maybeEnqueueEventWebhook(
   }
 }
 
+/** Same derivation as site-manager (contentRootName = cwd-relative content folder). */
 export function resolveContentRootForSite(site: string): string | null {
   try {
-    // Lazy load via createRequire to avoid circular deps at module load (ESM).
-    const { getSiteContextMap } = requireFromEsm("../site-manager") as typeof import("../site-manager");
-    for (const ctx of getSiteContextMap().values()) {
-      if (ctx.contentRootName === site) return ctx.contentRoot;
+    for (const config of getSiteConfigs()) {
+      const contentRoot = path.isAbsolute(config.contentFolder)
+        ? config.contentFolder
+        : path.join(process.cwd(), config.contentFolder);
+      if (path.relative(process.cwd(), contentRoot) === site) return contentRoot;
     }
-  } catch {
-    // site-manager may be unavailable in some tests
+  } catch (err) {
+    log.warn({ err, site }, "[EventWebhooks] could not resolve content root");
   }
   return null;
 }

@@ -69,11 +69,9 @@ import {
   type ProposalAttention,
 } from "./attention";
 import {
-  ensureKpiCatchUp,
   getKpiHistory,
-  invalidateTodayKpiCache,
+  invalidateKpiCache,
   liveByKindStatus,
-  wipeAndBackfillKpiHistory,
   type KindStatusCardCounts,
   type KpiCardKind,
   type KpiGranularity,
@@ -929,7 +927,7 @@ function emitProposalEvent(
     type === "proposal_withdrawn" ||
     type === "proposal_applied_progress"
   ) {
-    invalidateTodayKpiCache(site);
+    invalidateKpiCache(site);
   }
   emitEvent({
     site,
@@ -1853,7 +1851,6 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   function stats(): ProposalStats {
     const db = dbFor(site);
-    ensureKpiCatchUp(db, site);
     const by_status = { ...EMPTY_STATUS_COUNTS };
     const by_kind = { ...EMPTY_KIND_COUNTS };
     const by_attention = emptyAttentionCounts();
@@ -4353,7 +4350,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
   });
 
   const n = run(proposals);
-  wipeAndBackfillKpiHistory(db, site);
+  invalidateKpiCache(site);
   return n;
 }
 

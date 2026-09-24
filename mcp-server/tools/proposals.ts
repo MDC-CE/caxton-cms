@@ -761,8 +761,10 @@ export function registerProposalTools(
       "awaiting_rereview = blockers fixed, or the author rewrote entries / marked a blocker fixed, and no open blockers remain. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
-      "Opt-in kpi_history attaches stock series: granularity today = hourly UTC for today (computed, not stored); " +
-      "day ≈ last 28 completed days; week = last 7 completed UTC days (not ISO week). Open includes partial; withdrawn omitted. " +
+      "Opt-in kpi_history attaches per-bucket flow series (metric:\"flow\", each bucket restarts at 0): open = created in bucket, " +
+      "finished/rejected = closed into that status in bucket. today = UTC hours 0..now; day = last 28 UTC days + today; " +
+      "week = last 12 Monday-start UTC weeks + current week. Last point partial:true when its bucket contains now. " +
+      "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
@@ -848,28 +850,29 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe(
-          "When true, attach kpi_history stock series. Default false keeps payloads small. " +
-            "today = hourly UTC for the current day; day/week = completed days through yesterday.",
+          "When true, attach kpi_history per-bucket flow series (open = created, finished/rejected = closed in bucket). " +
+            "Default false keeps payloads small. Buckets include the in-progress one (partial:true).",
         ),
       kpi_granularity: z
         .enum(["today", "day", "week"])
         .optional()
         .describe(
           "Only when kpi_history is true. Default day. " +
-            "today = hourly computed stock for today (UTC); day ≈ 28 completed days; " +
-            "week = last 7 completed UTC days (not ISO week).",
+            "today = per UTC hour for today; day = per UTC day, last 28 days + today; " +
+            "week = per Monday-start UTC week, last 12 weeks + current (point day = week-start date).",
         ),
       kpi_from: z
         .string()
         .optional()
         .describe(
-          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), within 90-day retention.",
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC). day: clamped to the last 90 days; " +
+            "week: snapped to its Monday, no earlier than 12 weeks before the current week.",
         ),
       kpi_to: z
         .string()
         .optional()
         .describe(
-          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), capped at yesterday.",
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), capped at today (today's bucket is partial).",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
@@ -1007,17 +1010,19 @@ export function registerProposalTools(
             return fail(String(kData.error ?? "kpi_history failed"), { code: "kpi_history_failed" });
           }
           kpi_history = kData;
+          const bucketDesc =
+            g === "today"
+              ? "per UTC hour for today"
+              : g === "week"
+                ? "per Monday-start UTC week (last 12 + current; point day = week-start date)"
+                : "per UTC day (last 28 + today)";
           warnings.push({
-            code: "kpi_history_stock",
+            code: "kpi_history_flow",
             message:
-              g === "today"
-                ? "kpi_history today is hourly UTC stock for the current day (computed; not written to daily history). " +
-                  "Open includes partial; withdrawn is omitted. Last point is as-of-now."
-                : g === "week"
-                  ? "kpi_history week is last 7 completed UTC days through yesterday (day keys, not ISO week). " +
-                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows."
-                  : "kpi_history is end-of-day stock through yesterday (not throughput). " +
-                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows.",
+              `kpi_history is flow ${bucketDesc}, not stock — each bucket restarts at 0. ` +
+              "Series open = proposals created in the bucket (partial status counts); finished/rejected = closed into that status in the bucket " +
+              "(closed_at, updated_at fallback on older rows). Withdrawn omitted. Last point partial:true = bucket still in progress. " +
+              "Current pile (open now / finished / rejected totals) = proposal_stats.by_kind_status.",
           });
         }
 
