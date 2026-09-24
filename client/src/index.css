@@ -1,3 +1,8 @@
+/* Must stay above @font-face and @tailwind. Tailwind drops @import that
+   appear later, so these site styles never reach the browser. */
+@import "../../site_learning-mdc-edu/component-registry/article/article-prose.css";
+@import "../../site_learning-mdc-edu/component-registry/hero/hero-auto-video-right.css";
+
 /* =============================================================================
    MDC BRAND DESIGN SYSTEM (from Figma Grid System / Color Palette / Typography v0.1)
    Typography: Plus Jakarta Sans (Display → Body → Links)
@@ -216,45 +221,6 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-/* Above-fold article typography on critical path (avoids CLS when article chunk loads). */
-@import "../../site_learning-mdc-edu/component-registry/article/article-prose.css";
-
-/* Hero autoVideoRight clip. Must live in the first stylesheet: a <style> tag
-   inside the section chunk applies after the video's first frame, so the
-   picture flashes square and then rounds. */
-/* Mobile: video under the title, fade from the top, bottom corners only. */
-[data-testid="hero-auto-video-right"] .hero-auto-video-frame {
-  border-bottom-left-radius: 20px;
-  border-bottom-right-radius: 20px;
-  overflow: hidden;
-}
-[data-testid="hero-auto-video-right"] video {
-  border-bottom-left-radius: 20px;
-  border-bottom-right-radius: 20px;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 32%);
-  mask-image: linear-gradient(to bottom, transparent 0%, black 32%);
-}
-/* Tablet: video beside the title, fade from the left, bottom corners stay rounded. */
-@media (min-width: 679px) {
-  [data-testid="hero-auto-video-right"] video {
-    -webkit-mask-image: linear-gradient(to right, transparent 0%, black 46%);
-    mask-image: linear-gradient(to right, transparent 0%, black 46%);
-  }
-}
-/* Desktop: video on the right, fade from the left, right corners only. */
-@media (min-width: 1132px) {
-  [data-testid="hero-auto-video-right"] .hero-auto-video-frame,
-  [data-testid="hero-auto-video-right"] video {
-    border-bottom-left-radius: 0;
-    border-top-right-radius: 20px;
-    border-bottom-right-radius: 20px;
-  }
-  [data-testid="hero-auto-video-right"] video {
-    -webkit-mask-image: linear-gradient(to right, transparent 0%, black 46%);
-    mask-image: linear-gradient(to right, transparent 0%, black 46%);
-  }
-}
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
