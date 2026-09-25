@@ -1,0 +1,113 @@
+name: Sync website-v3
+
+# Reads breatheco-de/website-v3 and opens a pull request in THIS repo.
+# It never pushes to website-v3 or to breatheco-de/caxton-cms.
+# Merging the PR into main is still manual, so a sync does not deploy by itself.
+
+on:
+  schedule:
+    # Weekdays 14:00 UTC (morning US Eastern).
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-website-v3
+  cancel-in-progress: false
+
+jobs:
+  open-pull-request:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch website-v3 main
+        run: |
+          git remote add website-v3 https://github.com/breatheco-de/website-v3.git
+          git fetch website-v3 main
+
+      - name: Open or update sync pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM="$(git rev-parse website-v3/main)"
+          BASE="$(git rev-parse origin/main)"
+          BRANCH="sync/website-v3"
+          MARKER="website-v3@${UPSTREAM}"
+
+          if git merge-base --is-ancestor "$UPSTREAM" "$BASE"; then
+            echo "main already contains website-v3 ${UPSTREAM}"
+            exit 0
+          fi
+
+          set +e
+          MERGE_OUT="$(git merge-tree --write-tree "$BASE" "$UPSTREAM")"
+          MERGE_EC=$?
+          set -e
+          MERGE_TREE="$(printf '%s\n' "$MERGE_OUT" | head -n 1)"
+          OURS_TREE="$(git rev-parse "${BASE}^{tree}")"
+          if [ "$MERGE_EC" -eq 0 ] && [ "$MERGE_TREE" = "$OURS_TREE" ]; then
+            echo "website-v3 changes are already in the main tree (${UPSTREAM})"
+            exit 0
+          fi
+
+          REMOTE_SHA="$(git ls-remote origin "refs/heads/${BRANCH}" | cut -f1)"
+          if [ -z "$REMOTE_SHA" ]; then
+            git push origin "${UPSTREAM}:refs/heads/${BRANCH}"
+          elif [ "$REMOTE_SHA" = "$UPSTREAM" ]; then
+            echo "Sync branch already points at ${UPSTREAM}"
+          elif git merge-base --is-ancestor "$REMOTE_SHA" "$UPSTREAM"; then
+            git push origin "${UPSTREAM}:refs/heads/${BRANCH}"
+          elif git merge-base --is-ancestor "$UPSTREAM" "$REMOTE_SHA"; then
+            echo "Sync branch already includes website-v3 ${UPSTREAM}; leaving local commits in place"
+          else
+            echo "Sync branch diverged from website-v3; not overwriting"
+            PR_NUM="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$PR_NUM" ]; then
+              if ! gh pr view "$PR_NUM" --repo "$REPO" --comments | grep -q "$MARKER"; then
+                gh pr comment "$PR_NUM" --repo "$REPO" --body "$(cat <<EOF
+${MARKER}
+
+\`website-v3\` moved to \`${UPSTREAM}\`, and \`${BRANCH}\` already has its own commits, so this run left the branch as-is. Update the branch yourself if you still want those newer commits.
+EOF
+)"
+              fi
+            fi
+            exit 0
+          fi
+
+          EXISTING="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            echo "Pull request #${EXISTING} is already open"
+            exit 0
+          fi
+
+          SHORTLOG="$(git log --oneline "${BASE}..${UPSTREAM}")"
+          gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "Sync breatheco-de/website-v3 into main" --body "$(cat <<EOF
+## Summary
+Brings [\`breatheco-de/website-v3\`](https://github.com/breatheco-de/website-v3) \`main\` (\`${UPSTREAM}\`) into this fork.
+
+This workflow only **reads** that repository. It does not push to \`website-v3\` or to \`breatheco-de/caxton-cms\`.
+
+## How to merge
+- Use **Create a merge commit**. A squash makes the next run think these commits are still missing.
+- Merging into \`main\` can deploy to learning.mdc.edu when the changed paths match the deploy workflow.
+- If GitHub reports conflicts, resolve them on \`${BRANCH}\`. Later runs will not overwrite commits you add on that branch.
+
+## Commits
+\`\`\`
+${SHORTLOG}
+\`\`\`
+EOF
+)"
