@@ -635,7 +635,8 @@ export function ProposalListPanel() {
     const reviewer = view.filters.reviewerUsername.trim();
     if (reviewer) parts.push(`Reviewer ${reviewer}`);
     if (view.filters.escalatedOnly) parts.push("Escalated");
-    if (view.filters.badOutcomeOnly) parts.push("Bad outcome (needs lesson)");
+    if (view.filters.outcomeFocus === "bad") parts.push("Bad outcome (needs lesson)");
+    if (view.filters.outcomeFocus === "missing") parts.push("Missing outcome review");
     if (view.filters.attention !== "all") {
       parts.push(
         PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === view.filters.attention)?.label ??
@@ -652,7 +653,7 @@ export function ProposalListPanel() {
     view.filters.agentSessionId,
     view.filters.reviewerUsername,
     view.filters.escalatedOnly,
-    view.filters.badOutcomeOnly,
+    view.filters.outcomeFocus,
     view.filters.attention,
   ]);
 

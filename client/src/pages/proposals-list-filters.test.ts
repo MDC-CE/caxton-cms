@@ -39,7 +39,7 @@ describe("parseProposalListSearch", () => {
         agentSessionId: "",
         reviewerUsername: "",
         escalatedOnly: false,
-        badOutcomeOnly: false,
+        outcomeFocus: "off" as const,
         attention: "all",
         stalledOnly: false,
         needsReviewOnly: false,
@@ -83,13 +83,26 @@ describe("parseProposalListSearch", () => {
     expect(parseProposalListSearch("").filters.escalatedOnly).toBe(false);
   });
 
-  it("parses outcome_review=bad_open as badOutcomeOnly and maps it to the API", () => {
+  it("parses outcome_review=bad_open as outcomeFocus bad and maps it to the API", () => {
     const view = parseProposalListSearch("status=all&outcome_review=bad_open");
-    expect(view.filters.badOutcomeOnly).toBe(true);
-    expect(parseProposalListSearch("outcome_review=bad").filters.badOutcomeOnly).toBe(false);
+    expect(view.filters.outcomeFocus).toBe("bad");
+    expect(parseProposalListSearch("outcome_review=bad").filters.outcomeFocus).toBe("off");
     expect(serializeProposalListSearch(view)).toContain("outcome_review=bad_open");
     expect(toProposalListApiQuery(view.filters, "").outcome_review).toBe("bad_open");
     expect(countActiveProposalFilters(view.filters)).toBe(2);
+  });
+
+  it("parses outcome_review=none as outcomeFocus missing and maps it to the API", () => {
+    const view = parseProposalListSearch("status=all&outcome_review=none");
+    expect(view.filters.outcomeFocus).toBe("missing");
+    expect(serializeProposalListSearch(view)).toContain("outcome_review=none");
+    expect(toProposalListApiQuery(view.filters, "").outcome_review).toBe("none");
+    expect(clearProposalListFilters(view.filters).outcomeFocus).toBe("off");
+  });
+
+  it("omits outcome_review when outcomeFocus is off", () => {
+    expect(parseProposalListSearch("").filters.outcomeFocus).toBe("off");
+    expect(toProposalListApiQuery(DEFAULT_PROPOSAL_LIST_FILTERS, "").outcome_review).toBeUndefined();
   });
 
   it("parses stalled=1 as stalledOnly", () => {
@@ -149,7 +162,7 @@ describe("serializeProposalListSearch", () => {
         agentSessionId: "sess-9",
         reviewerUsername: "dana@x.com",
         escalatedOnly: true,
-        badOutcomeOnly: false,
+        outcomeFocus: "off" as const,
         attention: "blocked" as const,
         stalledOnly: false,
         needsReviewOnly: false,
@@ -227,7 +240,7 @@ describe("clearProposalListFilters", () => {
       agentSessionId: "",
       reviewerUsername: "",
       escalatedOnly: false,
-      badOutcomeOnly: false,
+      outcomeFocus: "off" as const,
       attention: "all",
       stalledOnly: false,
       needsReviewOnly: false,

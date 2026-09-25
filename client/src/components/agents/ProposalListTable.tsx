@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { IconLoader2, IconTrash } from "@tabler/icons-react";
+import { IconLoader2, IconThumbDown, IconThumbUp, IconTrash } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { ProposalKindBadge } from "@/components/agents/ProposalExplainBadges";
+import type { OutcomeVerdict } from "@/components/agents/ProposalOutcomeReview";
 import { formatProposalRelativeUpdatedAt } from "@/lib/proposalCardMeta";
 
 export type ProposalTableRow = {
@@ -29,7 +30,36 @@ export type ProposalTableRow = {
   title: string;
   kind: string;
   created_at: number;
+  outcome_review?: OutcomeVerdict | null;
 };
+
+const OUTCOME_CELL_LABEL = {
+  good: "Good outcome",
+  bad: "Bad outcome",
+  none: "Not reviewed",
+} as const;
+
+function OutcomeCell({ id, verdict }: { id: string; verdict: OutcomeVerdict | null }) {
+  const key = verdict ?? "none";
+  return (
+    <span
+      role="img"
+      aria-label={OUTCOME_CELL_LABEL[key]}
+      title={OUTCOME_CELL_LABEL[key]}
+      className="inline-flex items-center text-sm text-muted-foreground"
+      data-testid={`outcome-proposal-${id}`}
+      data-outcome={key}
+    >
+      {verdict === "good" ? (
+        <IconThumbUp className="h-4 w-4 text-status-online" aria-hidden />
+      ) : verdict === "bad" ? (
+        <IconThumbDown className="h-4 w-4 text-status-busy" aria-hidden />
+      ) : (
+        "-"
+      )}
+    </span>
+  );
+}
 
 function formatCreatedDate(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, {
@@ -78,6 +108,7 @@ export function ProposalListTable({
             </TableHead>
             <TableHead>Proposal</TableHead>
             <TableHead className="w-32">Type</TableHead>
+            <TableHead className="w-24">Outcome</TableHead>
             <TableHead className="w-36">Created</TableHead>
           </TableRow>
         </TableHeader>
@@ -110,6 +141,9 @@ export function ProposalListTable({
                 </TableCell>
                 <TableCell>
                   <ProposalKindBadge kind={p.kind} appearance="meta" testIdSuffix={`-table-${p.id}`} />
+                </TableCell>
+                <TableCell>
+                  <OutcomeCell id={p.id} verdict={p.outcome_review ?? null} />
                 </TableCell>
                 <TableCell
                   className="text-xs text-muted-foreground tabular-nums"

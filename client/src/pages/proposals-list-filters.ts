@@ -11,7 +11,7 @@ export const PROPOSAL_LIST_SEARCH_KEYS = {
   agentSessionId: "agent_session_id",
   reviewerUsername: "reviewer_username",
   escalatedOnly: "escalated",
-  badOutcomeOnly: "outcome_review",
+  outcomeFocus: "outcome_review",
   attention: "attention",
   stalledOnly: "stalled",
   needsReviewOnly: "needs_review",
@@ -41,6 +41,14 @@ export type ProposalListAttention =
   | "blocked"
   | "needs_author";
 
+/** `missing` = closed and not yet reviewed; `bad` = bad outcome with no lesson captured. */
+export type ProposalListOutcomeFocus = "off" | "missing" | "bad";
+
+const OUTCOME_FOCUS_TO_API: Record<Exclude<ProposalListOutcomeFocus, "off">, string> = {
+  missing: "none",
+  bad: "bad_open",
+};
+
 export type ProposalListFilters = {
   status: ProposalListStatus;
   kind: ProposalListKind;
@@ -57,8 +65,8 @@ export type ProposalListFilters = {
   reviewerUsername: string;
   /** When true, only proposals with the escalated flag. */
   escalatedOnly: boolean;
-  /** When true, only closed proposals marked bad outcome with no lesson captured yet. */
-  badOutcomeOnly: boolean;
+  /** Outcome review triage; closed proposals only when not `off`. */
+  outcomeFocus: ProposalListOutcomeFocus;
   /** Attention triage bucket; `all` = no filter. */
   attention: ProposalListAttention;
   /** Accepted ideas with no successful implements follow-up. */
@@ -83,7 +91,7 @@ export const DEFAULT_PROPOSAL_LIST_FILTERS: ProposalListFilters = {
   agentSessionId: "",
   reviewerUsername: "",
   escalatedOnly: false,
-  badOutcomeOnly: false,
+  outcomeFocus: "off",
   attention: "all",
   stalledOnly: false,
   needsReviewOnly: false,
@@ -153,8 +161,11 @@ function parseEscalatedOnly(raw: string | null): boolean {
   return v === "1" || v === "true";
 }
 
-function parseBadOutcomeOnly(raw: string | null): boolean {
-  return raw != null && raw.trim().toLowerCase() === "bad_open";
+function parseOutcomeFocus(raw: string | null): ProposalListOutcomeFocus {
+  const v = raw?.trim().toLowerCase();
+  if (v === "bad_open") return "bad";
+  if (v === "none") return "missing";
+  return DEFAULT_PROPOSAL_LIST_FILTERS.outcomeFocus;
 }
 
 function parseStalledOnly(raw: string | null): boolean {
@@ -213,7 +224,7 @@ export function parseProposalListSearch(search: string): ProposalListViewState {
       agentSessionId: params.get(PROPOSAL_LIST_SEARCH_KEYS.agentSessionId) ?? "",
       reviewerUsername: params.get(PROPOSAL_LIST_SEARCH_KEYS.reviewerUsername) ?? "",
       escalatedOnly: parseEscalatedOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly)),
-      badOutcomeOnly: parseBadOutcomeOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.badOutcomeOnly)),
+      outcomeFocus: parseOutcomeFocus(params.get(PROPOSAL_LIST_SEARCH_KEYS.outcomeFocus)),
       attention: parseAttention(params.get(PROPOSAL_LIST_SEARCH_KEYS.attention)),
       stalledOnly: parseStalledOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.stalledOnly)),
       needsReviewOnly: parseNeedsReviewOnly(params.get(PROPOSAL_LIST_SEARCH_KEYS.needsReviewOnly)),
@@ -298,10 +309,10 @@ export function serializeProposalListSearch(
     params.set(PROPOSAL_LIST_SEARCH_KEYS.escalatedOnly, "1");
   }
 
-  if (!filters.badOutcomeOnly) {
-    params.delete(PROPOSAL_LIST_SEARCH_KEYS.badOutcomeOnly);
+  if (filters.outcomeFocus === "off") {
+    params.delete(PROPOSAL_LIST_SEARCH_KEYS.outcomeFocus);
   } else {
-    params.set(PROPOSAL_LIST_SEARCH_KEYS.badOutcomeOnly, "bad_open");
+    params.set(PROPOSAL_LIST_SEARCH_KEYS.outcomeFocus, OUTCOME_FOCUS_TO_API[filters.outcomeFocus]);
   }
 
   if (filters.attention === d.attention) {
@@ -344,7 +355,7 @@ export function countActiveProposalFilters(filters: ProposalListFilters): number
   if (filters.agentSessionId.trim()) n += 1;
   if (filters.reviewerUsername.trim()) n += 1;
   if (filters.escalatedOnly) n += 1;
-  if (filters.badOutcomeOnly) n += 1;
+  if (filters.outcomeFocus !== "off") n += 1;
   if (filters.attention !== d.attention) n += 1;
   if (filters.stalledOnly) n += 1;
   if (filters.needsReviewOnly) n += 1;
@@ -363,7 +374,7 @@ export function clearProposalListFilters(filters: ProposalListFilters): Proposal
     agentSessionId: DEFAULT_PROPOSAL_LIST_FILTERS.agentSessionId,
     reviewerUsername: DEFAULT_PROPOSAL_LIST_FILTERS.reviewerUsername,
     escalatedOnly: DEFAULT_PROPOSAL_LIST_FILTERS.escalatedOnly,
-    badOutcomeOnly: DEFAULT_PROPOSAL_LIST_FILTERS.badOutcomeOnly,
+    outcomeFocus: DEFAULT_PROPOSAL_LIST_FILTERS.outcomeFocus,
     attention: DEFAULT_PROPOSAL_LIST_FILTERS.attention,
     stalledOnly: DEFAULT_PROPOSAL_LIST_FILTERS.stalledOnly,
     needsReviewOnly: DEFAULT_PROPOSAL_LIST_FILTERS.needsReviewOnly,
@@ -412,7 +423,7 @@ export function toProposalListApiQuery(
   const reviewer = filters.reviewerUsername.trim();
   if (reviewer) out.reviewer_username = reviewer;
   if (filters.escalatedOnly) out.escalated = "1";
-  if (filters.badOutcomeOnly) out.outcome_review = "bad_open";
+  if (filters.outcomeFocus !== "off") out.outcome_review = OUTCOME_FOCUS_TO_API[filters.outcomeFocus];
   if (filters.attention !== "all") out.attention = filters.attention;
   if (filters.stalledOnly) out.stalled = "1";
   if (filters.needsReviewOnly) out.needs_review = "1";

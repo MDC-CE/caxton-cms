@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import {
   Select,
   SelectContent,
@@ -39,6 +40,7 @@ import {
   type ProposalListAttention,
   type ProposalListFilters,
   type ProposalListKind,
+  type ProposalListOutcomeFocus,
   type ProposalListStats,
   type ProposalListStatus,
 } from "@/pages/proposals-list-filters";
@@ -53,7 +55,7 @@ export type ProposalListFilterDims = Pick<
   | "agentSessionId"
   | "reviewerUsername"
   | "escalatedOnly"
-  | "badOutcomeOnly"
+  | "outcomeFocus"
   | "attention"
 >;
 
@@ -70,6 +72,27 @@ function isNestedPickerTarget(target: HTMLElement): boolean {
   );
 }
 
+const OUTCOME_FOCUS_OPTIONS: Array<{ value: ProposalListOutcomeFocus; label: string }> = [
+  { value: "bad", label: "Bad" },
+  { value: "missing", label: "Missing" },
+  { value: "off", label: "Off" },
+];
+
+const OUTCOME_FOCUS_COPY: Record<ProposalListOutcomeFocus, { title: string; description: string }> = {
+  off: {
+    title: "Outcome review",
+    description: "Not filtering by outcome. Pick Missing to judge outcomes, or Bad to capture lessons.",
+  },
+  missing: {
+    title: "Missing outcome review",
+    description: "Closed proposals nobody has marked good or bad yet — judge whether they were the right call.",
+  },
+  bad: {
+    title: "Bad outcome (needs lesson)",
+    description: "Closed proposals a steward marked as a bad outcome, with no lesson captured yet.",
+  },
+};
+
 const ROLE_ANY = "__any__";
 const SESSION_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -83,7 +106,7 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     agentSessionId: filters.agentSessionId,
     reviewerUsername: filters.reviewerUsername,
     escalatedOnly: filters.escalatedOnly,
-    badOutcomeOnly: filters.badOutcomeOnly,
+    outcomeFocus: filters.outcomeFocus,
     attention: filters.attention,
   };
 }
@@ -118,6 +141,7 @@ export function ProposalListFiltersDialog({
   const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
   const [proposerPickerOpen, setProposerPickerOpen] = useState(false);
   const [reviewerPickerOpen, setReviewerPickerOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -133,7 +157,7 @@ export function ProposalListFiltersDialog({
     filters.agentSessionId,
     filters.reviewerUsername,
     filters.escalatedOnly,
-    filters.badOutcomeOnly,
+    filters.outcomeFocus,
     filters.attention,
   ]);
 
@@ -239,13 +263,36 @@ export function ProposalListFiltersDialog({
           <DialogHeader>
             <DialogTitle>Filters</DialogTitle>
             <DialogDescription>
-              Narrow which proposals appear in the list by status, kind, attention, or who filed or
-              reviewed them.
-              Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
-              to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
-              Ready for re-check means reviewers should look again: blockers are cleared, or the author
-              rewrote the proposal or marked a blocker fixed, and nothing is still waiting on the author.
+              Choose which proposals show in the list by status, kind, attention, or who filed or
+              reviewed them. Filtering only changes what you see; no proposal is changed.
             </DialogDescription>
+            <div>
+              <button
+                type="button"
+                className="text-xs text-primary underline-offset-2 hover:underline"
+                onClick={() => setShowAdvanced((v) => !v)}
+                data-testid="button-proposal-filters-read-more"
+              >
+                {showAdvanced ? "Hide advanced" : "Read more (advanced)"}
+              </button>
+              {showAdvanced ? (
+                <ul
+                  className="mt-1.5 list-disc space-y-1 pl-5 text-left text-[11px] text-muted-foreground"
+                  data-testid="proposal-filters-advanced-help"
+                >
+                  <li>Sorting lives on the Sort control next to Filters, not here.</li>
+                  <li>
+                    Sort by Needs attention to see steward holds first, then re-checks, then
+                    first-pass reviews.
+                  </li>
+                  <li>
+                    Ready for re-check means reviewers should look again: blockers are cleared, or
+                    the author rewrote the proposal or marked a blocker fixed, and nothing is still
+                    waiting on the author.
+                  </li>
+                </ul>
+              ) : null}
+            </div>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
@@ -336,37 +383,39 @@ export function ProposalListFiltersDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">
-                Proposer
-              </Label>
-              <ProposalProposerCombobox
-                value={draft.proposerUsername}
-                onChange={(proposerUsername) => patchDraft({ proposerUsername })}
-                enabled={open}
-                onOpenChange={setProposerPickerOpen}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                People with a proposal touched in the last 30 days. Type a full username if they’re not
-                listed (exact match).
-              </p>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="proposal-reviewer-username-filter" className="text-xs text-muted-foreground">
-                Reviewer
-              </Label>
-              <ProposalProposerCombobox
-                source="reviewers"
-                value={draft.reviewerUsername}
-                onChange={(reviewerUsername) => patchDraft({ reviewerUsername })}
-                enabled={open}
-                onOpenChange={setReviewerPickerOpen}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                Person who gave the latest feedback, or who finished or rejected the proposal (last 30
-                days). Earlier reviewers don’t match. Type a full username if they’re not listed (exact
-                match).
-              </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">
+                  Proposer
+                </Label>
+                <ProposalProposerCombobox
+                  value={draft.proposerUsername}
+                  onChange={(proposerUsername) => patchDraft({ proposerUsername })}
+                  enabled={open}
+                  onOpenChange={setProposerPickerOpen}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  People with a proposal touched in the last 30 days. Type a full username if they’re not
+                  listed (exact match).
+                </p>
+              </div>
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="proposal-reviewer-username-filter" className="text-xs text-muted-foreground">
+                  Reviewer
+                </Label>
+                <ProposalProposerCombobox
+                  source="reviewers"
+                  value={draft.reviewerUsername}
+                  onChange={(reviewerUsername) => patchDraft({ reviewerUsername })}
+                  enabled={open}
+                  onOpenChange={setReviewerPickerOpen}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Person who gave the latest feedback, or who finished or rejected the proposal (last 30
+                  days). Earlier reviewers don’t match. Type a full username if they’re not listed (exact
+                  match).
+                </p>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
@@ -481,27 +530,39 @@ export function ProposalListFiltersDialog({
               />
             </div>
             <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-              <div className="space-y-0.5">
-                <Label htmlFor="proposal-bad-outcome-filter" className="text-xs text-foreground">
-                  Bad outcome (needs lesson)
-                </Label>
+              <div className="space-y-0.5" data-testid="proposal-outcome-focus-copy">
+                <p className="text-xs font-medium text-foreground">
+                  {OUTCOME_FOCUS_COPY[draft.outcomeFocus].title}
+                </p>
                 <p className="text-[11px] text-muted-foreground">
-                  Closed proposals a steward marked as a bad outcome, with no lesson captured yet.
+                  {OUTCOME_FOCUS_COPY[draft.outcomeFocus].description}
                 </p>
               </div>
-              <Switch
-                id="proposal-bad-outcome-filter"
-                checked={draft.badOutcomeOnly}
-                onCheckedChange={(checked) =>
+              <ToggleButtonBar
+                value={draft.outcomeFocus}
+                onValueChange={(v) => {
+                  const outcomeFocus = v as ProposalListOutcomeFocus;
                   patchDraft({
-                    badOutcomeOnly: checked,
-                    ...(checked && (draft.status === "open" || draft.status === "partial")
+                    outcomeFocus,
+                    ...(outcomeFocus !== "off" &&
+                    (draft.status === "open" || draft.status === "partial")
                       ? { status: "all" as const }
                       : {}),
-                  })
-                }
-                data-testid="switch-proposal-bad-outcome-filter"
-              />
+                  });
+                }}
+                className="shrink-0"
+                listTestId="toggle-proposal-outcome-focus"
+              >
+                {OUTCOME_FOCUS_OPTIONS.map((opt) => (
+                  <ToggleButtonBarTrigger
+                    key={opt.value}
+                    value={opt.value}
+                    data-testid={`toggle-proposal-outcome-focus-${opt.value}`}
+                  >
+                    {opt.label}
+                  </ToggleButtonBarTrigger>
+                ))}
+              </ToggleButtonBar>
             </div>
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
