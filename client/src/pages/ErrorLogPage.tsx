@@ -1,5 +1,6 @@
-import { Fragment, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation, useSearch } from "wouter";
 import {
   IconAlertTriangle,
   IconAlertCircle,
@@ -9,6 +10,9 @@ import {
   IconInfoCircle,
   IconChevronRight,
   IconCopy,
+  IconArrowUp,
+  IconArrowDown,
+  IconArrowsSort,
 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +29,14 @@ import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import { useToast } from "@/hooks/use-toast";
 import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
+import {
+  nextErrorLogSort,
+  parseErrorLogSort,
+  serializeErrorLogSort,
+  sortErrorLogIssues,
+  type ErrorLogSort,
+  type ErrorLogSortKey,
+} from "./error-log-sort";
 
 type LevelFilter = "all" | "error" | "warn";
 
@@ -100,6 +112,22 @@ function LevelBadge({ level }: { level: "error" | "warn" }) {
     <Badge variant="outline" className="text-xs font-mono uppercase text-amber-600 border-amber-400">
       warn
     </Badge>
+  );
+}
+
+function MessageWithErrorType({ message, errName }: { message: string; errName: string | null }) {
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {errName && (
+        <Badge
+          variant="outline"
+          className="text-[10px] font-mono px-1.5 py-0 border-transparent bg-destructive/10 text-destructive"
+        >
+          {errName}
+        </Badge>
+      )}
+      <span className="line-clamp-2">{message}</span>
+    </div>
   );
 }
 
@@ -244,6 +272,45 @@ function ExpandChevron({ open }: { open: boolean }) {
   );
 }
 
+function SortableHead({
+  col,
+  label,
+  sort,
+  onSort,
+  className,
+  align = "left",
+}: {
+  col: ErrorLogSortKey;
+  label: string;
+  sort: ErrorLogSort;
+  onSort: (col: ErrorLogSortKey) => void;
+  className?: string;
+  align?: "left" | "right";
+}) {
+  const active = sort.key === col;
+  const Icon = !active ? IconArrowsSort : sort.dir === "asc" ? IconArrowUp : IconArrowDown;
+  return (
+    <TableHead
+      className={className}
+      aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        className={cn(
+          "inline-flex items-center gap-1 hover:text-foreground",
+          align === "right" && "w-full justify-end",
+          active && "text-foreground",
+        )}
+        onClick={() => onSort(col)}
+        data-testid={`sort-error-log-${col}`}
+      >
+        {label}
+        <Icon className={cn("w-3 h-3", !active && "opacity-40")} aria-hidden />
+      </button>
+    </TableHead>
+  );
+}
+
 export default function ErrorLogPage() {
   return (
     <MetricsAccessGate>
@@ -267,6 +334,22 @@ function ErrorLogPageInner() {
     },
     refetchInterval: 30000,
   });
+
+  const [pathname, setLocation] = useLocation();
+  const searchString = useSearch();
+  const sort = useMemo(() => parseErrorLogSort(searchString), [searchString]);
+  const handleSort = useCallback(
+    (col: ErrorLogSortKey) => {
+      const qs = serializeErrorLogSort(nextErrorLogSort(sort, col), searchString);
+      const pathOnly = pathname.split("?")[0];
+      setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
+    },
+    [sort, searchString, pathname, setLocation],
+  );
+  const sortedIssues = useMemo(
+    () => sortErrorLogIssues(data?.uniqueIssues ?? [], sort),
+    [data?.uniqueIssues, sort],
+  );
 
   const topIssueModule = data?.uniqueIssues?.[0]?.module ?? "—";
 
@@ -375,7 +458,8 @@ function ErrorLogPageInner() {
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Top unique issues</CardTitle>
             <p className="text-xs text-muted-foreground mt-1">
-              Same message shape collapsed. Errors first, then by count. Last seen shows the most recent occurrence.
+              Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
+              (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
             </p>
           </CardHeader>
           <CardContent className="p-0">
@@ -386,13 +470,25 @@ function ErrorLogPageInner() {
                   <TableHead className="w-20">Level</TableHead>
                   <TableHead className="w-44">Module</TableHead>
                   <TableHead>Message</TableHead>
-                  <TableHead className="text-right w-24">Count</TableHead>
-                  <TableHead className="w-40">Last seen</TableHead>
-                  <TableHead className="w-36">Error type</TableHead>
+                  <SortableHead
+                    col="count"
+                    label="Count"
+                    sort={sort}
+                    onSort={handleSort}
+                    className="text-right w-24"
+                    align="right"
+                  />
+                  <SortableHead
+                    col="lastSeen"
+                    label="Last seen"
+                    sort={sort}
+                    onSort={handleSort}
+                    className="w-40"
+                  />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.uniqueIssues.map((row, idx) => {
+                {sortedIssues.map((row, idx) => {
                   const open = openIssue === row.fingerprint;
                   const toggle = () => setOpenIssue(open ? null : row.fingerprint);
                   return (
@@ -418,7 +514,7 @@ function ErrorLogPageInner() {
                         </TableCell>
                         <TableCell className="font-mono text-sm">{row.module}</TableCell>
                         <TableCell className="text-sm text-foreground max-w-md">
-                          <span className="line-clamp-2">{row.message}</span>
+                          <MessageWithErrorType message={row.message} errName={row.err_name} />
                         </TableCell>
                         <TableCell className="text-right font-medium tabular-nums">
                           {row.count}
@@ -426,13 +522,10 @@ function ErrorLogPageInner() {
                         <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
                           {formatTs(row.lastTs)}
                         </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
-                          {row.err_name ?? "—"}
-                        </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow className="hover:bg-transparent">
-                          <TableCell colSpan={7} className="bg-muted/40 p-4">
+                          <TableCell colSpan={6} className="bg-muted/40 p-4">
                             <ErrorLogDetail id={row.lastId} count={row.count} sampleTs={row.sampleTs} />
                           </TableCell>
                         </TableRow>
@@ -491,7 +584,6 @@ function ErrorLogPageInner() {
                     <TableHead className="w-20">Level</TableHead>
                     <TableHead className="w-44">Module</TableHead>
                     <TableHead>Message</TableHead>
-                    <TableHead className="w-36">Error Type</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -526,15 +618,12 @@ function ErrorLogPageInner() {
                             {entry.module}
                           </TableCell>
                           <TableCell className="text-sm text-foreground max-w-xs">
-                            <span className="line-clamp-2">{entry.message}</span>
-                          </TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">
-                            {entry.err_name ?? "—"}
+                            <MessageWithErrorType message={entry.message} errName={entry.err_name} />
                           </TableCell>
                         </TableRow>
                         {open && (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={6} className="bg-muted/40 p-4">
+                            <TableCell colSpan={5} className="bg-muted/40 p-4">
                               <ErrorLogDetail id={entry.id} />
                             </TableCell>
                           </TableRow>

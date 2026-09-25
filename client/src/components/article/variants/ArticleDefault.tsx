@@ -1,10 +1,12 @@
-import { useRef, useMemo } from "react";
-import type { CSSProperties, MouseEvent, ReactNode } from "react";
+import { useRef, useMemo, memo, createContext, useContext, useCallback } from "react";
+import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
 import { useState, useEffect } from "react";
-import type { ComponentProps } from "react";
-import { ChevronRight, User, Clock, Calendar } from "lucide-react";
+import type { ComponentProps, ComponentType } from "react";
+import { ChevronRight, User, Clock, Calendar, RotateCcw, Code } from "lucide-react";
 import { playInView } from "geekchart/observe";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import type { Element as HastElement } from "hast";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
@@ -21,6 +23,16 @@ import {
 } from "@shared/markdown-math";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  MermaidFenceChart,
+  collectHastText,
+  durationFromMeta,
+  isMermaidCodeNode,
+  remarkFenceMeta,
+  speedFromMeta,
+} from "@/components/geekchart/MermaidFenceChart";
+import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useOrderedPageSections } from "@/contexts/PageSectionsContext";
 import { useSectionContext } from "@/contexts/SectionContext";
 import { CopyCodeButton } from "../CopyCodeButton";
@@ -622,7 +634,7 @@ export function Article({ data }: ArticleProps) {
   const locale = location.startsWith("/es") ? "es" : "en";
 
   const orderedSections = useOrderedPageSections();
-  const { sectionIndex } = useSectionContext();
+  const { sectionIndex, variableFields } = useSectionContext();
 
   const sectionKey = section_id || `article-${sectionIndex >= 0 ? sectionIndex : "0"}`;
 
@@ -689,21 +701,12 @@ export function Article({ data }: ArticleProps) {
     ? isFirstArticle
     : tocItems.length > 0 && effectiveTocPosition === "top" && isFirstArticle;
 
-  const slugCountsRef = useRef<Record<string, number>>({});
+  const proseRef = useRef<HTMLDivElement>(null);
 
-  const getHeadingId = (text: string) => {
-    let id = `${idPrefix}${slugify(text)}`;
-    const counts = slugCountsRef.current;
-    if (counts[id] !== undefined) {
-      counts[id]++;
-      id = `${id}-${counts[id]}`;
-    } else {
-      counts[id] = 0;
-    }
-    return id;
-  };
-
-  slugCountsRef.current = {};
+  const isEditMode = useEditModeOptional()?.isEditMode ?? false;
+  const contentBinding =
+    variableFields?.content ??
+    (data as { _variableFields?: Record<string, string> })._variableFields?.content;
 
   // C2: later articles hide the entire meta row.
   const meta =
@@ -722,11 +725,22 @@ export function Article({ data }: ArticleProps) {
     );
 
   const body = (
-    <div className="article-prose mx-auto max-w-[68ch]">
+    <div ref={proseRef} className="article-prose relative mx-auto max-w-[68ch]">
+      {isEditMode && contentBinding ? (
+        <Badge
+          variant="secondary"
+          className="absolute -top-7 right-0 z-10 text-[10px] font-medium"
+          title={contentBinding}
+          data-testid="article-bound-badge"
+        >
+          Text comes from the entry
+        </Badge>
+      ) : null}
       {meta}
       <MarkdownRenderer
         content={typeof content === "string" ? content : ""}
-        getHeadingId={getHeadingId}
+        idPrefix={idPrefix}
+        chartRootRef={proseRef}
       />
     </div>
   );
@@ -787,6 +801,7 @@ const sanitizeSchema = {
       ["className", /^line$/],
       "dataLanguage",
       "dataTheme",
+      "dataMeta",
     ],
     span: [
       ...(defaultSchema.attributes?.span ?? []),
@@ -841,13 +856,41 @@ function getDataLanguage(props: Record<string, unknown>): string | undefined {
   return typeof raw === "string" ? raw : undefined;
 }
 
-function MarkdownRenderer({
+/** Heading text → DOM id, deduped within one article render (see MarkdownRenderer). */
+const HeadingIdContext = createContext<(text: string) => string>(slugify);
+
+function useHeadingId(children: ReactNode, explicitId: string | undefined): string {
+  const getHeadingId = useContext(HeadingIdContext);
+  return explicitId || getHeadingId(extractTextFromChildren(children));
+}
+
+export const MarkdownRenderer = memo(function MarkdownRenderer({
   content,
-  getHeadingId,
+  idPrefix = "",
+  chartRootRef,
 }: {
   content: string | null | undefined;
-  getHeadingId: (text: string) => string;
+  idPrefix?: string;
+  chartRootRef?: RefObject<HTMLElement>;
 }) {
+  // Reset every render so duplicate headings get the same -1/-2 suffixes as extractTocItems.
+  const slugCountsRef = useRef<Record<string, number>>({});
+  slugCountsRef.current = {};
+  const getHeadingId = useCallback(
+    (text: string) => {
+      let id = `${idPrefix}${slugify(text)}`;
+      const counts = slugCountsRef.current;
+      if (counts[id] !== undefined) {
+        counts[id]++;
+        id = `${id}-${counts[id]}`;
+      } else {
+        counts[id] = 0;
+      }
+      return id;
+    },
+    [idPrefix],
+  );
+
   const safeContent = typeof content === "string" ? content : "";
   const isEnhanced = safeContent.startsWith(ARTICLE_HTML_MARKER);
   const source = isEnhanced
@@ -860,12 +903,15 @@ function MarkdownRenderer({
   const remarkPlugins = (
     isEnhanced
       ? [remarkGfm]
-      : [remarkGfm, [remarkMath, remarkMathOptions]]
+      : [remarkGfm, [remarkMath, remarkMathOptions], remarkFenceMeta]
   ) as ComponentProps<typeof ReactMarkdown>["remarkPlugins"];
 
   // Charts drawn by geekchart (server/markdown-enhance.ts) ship paused and
   // play once when scrolled 40% into view.
-  useEffect(() => playInView(document), [source]);
+  useEffect(
+    () => playInView(chartRootRef?.current ?? document),
+    [source, chartRootRef],
+  );
 
   const rehypePlugins = (
     isEnhanced
@@ -874,179 +920,377 @@ function MarkdownRenderer({
   ) as ComponentProps<typeof ReactMarkdown>["rehypePlugins"];
 
   return (
-    <ReactMarkdown
-      remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
-      components={{
-        h1: ({ children, ...props }) => {
-          const text = extractTextFromChildren(children);
-          const id = (props as { id?: string }).id || getHeadingId(text);
-          // Demote markdown/HTML h1 → h2 so the page hero remains the sole document H1.
-          return (
-            <h2
-              id={id}
-              className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
-              data-testid={`heading-${id}`}
-              {...props}
-            >
-              {children}
-            </h2>
-          );
-        },
-        h2: ({ children, ...props }) => {
-          const text = extractTextFromChildren(children);
-          const id = (props as { id?: string }).id || getHeadingId(text);
-          return (
-            <h2
-              id={id}
-              className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
-              data-testid={`heading-${id}`}
-              {...props}
-            >
-              {children}
-            </h2>
-          );
-        },
-        h3: ({ children, ...props }) => {
-          const text = extractTextFromChildren(children);
-          const id = (props as { id?: string }).id || getHeadingId(text);
-          return (
-            <h3
-              id={id}
-              className="mb-2 mt-8 scroll-mt-24 text-lg font-medium tracking-tight text-foreground/90 first:mt-0 md:text-xl"
-              data-testid={`heading-${id}`}
-              {...props}
-            >
-              {children}
-            </h3>
-          );
-        },
-        h4: ({ children, ...props }) => (
-          <h4 className="mb-2 mt-6 text-base font-semibold first:mt-0" {...props}>
-            {children}
-          </h4>
-        ),
-        p: ({ children, ...props }) => (
-          <p className="mb-4 mt-0 leading-8 text-foreground/90" {...props}>
-            {children}
-          </p>
-        ),
-        ul: ({ children, ...props }) => (
-          <ul className="mb-4 ml-6 list-disc space-y-2 marker:text-muted-foreground" {...props}>
-            {children}
-          </ul>
-        ),
-        ol: ({ children, ...props }) => (
-          <ol className="mb-4 ml-6 list-decimal space-y-2 marker:text-muted-foreground" {...props}>
-            {children}
-          </ol>
-        ),
-        li: ({ children, ...props }) => (
-          <li className="leading-8 text-foreground/90" {...props}>
-            {children}
-          </li>
-        ),
-        a: ({ href, children, ...props }) => (
-          <a
-            href={href}
-            className="text-primary underline underline-offset-4 hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            target={href?.startsWith("http") ? "_blank" : undefined}
-            rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
-            {...props}
-          >
-            {children}
-          </a>
-        ),
-        blockquote: ({ children, ...props }) => (
-          <blockquote
-            className="mb-5 rounded-r-md border-l-4 border-primary bg-muted/30 py-3 pl-4 pr-3 text-foreground/90 not-italic"
-            {...props}
-          >
-            {children}
-          </blockquote>
-        ),
-        code: ({ className, children, ...props }) => {
-          const isInline = !className;
-          if (isInline) {
-            return (
-              <code
-                className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.875em] text-foreground"
-                {...props}
-              >
-                {children}
-              </code>
-            );
-          }
-          return (
-            <code className={cn("font-mono text-sm", className)} {...props}>
-              {children}
-            </code>
-          );
-        },
-        pre: ({ children, ...props }) => {
-          const rest = props as Record<string, unknown>;
-          const language = getDataLanguage(rest);
-          // Drop react-markdown internal `node` before spreading to DOM.
-          const { node: _node, ...domProps } = rest;
-          return (
-            <CodeBlock language={language} {...(domProps as React.HTMLAttributes<HTMLPreElement>)}>
-              {children}
-            </CodeBlock>
-          );
-        },
-        figure: ({ children, ...props }) => (
-          <figure className="mb-0 contents" {...props}>
-            {children}
-          </figure>
-        ),
-        hr: ({ ...props }) => (
-          <hr className="my-10 border-0 border-t-2 border-border" {...props} />
-        ),
-        table: ({ children, ...props }) => (
-          <div className="mb-5 overflow-x-auto rounded-md border border-border">
-            <table className="w-full border-collapse text-sm" {...props}>
-              {children}
-            </table>
-          </div>
-        ),
-        thead: ({ children, ...props }) => (
-          <thead className="border-b border-border bg-muted/50" {...props}>
-            {children}
-          </thead>
-        ),
-        th: ({ children, ...props }) => (
-          <th className="border-b border-border px-4 py-2.5 text-left font-semibold" {...props}>
-            {children}
-          </th>
-        ),
-        td: ({ children, ...props }) => (
-          <td className="border-b border-border px-4 py-2.5" {...props}>
-            {children}
-          </td>
-        ),
-        img: ({ src, alt, ...props }) => (
-          <img
-            src={src}
-            alt={alt}
-            className="my-4 max-w-full rounded-md"
-            loading="lazy"
-            {...props}
-          />
-        ),
-        strong: ({ children, ...props }) => (
-          <strong className="font-semibold text-foreground" {...props}>
-            {children}
-          </strong>
-        ),
-        div: ({ className, children, ...props }) => (
-          <div className={className} {...props}>
-            {children}
-          </div>
-        ),
-      }}
+    <HeadingIdContext.Provider value={getHeadingId}>
+      {/* Changed server HTML remounts, so its charts start paused and replay in
+          view. Raw markdown (edit-mode typing) must not: its charts are live
+          components that would replay on every keystroke. */}
+      <ReactMarkdown
+        key={isEnhanced ? source : "raw"}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        components={isEnhanced ? markdownComponents : rawMarkdownComponents}
+      >
+        {source}
+      </ReactMarkdown>
+    </HeadingIdContext.Provider>
+  );
+});
+
+// Must stay a stable module-level object: a new map per render gives React new
+// component types, which remounts every element — including chart SVGs, which
+// then lose the playing mark set by playInView and render blank.
+const markdownComponents: Components = {
+  h1: function MarkdownH1({ children, ...props }) {
+    const id = useHeadingId(children, (props as { id?: string }).id);
+    // Demote markdown/HTML h1 → h2 so the page hero remains the sole document H1.
+    return (
+      <h2
+        id={id}
+        className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
+        data-testid={`heading-${id}`}
+        {...props}
+      >
+        {children}
+      </h2>
+    );
+  },
+  h2: function MarkdownH2({ children, ...props }) {
+    const id = useHeadingId(children, (props as { id?: string }).id);
+    return (
+      <h2
+        id={id}
+        className="mb-3 mt-12 scroll-mt-24 text-2xl font-bold tracking-tight text-foreground first:mt-0 md:text-[1.75rem]"
+        data-testid={`heading-${id}`}
+        {...props}
+      >
+        {children}
+      </h2>
+    );
+  },
+  h3: function MarkdownH3({ children, ...props }) {
+    const id = useHeadingId(children, (props as { id?: string }).id);
+    return (
+      <h3
+        id={id}
+        className="mb-2 mt-8 scroll-mt-24 text-lg font-medium tracking-tight text-foreground/90 first:mt-0 md:text-xl"
+        data-testid={`heading-${id}`}
+        {...props}
+      >
+        {children}
+      </h3>
+    );
+  },
+  h4: ({ children, ...props }) => (
+    <h4 className="mb-2 mt-6 text-base font-semibold first:mt-0" {...props}>
+      {children}
+    </h4>
+  ),
+  p: ({ children, ...props }) => (
+    <p className="mb-4 mt-0 leading-8 text-foreground/90" {...props}>
+      {children}
+    </p>
+  ),
+  ul: ({ children, ...props }) => (
+    <ul className="mb-4 ml-6 list-disc space-y-2 marker:text-muted-foreground" {...props}>
+      {children}
+    </ul>
+  ),
+  ol: ({ children, ...props }) => (
+    <ol className="mb-4 ml-6 list-decimal space-y-2 marker:text-muted-foreground" {...props}>
+      {children}
+    </ol>
+  ),
+  li: ({ children, ...props }) => (
+    <li className="leading-8 text-foreground/90" {...props}>
+      {children}
+    </li>
+  ),
+  a: ({ href, children, ...props }) => (
+    <a
+      href={href}
+      className="text-primary underline underline-offset-4 hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      target={href?.startsWith("http") ? "_blank" : undefined}
+      rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
+      {...props}
     >
-      {source}
-    </ReactMarkdown>
+      {children}
+    </a>
+  ),
+  blockquote: ({ children, ...props }) => (
+    <blockquote
+      className="mb-5 rounded-r-md border-l-4 border-primary bg-muted/30 py-3 pl-4 pr-3 text-foreground/90 not-italic"
+      {...props}
+    >
+      {children}
+    </blockquote>
+  ),
+  code: ({ className, children, ...props }) => {
+    const isInline = !className;
+    if (isInline) {
+      return (
+        <code
+          className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.875em] text-foreground"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className={cn("font-mono text-sm", className)} {...props}>
+        {children}
+      </code>
+    );
+  },
+  pre: ({ children, ...props }) => {
+    const rest = props as Record<string, unknown>;
+    const language = getDataLanguage(rest);
+    // Drop react-markdown internal `node` before spreading to DOM.
+    const { node: _node, ...domProps } = rest;
+    return (
+      <CodeBlock language={language} {...(domProps as React.HTMLAttributes<HTMLPreElement>)}>
+        {children}
+      </CodeBlock>
+    );
+  },
+  figure: ({ children, ...props }) => (
+    <figure className="mb-0 contents" {...props}>
+      {children}
+    </figure>
+  ),
+  hr: ({ ...props }) => (
+    <hr className="my-10 border-0 border-t-2 border-border" {...props} />
+  ),
+  table: ({ children, ...props }) => (
+    <div className="mb-5 overflow-x-auto rounded-md border border-border">
+      <table className="w-full border-collapse text-sm" {...props}>
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children, ...props }) => (
+    <thead className="border-b border-border bg-muted/50" {...props}>
+      {children}
+    </thead>
+  ),
+  th: ({ children, ...props }) => (
+    <th className="border-b border-border px-4 py-2.5 text-left font-semibold" {...props}>
+      {children}
+    </th>
+  ),
+  td: ({ children, ...props }) => (
+    <td className="border-b border-border px-4 py-2.5" {...props}>
+      {children}
+    </td>
+  ),
+  img: ({ src, alt, ...props }) => (
+    <img
+      src={src}
+      alt={alt}
+      className="my-4 max-w-full rounded-md"
+      loading="lazy"
+      {...props}
+    />
+  ),
+  strong: ({ children, ...props }) => (
+    <strong className="font-semibold text-foreground" {...props}>
+      {children}
+    </strong>
+  ),
+  div: ({ className, children, ...props }) => (
+    <div className={className} {...props}>
+      {children}
+    </div>
+  ),
+};
+
+// Raw markdown (edit mode, or a page rendered outside server enhancement) has
+// no server-drawn charts: ```mermaid fences are drawn here in the browser.
+const rawMarkdownComponents: Components = {
+  ...markdownComponents,
+  code: function RawMarkdownCode(props) {
+    const node = (props as { node?: HastElement }).node;
+    if (isMermaidCodeNode(node)) {
+      return (
+        <ArticleMermaidBlock
+          source={collectHastText(node).trim()}
+          speed={speedFromMeta(node)}
+          duration={durationFromMeta(node)}
+        />
+      );
+    }
+    const BaseCode = markdownComponents.code as ComponentType<typeof props>;
+    return <BaseCode {...props} />;
+  },
+  pre: function RawMarkdownPre(props) {
+    const node = (props as { node?: HastElement }).node;
+    const codeChild = node?.children.find(
+      (c): c is HastElement => c.type === "element" && c.tagName === "code",
+    );
+    // The chart renders as a <figure>; keep it out of <pre> / CodeBlock.
+    if (isMermaidCodeNode(codeChild)) return <>{props.children}</>;
+    const BasePre = markdownComponents.pre as ComponentType<typeof props>;
+    return <BasePre {...props} />;
+  },
+};
+
+/** Charts that already played their build animation this session; a remount
+ * (e.g. a code block added above) draws them finished instead of replaying. */
+const animatedChartSources = new Set<string>();
+
+interface MermaidBlockProps {
+  source: string;
+  speed?: number;
+  duration?: number;
+}
+
+const ArticleMermaidBlock = memo(function ArticleMermaidBlock(props: MermaidBlockProps) {
+  const isEditMode = useEditModeOptional()?.isEditMode ?? false;
+  if (isEditMode) return <EditableMermaidChart {...props} />;
+  return <VisitorMermaidChart key={props.source} {...props} />;
+});
+
+function MermaidSourceBlock({ source }: { source: string }) {
+  return (
+    <CodeBlock language="mermaid">
+      <code className="font-mono text-sm">{source}</code>
+    </CodeBlock>
+  );
+}
+
+function VisitorMermaidChart({ source, speed, duration }: MermaidBlockProps) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <MermaidSourceBlock source={source} />;
+  return (
+    <MermaidFenceChart
+      source={source}
+      speed={speed}
+      duration={duration}
+      play="in-view"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+function errorReason(error: Error): string {
+  return error.message?.trim() || "the chart code has a mistake.";
+}
+
+/**
+ * Staff view of a ```mermaid fence. Draws once with the build animation; later
+ * edits to this chart's code are test-drawn off-screen first, so a half-typed
+ * chart keeps showing the last version that worked.
+ */
+function EditableMermaidChart({ source, speed, duration }: MermaidBlockProps) {
+  const [lastGood, setLastGood] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ source: string; reason: string } | null>(null);
+  const [animate, setAnimate] = useState(() => !animatedChartSources.has(source));
+  const [replayKey, setReplayKey] = useState(0);
+  const [showCode, setShowCode] = useState(false);
+
+  const currentFailed = failure?.source === source ? failure.reason : null;
+  const visibleSource = lastGood ?? source;
+  const needsProbe = lastGood !== null && lastGood !== source && !currentFailed;
+
+  const handleVisibleRender = () => {
+    animatedChartSources.add(visibleSource);
+    if (lastGood === null) setLastGood(visibleSource);
+  };
+  const handleFirstError = (error: Error) => {
+    setFailure({ source: visibleSource, reason: errorReason(error) });
+  };
+  const handleProbeRender = () => {
+    animatedChartSources.add(source);
+    setAnimate(false);
+    setFailure(null);
+    setLastGood(source);
+  };
+  const handleProbeError = (error: Error) => {
+    setFailure({ source, reason: errorReason(error) });
+  };
+  const replay = () => {
+    setAnimate(true);
+    setReplayKey((k) => k + 1);
+  };
+
+  const neverDrawn = lastGood === null && currentFailed !== null;
+
+  return (
+    <div
+      className="relative mb-5 rounded-md border border-border bg-card"
+      data-testid="article-chart-editable"
+    >
+      <div className="flex h-9 items-center justify-end gap-1 border-b border-border/60 px-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2 text-xs"
+          onClick={replay}
+          disabled={showCode || lastGood === null}
+          data-testid="button-chart-replay"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+          Replay
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2 text-xs"
+          onClick={() => setShowCode((v) => !v)}
+          data-testid="button-chart-toggle-code"
+        >
+          <Code className="h-3.5 w-3.5" aria-hidden />
+          {showCode ? "Show chart" : "Show code"}
+        </Button>
+      </div>
+
+      {showCode || neverDrawn ? (
+        <pre className="overflow-x-auto p-4 font-mono text-sm leading-relaxed" tabIndex={0}>
+          {source}
+        </pre>
+      ) : (
+        <div className="px-4">
+          <MermaidFenceChart
+            key={`${visibleSource}::${replayKey}`}
+            source={visibleSource}
+            speed={speed}
+            duration={duration}
+            play="once"
+            motion={animate}
+            showWarnings
+            onRender={handleVisibleRender}
+            onError={lastGood === null ? handleFirstError : undefined}
+          />
+        </div>
+      )}
+
+      {needsProbe && (
+        <div
+          className="pointer-events-none absolute -left-[9999px] top-0 w-[612px]"
+          aria-hidden="true"
+        >
+          <MermaidFenceChart
+            key={source}
+            source={source}
+            motion={false}
+            onRender={handleProbeRender}
+            onError={handleProbeError}
+          />
+        </div>
+      )}
+
+      {neverDrawn ? (
+        <p className="border-t border-border/60 px-4 py-2 text-xs text-destructive" data-testid="text-chart-error">
+          This chart can't be drawn yet: {currentFailed}
+        </p>
+      ) : currentFailed && lastGood !== null ? (
+        <p className="border-t border-border/60 px-4 py-2 text-xs text-muted-foreground" data-testid="text-chart-pending-error">
+          Your latest change can't be drawn yet: {currentFailed}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

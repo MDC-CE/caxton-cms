@@ -1,11 +1,29 @@
-import type { Validator, ValidatorResult, ValidationContext } from "../shared/types";
+import type { ContentFile, Validator, ValidatorResult, ValidationContext } from "../shared/types";
 import { liveFilesForSeo } from "../shared/seoValidationScope";
+import { getResolvedMeta, hasTemplate } from "../shared/resolvedMeta";
 import { SEO_DUPLICATES_ISSUE_CODES } from "./seo-duplicates.issueCodes";
 
 /**
- * Cross-entry SEO duplicate title/description checks.
+ * Cross-entry SEO duplicate title/description checks on the filled-in meta,
+ * site-wide across languages (titles must differ per language).
  * Must not run in entry-scoped / on-save slices (false clear or false all-clear).
  */
+
+function usableValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || hasTemplate(trimmed)) return null;
+  return trimmed;
+}
+
+function otherFilesSuggestion(files: ContentFile[], field: string): string {
+  const others = files
+    .slice(1)
+    .map((f) => `${f.filePath} (${f.locale})`)
+    .join(", ");
+  const locales = Array.from(new Set(files.map((f) => `${f.locale}.yml`))).join(" / ");
+  return `Also used in: ${others}. ${field} must differ per page and per language; save a translated value in each ${locales}`;
+}
 
 export const seoDuplicatesValidator: Validator = {
   name: "seo-duplicates",
@@ -21,21 +39,25 @@ export const seoDuplicatesValidator: Validator = {
     const errors: ValidatorResult["errors"] = [];
     const warnings: ValidatorResult["warnings"] = [];
 
-    const titleMap = new Map<string, string[]>();
-    const descriptionMap = new Map<string, string[]>();
+    const titleMap = new Map<string, ContentFile[]>();
+    const descriptionMap = new Map<string, ContentFile[]>();
+    const liveFiles = liveFilesForSeo(context);
 
-    for (const file of liveFilesForSeo(context)) {
-      const pageTitle = file.meta?.page_title;
+    for (const file of liveFiles) {
+      const resolved = getResolvedMeta(file, context);
+      if (!resolved.ok) continue;
+
+      const pageTitle = usableValue(resolved.meta.page_title);
       if (pageTitle) {
         const existing = titleMap.get(pageTitle) || [];
-        existing.push(file.filePath);
+        existing.push(file);
         titleMap.set(pageTitle, existing);
       }
 
-      const description = file.meta?.description;
+      const description = usableValue(resolved.meta.description);
       if (description) {
         const existing = descriptionMap.get(description) || [];
-        existing.push(file.filePath);
+        existing.push(file);
         descriptionMap.set(description, existing);
       }
     }
@@ -48,8 +70,8 @@ export const seoDuplicatesValidator: Validator = {
           type: "error",
           code: "DUPLICATE_TITLE",
           message: `Duplicate page_title "${title}" used by ${files.length} files`,
-          file: files[0],
-          suggestion: `Also used in: ${files.slice(1).join(", ")}`,
+          file: files[0].filePath,
+          suggestion: otherFilesSuggestion(files, "Titles"),
         });
       }
     });
@@ -62,8 +84,8 @@ export const seoDuplicatesValidator: Validator = {
           type: "error",
           code: "DUPLICATE_DESCRIPTION",
           message: `Duplicate description used by ${files.length} files: "${desc.substring(0, 60)}..."`,
-          file: files[0],
-          suggestion: `Also used in: ${files.slice(1).join(", ")}`,
+          file: files[0].filePath,
+          suggestion: otherFilesSuggestion(files, "Descriptions"),
         });
       }
     });
@@ -76,7 +98,7 @@ export const seoDuplicatesValidator: Validator = {
       warnings,
       duration: Date.now() - startTime,
       artifacts: {
-        pagesChecked: liveFilesForSeo(context).length,
+        pagesChecked: liveFiles.length,
         duplicateTitles,
         duplicateDescriptions,
       },

@@ -6,6 +6,23 @@ window_days: 6
 
 entries:
   - date: "2026-09-25"
+    summary: "SEO validators (meta, seo-depth, seo-duplicates) check the filled-in meta visitors see, not raw {{ }} templates; new *_INHERITED_FROM_COMMON warnings"
+    agent_impact:
+      - "TITLE_TOO_SHORT/LONG, DESCRIPTION_TOO_*, DUPLICATE_TITLE/DESCRIPTION now measure meta after field-mapped {{ entry.* }} / {{ single.* }} + site vars (default values; entry's own region) — same resolveEntryMeta as the live SEO gate. Values still containing {{ }} skip length/duplicate checks (reported only as UNRESOLVED_META_TEMPLATE). Duplicates stay site-wide across languages; suggestion names each {locale}.yml to translate."
+      - "New seo-depth warnings (YAML entries with 2+ live languages): TITLE_INHERITED_FROM_COMMON / DESCRIPTION_INHERITED_FROM_COMMON when meta.page_title / meta.description (or the mapped entry field its {{ entry.X }} reads) exists only in _common.yml; CANONICAL_INHERITED_FROM_COMMON when meta.canonical_url is in _common.yml. suggestion carries the field path + {locale}.yml. Not checked: og_image, redirects, robots, priority, change_frequency."
+      - "MISSING_OG_IMAGE also fires when og_image is a variable with no value. META_RESOLVE_FAILED (seo-depth) = meta could not be filled in for that page; its other SEO checks are skipped for that page only."
+    tools_changed: false
+    paths:
+      - server/resolve-entry-meta.ts
+      - server/live-entry-seo-gate.ts
+      - scripts/validation/shared/resolvedMeta.ts
+      - scripts/validation/shared/metaSource.ts
+      - scripts/validation/validators/meta.ts
+      - scripts/validation/validators/seo-depth.ts
+      - scripts/validation/validators/seo-depth.issueCodes.ts
+      - scripts/validation/validators/seo-duplicates.ts
+
+  - date: "2026-09-25"
     summary: "layout_owner (shared_template | entry) tells you what a draft contains; section-built drafts get layout review help"
     agent_impact:
       - "layout_owner per entry on get_entry_content (+ detached: true / is_shared_template: true), proposal entries, review_context.entries[], accepted ideas (accepted_entry_layout_owner) and section errors (sections_required, invalid_sections, attached_sections_refused, attached_draft_structure). get_content_type_info / list_entries carry the type default only (detached rows may be entry). shared_template → fields only; entry → the draft is the whole page (full sections); is_shared_template → the draft is the shared layout (reaches affected_entries). Conventions §2d decision table + creatability table."

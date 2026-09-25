@@ -2,13 +2,8 @@
  * Gate live entry writes: required SEO meta + editor.required fields.
  */
 
-import { resolveSingleVars } from "./single-resolver";
-import { buildSingleEntryFromContent } from "./build-single-entry";
-import {
-  finalizeSingleEntryForTemplates,
-  getContentTypeConfig,
-} from "./content-types";
-import { resolveAllTemplateVars } from "./resolve-template-vars";
+import { getContentTypeConfig } from "./content-types";
+import { resolveEntryMeta } from "./resolve-entry-meta";
 import {
   validateRequiredMeta,
   validateRequiredMetaKeys,
@@ -140,33 +135,17 @@ export function evaluateLiveEntrySeoAndRequiredFields(
     }
   }
 
-  const singleEntry =
-    finalizeSingleEntryForTemplates(
-      buildSingleEntryFromContent(contentType, pageForResolve, {
-        slug,
-        locale,
-        contentRoot,
-      }) || {},
-      { slug, locale },
-    ) || {};
-
-  const resolvedPage = resolveSingleVars(pageForResolve, singleEntry) as Record<
-    string,
-    unknown
-  >;
-
   // Site globals in meta (e.g. hiring rate) must resolve before the leftover-{{ }} gate.
-  const root = contentRoot ?? getDefaultContentRoot();
-  let region: string | undefined;
-  if (typeof pageForResolve.region === "string" && pageForResolve.region.trim()) {
-    region = pageForResolve.region.trim();
-  }
-  const metaForGate = resolveAllTemplateVars(resolvedPage.meta ?? {}, {
+  const {
     singleEntry,
-    meta: (resolvedPage.meta as Record<string, unknown>) || undefined,
-    contentRoot: root,
-    context: { locale, region },
-    skipSiteVars: false,
+    resolvedPage,
+    meta: metaForGate,
+  } = resolveEntryMeta({
+    contentType,
+    slug,
+    locale,
+    pageData: pageForResolve,
+    contentRoot,
   });
 
   let conversionNames: string[] = [];
