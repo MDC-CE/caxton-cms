@@ -38,6 +38,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          DIVERGED_NOTE: >-
+            `breatheco-de/caxton-cms` moved to %s, and `%s` already has its own commits,
+            so this run left the branch as-is. Update the branch yourself if you still want those newer commits.
+          PR_BODY_TEMPLATE: |
+            ## Summary
+            Brings [`breatheco-de/caxton-cms`](https://github.com/breatheco-de/caxton-cms) `main` (`%s`) into this fork.
+
+            This workflow only **reads** that repository. It does not push to it.
+
+            ## How to merge
+            - Use **Create a merge commit**. A squash makes the next run think these commits are still missing.
+            - Merging into `main` can deploy to learning.mdc.edu when the changed paths match the deploy workflow.
+            - If GitHub reports conflicts, resolve them on `%s`. Later runs will not overwrite commits you add on that branch.
+
+            ## Commits
         run: |
           set -euo pipefail
 
@@ -76,12 +91,8 @@ jobs:
             PR_NUM="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
             if [ -n "$PR_NUM" ]; then
               if ! gh pr view "$PR_NUM" --repo "$REPO" --comments | grep -q "$MARKER"; then
-                gh pr comment "$PR_NUM" --repo "$REPO" --body "$(cat <<EOF
-${MARKER}
-
-\`breatheco-de/caxton-cms\` moved to \`${UPSTREAM}\`, and \`${BRANCH}\` already has its own commits, so this run left the branch as-is. Update the branch yourself if you still want those newer commits.
-EOF
-)"
+                NOTE="$(printf "$DIVERGED_NOTE" "$UPSTREAM" "$BRANCH")"
+                gh pr comment "$PR_NUM" --repo "$REPO" --body "$(printf '%s\n\n%s\n' "$MARKER" "$NOTE")"
               fi
             fi
             exit 0
@@ -94,20 +105,8 @@ EOF
           fi
 
           SHORTLOG="$(git log --oneline "${BASE}..${UPSTREAM}")"
-          gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "Sync breatheco-de/caxton-cms into main" --body "$(cat <<EOF
-## Summary
-Brings [\`breatheco-de/caxton-cms\`](https://github.com/breatheco-de/caxton-cms) \`main\` (\`${UPSTREAM}\`) into this fork.
-
-This workflow only **reads** that repository. It does not push to it.
-
-## How to merge
-- Use **Create a merge commit**. A squash makes the next run think these commits are still missing.
-- Merging into \`main\` can deploy to learning.mdc.edu when the changed paths match the deploy workflow.
-- If GitHub reports conflicts, resolve them on \`${BRANCH}\`. Later runs will not overwrite commits you add on that branch.
-
-## Commits
-\`\`\`
-${SHORTLOG}
-\`\`\`
-EOF
-)"
+          {
+            printf "$PR_BODY_TEMPLATE" "$UPSTREAM" "$BRANCH"
+            printf '\n```\n%s\n```\n' "$SHORTLOG"
+          } > /tmp/pr-body.md
+          gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "Sync breatheco-de/caxton-cms into main" --body-file /tmp/pr-body.md
