@@ -1166,10 +1166,11 @@ export function CreateContentModal({
                         {showWhyOneLanguage && (
                           <div className="mt-1.5 space-y-1.5 pl-0.5">
                             <p>
-                              Content types with a shared template (like Blog) do not use draft-first create.
-                              The entry is published immediately, so you can only create{" "}
-                              <strong className="text-foreground font-medium">one language at a time</strong>.
-                              Adding a second language here would put an empty public page online.
+                              The page is created as a{" "}
+                              <strong className="text-foreground font-medium">draft</strong> in{" "}
+                              <strong className="text-foreground font-medium">one language</strong>. Visitors do not
+                              see it until someone publishes it. Other languages are added later as translations of
+                              this one.
                             </p>
                             <button
                               type="button"
@@ -1187,10 +1188,10 @@ export function CreateContentModal({
                                 <p>
                                   Gate: <code className="text-[11px]">server/content-editor.ts</code> (
                                   <code className="text-[11px]">createContentEntry</code>
-                                  ). Shared-layout stays live-on-create (
+                                  ). Every file-based type is draft-first (
                                   <code className="text-[11px]">server/draft-entry.ts</code>{" "}
                                   <code className="text-[11px]">usesDraftFirstCreate</code>
-                                  ).
+                                  ); attached entries keep copy only in the draft, structure stays on the template.
                                 </p>
                                 <p>
                                   Later translations: DebugBubble Detach → MCP{" "}
@@ -1218,7 +1219,7 @@ export function CreateContentModal({
                         </button>
                         {showWhenTranslation && (
                           <p className="mt-1.5 pl-0.5">
-                            After this first locale exists and has real content: open the page, detach it from the shared template if it is still attached, then add the new language as a draft and promote it when the translation is ready.
+                            After this first language has real content: open the page and add the new language as a translation draft. It goes live when someone publishes it.
                           </p>
                         )}
                       </div>

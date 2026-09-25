@@ -130,6 +130,7 @@ import {
 import {
   isEntryDetached,
   isSharedLayoutType,
+  attachedOverlayStructureError,
   resolveVersioningReadSlug,
   resolveWritableVersioningTarget,
   isTemplateVersioningSlug,
@@ -270,6 +271,68 @@ function getValidationCache(res: Response) {
 }
 
 
+/** MCP role connectors forward `x-mcp-role`; swarm roles never publish directly. */
+function isSwarmCaller(req: Request): boolean {
+  const header = req.headers["x-mcp-role"];
+  const roleId = Array.isArray(header) ? header[0] : header;
+  return Boolean(roleId && userStore.isAgenticSwarmRoleId(String(roleId)));
+}
+
+export type VariantProposalBadge = {
+  id: string;
+  env: string;
+  /** False when the link comes from `_draft.proposal` and the proposal is not in this environment's DB. */
+  local: boolean;
+  title?: string;
+  status?: string;
+  proposer_username?: string;
+  proposer_kind?: "agent" | "staff";
+};
+
+/** `{locale: {variant: badge}}` — `_draft.proposal` first, then the local proposals DB. */
+async function proposalsByVariantFor(opts: {
+  site: string;
+  contentType: string;
+  slug: string;
+  versioning: Record<string, { variants?: Array<{ slug: string }> }>;
+  variantPath: (variant: string, locale: string) => string;
+}): Promise<Record<string, Record<string, VariantProposalBadge>>> {
+  const out: Record<string, Record<string, VariantProposalBadge>> = {};
+  const { readDraftMeta } = await import("../versioning/draft-meta");
+  let local: import("../content-proposals").OpenProposalForEntry[] = [];
+  let env = "unknown";
+  try {
+    const mod = await import("../content-proposals");
+    local = mod.listOpenProposalsForEntry(opts.site, opts.contentType, opts.slug);
+    env = mod.pipelineEnv();
+  } catch {
+    /* proposals DB unavailable — fall back to file links only */
+  }
+  const localById = new Map(local.map((p) => [p.id, p]));
+  for (const [locale, block] of Object.entries(opts.versioning)) {
+    for (const v of block?.variants ?? []) {
+      const link = readDraftMeta(opts.variantPath(v.slug, locale))?.proposal;
+      const fromDb = local.find((p) => p.locale === locale && p.variant === v.slug);
+      const hit = link ? localById.get(link.id) ?? null : fromDb ?? null;
+      if (!link && !hit) continue;
+      (out[locale] ??= {})[v.slug] = {
+        id: link?.id ?? hit!.id,
+        env: link?.env ?? env,
+        local: Boolean(hit),
+        ...(hit
+          ? {
+              title: hit.title,
+              status: hit.status,
+              proposer_username: hit.proposer_username,
+              proposer_kind: hit.proposer_kind,
+            }
+          : {}),
+      };
+    }
+  }
+  return out;
+}
+
 /** Resolve writable versioning slug (entry drafts or template `single`). */
 function resolveWritableVersioningSlug(
   contentType: string,
@@ -319,7 +382,7 @@ export function registerVersioningRoutes(app: Express): void {
   });
 
   // Get versioning data for a specific content type and slug
-  app.get("/api/versioning/:contentType/:contentSlug", (req, res) => {
+  app.get("/api/versioning/:contentType/:contentSlug", async (req, res) => {
     const { contentType, contentSlug: requestSlug } = req.params;
 
     if (!isValidType(contentType)) {
@@ -370,6 +433,9 @@ export function registerVersioningRoutes(app: Express): void {
       publishedAt = normalizeFlexibleDate(readPublishedAt(contentType, entrySlug, root));
     }
 
+    const attached = shared && !templateMode && !detached;
+    const isDraft = !hasLiveDefault && !templateMode;
+
     if (!versioning) {
       res.json({
         versioning: null,
@@ -378,13 +444,15 @@ export function registerVersioningRoutes(app: Express): void {
         availableLocales,
         detached,
         isSharedLayout: shared,
+        isAttached: attached,
         versioningSlug: resolvedSlug,
         hasLiveDefault,
         liveByLocale,
-        isDraft: !hasLiveDefault && !shared,
+        isDraft,
         title,
         updatedAt,
         publishedAt,
+        proposalsByVariant: {},
       });
       return;
     }
@@ -396,13 +464,24 @@ export function registerVersioningRoutes(app: Express): void {
       availableLocales,
       detached,
       isSharedLayout: shared,
+      isAttached: attached,
       versioningSlug: resolvedSlug,
       hasLiveDefault,
       liveByLocale,
-      isDraft: !hasLiveDefault && !shared,
+      isDraft,
       title,
       updatedAt,
       publishedAt,
+      proposalsByVariant: templateMode
+        ? {}
+        : await proposalsByVariantFor({
+            site: getContentRootName(res),
+            contentType,
+            slug: resolvedSlug,
+            versioning,
+            variantPath: (variant, locale) =>
+              versioningManager.getVariantFilePath(contentType, resolvedSlug, variant, locale),
+          }),
     });
   });
 
@@ -446,6 +525,23 @@ export function registerVersioningRoutes(app: Express): void {
         if (!hasAnyLiveLocale(contentDir, resolved.templateMode)) {
           res.status(400).json({
             error: "Cannot allocate traffic until a live locale exists. Publish a draft first.",
+          });
+          return;
+        }
+
+        const root = getContentRoot(res);
+        const attachedEntry =
+          !resolved.templateMode &&
+          isSharedLayoutType(contentType, root) &&
+          !isEntryDetached(contentType, resolved.slug, root);
+        const trafficOnAttached = parseResult.data.variants.filter((v) => v.allocation > 0);
+        if (attachedEntry && trafficOnAttached.length > 0) {
+          res.status(400).json({
+            code: "attached_variant_traffic",
+            error:
+              "Posts that use the shared template cannot run experiments on their own. " +
+              "Variants here are drafts (0% traffic). Detach the entry first, or run the experiment on the shared template.",
+            variants: trafficOnAttached.map((v) => v.slug),
           });
           return;
         }
@@ -497,7 +593,6 @@ export function registerVersioningRoutes(app: Express): void {
           return;
         }
 
-        const root = getContentRoot(res);
         const ci = getCI(res);
         const cache = getValidationCache(res);
         const warningsByVariant: Record<string, unknown[]> = {};
@@ -687,12 +782,35 @@ export function registerVersioningRoutes(app: Express): void {
     }
 
     try {
-      const sourceContent = fs.readFileSync(sourceFilePath, "utf-8");
+      const { stripDraftMetaFromRaw } = await import("../versioning/draft-meta");
+      const { recordDraftBase } = await import("../versioning/draft-base");
+      // Never copy another file's `_draft` (base / proposal link / translation source).
+      const sourceContent = stripDraftMetaFromRaw(fs.readFileSync(sourceFilePath, "utf-8"));
+      const attachedEntry =
+        !resolved.templateMode &&
+        isSharedLayoutType(contentType, root) &&
+        !isEntryDetached(contentType, resolved.slug, root);
+      if (attachedEntry) {
+        const structureErr = attachedOverlayStructureError(
+          (getCI(res).safeYamlLoad(sourceContent) as Record<string, unknown>) || {},
+        );
+        if (structureErr) {
+          res.status(400).json({
+            code: "attached_draft_structure",
+            error: `${structureErr} Drafts of posts that use the shared template may only change fields.`,
+          });
+          return;
+        }
+      }
       fs.writeFileSync(variantFilePath, sourceContent, "utf-8");
       const relPrimary = resolved.templateMode
         ? `${folder}/${variantTemplateBasename(variantSlug, locale)}`
         : `${folder}/${resolved.slug}/${variantSlug}.${locale}.yml`;
       markFileAsModified(relPrimary, auth.author || "api", undefined, root);
+      recordDraftBase(
+        { contentType, slug: resolved.slug, locale, variant: variantSlug, contentRoot: root },
+        { author: auth.author || "api" },
+      );
 
       // Template mode: fan out sibling-locale variant files with _label pending translation
       const createdSiblings: string[] = [];
@@ -827,134 +945,61 @@ export function registerVersioningRoutes(app: Express): void {
       return;
     }
 
-    const publishedLocales: string[] = [];
+    const { promoteVariantWithOptionalTeardown } = await import("../versioning/promote-with-teardown");
+    const { findOpenProposalLinkForDraft } = await import("../content-proposals/service");
+    const siteName = getContentRootName(res);
+    const promoteLocale = (locale: string, dryRun: boolean) =>
+      promoteVariantWithOptionalTeardown({
+        contentType,
+        slug: resolved.slug,
+        locale,
+        variantSlug,
+        author: auth.author || "api",
+        contentRoot: root,
+        contentRootName: siteName,
+        folder,
+        templateMode: resolved.templateMode,
+        versioningManager,
+        ci: getCI(res),
+        cache: getValidationCache(res),
+        confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
+        confirmSourceChanged: req.body?.confirm_source_changed === true,
+        callerIsSwarm: isSwarmCaller(req),
+        findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
+        dryRun,
+      });
+
     try {
+      // All-or-nothing: every locale must pass every check before any file is written.
       for (const locale of draftLocales) {
-        const variantFilePath = path.resolve(
-          versioningManager.getVariantFilePath(contentType, resolved.slug, variantSlug, locale),
-        );
-        const defaultFilePath = path.resolve(
-          contentDir,
-          resolved.templateMode ? liveLocaleFileName(locale, true) : `${locale}.yml`,
-        );
-        const variantContent = fs.readFileSync(variantFilePath, "utf-8");
-        const identityErr = validateYamlIdentity(variantContent, {
-          contentType,
-          contentSlug: resolved.slug,
-        });
-        if (identityErr) {
-          res.status(400).json({
-            error:
-              `Cannot publish: ${identityErr} (locale ${locale}). ` +
-              `Set conversion_name / CTA tracking / funnel.products on _common.yml (Funnel tab) before publishing.`,
+        const check = await promoteLocale(locale, true);
+        if (!check.ok) {
+          res.status(check.status ?? 400).json({
+            error: `Cannot publish: ${check.error} (locale ${locale})`,
+            code: check.code,
             locale,
+            ...(check.details ? { details: check.details } : {}),
           });
           return;
         }
-        const parsedVariant =
-          (getCI(res).safeYamlLoad(variantContent) as Record<string, unknown>) || {};
-        const commonForGate =
-          getCI(res).loadCommonData(contentType, resolved.slug) || {};
-        const { assertLiveEntrySeoAndRequiredFields } = await import(
-          "../live-entry-seo-gate"
-        );
-        const seoGateErr = assertLiveEntrySeoAndRequiredFields({
-          contentType,
-          slug: resolved.slug,
-          locale,
-          pageData: deepMerge(commonForGate, parsedVariant) as Record<
-            string,
-            unknown
-          >,
-          contentRoot: root,
-          mode: "publish",
-          intent: "publish",
-          isDraftWrite: false,
-        });
-        if (seoGateErr) {
-          res.status(400).json({ error: `Cannot publish: ${seoGateErr}`, locale });
-          return;
-        }
-        if (!resolved.templateMode) {
-          const mergedForUrl = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
-          const urlCheck = assertLocaleUrlAvailable({
-            contentType,
-            entryIdentity: resolved.slug,
+      }
+
+      const publishedLocales: string[] = [];
+      const warnings: Array<{ locale: string; code: string; message: string }> = [];
+      for (const locale of draftLocales) {
+        const result = await promoteLocale(locale, false);
+        if (!result.ok) {
+          res.status(result.status ?? 500).json({
+            error: `Publish stopped at locale ${locale}: ${result.error}`,
+            code: result.code,
             locale,
-            mergedPageData: mergedForUrl,
-            ci: getCI(res),
+            published_locales: publishedLocales,
+            ...(result.details ? { details: result.details } : {}),
           });
-          if (!urlCheck.ok) {
-            res.status(urlCheck.statusCode).json({
-              error: `Cannot publish: ${urlCheck.error}`,
-              locale,
-              code: urlCheck.code,
-              url: urlCheck.url,
-            });
-            return;
-          }
-        }
-        // First publish: no live locales yet — draft SEO becomes live SEO.
-        fs.writeFileSync(defaultFilePath, variantContent, "utf-8");
-
-        const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
-        const localeData = existing[locale];
-        if (localeData) {
-          const updatedVariants = (localeData.variants || []).filter((v) => v.slug !== variantSlug);
-          versioningManager.updateVersioning(contentType, resolved.slug, {
-            ...existing,
-            [locale]: { variants: updatedVariants },
-          });
-        }
-
-        fs.unlinkSync(variantFilePath);
-
-        if (resolved.templateMode) {
-          markFileAsModified(`${folder}/${liveTemplateBasename(locale)}`, auth.author || "api", undefined, root);
-          markFileAsModified(`${folder}/${variantTemplateBasename(variantSlug, locale)}`, auth.author || "api", undefined, root);
-        } else {
-          markFileAsModified(`${folder}/${resolved.slug}/${locale}.yml`, auth.author || "api", undefined, root);
-          markFileAsModified(`${folder}/${resolved.slug}/${variantSlug}.${locale}.yml`, auth.author || "api", undefined, root);
+          return;
         }
         publishedLocales.push(locale);
-      }
-
-      if (!resolved.templateMode) {
-        ensurePublishedAtOnce(contentType, resolved.slug, {
-          author: auth.author || "api",
-          contentRoot: root,
-        });
-      }
-
-      getCI(res).refresh();
-      getCI(res).invalidateCommonFields(contentType);
-      clearSsrSchemaCache();
-      invalidateContentCaches(contentType, getCI(res));
-      if (!resolved.templateMode) {
-        refreshSitemapEntriesForContentKey(contentType, resolved.slug, publishedLocales);
-      }
-
-      try {
-        const { syncSeoIndexEntryFromLiveDisk } = await import("../seo-index");
-        for (const locale of publishedLocales) {
-          syncSeoIndexEntryFromLiveDisk({
-            contentType,
-            slug: resolved.slug,
-            locale,
-            contentRoot: root,
-            author: auth.author || "api",
-            ci: getCI(res),
-          });
-          emitEntryLocalePromoted({
-            site: getContentRootName(res),
-            contentType,
-            slug: resolved.slug,
-            locale,
-            author: auth.author || "api",
-          });
-        }
-      } catch {
-        /* non-fatal */
+        for (const w of result.warnings) warnings.push({ locale, code: w.code, message: w.message });
       }
 
       res.json({
@@ -962,6 +1007,7 @@ export function registerVersioningRoutes(app: Express): void {
         published: true,
         variantSlug,
         locales: publishedLocales,
+        warnings,
       });
     } catch (error) {
       res.status(500).json({ error: String(error) });
@@ -1009,6 +1055,8 @@ export function registerVersioningRoutes(app: Express): void {
     const root = getContentRoot(res);
     const folder = getFolder(contentType as ContentType);
     const { promoteVariantWithOptionalTeardown } = await import("../versioning/promote-with-teardown");
+    const { findOpenProposalLinkForDraft } = await import("../content-proposals/service");
+    const siteName = getContentRootName(res);
     const result = await promoteVariantWithOptionalTeardown({
       contentType,
       slug: resolved.slug,
@@ -1016,7 +1064,7 @@ export function registerVersioningRoutes(app: Express): void {
       variantSlug,
       author: auth.author || "api",
       contentRoot: root,
-      contentRootName: getContentRootName(res),
+      contentRootName: siteName,
       folder,
       templateMode: resolved.templateMode,
       versioningManager,
@@ -1025,19 +1073,30 @@ export function registerVersioningRoutes(app: Express): void {
       confirmEndExperiment: req.body?.confirm_end_experiment === true,
       // Versions UI: leave sibling experiments alone unless explicitly ending them
       endExperimentMode: req.body?.confirm_end_experiment === true,
+      confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
+      confirmSourceChanged: req.body?.confirm_source_changed === true,
+      callerIsSwarm: isSwarmCaller(req),
+      findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
+      dryRun: req.body?.dry_run === true,
     });
     if (!result.ok) {
       res.status(result.status ?? 400).json({
         error: result.error,
         code: result.code,
         ...(result.traffic_siblings ? { traffic_siblings: result.traffic_siblings } : {}),
+        ...(result.details ? { details: result.details } : {}),
       });
       return;
     }
     res.json({
       success: true,
+      dry_run: result.dryRun === true,
       ignoredVariantSeo: result.ignoredVariantSeo,
       deletedSiblings: result.deletedSiblings,
+      warnings: result.warnings,
+      published_diff: result.publishedDiff,
+      ...(result.rebuilt ? { rebuilt: result.rebuilt } : {}),
+      versioning_deleted: result.versioningDeleted === true,
     });
   });
 
@@ -1089,6 +1148,14 @@ export function registerVersioningRoutes(app: Express): void {
         return;
       }
 
+      {
+        const { recordDraftBase } = await import("../versioning/draft-base");
+        recordDraftBase(
+          { contentType, slug: resolved.slug, locale, variant: result.variantSlug, contentRoot: root },
+          { author: auth.author || "api" },
+        );
+      }
+
       getCI(res).invalidateCommonFields(contentType);
       clearSsrSchemaCache();
       invalidateContentCaches(contentType, getCI(res));
@@ -1133,6 +1200,70 @@ export function registerVersioningRoutes(app: Express): void {
         draftRelPath: result.draftRelPath,
         versioningRelPath: result.versioningRelPath,
       });
+    },
+  );
+
+  // Unlink a draft from its proposal (staff only): removes `_draft.proposal`, draft content unchanged.
+  app.post(
+    "/api/versioning/:contentType/:contentSlug/:locale/:variantSlug/unlink-proposal",
+    async (req, res) => {
+      const { contentType, contentSlug, locale, variantSlug } = req.params;
+      if (!isValidType(contentType)) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+        return;
+      }
+      const auth = await requireCapability(req, res, "content_promote_variant", contentType);
+      if (!auth.authorized) return;
+      if (isSwarmCaller(req)) {
+        res.status(403).json({
+          code: "staff_only",
+          error: "Only staff can unlink a draft from its proposal.",
+        });
+        return;
+      }
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (reason.length < 10) {
+        res.status(400).json({ code: "reason_required", error: "Say why you are unlinking this draft (min 10 characters)." });
+        return;
+      }
+      if (!/^[a-z0-9-]+$/.test(variantSlug) || !/^[a-z]{2}(-[A-Z]{2})?$/.test(locale)) {
+        res.status(400).json({ error: "Invalid variant or locale" });
+        return;
+      }
+      const resolved = resolveWritableVersioningSlug(contentType, contentSlug, getContentRoot(res));
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ error: resolved.error });
+        return;
+      }
+      const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+      const variantFilePath = path.resolve(
+        versioningManager.getVariantFilePath(contentType, resolved.slug, variantSlug, locale),
+      );
+      if (!fs.existsSync(variantFilePath)) {
+        res.status(404).json({ error: "Draft file not found" });
+        return;
+      }
+      const { readDraftMeta, writeDraftMeta } = await import("../versioning/draft-meta");
+      const link = readDraftMeta(variantFilePath)?.proposal;
+      if (!link) {
+        res.json({ success: true, unlinked: false, message: "This draft is not linked to a proposal." });
+        return;
+      }
+      writeDraftMeta(
+        variantFilePath,
+        { proposal: null },
+        { author: auth.author || "api", contentRoot: getContentRoot(res) },
+      );
+      const { emitEvent } = await import("../events/event-store");
+      const { singleAttribution } = await import("../events/types");
+      emitEvent({
+        site: getContentRootName(res),
+        type: "draft_unlinked",
+        resource: { contentType, slug: resolved.slug, locale },
+        attribution: singleAttribution(auth.author || "api", { type: "ui" }),
+        payload: { variant: variantSlug, proposal_id: link.id, env: link.env, reason },
+      });
+      res.json({ success: true, unlinked: true, proposal_id: link.id, env: link.env });
     },
   );
 
@@ -1207,6 +1338,28 @@ export function registerVersioningRoutes(app: Express): void {
 
     const fileExists = fs.existsSync(variantFilePath);
     const registered = isVariantRegisteredInVersioning(existingVersioning, locale, variantSlug);
+
+    if (fileExists) {
+      const { readDraftMeta } = await import("../versioning/draft-meta");
+      const { findOpenProposalLinkForDraft } = await import("../content-proposals/service");
+      const linked = readDraftMeta(variantFilePath)?.proposal;
+      const open = linked
+        ? { id: linked.id, env: linked.env }
+        : findOpenProposalLinkForDraft(getContentRootName(res), {
+            contentType,
+            slug: resolved.slug,
+            locale,
+            variant: variantSlug,
+          });
+      if (open) {
+        res.status(409).json({
+          code: "draft_in_proposal",
+          error: `This draft is under review in proposal ${open.id}. Reject or withdraw the proposal before deleting the draft.`,
+          details: { proposal_id: open.id, env: open.env },
+        });
+        return;
+      }
+    }
 
     if (!fileExists) {
       if (!cleanupOrphan) {

@@ -51,11 +51,35 @@ All marketing content lives under the site folder from `sites.yml` (`content_fol
 - **Draft entry:** folder has **no** live `{locale}.yml`. Content lives in `{variant}.{locale}.yml` (often `draft.en.yml`) + `versioning.yml` at 0%. ContentIndex skips it → public 404, not in sitemap. Create/duplicate (non-shared-layout) start this way. Publish with `publish_draft` (all remaining draft locales at once).
 - **Live / published:** at least one `{locale}.yml` exists. Routable and sitemap-eligible (unless `robots: noindex`).
 - **Variant (of a live page):** `{variant}.{locale}.yml` beside a live `{locale}.yml`, registered in `versioning.yml`. Traffic allocation allowed. `promote_variant` replaces live for one locale; `delete_variant` discards one locale's variant file (per-locale; blocked when allocation > 0% — staff must remove traffic first). Deleting the last draft on an unpublished entry removes the whole folder. Soft guidance: confirm with the user before promote/publish/delete. On **attached** shared-layout entries, `create_variant` remaps to the type template unless detached or entry-level drafts exist — MCP requires principal approval + `confirm_template_variant: true` (see `explain_site` topic `shared-layout`). Per-entry field refreshes use `propose_change` / `update_fields`, not `create_variant`.
-- **All content types:** **Create/duplicate seeds exactly one locale** — multi-locale create is rejected (`create_entry`, `/api/content/create`, Create Content UI). Add translations via `translate_entry` → `draft.{locale}.yml` → promote/publish. Shared-layout types still go live immediately on first create; classic types may use draft-first create.
+- **All content types:** **Create/duplicate seeds exactly one locale** — multi-locale create is rejected (`create_entry`, `/api/content/create`, Create Content UI). Add translations via `translate_entry` → `draft.{locale}.yml` → promote/publish. Every file-based type (shared-layout included) is draft-first on create; attached drafts carry fields only (structure stays on `template.{locale}.yml`).
 
 ## Merge behavior
 
 When a page is loaded the system performs a deep merge: `_common.yml` fields are the base and the locale file overrides them. Arrays are replaced wholesale (not appended). This means locale-specific fields override shared ones for the same key.
+
+## Field scope (page-level vs locale) — fixed system rule
+
+`shared/field-scope.ts` decides where each field lives. Same for every content type and site; not configurable; `meta_target` is ignored (warning `meta_target_ignored`).
+
+| Scope | Fields | File |
+|---|---|---|
+| `common` (whole page, every locale) | `funnel.*`, `meta.robots`, `meta.priority`, `meta.change_frequency`, `published_at`, `detached`, `authors` | `{slug}/_common.yml` |
+| `locale` (default) | everything else — `title`, `description`, `content`, `image`, `seo.*`, other `meta.*`, `tags`, `status`, URL pattern params (e.g. `category`), … | `{slug}/{locale}.yml` (or the draft) |
+
+Resolution: exact path, then the longest listed prefix, then `locale`. URL pattern params are always `locale`.
+
+- **Writes to a draft** stage `common` fields inside the draft; publish/promote moves them to `_common.yml` (warning `common_fields_all_languages`). Live writes of `common` fields go straight to `_common.yml`.
+- **Removing a field:** `{ field_path, op: "remove" }` (or `value: null`). On a draft the field is stored as `null` until publish (warning `common_field_removal_staged`), then deleted from `_common.yml` in every locale. `null` in a live `_common.yml` is a validation error (`FIELD_SCOPE_NULL_OUTSIDE_DRAFT`).
+- Validator `draft-integrity` warns `FIELD_SCOPE_MISMATCH` when a file holds keys of the other scope; fixer `field-scope-mismatch` moves them (common keys leave locale files only when every live locale agrees).
+
+## Draft base (`_draft.based_on`) and translation source
+
+Every draft carries a `_draft` block that never reaches a published file and is ignored by fingerprints:
+
+- **`based_on { locale, common, at }`** — hashes of the live locale file and `_common.yml` when the draft was created (null = not published). Set by create_entry / translate_entry (new draft) / proposals; also refreshed when a proposal resets its draft. **Editing the draft never changes it.** A base copy of the live content is kept in the pipeline DB for rebuilds.
+- On promote/publish: live unchanged since `based_on` → normal promote. Live moved + non-overlapping fields → draft rebuilt on today's live (warning `draft_rebuilt`). Overlap / `sections` / no base copy → `draft_base_stale` (details `conflicting_fields` or `reason`). No `based_on` (older draft) → `draft_base_unknown`. Both need `confirm_overwrite_newer_live: true` to publish as-is (discards the newer live changes).
+- **`translated_from { locale, hash, at }`** — recorded by translate_entry (and proposals with `translated_from_locale`). Source live changed since → promote/publish `translation_source_changed` (`confirm_source_changed`); proposals go `context_stale`.
+- **`proposal { id, env, … }`** — the open proposal that owns the draft. Direct promote/publish/delete refuses (`draft_in_proposal`); approve the proposal instead.
 
 ## Safe loading — CRITICAL
 

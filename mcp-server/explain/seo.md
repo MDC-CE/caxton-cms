@@ -91,7 +91,11 @@ Warn band → `confirm_seo_research_budget`; 100% → exhausted. Not a substitut
 - **Warnings:** `bing_not_configured`, `search_engines_stale` when Google cache is stale.
 - **Non-effects:** no live API, no inspect queue, no YAML/GitHub, no diagnostics job.
 
-### Live SEO meta gates
+### Page-level vs locale SEO fields
+
+`meta.robots`, `meta.priority` and `meta.change_frequency` are page-level (`_common.yml`, every locale). `meta.page_title`, `meta.description`, other `meta.*` and `seo.*` are per locale. A proposal that sets `meta.robots` changes indexing for every locale (warning `common_fields_all_languages`). See `explain_site` topic `content_system` → Field scope.
+
+## Live SEO meta gates
 
 - **Live locale writes / publish / promote** require resolved non-empty `meta.page_title` and `meta.description` (no leftover `{{ }}`). Draft-only writes are exempt. Gate: `server/live-entry-seo-gate.ts` + `shared/validateRequiredMeta.ts`.
 - **Diagnostics `meta` validator** resolves site vars (`global.*` / `brand.*`) the same way as that live gate (`resolveAllTemplateVars` with `skipSiteVars: false`) before required-title/description checks — resolved templates are not false `MISSING_*` / `META_USES_GLOBAL_VAR`.

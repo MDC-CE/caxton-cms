@@ -91,25 +91,31 @@ export function pickPrimaryBlocker(opts: {
   return null;
 }
 
+/** Consent-page card when sign-in carried no role (no `resource` / `mcp_role`). */
 export function oauthPlainMcpNotice(nodeEnv = process.env.NODE_ENV): {
   title: string;
   body: string;
+  advanced: string;
   isProduction: boolean;
 } {
   const isProduction = nodeEnv === "production";
+  const roleFraming =
+    "If this connector's address ends in /mcp/role/<name>, it will still be limited to that role once connected.";
+  const advanced =
+    "Your MCP client did not send a resource address during sign-in (OAuth protected-resource metadata, RFC 9728). If you added this connector before role detection shipped, remove and re-add it so your client picks up the role. Role URLs: Private → MCP Server → Connection.";
   if (isProduction) {
     return {
       isProduction: true,
-      title: "Plain /mcp is read-only in production",
-      body:
-        "Write tools are disabled on this connector. To edit content, create multiple MCP connectors — one agent role URL each (/mcp/role/<slug>) for an agent swarm. Staff path: Private → MCP Server → Connection.",
+      title: "No agent role detected",
+      body: `${roleFraming} A plain /mcp connector can read content but can't make edits in production.`,
+      advanced,
     };
   }
   return {
     isProduction: false,
-    title: "Development: plain /mcp may write",
-    body:
-      "Writes are allowed on plain /mcp in this development environment (when the user’s MCP write toggle is on). The same /mcp URL is read-only in production (write tools disabled); use role connectors there for a swarm.",
+    title: "No agent role detected",
+    body: `${roleFraming} In development, plain /mcp can edit when your MCP write setting is on; in production it can only read.`,
+    advanced,
   };
 }
 

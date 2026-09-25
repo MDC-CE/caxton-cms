@@ -31,6 +31,10 @@ export const EVENT_WEBHOOK_ALLOWLIST = [
   "proposal_escalated",
   "proposal_deescalated",
   "proposal_idea_funnel_set",
+  "proposal_stale_flagged",
+  "proposal_closed_abandoned_stale",
+  "proposal_needs_author",
+  "proposal_reverted",
 ] as const;
 
 export type EventWebhookAllowlistedType = (typeof EVENT_WEBHOOK_ALLOWLIST)[number];

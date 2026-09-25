@@ -33,6 +33,7 @@ import { canonicalSectionId, sectionIdCandidates } from "./utils/sectionIdentity
 import { applyPerEntryLayer, type PerEntryAccum } from "./section-merge";
 import { applySectionLayoutDefaults } from "./section-layout-defaults";
 import { isEntryDetached } from "./shared-layout-entry";
+import { stripDraftMeta } from "./versioning/draft-meta";
 import {
   resolveCommonTemplatePath,
   resolveTemplateLocalePath,
@@ -238,7 +239,7 @@ export function mergeSingleTemplate(
       }
       if (entryLocalePath) {
         const parsed = contentIndex.safeYamlLoad(fs.readFileSync(entryLocalePath, "utf-8"));
-        if (parsed) merged = applyPerEntryLayer(merged, parsed, accum, aliases, dataOnly);
+        if (parsed) merged = applyPerEntryLayer(merged, stripDraftMeta(parsed), accum, aliases, dataOnly);
       } else if (entryVariant) {
         // Caller asked for a variant that is not on disk — refuse the shell-only merge.
         return null;

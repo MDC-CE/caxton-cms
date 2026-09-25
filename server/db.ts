@@ -186,6 +186,12 @@ export function clearSiteSqliteCacheForTests(): void {
 }
 
 /** Raw better-sqlite3 handle for a site DB (events, leases, etc.). */
+/** True when the site's app.db already exists (read-only probes must not create it). */
+export function siteDbExists(contentFolderName: string): boolean {
+  const safeName = contentFolderName.replace(/[/\\]/g, "-");
+  return _siteSqliteCache.has(safeName) || fs.existsSync(path.join(dataDir, safeName, "app.db"));
+}
+
 export function getSiteSqlite(contentFolderName: string, copyLegacyIfMissing = false): Database.Database {
   const safeName = contentFolderName.replace(/[/\\]/g, "-");
   if (_siteSqliteCache.has(safeName)) {

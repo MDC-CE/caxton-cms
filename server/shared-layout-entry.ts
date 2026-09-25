@@ -65,6 +65,34 @@ export function isEntryDetached(
 }
 
 /**
+ * File-based entries of a shared-layout type that are still attached to the template and
+ * published in `locale` (what a template change reaches). Empty for DB-backed types.
+ */
+export function listAttachedEntries(
+  contentType: string,
+  locale: string,
+  contentRoot?: string,
+): string[] {
+  if (!isSharedLayoutType(contentType, contentRoot)) return [];
+  const root = contentRoot ?? getDefaultContentRoot();
+  const typeDir = path.join(root, getFolder(contentType, root));
+  if (!fs.existsSync(typeDir)) return [];
+  return fs
+    .readdirSync(typeDir, { withFileTypes: true })
+    .filter(
+      (d) =>
+        d.isDirectory() &&
+        !d.name.startsWith(".") &&
+        !d.name.startsWith("_") &&
+        !isTemplateVersioningSlug(d.name) &&
+        fs.existsSync(path.join(typeDir, d.name, `${locale}.yml`)) &&
+        !isEntryDetached(contentType, d.name, root),
+    )
+    .map((d) => d.name)
+    .sort();
+}
+
+/**
  * True when the entry folder owns its own drafts/versioning.yml
  * (e.g. translate_entry wrote `draft.{locale}.yml` while still attached).
  * Used to prefer entry-level Page Versions over type-root Template Versions.

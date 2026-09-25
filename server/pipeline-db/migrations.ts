@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 25;
+export const PIPELINE_SCHEMA_VERSION = 26;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -502,6 +502,57 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
         db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_by_actor_json TEXT");
       }
       backfillReviewerActionBy(db);
+    },
+  },
+  {
+    version: 26,
+    name: "content_proposals_draft_first_v1",
+    up(db) {
+      if (tableExists(db, "content_proposals")) {
+        const proposalColumns: Array<[string, string]> = [
+          ["system_version", "TEXT"],
+          ["co_authors_json", "TEXT NOT NULL DEFAULT '[]'"],
+          ["stale_since", "TEXT"],
+          ["stale_flagged_at", "TEXT"],
+          ["all_or_nothing", "INTEGER NOT NULL DEFAULT 0"],
+          ["reverts_proposal_id", "TEXT"],
+        ];
+        for (const [name, type] of proposalColumns) {
+          if (!tableHasColumn(db, "content_proposals", name)) {
+            db.exec(`ALTER TABLE content_proposals ADD COLUMN ${name} ${type}`);
+          }
+        }
+      }
+      if (tableExists(db, "content_proposal_entries")) {
+        const entryColumns: Array<[string, string]> = [
+          ["created_draft", "INTEGER NOT NULL DEFAULT 0"],
+          ["derived_ops_json", "TEXT"],
+          ["derived_for_key", "TEXT"],
+          ["published_diff_json", "TEXT"],
+          ["pre_apply_snapshot_json", "TEXT"],
+        ];
+        for (const [name, type] of entryColumns) {
+          if (!tableHasColumn(db, "content_proposal_entries", name)) {
+            db.exec(`ALTER TABLE content_proposal_entries ADD COLUMN ${name} ${type}`);
+          }
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS draft_bases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_type TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          locale TEXT NOT NULL,
+          variant TEXT NOT NULL,
+          locale_hash TEXT,
+          common_hash TEXT,
+          snapshot_json TEXT,
+          source_snapshot_json TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_bases_draft
+          ON draft_bases (content_type, slug, locale, variant);
+      `);
     },
   },
 ];

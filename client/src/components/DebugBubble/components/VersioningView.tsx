@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "wouter";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
 import { deslugify } from "../utils/debugHelpers";
-import { IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconArrowBackUp, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
+import { IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
@@ -18,11 +18,14 @@ import { Link2, Loader2, Unlink } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 import { apiFetch } from "@/lib/queryClient";
-import { emitVariantCreated, emitVariantDeleted, emitVariantPromoted } from "@/lib/contentEvents";
+import { emitContentUpdated, emitVariantCreated, emitVariantDeleted, emitVariantPromoted } from "@/lib/contentEvents";
 import { TEMPLATE_VERSIONING_SLUG, versioningContentSlug } from "@/lib/sharedLayoutEntry";
+import { getFolderFromType, useContentTypes } from "@/hooks/useContentTypes";
+import { FolderRestoreDialog, type FolderRestoreResult, type FolderRestoreTarget } from "./FolderRestoreDialog";
 import type { MenuView, ContentInfo, VersioningResponse } from "../types";
 import { STORAGE_KEY, OPEN_STORAGE_KEY } from "../types";
 import { PageHealthIndicators } from "./PageHealthIndicators";
+import { VariantProposalBadge } from "./VariantProposalBadge";
 import type { PageErrorsTab } from "./PageErrorsModal";
 
 interface VersioningViewProps {
@@ -304,6 +307,11 @@ export function VersioningView({
   const [shareTarget, setShareTarget] = useState<{ locale: string; slug: string | null } | null>(null);
 
   const [promoteTarget, setPromoteTarget] = useState<{ locale: string; slug: string } | null>(null);
+  const [promoteIssue, setPromoteIssue] = useState<{ code: string; message: string } | null>(null);
+  const [promoteConfirms, setPromoteConfirms] = useState<{ overwrite: boolean; source: boolean }>({
+    overwrite: false,
+    source: false,
+  });
   const [isPromoting, setIsPromoting] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<{ locale: string; slug: string; allocation: number } | null>(null);
@@ -314,11 +322,29 @@ export function VersioningView({
   const [showDetachForConvert, setShowDetachForConvert] = useState(false);
 
   const [showRestorePanel, setShowRestorePanel] = useState(false);
-  const [restoreHistory, setRestoreHistory] = useState<Array<{ sha: string; date: string; author: string; subject: string }>>([]);
+  const [restoreHistory, setRestoreHistory] = useState<Array<{ sha: string; date: string; author: string; subject: string; parentSha?: string | null }>>([]);
   const [restoreHistoryLoading, setRestoreHistoryLoading] = useState(false);
+  const [restoreHistoryError, setRestoreHistoryError] = useState<string | null>(null);
+  const [restoreHasMore, setRestoreHasMore] = useState(false);
+  const [restorePage, setRestorePage] = useState(1);
+  const [restoreLoadingMore, setRestoreLoadingMore] = useState(false);
   const [repoUrl, setRepoUrl] = useState<string | null>(null);
-  const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
-  const [isRestoring, setIsRestoring] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<FolderRestoreTarget | null>(null);
+  const contentTypesMap = useContentTypes();
+  const { data: siteInfo } = useQuery<{ contentFolder: string }>({
+    queryKey: ["/api/site/info"],
+  });
+  const typeFolder =
+    contentInfo.type && contentTypesMap ? getFolderFromType(contentTypesMap, contentInfo.type) : null;
+  // Always the entry's own folder, never the shared template slug.
+  const restoreFolder =
+    siteInfo?.contentFolder && typeFolder && contentInfo.slug
+      ? `${siteInfo.contentFolder}/${typeFolder}/${contentInfo.slug}`
+      : null;
+  const templateHistoryUrl =
+    repoUrl && siteInfo?.contentFolder && typeFolder
+      ? `${repoUrl}/commits/HEAD/${siteInfo.contentFolder}/${typeFolder}`
+      : null;
   const [publishConfirmVariants, setPublishConfirmVariants] = useState<string[] | null>(null);
   const [allocationSaveError, setAllocationSaveError] = useState<string | null>(null);
 
@@ -416,7 +442,39 @@ export function VersioningView({
     }
   };
 
-  const handlePromote = async () => {
+  const resetPromoteIssue = () => {
+    setPromoteIssue(null);
+    setPromoteConfirms({ overwrite: false, source: false });
+  };
+
+  const promoteConfirmBody = (confirms = promoteConfirms) => ({
+    ...(confirms.overwrite ? { confirm_overwrite_newer_live: true } : {}),
+    ...(confirms.source ? { confirm_source_changed: true } : {}),
+  });
+
+  /** Keep the dialog open and ask again when the server needs an explicit overwrite confirm. */
+  const holdForPromoteConfirm = (data: { code?: string; error?: string }): boolean => {
+    const code = data.code;
+    if (code !== "draft_base_stale" && code !== "draft_base_unknown" && code !== "translation_source_changed") {
+      return false;
+    }
+    const message =
+      code === "draft_base_unknown"
+        ? "We don't know which live version this draft came from, so publishing it may undo recent changes to the live page."
+        : code === "translation_source_changed"
+          ? "The language this was translated from changed after translating. Publishing anyway shows a translation of the previous version."
+          : data.error || "This draft was created from an older version. Publishing it would undo recent live changes.";
+    setPromoteIssue({ code, message });
+    return true;
+  };
+
+  const toastIfRebuilt = (warnings: unknown) => {
+    if (Array.isArray(warnings) && warnings.some((w) => (w as { code?: string })?.code === "draft_rebuilt")) {
+      toast({ title: "Published combined with the live changes made after the draft was created." });
+    }
+  };
+
+  const handlePromote = async (confirms = promoteConfirms) => {
     if (!promoteTarget || !contentInfo.type || !contentInfo.slug) return;
     setIsPromoting(true);
     try {
@@ -430,11 +488,12 @@ export function VersioningView({
           {
             method: "POST",
             headers,
-            body: JSON.stringify({ variantSlug: promoteTarget.slug }),
+            body: JSON.stringify({ variantSlug: promoteTarget.slug, ...promoteConfirmBody(confirms) }),
           },
         );
         const data = await res.json();
         if (!res.ok) {
+          if (holdForPromoteConfirm(data)) return;
           toast({ title: data.error || "Failed to publish draft", variant: "destructive" });
           return;
         }
@@ -442,6 +501,8 @@ export function VersioningView({
           title: `Published "${promoteTarget.slug}"`,
           description: `Live for locale(s): ${(data.locales || []).join(", ") || "all"}`,
         });
+        toastIfRebuilt(data.warnings);
+        resetPromoteIssue();
         emitVariantPromoted({
           contentType: contentInfo.type,
           slug: contentInfo.slug,
@@ -462,14 +523,17 @@ export function VersioningView({
 
       const res = await fetch(
         `/api/versioning/${contentInfo.type}/${versioningWriteSlug}/${promoteTarget.locale}/promote/${promoteTarget.slug}`,
-        { method: "POST", headers }
+        { method: "POST", headers, body: JSON.stringify(promoteConfirmBody(confirms)) }
       );
       const data = await res.json();
       if (!res.ok) {
+        if (holdForPromoteConfirm(data)) return;
         toast({ title: data.error || "Failed to promote variant", variant: "destructive" });
         return;
       }
       toast({ title: `Variant "${promoteTarget.slug}" promoted to default` });
+      toastIfRebuilt(data.warnings);
+      resetPromoteIssue();
       emitVariantPromoted({ contentType: contentInfo.type, slug: contentInfo.slug, locale: promoteTarget.locale, variantSlug: promoteTarget.slug });
       setPromoteTarget(null);
       if (onVersioningDataUpdate) {
@@ -721,56 +785,94 @@ export function VersioningView({
     }
   };
 
+  const loadRestoreHistory = async (page: number) => {
+    if (!restoreFolder) {
+      setRestoreHistoryError("Could not work out this page's content folder.");
+      return;
+    }
+    const params = new URLSearchParams({ folder: restoreFolder, limit: "30", page: String(page) });
+    const res = await apiFetch(`/api/git/folder-history?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      setRestoreHistoryError(data.error || "Could not load history from GitHub.");
+      return;
+    }
+    setRestoreHistoryError(null);
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    setRestoreHistory((prev) => (page === 1 ? entries : [...prev, ...entries]));
+    setRestoreHasMore(!!data.hasMore);
+    setRestorePage(page);
+    if (typeof data.repoUrl === "string" && data.repoUrl) {
+      setRepoUrl(data.repoUrl.replace(/\.git$/, "").replace(/\/$/, ""));
+    }
+  };
+
   const handleOpenRestorePanel = async () => {
     setShowRestorePanel(true);
     if (restoreHistory.length > 0) return;
     setRestoreHistoryLoading(true);
-    const { type, slug } = contentInfo;
-    if (!type || !slug) { setRestoreHistoryLoading(false); return; }
-    const folder = `4geeks-com/${type}/${slug}`;
     try {
-      const data = await fetch(`/api/git/folder-history?folder=${encodeURIComponent(folder)}&limit=30`).then(r => r.json());
-      setRestoreHistory(data.entries || []);
-      setRepoUrl(data.repoUrl || null);
+      await loadRestoreHistory(1);
     } catch {
-      setRestoreHistory([]);
+      setRestoreHistoryError("Could not load history from GitHub.");
     } finally {
       setRestoreHistoryLoading(false);
     }
   };
 
-  const handleRestore = async () => {
-    if (!restoreTarget || !contentInfo.type || !contentInfo.slug) return;
-    setIsRestoring(true);
-    const folder = `4geeks-com/${contentInfo.type}/${contentInfo.slug}`;
+  const handleLoadMoreRestoreHistory = async () => {
+    setRestoreLoadingMore(true);
     try {
-      const token = getDebugToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Token ${token}`;
-      const res = await fetch("/api/git/restore-folder", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ folder, sha: restoreTarget }),
+      await loadRestoreHistory(restorePage + 1);
+    } catch {
+      setRestoreHistoryError("Could not load more history.");
+    } finally {
+      setRestoreLoadingMore(false);
+    }
+  };
+
+  const handleRestored = (result: FolderRestoreResult) => {
+    const target = restoreTarget;
+    const count = result.restoredFiles.length + result.deletedFiles.length;
+    const verb = target?.mode === "undo" ? "Change undone" : "Version restored";
+    if (!result.pushed) {
+      toast({
+        title: "Restored on this server, but not saved to GitHub yet",
+        description: result.pushError || "The files stay unpushed until the next sync.",
+        variant: "destructive",
       });
-      const data = await res.json();
-      if (!res.ok) {
-        toast({ title: data.error || "Restore failed", variant: "destructive" });
-        return;
+    } else if (result.warnings.length > 0) {
+      toast({
+        title: `${verb} with warning`,
+        description: result.warnings.join(" "),
+        variant: "destructive",
+      });
+    } else {
+      toast({
+        title: verb,
+        description: `${count} file${count === 1 ? "" : "s"} restored${result.commitHash ? ` and saved as ${result.commitHash.slice(0, 7)}` : ""}.`,
+      });
+    }
+    setRestoreTarget(null);
+    setShowRestorePanel(false);
+    setRestoreHistory([]);
+    setRestorePage(1);
+    setRestoreHasMore(false);
+    if (contentInfo.type && contentInfo.slug) {
+      const locales = new Set<string>();
+      for (const p of result.restoredFiles) {
+        const m = /(?:^|\.|\/)([a-z]{2}(?:-[a-z]{2})?)\.ya?ml$/i.exec(p.split("/").pop() || "");
+        if (m) locales.add(m[1]!);
       }
-      toast({ title: "Folder restored", description: `Content restored to commit ${restoreTarget.slice(0, 7)}` });
-      setRestoreTarget(null);
-      setShowRestorePanel(false);
-      setRestoreHistory([]);
-      if (onVersioningDataUpdate && contentInfo.type && contentInfo.slug) {
+      for (const locale of locales) {
+        emitContentUpdated({ contentType: contentInfo.type, slug: contentInfo.slug, locale });
+      }
+      if (onVersioningDataUpdate) {
         fetch(`/api/versioning/${contentInfo.type}/${contentInfo.slug}`)
           .then(r => r.json())
           .then(onVersioningDataUpdate)
           .catch(() => {});
       }
-    } catch {
-      toast({ title: "Restore failed", variant: "destructive" });
-    } finally {
-      setIsRestoring(false);
     }
   };
 
@@ -1106,15 +1208,20 @@ export function VersioningView({
               <div className="flex items-center justify-center py-8">
                 <IconRefresh className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
+            ) : restoreHistoryError ? (
+              <div className="text-center py-8 px-4" data-testid="text-restore-history-error">
+                <IconHistory className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+                <p className="text-sm text-destructive">{restoreHistoryError}</p>
+              </div>
             ) : restoreHistory.length === 0 ? (
               <div className="text-center py-8 px-4">
                 <IconHistory className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground">No git history found for this content folder</p>
+                <p className="text-sm text-muted-foreground">No saved versions of this page on GitHub yet.</p>
               </div>
             ) : (
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground px-2 pb-1">
-                  Select a commit to restore the entire content folder to that snapshot.
+                  Pick a change to undo it, or go back to how the page looked right after it.
                 </p>
                 {restoreHistory.map((entry) => {
                   const relDate = (() => {
@@ -1125,8 +1232,8 @@ export function VersioningView({
                     if (hrs < 24) return `${hrs}h ago`;
                     return `${Math.floor(hrs / 24)}d ago`;
                   })();
-                  const githubUrl = repoUrl
-                    ? `${repoUrl}/tree/${entry.sha}/4geeks-com/${contentInfo.type}/${contentInfo.slug}`
+                  const githubUrl = repoUrl && restoreFolder
+                    ? `${repoUrl}/tree/${entry.sha}/${restoreFolder}`
                     : null;
                   return (
                     <div key={entry.sha} className="flex items-start justify-between gap-2 px-2 py-1.5 rounded-md hover-elevate">
@@ -1149,19 +1256,61 @@ export function VersioningView({
                             <IconExternalLink className="h-3.5 w-3.5" />
                           </a>
                         )}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-5 px-1.5 py-0 text-[10px] leading-none"
-                          onClick={() => setRestoreTarget(entry.sha)}
-                          data-testid={`button-restore-commit-${entry.sha}`}
-                        >
-                          Restore
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-5 px-1.5 py-0 text-[10px] leading-none"
+                              data-testid={`button-restore-commit-${entry.sha}`}
+                            >
+                              Restore
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-64 z-[10001]">
+                            {entry.parentSha !== null && (
+                              <DropdownMenuItem
+                                className="flex-col items-start gap-0.5"
+                                onClick={() => setRestoreTarget({ sha: entry.sha, mode: "undo", subject: entry.subject })}
+                                data-testid={`menu-undo-commit-${entry.sha}`}
+                              >
+                                <span className="text-[13px]">Undo this change</span>
+                                <span className="text-[11px] text-muted-foreground">
+                                  Puts files back to how they were before it.
+                                </span>
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              className="flex-col items-start gap-0.5"
+                              onClick={() => setRestoreTarget({ sha: entry.sha, mode: "restore", subject: entry.subject })}
+                              data-testid={`menu-restore-commit-${entry.sha}`}
+                            >
+                              <span className="text-[13px]">Restore to this version</span>
+                              <span className="text-[11px] text-muted-foreground">
+                                Puts files back to how they were right after it.
+                              </span>
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </div>
                   );
                 })}
+                {restoreHasMore && (
+                  <div className="flex justify-center pt-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs"
+                      onClick={handleLoadMoreRestoreHistory}
+                      disabled={restoreLoadingMore}
+                      data-testid="button-restore-history-load-more"
+                    >
+                      {restoreLoadingMore ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                      Load more
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1487,6 +1636,10 @@ export function VersioningView({
                     })()}
                     {localeData.variants.map((variant) => {
                       const isActive = activeVariant === variant.slug;
+                      const proposalLink = versioningData?.proposalsByVariant?.[locale]?.[variant.slug];
+                      const inOpenProposal =
+                        !!proposalLink &&
+                        (!proposalLink.status || proposalLink.status === "open" || proposalLink.status === "partial");
                       return (
                       <div key={variant.slug} className={isActive ? "rounded-md bg-primary/10 px-2 py-1 -mx-2" : ""}>
                         <div className="flex items-center justify-between text-sm gap-2">
@@ -1530,6 +1683,25 @@ export function VersioningView({
                                 draft
                               </Badge>
                             )}
+                            {proposalLink && (
+                              <VariantProposalBadge
+                                link={proposalLink}
+                                unlinkUrl={
+                                  contentInfo.type && versioningWriteSlug
+                                    ? `/api/versioning/${contentInfo.type}/${versioningWriteSlug}/${locale}/${variant.slug}/unlink-proposal`
+                                    : null
+                                }
+                                onUnlinked={() => {
+                                  if (onVersioningDataUpdate && contentInfo.type && contentInfo.slug) {
+                                    fetch(`/api/versioning/${contentInfo.type}/${contentInfo.slug}`)
+                                      .then((r) => r.json())
+                                      .then(onVersioningDataUpdate)
+                                      .catch(() => {});
+                                  }
+                                }}
+                                testIdSuffix={`${locale}-${variant.slug}`}
+                              />
+                            )}
                             {!isEditing && (
                               <TooltipProvider delayDuration={300}>
                                 <Tooltip>
@@ -1559,13 +1731,20 @@ export function VersioningView({
                                       variant="ghost"
                                       className="h-5 w-5 shrink-0 transition-colors hover:bg-yellow-100 hover:text-yellow-700 dark:hover:bg-yellow-900/40 dark:hover:text-yellow-400"
                                       onClick={() => setPromoteTarget({ locale, slug: variant.slug })}
+                                      disabled={inOpenProposal}
                                       data-testid={`button-promote-variant-${locale}-${variant.slug}`}
                                     >
                                       <IconCrown className="h-3 w-3" />
                                     </Button>
                                   </TooltipTrigger>
                                   <TooltipContent side="top">
-                                    <p>{isDraftEntry ? "Publish this draft (all remaining locales)" : "Promote this version"}</p>
+                                    <p>
+                                      {inOpenProposal
+                                        ? "This draft is under review in a proposal. Approve the proposal to publish it."
+                                        : isDraftEntry
+                                          ? "Publish this draft (all remaining locales)"
+                                          : "Promote this version"}
+                                    </p>
                                   </TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>
@@ -1593,6 +1772,8 @@ export function VersioningView({
                                   </DropdownMenuItem>
                                   <DropdownMenuItem
                                     onClick={() => setDeleteTarget({ locale, slug: variant.slug, allocation: variant.allocation })}
+                                    disabled={inOpenProposal}
+                                    title={inOpenProposal ? "This draft is under review in a proposal. Reject or withdraw the proposal first." : undefined}
                                     className="text-[13px] text-destructive"
                                     data-testid={`menu-delete-variant-${locale}-${variant.slug}`}
                                   >
@@ -1776,7 +1957,7 @@ export function VersioningView({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={promoteTarget !== null} onOpenChange={(open) => { if (!open) setPromoteTarget(null); }}>
+      <Dialog open={promoteTarget !== null} onOpenChange={(open) => { if (!open) { setPromoteTarget(null); resetPromoteIssue(); } }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
@@ -1799,10 +1980,30 @@ export function VersioningView({
               )}
             </DialogDescription>
           </DialogHeader>
+          {promoteIssue ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              data-testid="text-promote-issue"
+            >
+              {promoteIssue.message} Update the draft first, or publish anyway.
+            </p>
+          ) : null}
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button
               variant="destructive"
-              onClick={handlePromote}
+              onClick={() => {
+                if (promoteIssue) {
+                  const next = {
+                    overwrite: promoteConfirms.overwrite || promoteIssue.code !== "translation_source_changed",
+                    source: promoteConfirms.source || promoteIssue.code === "translation_source_changed",
+                  };
+                  setPromoteConfirms(next);
+                  setPromoteIssue(null);
+                  void handlePromote(next);
+                  return;
+                }
+                void handlePromote();
+              }}
               disabled={isPromoting}
               className="w-full"
               data-testid="button-confirm-promote"
@@ -1812,11 +2013,15 @@ export function VersioningView({
               ) : (
                 <IconCrown className="h-4 w-4" />
               )}
-              {isDraftEntry ? "Yes, publish now" : "Yes, promote and replace original"}
+              {promoteIssue
+                ? "Publish anyway"
+                : isDraftEntry
+                  ? "Yes, publish now"
+                  : "Yes, promote and replace original"}
             </Button>
             <Button
               variant="outline"
-              onClick={() => setPromoteTarget(null)}
+              onClick={() => { setPromoteTarget(null); resetPromoteIssue(); }}
               disabled={isPromoting}
               className="w-full"
               data-testid="button-cancel-promote"
@@ -2011,45 +2216,15 @@ export function VersioningView({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={restoreTarget !== null} onOpenChange={(open) => { if (!open) setRestoreTarget(null); }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Restore content folder?</DialogTitle>
-            <DialogDescription>
-              This will overwrite every file in{" "}
-              <code className="text-xs bg-muted px-1 py-0.5 rounded">
-                4geeks-com/{contentInfo.type}/{contentInfo.slug}/
-              </code>{" "}
-              with the versions from commit{" "}
-              <code className="text-xs bg-muted px-1 py-0.5 rounded">{restoreTarget?.slice(0, 7)}</code>.
-              The restore itself will be saved as a new commit so it can be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRestoreTarget(null)}
-              disabled={isRestoring}
-              data-testid="button-cancel-restore"
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleRestore}
-              disabled={isRestoring}
-              data-testid="button-confirm-restore"
-            >
-              {isRestoring ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : (
-                <IconArrowBackUp className="h-4 w-4 mr-2" />
-              )}
-              Yes, restore this snapshot
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <FolderRestoreDialog
+        target={restoreTarget}
+        folder={restoreFolder ?? ""}
+        contentType={contentInfo.type ?? null}
+        isTemplateAttached={isTemplateVersioning}
+        templateHistoryUrl={templateHistoryUrl}
+        onClose={() => setRestoreTarget(null)}
+        onRestored={handleRestored}
+      />
     </>
   );
 }

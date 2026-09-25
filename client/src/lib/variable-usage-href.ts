@@ -9,18 +9,91 @@
  *   site_4geeks-com/blog/template.en.yml → /private/type/blog
  */
 
-export function variableUsagePathToStaffHref(
-  filePath: string,
-  resolveContentType: (directory: string) => string = (d) => d,
-): string | null {
+export type ContentEntryFileRef = {
+  contentType: string;
+  slug: string;
+  locale: string;
+  /** `draft` for `draft.{locale}.yml`; A/B variant name for `{variant}.{locale}.yml`. */
+  variant?: string;
+};
+
+function splitSitePath(filePath: string): string[] | null {
   const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   const parts = normalized.split("/").filter(Boolean);
   // Expect: site_*/{typeFolder}/{...}
   if (parts.length < 3) return null;
   if (!parts[0].startsWith("site_")) return null;
+  return parts;
+}
 
-  const typeFolder = parts[1];
-  const contentType = resolveContentType(typeFolder);
+function parseEntryParts(
+  parts: string[],
+  resolveContentType: (directory: string) => string,
+): ContentEntryFileRef | null {
+  const rest = parts.slice(2);
+  if (rest.length < 2) return null;
+
+  const slug = rest[0];
+  const file = rest[rest.length - 1];
+  if (!/\.yml$/i.test(file)) return null;
+
+  const simpleLocale = file.match(/^(draft\.)?([a-z]{2}(?:-[a-z]+)?)\.yml$/i);
+  const variantLocale = file.match(
+    /^(?:draft\.)?([a-z0-9_-]+)\.([a-z]{2}(?:-[a-z]+)?)\.yml$/i,
+  );
+
+  const contentType = resolveContentType(parts[1]);
+  if (simpleLocale) {
+    return {
+      contentType,
+      slug,
+      locale: simpleLocale[2],
+      ...(simpleLocale[1] ? { variant: "draft" } : {}),
+    };
+  }
+  if (
+    variantLocale &&
+    variantLocale[1] !== "template" &&
+    variantLocale[1] !== "single"
+  ) {
+    return { contentType, slug, locale: variantLocale[2], variant: variantLocale[1] };
+  }
+  return null;
+}
+
+/**
+ * Parse an entry locale file (`site_x/{typeFolder}/{slug}/{locale}.yml`, `draft.{locale}.yml`,
+ * `{variant}.{locale}.yml`). Returns null for templates, `_common.yml`, nested paths and unknown shapes.
+ */
+export function parseContentEntryFile(
+  filePath: string,
+  resolveContentType: (directory: string) => string = (d) => d,
+): ContentEntryFileRef | null {
+  const parts = splitSitePath(filePath);
+  if (!parts || parts.length !== 4) return null;
+  return parseEntryParts(parts, resolveContentType);
+}
+
+/** Private preview URL for an entry; variants (including `draft`) are forced via `force_variant`. */
+export function entryPreviewHref(entry: {
+  contentType: string;
+  slug: string;
+  locale: string;
+  variant?: string | null;
+}): string {
+  const params = new URLSearchParams({ locale: entry.locale });
+  if (entry.variant) params.set("force_variant", entry.variant);
+  return `/private/preview/${encodeURIComponent(entry.contentType)}/${encodeURIComponent(entry.slug)}?${params.toString()}`;
+}
+
+export function variableUsagePathToStaffHref(
+  filePath: string,
+  resolveContentType: (directory: string) => string = (d) => d,
+): string | null {
+  const parts = splitSitePath(filePath);
+  if (!parts) return null;
+
+  const contentType = resolveContentType(parts[1]);
   const rest = parts.slice(2);
 
   // Shared template: template.{locale}.yml or legacy single.{locale}.yml at type root
@@ -39,40 +112,17 @@ export function variableUsagePathToStaffHref(
     return null;
   }
 
-  // Entry locale: {slug}/{locale}.yml or {slug}/draft.{locale}.yml etc.
-  if (rest.length >= 2) {
-    const slug = rest[0];
-    const file = rest[rest.length - 1];
-    if (!/\.yml$/i.test(file)) return null;
-
-    const simpleLocale = file.match(/^(?:draft\.)?([a-z]{2}(?:-[a-z]+)?)\.yml$/i);
-    const variantLocale = file.match(
-      /^(?:draft\.)?([a-z0-9_-]+)\.([a-z]{2}(?:-[a-z]+)?)\.yml$/i,
-    );
-
-    let locale: string | null = null;
-    let variant: string | null = null;
-
-    if (simpleLocale) {
-      locale = simpleLocale[1];
-    } else if (
-      variantLocale &&
-      variantLocale[1] !== "template" &&
-      variantLocale[1] !== "single"
-    ) {
-      variant = variantLocale[1];
-      locale = variantLocale[2];
-    } else if (file === "_common.yml") {
-      return `/private/preview/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}`;
+  const entry = parseEntryParts(parts, resolveContentType);
+  if (entry) {
+    const params = new URLSearchParams({ locale: entry.locale });
+    if (entry.variant && entry.variant !== "draft") {
+      params.set("variant", entry.variant);
     }
+    return `/private/preview/${encodeURIComponent(contentType)}/${encodeURIComponent(entry.slug)}?${params.toString()}`;
+  }
 
-    if (!locale) return null;
-
-    const params = new URLSearchParams({ locale });
-    if (variant && variant !== "draft") {
-      params.set("variant", variant);
-    }
-    return `/private/preview/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}?${params.toString()}`;
+  if (rest[rest.length - 1] === "_common.yml") {
+    return `/private/preview/${encodeURIComponent(contentType)}/${encodeURIComponent(rest[0])}`;
   }
 
   return null;

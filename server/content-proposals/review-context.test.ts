@@ -8,6 +8,7 @@ import {
   damageClassForTarget,
   isMixedRiskBundle,
   undoCostFor,
+  undoCostFromDiff,
 } from "./review-context";
 import type { ProposalRecord } from "./service";
 
@@ -121,6 +122,31 @@ describe("undoCostFor", () => {
     expect(undoCostFor("edits", "soft")).toBe("medium");
     expect(undoCostFor("edits", "draft_backed")).toBe("high");
     expect(undoCostFor("notes", "soft")).toBe("none");
+  });
+});
+
+describe("undoCostFromDiff (v1.0)", () => {
+  const change = (field_path: string, scope: "locale" | "common" = "locale") => ({
+    field_path,
+    before: "a",
+    after: "b",
+    scope,
+  });
+  it("rates by what the draft touches", () => {
+    expect(undoCostFromDiff([{ slug: "hello", author_diff: [change("title")] }])).toEqual({
+      cost: "low",
+      reason: "locale_fields",
+    });
+    expect(undoCostFromDiff([{ slug: "hello", author_diff: [change("title"), change("meta.page_title")] }])).toEqual({
+      cost: "medium",
+      reason: "seo_or_url",
+    });
+    expect(undoCostFromDiff([{ slug: "hello", author_diff: [change("funnel.stage", "common")] }]).cost).toBe("high");
+    expect(undoCostFromDiff([{ slug: "hello", author_diff: [change("sections")] }]).reason).toBe("sections");
+    expect(undoCostFromDiff([{ slug: "hello", author_diff: [change("title")], liveMissing: true }]).reason).toBe(
+      "first_publish",
+    );
+    expect(undoCostFromDiff([{ slug: "template", author_diff: [change("title")] }]).reason).toBe("shared_template");
   });
 });
 

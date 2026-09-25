@@ -3,7 +3,8 @@
  *
  * An entry is a draft when it has no live `{locale}.yml` files.
  * Draft content lives in `{variant}.{locale}.yml` + versioning.yml at 0% allocation.
- * Shared-layout / template types are excluded from draft-first create.
+ * Shared-layout entries are draft-first too (attached drafts carry fields only).
+ * Database-backed types and the type-root template shell are excluded.
  */
 
 import fs from "fs";
@@ -25,7 +26,6 @@ export const DEFAULT_DRAFT_VARIANT = "draft";
 const LIVE_LOCALE_RE = /^[a-z]{2}(-[a-z]{2})?$/;
 
 export function usesDraftFirstCreate(contentType: string, contentRoot?: string): boolean {
-  if (isSharedLayoutType(contentType, contentRoot)) return false;
   const config = getContentTypeConfig(contentType, contentRoot);
   if (!config || config.database?.slug) return false;
   return true;
@@ -85,10 +85,6 @@ export function isDraftEntry(
   slug: string,
   contentRoot?: string,
 ): boolean {
-  if (isSharedLayoutType(contentType, contentRoot) && !isTemplateVersioningSlug(slug)) {
-    // Attached shared-layout entries are never draft-first at entry level
-    return false;
-  }
   const dir = getEntryContentDir(contentType, slug, contentRoot);
   if (!fs.existsSync(dir)) return false;
   return !hasAnyLiveLocale(dir, isTemplateVersioningSlug(slug));
@@ -219,11 +215,10 @@ export function rejectLiveWriteIfDraft(opts: {
   if (variant && variant !== "" && variant !== "default") {
     return { ok: true };
   }
-  // Shared-layout types excluded from draft-first
-  if (usesDraftFirstCreate(contentType, contentRoot) === false && isSharedLayoutType(contentType, contentRoot)) {
+  if (!usesDraftFirstCreate(contentType, contentRoot)) {
     return { ok: true };
   }
-  if (!usesDraftFirstCreate(contentType, contentRoot)) {
+  if (templateMode || isTemplateVersioningSlug(slug)) {
     return { ok: true };
   }
   const dir = getEntryContentDir(contentType, slug, contentRoot);

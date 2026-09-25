@@ -95,7 +95,13 @@ import {
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
+import { entryPreviewHref } from "@/lib/variable-usage-href";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
+import {
+  ProposalDraftEntryDetails,
+  type DraftEntryV1,
+} from "@/components/agents/ProposalDraftEntryDetails";
 import {
   ProposalOutcomeReview,
   type OutcomeHistoryEntry,
@@ -156,7 +162,7 @@ function proposalsListHref(search: string): string {
   return qs ? `${AGENTS_PROPOSALS_BASE}?${qs}` : AGENTS_PROPOSALS_BASE;
 }
 
-type EntryRow = {
+type EntryRow = Omit<DraftEntryV1, "ops"> & {
   id: number;
   contentType: string;
   slug: string;
@@ -164,8 +170,9 @@ type EntryRow = {
   variant: string | null;
   status: string;
   last_error: string | null;
-  ops: Array<{ field_path: string; value?: unknown }>;
+  ops: Array<{ field_path: string; value?: unknown; op?: "set" | "remove" }>;
   baseline_context: { values: Record<string, unknown>; note?: string };
+  created_draft?: boolean;
 };
 
 type BlockerRow = {
@@ -213,6 +220,16 @@ type Proposal = {
   reviewer_action_by_actor?: Record<string, unknown>;
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
+  system_version?: string | null;
+  all_or_nothing?: boolean;
+  stale_since?: string | null;
+  stale_flagged_at?: string | null;
+  reverts_proposal_id?: string | null;
+  co_authors?: Array<{ username: string }>;
+  affected_entries?: {
+    count: number;
+    sample: Array<{ contentType: string; slug: string; locale: string; variant: string | null }>;
+  } | null;
   accepted_entry?: { contentType: string; slug: string; locale: string } | null;
   idea_funnel?: {
     stage: string;
@@ -435,7 +452,7 @@ function ReviewModeBadge({
 
 function previewHref(entry: EntryRow): string | null {
   if (!entry.variant) return null;
-  return `/private/preview/${encodeURIComponent(entry.contentType)}/${encodeURIComponent(entry.slug)}?locale=${encodeURIComponent(entry.locale)}&force_variant=${encodeURIComponent(entry.variant)}`;
+  return entryPreviewHref(entry);
 }
 
 function NoAutoRetryBadge({
@@ -938,10 +955,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [blockerBody, setBlockerBody] = useState("");
   const [resolveNotes, setResolveNotes] = useState<Record<number, string>>({});
   const [confirmExperiment, setConfirmExperiment] = useState(false);
+  const [confirmBaseUnknown, setConfirmBaseUnknown] = useState(false);
+  const [, setDetailLocation] = useLocation();
   const [advanced, setAdvanced] = useState(false);
   const [claimOpen, setClaimOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [activityAck, setActivityAck] = useState(false);
+  const [affectedAck, setAffectedAck] = useState(false);
   const [closeOpen, setCloseOpen] = useState(false);
   const [closeReason, setCloseReason] = useState<ProposalCloseReasonValue>("wont_fix");
   const [closeNote, setCloseNote] = useState("");
@@ -1016,6 +1036,28 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           "Another open edits proposal already targets this same page. Join that one, or reject the weaker proposal first.",
         target_missing:
           "The page this proposal edits no longer exists — apply is blocked. Reject or withdraw, or restore the page and file fresh.",
+        legacy_version:
+          "This proposal was filed before proposals 1.0 and can only be withdrawn or rejected. File a new proposal for this change.",
+        context_stale:
+          "The live page changed after this draft was made. It went back to the author to update — nothing was published.",
+        draft_missing:
+          "The draft for this page no longer exists, so nothing was published. The author needs to revise the proposal.",
+        four_eyes_co_author:
+          "You edited this draft directly, so you count as a co-author. Someone else must approve it.",
+        all_or_nothing_blocked:
+          "This proposal publishes all pages or none, and at least one page cannot be published yet. Nothing was published.",
+        competing_shared_fields:
+          "Another open proposal already changes the same whole-page fields. Finish or close that one first.",
+        draft_in_proposal:
+          "That draft already belongs to another open proposal.",
+        variant_has_traffic:
+          "That version is receiving visitor traffic, so it cannot be used as a proposal draft.",
+        revert_conflicts:
+          "Some fields changed again after this proposal was applied, so they cannot be reverted automatically.",
+        nothing_to_revert: "There is nothing left to revert on this proposal.",
+        not_applied: "Only applied proposals can be reverted.",
+        confirm_affected_entries:
+          "The number of pages this template change reaches has changed. Reload and confirm again.",
       };
       toast({
         title: (code && plainByCode[code]) || e.message,
@@ -1028,6 +1070,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       if (e.data?.code === "confirm_recent_activity") {
         setApplyOpen(true);
         setActivityAck(false);
+      }
+      if (e.data?.code === "draft_base_unknown") {
+        setConfirmBaseUnknown(true);
+        setApplyOpen(true);
       }
     },
   });
@@ -1297,6 +1343,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}
+                  <ProposalV1Badges p={p} />
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
                 {p.escalated ? (
@@ -1894,6 +1941,42 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             </div>
           ) : null}
 
+          {p.system_version &&
+          p.kind === "edits" &&
+          (p.status === "finished" || p.status === "partial") &&
+          p.entries.some((e) => e.status === "done") ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="panel-proposal-revert"
+            >
+              <p className="text-muted-foreground">
+                Want to undo this? Revert opens a new proposal that puts back the values that were
+                live before. Nothing changes until that proposal is approved.
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={mut.isPending}
+                onClick={() =>
+                  mut.mutate(
+                    { action: "revert" },
+                    {
+                      onSuccess: (json: { proposal?: { id?: string } }) => {
+                        if (json.proposal?.id) {
+                          setDetailLocation(`${AGENTS_PROPOSALS_BASE}/${json.proposal.id}`);
+                        }
+                      },
+                    },
+                  )
+                }
+                data-testid="button-revert-proposal"
+              >
+                Revert
+              </Button>
+            </div>
+          ) : null}
+
           {p.status === "rejected" && (p.close_reason || p.close_note) ? (
             <div
               className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm"
@@ -2026,6 +2109,36 @@ export function ProposalDetailPanel({ id }: { id: string }) {
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Proposed changes ({p.entries.length})
               </h3>
+              {p.affected_entries ? (
+                <div
+                  className="space-y-1.5 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+                  data-testid="panel-proposal-affected-entries"
+                >
+                  <p className="font-medium text-foreground">
+                    Affects {p.affected_entries.count} page{p.affected_entries.count === 1 ? "" : "s"} that use this template
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    This changes the shared template, so every attached page in that language changes when it is
+                    published. Pages detached from the template are not affected.
+                  </p>
+                  {p.affected_entries.sample.length ? (
+                    <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                      {p.affected_entries.sample.map((a) => (
+                        <li key={`${a.contentType}:${a.slug}:${a.locale}`}>
+                          <a
+                            href={entryPreviewHref(a)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary hover:underline"
+                          >
+                            Preview {a.slug}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
               {p.entries.map((e) => {
                 const href = previewHref(e);
                 return (
@@ -2132,19 +2245,23 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           <p className="whitespace-pre-wrap">{e.last_error}</p>
                         </div>
                       )}
-                      {e.ops.length === 0 && (p.promote_on_apply || p.review_mode === "draft_backed") && (
+                      {e.ops.length === 0 && !e.draft_missing && (p.promote_on_apply || p.review_mode === "draft_backed") && (
                         <p className="text-xs text-muted-foreground">
                           No field-diff list — the attached draft is the change. Preview it before approve.
                         </p>
                       )}
-                      {e.ops.map((op) => (
-                        <ProposalFieldDiff
-                          key={op.field_path}
-                          fieldPath={op.field_path}
-                          current={e.baseline_context.values[op.field_path]}
-                          proposed={op.value}
-                        />
-                      ))}
+                      {p.system_version ? (
+                        <ProposalDraftEntryDetails entry={e} />
+                      ) : (
+                        e.ops.map((op) => (
+                          <ProposalFieldDiff
+                            key={op.field_path}
+                            fieldPath={op.field_path}
+                            current={e.baseline_context.values[op.field_path]}
+                            proposed={op.value}
+                          />
+                        ))
+                      )}
                     </div>
                   </Card>
                 );
@@ -2330,6 +2447,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           Approving copies the prepared draft over the live page for this locale.
                           Visitors will see that version.
                         </p>
+                        {p.all_or_nothing ? (
+                          <p>All pages publish together. If any page cannot be published, nothing is published.</p>
+                        ) : null}
+                        {confirmBaseUnknown ? (
+                          <p className="text-destructive" data-testid="apply-base-unknown-warning">
+                            Some drafts have no recorded starting point, so changes made to the live
+                            page since then cannot be detected. Confirming publishes the draft as-is
+                            and may undo those changes.
+                          </p>
+                        ) : null}
                         {confirmExperiment ? (
                           <p className="text-destructive">
                             Other versions still have traffic. Confirming will remove those
@@ -2359,6 +2486,23 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         </p>
                       </>
                     )}
+                    {p.affected_entries ? (
+                      <label
+                        className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground cursor-pointer"
+                        data-testid="apply-affected-entries-ack"
+                      >
+                        <Checkbox
+                          checked={affectedAck}
+                          onCheckedChange={(v) => setAffectedAck(v === true)}
+                          className="mt-0.5"
+                          data-testid="checkbox-affected-entries-ack"
+                        />
+                        <span>
+                          I understand this changes {p.affected_entries.count} page
+                          {p.affected_entries.count === 1 ? "" : "s"} that use the template.
+                        </span>
+                      </label>
+                    ) : null}
                     {needsActivityAck ? (
                       <div
                         className="space-y-2 rounded-md border border-card-border bg-muted/40 p-3"
@@ -2393,12 +2537,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     mut.isPending ||
                     blockersOpen ||
                     Boolean(p.recent_activity_error) ||
-                    (needsActivityAck && !activityAck)
+                    (needsActivityAck && !activityAck) ||
+                    (Boolean(p.affected_entries) && !affectedAck)
                   }
                   onClick={() => {
                     const body: Record<string, unknown> = {};
                     if (confirmExperiment) body.confirm_end_experiment = true;
                     if (needsActivityAck) body.confirm_recent_activity = true;
+                    if (confirmBaseUnknown) body.confirm_base_unknown = true;
+                    if (p.affected_entries) body.confirm_affected_entries = p.affected_entries.count;
                     mut.mutate(
                       {
                         action: "apply",
@@ -2408,6 +2555,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         onSuccess: () => {
                           setApplyOpen(false);
                           setActivityAck(false);
+                          setConfirmBaseUnknown(false);
                         },
                       },
                     );

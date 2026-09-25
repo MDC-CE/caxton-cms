@@ -49,7 +49,7 @@ describe("agentic-write-gate", () => {
       expect(pub.allowed).toBe(false);
       if (pub.allowed) return;
       const text = pub.response.content[0]!.text;
-      expect(text).toContain("agentic_propose_required");
+      expect(text).toContain("proposal_required");
       expect(text).toContain("propose_change");
 
       const create = await assertAgenticContentWriteAllowed({

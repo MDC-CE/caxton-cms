@@ -62,7 +62,7 @@ import {
 } from "../../shared/contentTypeStrategy.js";
 import { runContentTypeFieldPatch } from "../lib/content-type-field-mcp.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
-import { promoteWarnings, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
+import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
 import {
   isSignupFieldMapError,
   signupFieldMapActionRequired,
@@ -176,6 +176,7 @@ import {
 } from "../lib/translate-entry.js";
 import { applyPurchasableToRecord, ecommerceManager, PURCHASABLE_FIELD } from "../../server/ecommerce/ecommerce-manager.js";
 import { FUNNEL_STAGES } from "@shared/funnel";
+import { COMMON_META_KEYS, isCommonField } from "@shared/field-scope";
 import {
   applyFunnelFieldUpdates,
   isFunnelFieldPath,
@@ -209,10 +210,7 @@ import {
 } from "../../server/editorial-updated-at.js";
 import { getSeoIndexEntry, loadSeoIndex, SEO_INDEX_FILENAME } from "../../server/seo-index.js";
 import { buildSearchEnginesPagePayload } from "../../server/search-engines-page.js";
-import {
-  assertSeoWriteLayerAllowed,
-  SEO_DRAFT_WHILE_LIVE_FORBIDDEN,
-} from "../../server/seo-write-layer.js";
+import { assertSeoWriteLayerAllowed } from "../../server/seo-write-layer.js";
 import {
   collectFormSourceHitsFromNode,
   collectFormSourceHitsFromUpdates,
@@ -3143,7 +3141,7 @@ export function registerPageTools(
 
   // Safe top-level paths are resolved per content-type via safeTopLevelFieldsForConfig (editor.type).
 
-  const META_COMMON_FIELDS = new Set(["robots", "priority", "change_frequency"]);
+  const META_COMMON_FIELDS = new Set<string>(COMMON_META_KEYS);
   const META_LOCALE_FIELDS = new Set([
     "page_title", "description", "og_image", "og_type",
     "og_url", "og_locale", "canonical_url",
@@ -3178,7 +3176,7 @@ export function registerPageTools(
     "Rejects two or more distinct section indexes (split into separate calls so bindings can propagate). " +
     "sections.N.* patches an existing slot only — missing index fails (reload, or edit template.{locale}.yml with layout_target type_template). Does not create overlay patches or grow sections[]. " +
     "field_path routing: sections.* and safe top-level → locale; seo.main_keyword|seo.kw_monthly_volume|seo.kw_difficulty|seo.pillar_path|seo.is_pillar|seo.refresh_tier → locale seo: (never _common.yml, no meta_target); " +
-    "SEO writes only on live {locale}.yml or draft.{locale}.yml when the entry has no live locales yet (rejects A/B variants and draft-while-live with seo_variant_forbidden / seo_draft_while_live_forbidden); " +
+    "SEO writes on live {locale}.yml or any draft (variant at 0% traffic); experiments (traffic > 0) fail with seo_variant_forbidden. Promote applies the draft's seo: over live; " +
     "seo.include_in_clustering (MCP-only boolean, never YAML) expands to pillar_path/is_pillar — requires content-type seo_monitoring.enabled; " +
     "seo.refresh_tier is fast|medium|evergreen (fact-staleness); cannot clear (null/reset forbidden) — omit to leave unchanged; pick help via get_entry_fields fill_intent or explain_site topic seo; " +
     "research writes: if any of main_keyword|kw_monthly_volume|kw_difficulty is in updates, omitted metrics are forced to null (pass both integers to keep them); " +
@@ -3189,8 +3187,8 @@ export function registerPageTools(
     "on=true needs non-empty seo.pillar_path or seo.is_pillar:true after merge; on=false → pillar_path:null + is_pillar:false; " +
     "raw seo.pillar_path:null still opts out (warns). While ORPHAN_PAGE / PARTIALLY_SET_CLUSTER is open, " +
     "becoming a hub (is_pillar) or opting out requires confirm_cluster_resolution: true (joining a hub does not). " +
-    "meta.robots/priority/change_frequency → _common.yml; " +
-    "other known meta.* → locale; unknown meta.* requires meta_target locale|common.\n\n" +
+    "Page-level fields (fixed system rule, fieldScope: funnel.*, meta.robots|priority|change_frequency, published_at, detached, authors) → _common.yml (all languages; warning); " +
+    "everything else (incl. unknown meta.*) → locale. meta_target is ignored (warning).\n\n" +
     "Live gate: live writes need meta.page_title + meta.description; editor.required cannot be cleared on live. Drafts exempt.\n" +
     "CIRCULAR TRAP: if both meta.description and body description are empty, set BOTH in this one updates[] call.\n\n" +
     "funnel.stage / funnel.products (and funnel / reset:true) write page _common.yml journey membership. " +
@@ -3217,7 +3215,7 @@ export function registerPageTools(
           "When true, clear this field (inherit lower layer). Do not send value or meta_target on this item.",
         ),
         meta_target: z.enum(["locale", "common"]).optional().describe(
-          "Required for unknown meta.* keys. Known meta auto-routes.",
+          "Deprecated and ignored: page-level vs locale is a fixed system rule (fieldScope).",
         ),
       })).min(1).describe("Field updates (min 1). At most one distinct sections.N index. Each item is set (value) or reset (reset:true)."),
       contentType: z.string().optional().describe("Content type hint. Omit to auto-detect."),
@@ -3390,21 +3388,6 @@ export function registerPageTools(
           `Disallowed field_path '${p}'. Must start with 'sections.', 'meta.', 'funnel.stage|funnel.products', 'seo.main_keyword|seo.kw_monthly_volume|seo.kw_difficulty|seo.pillar_path|seo.is_pillar|seo.refresh_tier|seo.include_in_clustering', or be one of: ${[...safeTop].join(", ")}.`,
         );
       }
-      for (const u of funnelUpdates) {
-        if (u.meta_target) {
-          return fail("funnel.* always writes _common.yml; do not pass meta_target.");
-        }
-      }
-      for (const u of updates) {
-        if (isSeoPath(u.field_path) && u.meta_target) {
-          return fail("seo.* always writes the locale file; do not pass meta_target.");
-        }
-        if (!u.field_path.startsWith("meta.") || u.reset === true) continue;
-        const key = u.field_path.slice(5).split(".")[0];
-        if (!ALL_KNOWN_META_FIELDS.has(key) && !u.meta_target) {
-          return fail(`Unknown meta field '${key}' requires meta_target: "locale" | "common"`);
-        }
-      }
 
       const seoTouching = updates.some((u) => isSeoPath(u.field_path));
       if (seoTouching) {
@@ -3422,9 +3405,7 @@ export function registerPageTools(
               tool: "update_fields",
               priority: "required",
               reason:
-                layerGate.code === SEO_DRAFT_WHILE_LIVE_FORBIDDEN
-                  ? "Edit cluster SEO on the live locale (omit variant)."
-                  : "Edit cluster SEO on live (omit variant), or on draft only when the page is not live yet.",
+                "Edit cluster SEO on live (omit variant) or on a draft at 0% traffic — experiments (traffic > 0) cannot change seo:.",
               args_hint: {
                 slug,
                 contentType: resolved.contentType,
@@ -3438,14 +3419,6 @@ export function registerPageTools(
               },
             },
           ];
-          if (layerGate.code === SEO_DRAFT_WHILE_LIVE_FORBIDDEN) {
-            next_actions.push({
-              tool: "get_entry_seo",
-              priority: "recommended",
-              reason: "Confirm live cluster SEO before editing.",
-              args_hint: { slug, contentType: resolved.contentType, locale, ...siteHint },
-            });
-          }
           return fail(layerGate.error, { code: layerGate.code, next_actions });
         }
       }
@@ -3916,16 +3889,12 @@ export function registerPageTools(
       const slugRenameValue = !variant
         ? updates.find((u) => u.field_path === "slug" && typeof u.value === "string")?.value as string | undefined
         : undefined;
-      for (const { field_path, value, meta_target } of updates) {
+      for (const { field_path, value } of updates) {
         if (field_path === "slug" && slugRenameValue !== undefined) {
           continue;
         }
-        if (field_path.startsWith("meta.")) {
-          const metaKey = field_path.slice(5).split(".")[0];
-          const toCommon = META_COMMON_FIELDS.has(metaKey) ||
-            (!ALL_KNOWN_META_FIELDS.has(metaKey) && meta_target === "common");
-          if (toCommon) commonEntries.push([field_path, value]);
-          else localeEntries.push([field_path, value]);
+        if (!field_path.startsWith("sections.") && isCommonField(field_path)) {
+          commonEntries.push([field_path, value]);
         } else {
           localeEntries.push([field_path, value]);
         }
@@ -3974,11 +3943,23 @@ export function registerPageTools(
             "sections.N.* patches an existing slot only (this file or template.{locale}.yml). Missing index fails — reload get_entry_fields or use layout_target type_template. Does not create overlay patches. Merge: server/section-merge.ts.",
         });
       }
+      if (commonEntries.length > 0) {
+        warnings.push({
+          code: "common_fields_all_languages",
+          message: `${commonEntries.map(([p]) => p).join(", ")} ${commonEntries.length === 1 ? "is a" : "are"} page-level field (fieldScope common): written to ${commonRelPath} and changes every language.`,
+        });
+      }
       if (variant && commonEntries.length > 0) {
         warnings.push({
           code: "common_meta_ignores_variant",
           message:
-            "Common meta (robots/priority/change_frequency or meta_target=common) writes _common.yml and ignores variant.",
+            "Page-level fields write _common.yml and ignore variant. To stage them for review, use proposals_create (the draft carries them until publish).",
+        });
+      }
+      if (updates.some((u) => u.meta_target !== undefined)) {
+        warnings.push({
+          code: "meta_target_ignored",
+          message: "meta_target is ignored: page-level vs locale is a fixed system rule (fieldScope).",
         });
       }
 
@@ -4362,7 +4343,7 @@ export function registerPageTools(
         field_path: z.string().describe("meta.* or funnel.stage|funnel.products"),
         value: z.unknown().optional().describe("New value (required unless reset:true on funnel)"),
         reset: z.boolean().optional().describe("Clear funnel path only (not supported for meta in bulk)"),
-        meta_target: z.enum(["locale", "common"]).optional().describe("Required for unknown meta keys"),
+        meta_target: z.enum(["locale", "common"]).optional().describe("Deprecated and ignored: routing is the fixed fieldScope rule"),
       })).min(1).describe("Attribute updates applied identically to every slug"),
       contentType: z.string().describe("Content type for all slugs (required; cross-type batches are rejected)"),
       variant: z.string().optional().describe("Optional variant for locale-routed meta (ignored for funnel/common)"),
@@ -5585,11 +5566,22 @@ export function registerPageTools(
     "Also fails when resolved meta.page_title / meta.description are empty, when editor.required fields " +
     "(e.g. blog title + description) are empty, or when a detached locale would go live empty (EMPTY_LOCALE: no sections and no content). " +
     "Confirm with the user before calling — this makes the page live. " +
+    "Page-level fields in the draft (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
+    "Rejections: proposal_required (swarm roles), draft_in_proposal (draft under an open proposal — apply that proposal instead), translation_source_changed, " +
+    "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees). " +
     "On success, next_actions requires run_entry_diagnostics (hard + one slug — sync completed in that call).",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
       slug: z.string().describe("Page slug"),
       variantSlug: z.string().default("draft").describe("Draft variant to publish, e.g. 'draft'"),
+      confirm_overwrite_newer_live: z
+        .boolean()
+        .optional()
+        .describe("After draft_base_stale / draft_base_unknown: publish the draft as-is, discarding live changes made after it was created (ask the user first)."),
+      confirm_source_changed: z
+        .boolean()
+        .optional()
+        .describe("Publish translations whose source locale changed after translating (ask the user first)."),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5598,7 +5590,7 @@ export function registerPageTools(
         .describe("Required. From agent_session start."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ contentType, slug, variantSlug, report, agent_session_id, site }) => {
+    async ({ contentType, slug, variantSlug, confirm_overwrite_newer_live, confirm_source_changed, report, agent_session_id, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
 
@@ -5649,17 +5641,26 @@ export function registerPageTools(
         const res = await fetch(url, {
           method: "POST",
           headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
-          body: JSON.stringify({ variantSlug, report: trimmedReport }),
+          body: JSON.stringify({
+            variantSlug,
+            report: trimmedReport,
+            ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
+            ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
+          }),
         });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
           const errMsg = (data.error as string) || `Server error: ${res.status}`;
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
+          const serverCode = typeof data.code === "string" ? data.code : undefined;
+          const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
           return fail(errMsg, {
-            code: isEmpty ? "EMPTY_LOCALE" : undefined,
+            code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
             slug,
             variantSlug,
+            ...(data.locale ? { locale: data.locale } : {}),
+            ...(details ? { details } : {}),
             next_actions: isEmpty
               ? [{
                   tool: "get_entry_content",
@@ -5667,9 +5668,24 @@ export function registerPageTools(
                   args_hint: { slug, contentType, variant: variantSlug },
                   priority: "required",
                 }]
-              : [],
+              : promoteFailureNextActions({
+                  code: serverCode,
+                  details,
+                  retryTool: "publish_draft",
+                  contentType,
+                  slug,
+                  locale: typeof data.locale === "string" ? data.locale : undefined,
+                  variantSlug,
+                  site,
+                }),
           });
         }
+        const serverWarnings = Array.isArray(data.warnings)
+          ? (data.warnings as Array<{ locale?: string; code: string; message: string }>).map((w) => ({
+              code: w.code,
+              message: w.locale ? `[${w.locale}] ${w.message}` : w.message,
+            }))
+          : [];
         return ok(
           {
             published: true,
@@ -5680,6 +5696,7 @@ export function registerPageTools(
           },
           {
             warnings: [
+              ...serverWarnings,
 {
                 code: "page_now_live",
                 message: "Page is live for the listed locales and will appear in the sitemap. Confirm with the user before publishing in the future.",
@@ -5707,9 +5724,13 @@ export function registerPageTools(
   mcp.tool(
     "promote_variant",
     "Promote a variant to become the live version for ONE locale: overwrites the default locale file with the variant's content, " +
-    "removes the variant from versioning.yml, and deletes the variant file. " +
-    "When a live locale already exists, cluster seo: stays on the live file (variant seo: is ignored — warning seo_not_promoted_from_variant). " +
-    "First go-live from draft (no live file yet) still brings draft SEO onto live and patches seo-index.json. " +
+    "removes the variant from versioning.yml (deletes versioning.yml when it empties), and deletes the variant file. " +
+    "A draft seo: block replaces live seo:; drafts without seo: keep live seo:. " +
+    "Page-level fields (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
+    "If live changed after the draft was created, non-overlapping edits are rebuilt on top of live (warning draft_rebuilt); overlaps fail with draft_base_stale (details.conflicting_fields) — " +
+    "retry with confirm_overwrite_newer_live only after the user agrees to discard those live changes. draft_base_unknown = draft has no recorded base (same confirm). " +
+    "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure. " +
+    "dry_run: true runs every check and returns published_diff without writing. " +
     "For attached shared-layout entries, pass the entry slug (not \"single\") to promote entry drafts from translate_entry " +
     "({variantSlug}.{locale}.yml under the entry folder). Pass slug \"single\" only to promote a type-root template variant. " +
     "For unpublished draft entries (no live locales), use publish_draft instead (all-or-nothing across locales). " +
@@ -5722,6 +5743,15 @@ export function registerPageTools(
       slug: z.string().describe("Page slug"),
       variantSlug: z.string().describe("Slug of the variant to promote, e.g. 'draft-v2'"),
       locale: z.string().default("en").describe("Locale of the variant to promote, e.g. 'en' or 'es'"),
+      confirm_overwrite_newer_live: z
+        .boolean()
+        .optional()
+        .describe("Publish even though live changed after the draft was created (discards those live edits). Ask the user first."),
+      confirm_source_changed: z
+        .boolean()
+        .optional()
+        .describe("Publish a translation whose source locale changed after translating. Ask the user first."),
+      dry_run: z.boolean().optional().describe("Run every check and return published_diff without writing."),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5730,7 +5760,18 @@ export function registerPageTools(
         .describe("Required. From agent_session start."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ contentType, slug, variantSlug, locale, report, agent_session_id, site }) => {
+    async ({
+      contentType,
+      slug,
+      variantSlug,
+      locale,
+      confirm_overwrite_newer_live,
+      confirm_source_changed,
+      dry_run,
+      report,
+      agent_session_id,
+      site,
+    }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
 
@@ -5787,18 +5828,27 @@ export function registerPageTools(
         const res = await fetch(url, {
           method: "POST",
           headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
-          body: JSON.stringify({ report: trimmedReport }),
+          body: JSON.stringify({
+            report: trimmedReport,
+            ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
+            ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
+            ...(dry_run ? { dry_run: true } : {}),
+          }),
         });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
           const errMsg = (data.error as string) || `Server error: ${res.status}`;
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
+          const serverCode = typeof data.code === "string" ? data.code : undefined;
+          const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
           return fail(errMsg, {
-            code: isEmpty ? "EMPTY_LOCALE" : undefined,
+            code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
             slug,
             locale,
             variantSlug,
+            ...(details ? { details } : {}),
+            ...(data.traffic_siblings ? { traffic_siblings: data.traffic_siblings } : {}),
             next_actions: isEmpty
               ? [{
                   tool: "get_entry_content",
@@ -5806,8 +5856,31 @@ export function registerPageTools(
                   args_hint: { slug, contentType, locale, variant: variantSlug },
                   priority: "required",
                 }]
-              : [],
+              : promoteFailureNextActions({
+                  code: serverCode,
+                  details,
+                  retryTool: "promote_variant",
+                  contentType,
+                  slug,
+                  locale,
+                  variantSlug,
+                  site,
+                }),
           });
+        }
+        if (data.dry_run === true) {
+          return ok(
+            {
+              dry_run: true,
+              message: `Dry run: '${variantSlug}' can be promoted for ${contentType}/${slug} (${locale}). Nothing was written.`,
+              published_diff: data.published_diff ?? [],
+              ...(data.rebuilt ? { rebuilt: data.rebuilt } : {}),
+            },
+            {
+              warnings: Array.isArray(data.warnings) ? (data.warnings as McpWarning[]) : [],
+              next_actions: [],
+            },
+          );
         }
         const next_actions: NextAction[] = sharedLayout
           ? [{
@@ -5820,17 +5893,13 @@ export function registerPageTools(
         next_actions.push(diagnosticsAfterGoLiveNextAction(slug, site));
         {
           const promoteWarns = promoteWarnings(sharedLayout);
-          if (data.ignoredVariantSeo === true) {
-            promoteWarns.push({
-              code: "seo_not_promoted_from_variant",
-              message:
-                "Live cluster seo: was kept; variant seo: was not applied. Edit SEO on the live locale with update_fields (omit variant).",
-            });
-          }
-return ok(
+          if (Array.isArray(data.warnings)) promoteWarns.push(...(data.warnings as McpWarning[]));
+          return ok(
             {
               message: `Variant '${variantSlug}' promoted to live for ${contentType}/${slug} (${locale})`,
-              ignoredVariantSeo: data.ignoredVariantSeo === true,
+              published_diff: data.published_diff ?? [],
+              versioning_deleted: data.versioning_deleted === true,
+              ...(data.rebuilt ? { rebuilt: data.rebuilt } : {}),
             },
             { warnings: promoteWarns, next_actions },
           );
@@ -5987,6 +6056,24 @@ return ok(
                   "Variant has traffic allocated and cannot be deleted. A staff member must remove the allocation in Versioning before retrying.",
               }],
               next_actions: [],
+            });
+          }
+          if (code === "draft_in_proposal") {
+            const details = data.details as Record<string, unknown> | undefined;
+            return fail(errMsg, {
+              code,
+              contentType,
+              slug,
+              locale,
+              variantSlug,
+              ...(details ? { details } : {}),
+              next_actions: [{
+                tool: "update_proposal",
+                priority: "required",
+                reason:
+                  "This draft belongs to an open proposal. Withdraw (proposer) or reject (reviewer) that proposal instead of deleting the draft directly.",
+                args_hint: { proposal_id: details?.proposal_id, ...(site ? { site } : {}) },
+              }],
             });
           }
           const next_actions: NextAction[] =
@@ -6277,12 +6364,12 @@ const next_actions: NextAction[] = entryDeleted
   mcp.tool(
     "create_entry",
     "Create a brand-new YAML-driven content entry (any non-DB content type, including single_template types such as blog). " +
-    "For normal (non-shared-layout) types this creates an unpublished DRAFT: " +
+    "Every type (shared-layout included) creates an unpublished DRAFT: " +
     "writes _common.yml + draft.{locale}.yml + versioning.yml (0% allocation). " +
-    "Edit with variant: 'draft', then call publish_draft. Confirm with the principal before publishing.\n" +
+    "Edit with variant: 'draft', then call publish_draft (needs content_promote_variant). Confirm with the principal before publishing.\n" +
     "All content types: exactly ONE locale per create (multi-locale create is rejected). Add translations via translate_entry.\n" +
-    "Shared-layout / single_template types write that one locale live immediately. " +
-    "Put body/fields on the locale (title, description, content, … per field_mapping); sections must be [] — shell comes from template.{locale}.yml. " +
+    "Shared-layout / single_template drafts carry fields only: " +
+    "put body/fields on the locale (title, description, content, … per field_mapping); sections must be [] — shell comes from template.{locale}.yml. " +
     "Call explain_site topic shared-layout and/or get_content_type_info before creating shared-layout entries. " +
     MULTI_SITE_TOOL_BLURB + "\n\n" +
     "locales map: locale → { meta?, sections?, …field_mapping keys }. Exactly one locale key.\n" +
@@ -6466,7 +6553,7 @@ const next_actions: NextAction[] = entryDeleted
               action_required: "missing_required_fields",
               code: "missing_required_fields",
               message:
-                `Missing editor.required fields for live shared-layout create: ${missing.join(", ")}. ` +
+                `Missing editor.required fields for shared-layout create: ${missing.join(", ")}. ` +
                 "Supply them on the locale object (or common when appropriate).",
               missing,
               contentType,
@@ -6612,13 +6699,12 @@ const next_actions: NextAction[] = entryDeleted
         });
       }
 
-      const draftFirst = !sharedLayoutCreate;
+      // Every YAML type (shared-layout included) starts as an unpublished draft.
+      const draftFirst = true;
       const draftVariant = "draft";
       const localesWithSeo = Object.entries(normalizedLocales).filter(
         ([, v]) => v.fields && typeof (v.fields as Record<string, unknown>).seo === "object",
       );
-      // Draft-first create is always unpublished → SEO on locale draft files is allowed.
-      // Shared-layout create writes live files → SEO on live is allowed.
 
       fs.mkdirSync(pageDir, { recursive: true });
 
@@ -6657,6 +6743,13 @@ const next_actions: NextAction[] = entryDeleted
         }
         fs.writeFileSync(path.join(pageDir, "versioning.yml"), safeDump(versioning), "utf-8");
         createdFiles.push("versioning.yml");
+        const { recordDraftBase } = await import("../../server/versioning/draft-base.js");
+        for (const loc of createdLocales) {
+          recordDraftBase(
+            { contentType, slug, locale: loc, variant: draftVariant, contentRoot: contentPath },
+            { author: mcpWriteAuthor(mcpToken), skipMark: true },
+          );
+        }
       }
 
       const relPaths = createdFiles.map((f) => `${contentFolder}/${ctDir}/${slug}/${f}`);
@@ -6711,59 +6804,14 @@ const ghWarning = githubCommitWarning(commitResult);
           reason: "When ready, publish all remaining draft locales at once (confirm with the principal first).",
           args_hint: { contentType, slug, variantSlug: draftVariant, ...siteHint },
         });
-      } else if (sharedLayoutCreate) {
-        warnings.push(CREATE_ENTRY_SHARED_LAYOUT_WARNING);
-        warnings.push({
-          code: "shared_layout_single_locale_create",
-          message:
-            `Created live ${primaryLocale}.yml only. Did not seed sibling locales. ` +
-            "Add translations later with translate_entry using locale fields while attached (draft until promote). " +
-            "Use set_entry_attachment only when this entry needs a custom shell (not for field translation).",
-        });
-        warnings.push({
-          code: "published_at_stamped",
-          message:
-            "Live create stamps published_at=now on _common.yml (shared-layout). Distinct from _updated_at; not tied to YAML status.",
-        });
-        side_effects.push(sharedTemplateBlastSideEffect(contentType, primaryLocale));
-        next_actions.push({
-          tool: "get_entry_content",
-          priority: "recommended",
-          reason: "Re-read merged content (fields + template.{locale}.yml shell). Prefer update_fields for locale fields — not section shell edits.",
-          args_hint: { contentType, slug, locale: primaryLocale, ...siteHint },
-        });
-        next_actions.push({
-          tool: "run_entry_diagnostics",
-          priority: "recommended",
-          reason: "Hard-refresh diagnostics for the new live entry (one slug — sync completed in that call)",
-          args_hint: { slugs: [slug], freshness: "hard", confirm: true, ...siteHint },
-        });
-      } else {
-        warnings.push({
-          code: "published_at_stamped",
-          message:
-            "Live create stamps published_at=now on _common.yml when the type is not draft-first.",
-        });
-      }
-      if (!draftFirst && localesWithSeo.length > 0) {
-        try {
-          const { syncSeoIndexEntryFromLiveDisk } = await import("../../server/seo-index.js");
-          for (const [loc] of localesWithSeo) {
-            syncSeoIndexEntryFromLiveDisk({
-              contentType,
-              slug,
-              locale: loc,
-              contentRoot: contentPath,
-              author: mcpWriteAuthor(mcpToken),
-              emitEvent: true,
-            });
-          }
-          side_effects.push({
-            kind: "seo_index",
-            summary: `Patched ${contentFolder}/${SEO_INDEX_FILENAME} for live locales created with seo:.`,
+        if (sharedLayoutCreate) {
+          warnings.push({
+            code: "attached_draft_fields_only",
+            message:
+              `Created ${draftVariant}.${primaryLocale}.yml only (fields over template.${primaryLocale}.yml). ` +
+              "Attached drafts carry fields only — no sections/layout, no traffic allocation. " +
+              "Add translations later with translate_entry. Use set_entry_attachment only when this entry needs a custom shell.",
           });
-        } catch {
-          /* non-fatal */
         }
       }
       if (!refreshResult.ok) {
@@ -8299,6 +8347,18 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         variantSlug,
       });
 
+      {
+        const { recordDraftBase, recordTranslationSource } = await import("../../server/versioning/draft-base.js");
+        const draftRef = { contentType: resolved.contentType, slug, locale: target_locale, variant: variantSlug, contentRoot: contentPath };
+        if (isNew) recordDraftBase(draftRef, { author: mcpWriteAuthor(mcpToken), skipMark: true });
+        if (recordTranslationSource(draftRef, source_locale, { author: mcpWriteAuthor(mcpToken), skipMark: true })) {
+          warnings.push({
+            code: "translation_source_recorded",
+            message: `Recorded ${source_locale} as the translation source. If live ${source_locale}.yml changes before publish, promote/publish returns translation_source_changed and proposals go context_stale.`,
+          });
+        }
+      }
+
       const commitPaths = [targetRelPath, versioningRelPath];
       const commitMsg = `Draft translate ${resolved.contentType}/${slug} → ${variantSlug}.${target_locale}`;
       const [commitResult] = await Promise.all([
@@ -9355,7 +9415,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             create_via: createVia,
             create_via_note:
               createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
-                ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant. create_entry writes live immediately and is not on specialist connectors."
+                ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant (the proposal creates the draft). create_entry creates an unpublished draft (one locale) and is not on specialist connectors."
                 : createVia
                   ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
                   : "Database-backed — create_entry cannot create rows; use DB/admin path.",
@@ -9363,9 +9423,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
               ? {
                   warnings: [
                     {
-                      code: "create_entry_writes_live",
+                      code: "create_entry_specialists_use_proposals",
                       message:
-                        "create_entry writes this attached post live immediately and is not on specialist connectors. Prefer an accepted idea, then propose_change field edits with no variant.",
+                        "create_entry creates this attached post as an unpublished draft (draft.{locale}.yml, copy fields only) and is not on specialist connectors. Specialists: accepted idea, then propose_change field edits with no variant.",
                     },
                   ],
                 }

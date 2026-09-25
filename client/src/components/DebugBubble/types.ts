@@ -52,6 +52,19 @@ export interface VersioningResponse {
   updatedAt?: string | null;
   /** Editorial published_at (ISO) — first go-live on _common.yml */
   publishedAt?: string | null;
+  /** `{locale: {variant: badge}}` for drafts linked to a proposal. */
+  proposalsByVariant?: Record<string, Record<string, VariantProposalLink>>;
+}
+
+export interface VariantProposalLink {
+  id: string;
+  env: string;
+  /** True when the proposal exists in this environment's proposals DB. */
+  local: boolean;
+  title?: string;
+  status?: string;
+  proposer_username?: string;
+  proposer_kind?: "agent" | "staff";
 }
 
 export interface ContentInfo {

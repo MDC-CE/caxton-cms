@@ -5,6 +5,8 @@ import yaml from "js-yaml";
 import { escapeObjectVars, unescapeYamlDump } from "@shared/templateVars";
 import { entryBagFieldPathFromVarName, getLegacySingleVarWriteError } from "@shared/entryTemplateVars";
 import { getConsentKeyError } from "@shared/consentLegacyKeys";
+import { deleteAtPath } from "@shared/object-path";
+import { isCommonField } from "@shared/field-scope";
 import {
   wipeSectionOnDuplicate,
   wipeDocumentSectionsOnDuplicate,
@@ -168,6 +170,8 @@ import {
   writeVersioningFile,
   rejectLiveWriteIfDraft,
 } from "./draft-entry";
+import { recordDraftBase } from "./versioning/draft-base";
+import { notifyVariantWritten } from "./versioning/draft-meta";
 
 /** Create/duplicate: exactly one locale at a time (all content types). */
 export const SINGLE_LOCALE_CREATE_ERROR =
@@ -1463,6 +1467,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
     });
     
     fs.writeFileSync(filePath, updatedYaml, "utf-8");
+    if (variant) notifyVariantWritten(filePath, { author: request.author, contentRoot });
 
     if (Object.keys(seoUpdates).length === 0) {
       markFileAsModified(filePath, request.author, undefined, contentRoot);
@@ -2511,8 +2516,8 @@ export function editCommonContent(request: CommonEditRequest): {
           };
         }
       }
-      if (op.value === undefined) {
-        delete commonData[op.path];
+      if (op.value === undefined || op.value === null) {
+        deleteAtPath(commonData, op.path);
       } else {
         setValueAtPath(commonData, op.path, op.value);
       }
@@ -2585,10 +2590,11 @@ export function getContentForEdit(
       return { content: null, error: loadError || `Content file not found` };
     }
 
+    const { _draft: _draftMeta, ...localeContent } = localeData;
     const commonData = index.loadCommonData(contentType, slug);
     const content = commonData
-      ? deepMerge(commonData, localeData)
-      : localeData;
+      ? deepMerge(commonData, localeContent)
+      : localeContent;
 
     return { content };
   } catch (error) {
@@ -3231,6 +3237,12 @@ export async function createContentEntry(
       author,
       contentRootAbs,
     );
+    for (const loc of locales) {
+      recordDraftBase(
+        { contentType: type, slug: folderSlug, locale: loc, variant: draftVariant, contentRoot: contentRootAbs },
+        { author },
+      );
+    }
   };
 
   const draftSuccessData = (extra: Record<string, unknown> = {}) => ({
@@ -3630,32 +3642,32 @@ export async function createContentEntry(
   const typeConfig = typeConfigForParams;
   const fieldMappingRaw = typeConfig?.field_mapping ?? {};
   const fieldKeys = Object.keys(fieldMappingRaw).filter(k => !k.startsWith("_"));
-  const activeLocale = getSupportedLocales().find(l => !skipLocales.includes(l)) ?? getDefaultLocale();
-
+  // Page-level fields (fieldScope "common") seed _common.yml; everything else seeds
+  // each locale file so _common.yml never carries locale-scoped fields.
   const commonObj: Record<string, unknown> = {};
+  const localeSeed: Record<string, unknown> = {};
   for (const key of fieldKeys) {
-    if (key === "slug") commonObj.slug = folderSlug;
-    else if (key === "title") commonObj.title = title;
-    else if (key === "locale") commonObj.locale = activeLocale;
-    else if (key === RESERVED_PUBLISHED_AT_FIELD) {
+    if (key === "slug" || key === "title" || key === "locale") continue;
+    if (key === RESERVED_PUBLISHED_AT_FIELD) {
       // Draft-first: omit until publish/promote. Live create: stamp now.
       if (!draftFirst) commonObj[key] = new Date().toISOString();
-    } else if (urlParams.includes(key)) {
-      // URL pattern params are locale-only; omit from _common.yml
-    } else if (uniqueFieldValues[key] !== undefined) {
-      const ufv = uniqueFieldValues[key];
-      commonObj[key] = typeof ufv === "boolean" ? ufv : coerceStringValue(ufv as string);
-    } else {
-      commonObj[key] = "";
+      continue;
     }
+    if (urlParams.includes(key)) continue; // URL pattern params: per-locale below
+    const ufv = uniqueFieldValues[key];
+    const value =
+      ufv !== undefined ? (typeof ufv === "boolean" ? ufv : coerceStringValue(ufv as string)) : "";
+    if (isCommonField(key, { urlParams })) commonObj[key] = value;
+    else localeSeed[key] = value;
   }
   const commonYml = yaml.dump(commonObj, { lineWidth: 120, noRefs: true, sortKeys: false });
 
   const makeLocaleObj = (slug: string, loc: string) => {
-    const obj: Record<string, unknown> = { slug, sections: [] };
+    const obj: Record<string, unknown> = { slug, ...localeSeed, sections: [] };
+    if (fieldKeys.includes("locale")) obj.locale = loc;
     const localeTitle = localeTitles[loc];
     const effectiveTitle = localeTitle || title;
-    if (localeTitle) obj.title = localeTitle;
+    if (effectiveTitle && (fieldKeys.includes("title") || localeTitle)) obj.title = effectiveTitle;
     if (effectiveTitle) obj.meta = { page_title: effectiveTitle };
     // Locale-specific URL params (e.g. category slug that differs per language)
     for (const param of perLocaleUrlParams) {

@@ -3173,7 +3173,7 @@ export function registerContentRoutes(app: Express): void {
 
       const results = entries.map(enrichEntry);
 
-      // Include draft-only folders (no live locales) for non-shared-layout types
+      // Include draft-only folders (no live locales), attached shared-layout entries included
       if (usesDraftFirstCreate(type, root)) {
         const allSlugs = getCI(res).listContentSlugs(type as ContentType);
         for (const slug of allSlugs) {
@@ -3191,8 +3191,6 @@ export function registerContentRoutes(app: Express): void {
             } catch { /* ignore */ }
           }
 
-          if (!matchesQuery(title, slug)) continue;
-
           const draftVariants = new Set<string>();
           for (const loc of draftLocales) {
             for (const v of listVariantSlugsForLocale(dir, loc, false)) draftVariants.add(v);
@@ -3201,6 +3199,18 @@ export function registerContentRoutes(app: Express): void {
             ? DEFAULT_DRAFT_VARIANT
             : [...draftVariants][0] ?? DEFAULT_DRAFT_VARIANT;
           const primaryLocale = draftLocales.includes("en") ? "en" : (draftLocales[0] ?? "en");
+
+          if (title === slug) {
+            const draftPath = path.join(dir, `${primaryVariant}.${primaryLocale}.yml`);
+            try {
+              const draft = fs.existsSync(draftPath)
+                ? (getCI(res).safeYamlLoad(fs.readFileSync(draftPath, "utf-8")) as Record<string, unknown> | null)
+                : null;
+              if (typeof draft?.title === "string" && draft.title.trim()) title = draft.title.trim();
+            } catch { /* ignore */ }
+          }
+
+          if (!matchesQuery(title, slug)) continue;
 
           results.push({
             slug,

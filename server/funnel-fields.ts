@@ -282,8 +282,10 @@ export function clearFunnelBlock(contentType: string, slug: string, contentRoot?
 }
 
 /**
- * Remove top-level `funnel:` from every non-_common YAML under the entry folder
- * (live locales + variant locale files). Journey membership is `_common.yml` only.
+ * Remove top-level `funnel:` from every live locale YAML (`{locale}.yml`) under the
+ * entry folder. Journey membership is `_common.yml` only. Variant files
+ * (`{variant}.{locale}.yml`) are left alone: a draft may carry a proposed `funnel:`
+ * that moves to `_common.yml` on promote.
  */
 export function stripFunnelFromAllLocaleYamls(
   contentType: string,
@@ -300,6 +302,7 @@ export function stripFunnelFromAllLocaleYamls(
   for (const name of fs.readdirSync(dir)) {
     if (!/\.ya?ml$/i.test(name)) continue;
     if (name === "_common.yml" || name === "_common.yaml") continue;
+    if (name.split(".").length !== 2 || name.startsWith("versioning.")) continue;
     const abs = path.join(dir, name);
     let st: fs.Stats;
     try {

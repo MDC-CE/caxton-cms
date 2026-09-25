@@ -38,7 +38,8 @@ export type ProposalListAttention =
   | "escalated"
   | "awaiting_rereview"
   | "no_feedback"
-  | "blocked";
+  | "blocked"
+  | "needs_author";
 
 export type ProposalListFilters = {
   status: ProposalListStatus;
@@ -112,6 +113,7 @@ const ATTENTION_VALUES = new Set<ProposalListAttention>([
   "awaiting_rereview",
   "no_feedback",
   "blocked",
+  "needs_author",
 ]);
 
 function parseStatus(raw: string | null): ProposalListStatus {
@@ -490,6 +492,7 @@ export const PROPOSAL_ATTENTION_OPTIONS: Array<{
   { value: "awaiting_rereview", label: "Ready for re-check" },
   { value: "no_feedback", label: "No feedback yet" },
   { value: "blocked", label: "Waiting on author" },
+  { value: "needs_author", label: "Out of date (author)" },
 ];
 
 export const PROPOSAL_ACTOR_TYPE_OPTIONS: Array<{

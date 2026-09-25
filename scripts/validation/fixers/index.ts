@@ -16,6 +16,11 @@ import { aiUnusedImagesCleanupFixer } from "./ai-unused-images-cleanup";
 import { dbTemplateRestoreFixer } from "./db-template-restore";
 import { bindingCleanupFixer } from "./binding-cleanup";
 import { sharedLayoutSinglesFixer } from "./shared-layout-singles";
+import {
+  draftMetaInPublishedFixer,
+  fieldScopeMismatchFixer,
+  orphanEntryVersioningFixer,
+} from "./draft-integrity";
 
 export type { Fixer, FixerContext, FixerResult, ProgressEvent } from "./types";
 
@@ -30,6 +35,9 @@ const fixers: Fixer[] = [
   dbTemplateRestoreFixer,
   bindingCleanupFixer,
   sharedLayoutSinglesFixer,
+  orphanEntryVersioningFixer,
+  draftMetaInPublishedFixer,
+  fieldScopeMismatchFixer,
 ];
 
 export const fixerMap = new Map<string, Fixer>(fixers.map((f) => [f.name, f]));

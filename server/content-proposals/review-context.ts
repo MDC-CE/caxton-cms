@@ -3,7 +3,8 @@
  * Compute on read (and at create for snapshot). Same inputs → same output.
  */
 
-import type { ProposalCategory, ProposalKind, ProposalRecord, ReviewMode } from "./service";
+import type { ProposalCategory, ProposalEntryRow, ProposalKind, ProposalRecord, ReviewMode } from "./service";
+import { isTemplateVersioningSlug } from "@shared/sharedLayoutPaths";
 import {
   DAMAGE_CLASS_META,
   THINK_TEMPLATES,
@@ -74,8 +75,18 @@ export type RelatedOpenProposal = {
   shared_issue_ids: string[];
 };
 
+export type UndoCostReason =
+  | "locale_fields"
+  | "seo_or_url"
+  | "page_level_fields"
+  | "sections"
+  | "first_publish"
+  | "shared_template";
+
 export type ReviewContext = {
   undo_cost: UndoCost;
+  /** v1.0: which draft change set the undo cost (from author_diff). */
+  undo_cost_reason?: UndoCostReason;
   damage_class: DamageClass;
   review_mode_operative: boolean;
   active_checklists: ChecklistId[];
@@ -146,6 +157,7 @@ export type ClassifyProposalReviewOpts = {
     | "promote_on_apply"
     | "review_situations"
   > & {
+    system_version?: ProposalRecord["system_version"];
     accepted_entry?: ProposalRecord["accepted_entry"];
     idea_funnel?: ProposalRecord["idea_funnel"];
   };
@@ -293,6 +305,43 @@ export function undoCostFor(kind: ProposalKind, reviewMode: ReviewMode): UndoCos
   return "medium"; // soft
 }
 
+const UNDO_RANK: Record<UndoCost, number> = { none: 0, low: 1, medium: 2, high: 3 };
+
+function isSeoOrUrlField(fieldPath: string): boolean {
+  const head = fieldPath.split(/[.[]/)[0] ?? "";
+  return head === "seo" || head === "meta" || head === "slug" || /(^|\.)slug$/.test(fieldPath);
+}
+
+/**
+ * v1.0 undo cost from what the draft actually changes (author_diff), not review_mode.
+ * low: locale text/image · medium: seo / meta / slug · high: page-level (common) fields,
+ * sections, first publish of a locale, or any shared template.
+ */
+export function undoCostFromDiff(
+  entries: Array<Pick<ProposalEntryRow, "slug" | "author_diff"> & { liveMissing?: boolean }>,
+): { cost: UndoCost; reason?: UndoCostReason } {
+  let cost: UndoCost = "none";
+  let reason: UndoCostReason | undefined;
+  const bump = (next: UndoCost, why: UndoCostReason) => {
+    if (UNDO_RANK[next] > UNDO_RANK[cost]) {
+      cost = next;
+      reason = why;
+    }
+  };
+  for (const e of entries) {
+    if (isTemplateVersioningSlug(e.slug)) bump("high", "shared_template");
+    if (e.liveMissing) bump("high", "first_publish");
+    for (const c of e.author_diff ?? []) {
+      if (c.scope === "common") bump("high", "page_level_fields");
+      else if (c.field_path === "sections" || c.field_path.startsWith("sections.") || c.field_path.startsWith("sections["))
+        bump("high", "sections");
+      else if (isSeoOrUrlField(c.field_path)) bump("medium", "seo_or_url");
+      else bump("low", "locale_fields");
+    }
+  }
+  return reason ? { cost, reason } : { cost };
+}
+
 function lookupKey(contentType: string, slug: string, locale: string, variant?: string | null) {
   return `${contentType}\0${slug}\0${locale}\0${variant?.trim() || ""}`;
 }
@@ -339,7 +388,19 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   let figuresActive = false;
 
   const review_mode_operative = proposal.kind === "edits";
-  const undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
+  let undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
+  let undo_cost_reason: UndoCostReason | undefined;
+  if (proposal.kind === "edits" && proposal.system_version) {
+    const fromDiff = undoCostFromDiff(
+      proposal.entries.map((e) => ({
+        slug: e.slug,
+        author_diff: e.author_diff,
+        liveMissing: findLookup(lookups, e.contentType, e.slug, e.locale, e.variant)?.existence === "missing",
+      })),
+    );
+    undo_cost = fromDiff.cost === "none" ? "low" : fromDiff.cost;
+    undo_cost_reason = fromDiff.reason;
+  }
 
   if (proposal.kind === "notes") {
     checklists.add("notes_close");
@@ -753,6 +814,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   return {
     undo_cost,
+    ...(undo_cost_reason ? { undo_cost_reason } : {}),
     damage_class,
     review_mode_operative,
     active_checklists: orderedIds.map((t) => t.id),
@@ -865,6 +927,7 @@ export function snapshotFromReviewContext(ctx: ReviewContext): Record<string, un
   return {
     damage_class: ctx.damage_class,
     undo_cost: ctx.undo_cost,
+    ...(ctx.undo_cost_reason ? { undo_cost_reason: ctx.undo_cost_reason } : {}),
     badge_label: ctx.staff_summary.badge_label,
     situation_description: ctx.staff_summary.situation_description,
     active_checklists: ctx.active_checklists,

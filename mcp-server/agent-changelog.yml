@@ -6,6 +6,26 @@ window_days: 6
 
 entries:
   - date: "2026-09-24"
+    summary: "Proposals 1.0: the draft is the source of truth (propose writes the draft, apply only promotes)"
+    agent_impact:
+      - "propose_change / revise_entries write updates[] into a 0% draft now (named variant, or `draft` / `draft-p{id6}` from today's live); side_effects.drafts_written lists them. Live is unchanged until apply; apply only promotes (fingerprint-checked). attached_no_draft / creates_attached_entry paths are gone — accepted-idea edits create the folder + draft."
+      - "New args: propose_change all_or_nothing + entries[].translated_from_locale + updates[].op remove; update_proposal dry_run (merge_preview, no write), all_or_nothing (revise), confirm_base_unknown, confirm_affected_entries (template proposals), action revert."
+      - "New codes with next_actions: legacy_version (pre-1.0 rows are read-only → re-file), context_stale (+ conflicting_fields; attention needs_author), draft_missing, draft_base_unknown, confirm_affected_entries, all_or_nothing_blocked, four_eyes_co_author, revert_conflicts, competing_shared_fields, draft_in_proposal (+ env), variant_has_traffic."
+      - "Page-level fields (funnel, meta.robots/priority/change_frequency, published_at, detached, authors) publish to {slug}/_common.yml for every locale (warning common_fields_all_languages); propose_change now passes server warnings through. Live update_fields warns open_proposal_will_go_stale with ids."
+      - "list_proposals attention filter adds needs_author; rows carry system_version, all_or_nothing, stale_since, stale_flagged_at, reverts_proposal_id. Stale 30 idle days → flagged; 90 → closed abandoned_stale. publish_draft accepts confirm_overwrite_newer_live; translate_entry records the translation source."
+      - "CONVENTIONS_VERSION 33 (§2b 1.0 summary + new-post example). Re-bootstrap_agent for skill.content; reconnect MCP for the new tool schemas."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/seo.md
+      - mcp-server/agent-conventions.md
+      - server/content-proposals/service.ts
+      - server/field-write-router.ts
+
+  - date: "2026-09-24"
     summary: "create_or_update_product: creating a new sellable product now keeps offer + personas from the same call"
     agent_impact:
       - "Bug fix: purchasable: true on an entry with no _product.yml used to write only selling fields and drop offer/personas (audience_status: missing). One call now creates the sidecar with the audience — no second call needed."

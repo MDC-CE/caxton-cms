@@ -40,8 +40,8 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 
 | Caps | Allowed | Denied |
 |---|---|---|
-| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations |
-| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations | apply, reject, accept, close, blockers |
+| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, revert |
+| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, revert | apply, reject, accept, close, blockers |
 | both | full set | — |
 
 ## Kinds
@@ -81,13 +81,19 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - On open review, `list_proposals(proposal_id)` may elevate `get_entry_activity` and warn `recent_entry_writes` when SERP ops or gate-filtered writes exist — see **`explain` topic `reading-proposals`**.
 - Confirming does **not** write YAML or complete validation issues. Same-field SERP churn + live not broken → reject (title/description-only) or revise to drop SERP ops (mixed) instead of confirming.
 
-## Review modes (edits)
+## Proposals 1.0 — the draft is the source of truth (edits)
 
-| `review_mode` | On apply |
-|---|---|
-| `soft` | Write `updates[]` to live |
-| `soft_variant` | Write into draft variant (no promote) |
-| `draft_backed` | Promote variant. May need `confirm_end_experiment` |
+New edits proposals carry `system_version: "1.0"`. Legacy rows (`system_version` null) are read-only: anything except withdraw / reject / release / outcome review returns **`legacy_version`** → re-file (open legacy edits were closed with `close_reason: legacy_version`; accepted legacy ideas stay implementable).
+
+- **Create / `revise_entries`:** `updates[]` are written into a 0%-traffic draft **now**. Named `variant` = use that draft (must be 0% traffic → else `variant_has_traffic`; not owned by another open proposal → else `draft_in_proposal`, with `env` when it lives in another environment). No variant → the proposal creates `draft` (or `draft-p{id6}` when taken) from today's live, or `{}` for an unpublished locale / accepted-idea new entry (also creates `{slug}/_common.yml`). Drafts carry `_draft.proposal { id, env, created_by_proposal, created_fingerprint }`. Any failure rolls back every draft touched. `revise_entries` restarts drafts this proposal created from today's live, then writes.
+- **Field scope:** page-level (`common`) fields — `funnel.*`, `meta.robots`, `meta.priority`, `meta.change_frequency`, `published_at`, `detached`, `authors` — publish to `{slug}/_common.yml` for **every locale** (warning `common_fields_all_languages`). Only one open proposal per page may stage them (`competing_shared_fields` → join it with `revise_entries`). Remove a field with `{ field_path, op: "remove" }` (or `value: null`): the draft stores `null` until publish (warning `common_field_removal_staged`). `meta_target` is ignored with a warning. Attached posts take field updates only (`attached_draft_structure`).
+- **Reading:** `ops` / `baseline_context` / `author_diff[]` (`field_path`, `before`, `after`, `scope`, `removed`, `source` for translations) are derived from the draft vs its recorded base. `author_diff_approximate: true` = no base copy (diff vs today's live; may include others' live edits). `requested_ops` + `ops_match_request: false` = the draft now differs from what the author sent. Per entry: `base_status` ok|stale|unknown, `merge_preview` (rebuild → `author_fields` + `live_changes_since_base`; or `conflict` / `has_sections` / `no_base_copy`), `source_changed`, `draft_missing`. Template proposals add `affected_entries { count, sample }`.
+- **Apply = promote only** (fingerprint-checked). Stale draft with non-overlapping fields → rebuilt on today's live (warning `draft_rebuilt`); overlap / sections / no base copy → **`context_stale`** with `conflicting_fields` (nothing published; proposal → attention `needs_author`). Translation source changed → `context_stale` (`reason: source_changed`). Draft gone → `draft_missing`. No recorded base (pre-1.0 draft) → **`draft_base_unknown`** → retry with `confirm_base_unknown: true` after `dry_run`. Template → **`confirm_affected_entries: N`** (N = attached pages in that locale). `dry_run: true` returns `merge_preview` and writes nothing. `all_or_nothing` (create / revise) checks every entry first → `all_or_nothing_blocked` with the pending list; a write failing mid-way leaves `partial` (no auto-undo).
+- **Co-authors:** anyone who edits a proposal's draft outside the proposal is recorded in `co_authors` and cannot apply it (`four_eyes_co_author`). Live writes that make an open proposal stale return warning `open_proposal_will_go_stale` with ids.
+- **Revert** (`update_proposal action: "revert"`, finished|partial 1.0 edits): files a **new** proposal with `reverts_proposal_id` that puts back each done entry's pre-apply values (fields that did not exist are removed). Live unchanged until that proposal is approved (four-eyes). Fields changed again since apply → `revert_conflicts` + `conflicting_fields` (nothing created). Folder restore is not the undo path.
+- **Reject / withdraw / close / abandon:** drafts the proposal created (fingerprint unchanged) are deleted; drafts that existed before (or were edited by others) are kept and unlinked.
+- **Stale lifecycle:** `stale_since` set when live or the source moves under the draft; cleared by revise/rebuild. Daily sweep: 30 idle days → `stale_flagged_at` (+ event `proposal_stale_flagged`); 90 → withdrawn with `close_reason: abandoned_stale`. Daily link check: a draft whose proposal is closed / missing in its env is unlinked after 7 days (deleted only if created by the proposal and unchanged); remote env unreachable → `unverified_since`, never cleaned.
+- **Undo cost (risk):** `undo_cost` + `undo_cost_reason` from `author_diff` — high: shared template, first publish of a locale, any `common` field (incl. removal), `sections`; medium: `seo.*` / meta / URL params / slug; low: locale text/image fields.
 
 ## Notes / no_auto_retry
 
@@ -104,7 +110,7 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **One open proposal per variant** → `proposal_exists`.
 - **Claim** = working it (human+role; staff UI may take over). **add_blocker** = feedback for polish.
 - **Reject** = rare terminal: bad / not implementable / illegal-or-policy / harmful / duplicate weaker / target missing. Requires `confirm_reject`, `reject_kind`, and `close_note` (min 80). Do **not** reject for polish.
-- **revise_entries** (authors): rewrite pending/failed soft ops; idle or self-claim only; foreign claim blocks; open blockers stay open until `resolve_blocker`.
+- **revise_entries** (authors): replace pending/failed entries (1.0: rewrites the draft); idle or self-claim only; foreign claim blocks; open blockers stay open until `resolve_blocker`. Clears `stale_since`.
 - **Open blockers block apply and idea accept** — reject/withdraw/close still work.
 - **Escalated:** steward UI hold (`escalated: true` + note). Status stays open|partial. MCP `update_proposal` fails (`code: escalated`) until release. Not an MCP action. Sibling create may warn `escalated_sibling`.
 - **Outcome review:** steward-only UI retro on closed proposals (finished|rejected|withdrawn): `outcome_review` good|bad, `outcome_review_note` (what went wrong), `outcome_review_expected` (what should have happened), `outcome_lesson_captured_*`. Read-only for agents — not an MCP action, no warnings, does not affect other proposals. Filter `list_proposals` with `outcome_review: good|bad|none|bad_open`.
@@ -116,16 +122,16 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 
 - **Four-eyes:** apply / reject / accept when caller identity (username+role or UI) ≠ proposer identity — unless site Rules turn four-eyes off (or staff UI exempt). **Close/park is not four-eyes.**
 - **Site Rules:** stewards configure withdraw / four-eyes / holds at Agents → Rules; changes apply to the next action only.
-- **Non-effects:** no GitHub push; no auto-complete issues; accept does not create YAML. Apply of a `creates_entry` packet creates that one locale’s files.
+- **Non-effects:** no GitHub push; no auto-complete issues; accept does not create YAML. Create/revise write only 0% drafts (never live).
 
 ## Create refuses + review context
 
-- **Refuse create:** `entry_not_found` (missing write target that is not a reserved attached slug), `attached_no_draft` (new attached post must not use a draft), `database_entry_required` (cannot create a database row), `required_fields_missing`, `attached_sections_refused`, `mixed_risk_bundle` (mixed selling/new-public/other in one edits or idea related set), `competing_entry_edits` (second open edits on same type+slug+locale), `implements_required` / `idea_already_in_progress` / `implements_entry_mismatch` (accepted-idea follow-through).
-- **Allowed shapes:** live missing but named draft exists → `new_public_content` (promote later). File-based attached slug locked by an accepted idea, field updates, no variant → `creates_entry` / `new_public_content`. Apply creates `{slug}/_common.yml` and `{locale}.yml` and does not change `template.{locale}.yml`.
-- **Apply block:** `target_missing` when a page that was **not** filed as `creates_entry` was deleted after filing — reject/withdraw/close still work. New URL-param values on a `creates_entry` apply need `confirm_new_values: true`.
+- **Refuse create:** `entry_not_found` (missing write target that is not a reserved slug), `database_entry_required` (cannot create a database row), `required_fields_missing`, `attached_sections_refused` / `attached_draft_structure`, `mixed_risk_bundle` (mixed selling/new-public/other in one edits or idea related set), `competing_entry_edits` (second open edits on same type+slug+locale), `competing_shared_fields`, `draft_in_proposal`, `variant_has_traffic`, `implements_required` / `idea_already_in_progress` / `implements_entry_mismatch` (accepted-idea follow-through).
+- **Allowed shapes:** live missing but named draft exists → `new_public_content`. Slug locked by an accepted idea, field updates, no variant → the proposal creates `{slug}/_common.yml` + the draft (`new_public_content`); apply publishes `{locale}.yml` and never changes `template.{locale}.yml`.
+- **Apply block:** `target_missing` when the page was deleted after filing — reject/withdraw/close still work. New URL-param values on a new-entry apply need `confirm_new_values: true`.
 - Live `review_context` on `list_proposals(proposal_id)` for open|partial; snapshot on list rows is a filed hint only.
 - Multi-row list is **summary only** (`proposals_view: "summary"`, warning `proposals_summary_only`): use `attention`, `entry_count`, `field_paths` to triage; pass `proposal_id` for ops/baselines before apply.
-- **Attention triage:** buckets `escalated` → `awaiting_rereview` (blockers fixed, or the author rewrote entries / marked a blocker fixed and no open blockers remain) → `no_feedback` → `blocked` (reviewer order; open blockers beat an author rewrite). Create-only agents get blocked earlier in the default sort; may see warning `attention_author_scope_hint` unless they pass `proposer_username` / `agent_session_id`. Filter with `attention`. `needs_review: true` is open|partial **edits** in `awaiting_rereview` or `no_feedback` only (staff Edits badge). Escalated rows still freeze `update_proposal` until release.
+- **Attention triage:** `needs_author` (1.0 stale draft — out of the reviewer queue until the author revises) plus buckets `escalated` → `awaiting_rereview` (blockers fixed, or the author rewrote entries / marked a blocker fixed and no open blockers remain) → `no_feedback` → `blocked` (reviewer order; open blockers beat an author rewrite). Create-only agents get blocked earlier in the default sort; may see warning `attention_author_scope_hint` unless they pass `proposer_username` / `agent_session_id`. Filter with `attention`. `needs_review: true` is open|partial **edits** in `awaiting_rereview` or `no_feedback` only (staff Edits badge). Escalated rows still freeze `update_proposal` until release.
 - Before apply, prefer `list_proposals(proposal_id)` + `explain` → `reading-proposals`.
 
 Full checklist IDs and axes: `explain` → `reading-proposals`.

@@ -15,9 +15,30 @@ import {
   type ResolveRecentActivityResult,
 } from "./entry-activity";
 import { hashVariantFileContents } from "../versioning/promote-with-teardown";
-import { isSectionFieldPath, missingRequiredFromOps, type MissingTargetShape } from "./attached-entry-gate";
-import { getFolder, getContentTypeConfig, listExtraUrlPatternParams } from "../content-types";
-import { isEntryDetached, isTemplateVersioningSlug, resolveWritableVersioningTarget } from "../shared-layout-entry";
+import path from "path";
+import { sameValue, type FieldChange } from "../versioning/draft-base";
+import { fieldScope } from "@shared/field-scope";
+import { onVariantWrite, readDraftMeta } from "../versioning/draft-meta";
+import {
+  draftStoreForSite,
+  type ProposalDraftRef,
+  type ProposalDraftStore,
+} from "./draft-store";
+import {
+  isSectionFieldPath,
+  missingRequiredFromOps,
+  type MissingTargetShape,
+} from "./attached-entry-gate";
+import {
+  getFolder,
+  getContentTypeConfig,
+  listExtraUrlPatternParams,
+} from "../content-types";
+import {
+  isEntryDetached,
+  isTemplateVersioningSlug,
+  resolveWritableVersioningTarget,
+} from "../shared-layout-entry";
 import { listRequiredEditorFields } from "@shared/validateRequiredFields";
 import { extractParamSlug, validateUrlParamPeerValues } from "../url-param-peers";
 import { ensurePublishedAtOnce } from "../published-at";
@@ -126,7 +147,12 @@ export type ProposalRejectKind =
   | "target_missing";
 
 /** Values stored in close_reason (notes/ideas close, reject kinds, withdraw). */
-export type ProposalStoredCloseReason = ProposalCloseReason | ProposalRejectKind | "withdrawn";
+export type ProposalStoredCloseReason =
+  | ProposalCloseReason
+  | ProposalRejectKind
+  | "withdrawn"
+  | "legacy_version"
+  | "abandoned_stale";
 
 export const PROPOSAL_CLOSE_REASONS: ProposalCloseReason[] = [
   "wont_fix",
@@ -200,7 +226,18 @@ export function isProposalRejectKind(raw: string): raw is ProposalRejectKind {
   return (PROPOSAL_REJECT_KINDS as string[]).includes(raw);
 }
 
-export type FieldUpdate = { field_path: string; value?: unknown; reset?: boolean };
+export type FieldUpdate = {
+  field_path: string;
+  value?: unknown;
+  reset?: boolean;
+  op?: "set" | "remove";
+};
+
+export type CoAuthor = {
+  username: string;
+  actor?: Record<string, unknown>;
+  at: number;
+};
 
 export type ProposalClaim = {
   by: string;
@@ -216,6 +253,8 @@ export type ProposalEntryInput = {
   locale: string;
   variant?: string;
   updates?: FieldUpdate[];
+  /** v1.0: the draft is a translation of this published locale (records `_draft.translated_from`). */
+  translated_from_locale?: string;
 };
 
 export type ProposalEntryRow = {
@@ -233,6 +272,41 @@ export type ProposalEntryRow = {
   applied_by: string | null;
   contentType: string;
   slug: string;
+  /** v1.0: this proposal created the draft (deleted again on reject / withdraw). */
+  created_draft?: boolean;
+  /** v1.0: author changes, base copy (or today's live when approximate) vs draft. Same data as `ops`. */
+  author_diff?: FieldChange[];
+  author_diff_approximate?: boolean;
+  /** v1.0: what the author sent (`ops_json`); `ops` is the view of the draft. */
+  requested_ops?: FieldUpdate[];
+  ops_match_request?: boolean;
+  /** v1.0: the draft file no longer exists; no ops view. */
+  draft_missing?: boolean;
+  /** v1.0: what the apply published, field by field (revert source). */
+  published_diff?: FieldChange[] | null;
+  /** v1.0: raw live/common before apply — only on snapshot export (revert source). */
+  pre_apply_snapshot?: { live: string | null; common: string | null } | null;
+  /** v1.0: live moved after the draft was created (stale) / no known base (unknown). */
+  base_status?: "ok" | "stale" | "unknown";
+  /** v1.0: what apply will publish when live moved (same function as the rebuild). */
+  merge_preview?: {
+    status:
+      | "rebuild"
+      | "conflict"
+      | "has_sections"
+      | "no_base_copy"
+      | "draft_missing";
+    author_fields?: string[];
+    live_changes_since_base?: FieldChange[];
+    conflicting_fields?: Array<{
+      field_path: string;
+      author: unknown;
+      live: unknown;
+    }>;
+    result?: Record<string, unknown>;
+  };
+  /** v1.0: translation source locale changed after translating. */
+  source_changed?: { source_locale: string; fields?: string[] };
 };
 
 export type ProposalBlocker = {
@@ -339,6 +413,18 @@ export type ProposalRecord = {
   outcome_lesson_captured_at: number | null;
   outcome_lesson_captured_by: string | null;
   outcome_lesson_note: string | null;
+  /** "1.0" = draft-first proposals; null = legacy (read-only). */
+  system_version: string | null;
+  /** Staff/agents who edited the proposal's draft directly (four-eyes blocks them from approving). */
+  co_authors: CoAuthor[];
+  /** Apply publishes every entry or none. */
+  all_or_nothing: boolean;
+  reverts_proposal_id: string | null;
+  /** First time live or the translation source moved under the draft (ISO). Cleared by rebuild / revise. */
+  stale_since: string | null;
+  stale_flagged_at: string | null;
+  /** v1.0 template proposals: attached entries the change reaches (read-only enrichment). */
+  affected_entries?: AffectedEntries | null;
   /** Enriched on read — not persisted. */
   recent_activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
   recent_activity_error?: string;
@@ -420,6 +506,11 @@ export type ProposalSummary = {
   outcome_lesson_captured_by: string | null;
   outcome_lesson_note: string | null;
   entry_count: number;
+  system_version: string | null;
+  all_or_nothing: boolean;
+  stale_since: string | null;
+  stale_flagged_at: string | null;
+  reverts_proposal_id: string | null;
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
   entries: ProposalEntrySummary[];
@@ -434,6 +525,7 @@ function attentionForRecord(record: ProposalRecord): ProposalAttention | null {
     resolved_blocker_count: resolvedBlockerCount(record.blockers),
     author_content_at: record.author_content_at,
     reviewer_action_at: record.reviewer_action_at,
+    needs_author: record.stale_since != null,
   });
 }
 
@@ -501,6 +593,11 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     outcome_lesson_captured_by: record.outcome_lesson_captured_by,
     outcome_lesson_note: record.outcome_lesson_note,
     entry_count: record.entries.length,
+    system_version: record.system_version,
+    all_or_nothing: record.all_or_nothing,
+    stale_since: record.stale_since,
+    stale_flagged_at: record.stale_flagged_at,
+    reverts_proposal_id: record.reverts_proposal_id,
     field_paths,
     entries: record.entries.map((e) => ({
       contentType: e.contentType,
@@ -568,6 +665,12 @@ type ProposalRow = {
   outcome_lesson_captured_at?: number | null;
   outcome_lesson_captured_by?: string | null;
   outcome_lesson_note?: string | null;
+  system_version?: string | null;
+  co_authors_json?: string | null;
+  all_or_nothing?: number | null;
+  reverts_proposal_id?: string | null;
+  stale_since?: string | null;
+  stale_flagged_at?: string | null;
 };
 
 type EntryDbRow = {
@@ -583,6 +686,11 @@ type EntryDbRow = {
   last_error: string | null;
   applied_at: number | null;
   applied_by: string | null;
+  created_draft?: number | null;
+  derived_ops_json?: string | null;
+  derived_for_key?: string | null;
+  published_diff_json?: string | null;
+  pre_apply_snapshot_json?: string | null;
 };
 
 type BlockerDbRow = {
@@ -633,6 +741,10 @@ export type CreateProposalInput = {
    * Soft warning when missing on new-URL create; accept refuses until complete.
    */
   idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
+  /** v1.0 edits: publish every entry or none on apply. */
+  all_or_nothing?: boolean;
+  /** v1.0: this proposal reverts an applied proposal (prefilled by revert). */
+  reverts_proposal_id?: string;
 };
 
 export type SimilarProposal = { id: string; title: string; score: number };
@@ -657,7 +769,8 @@ export type ProposalUpdateAction =
   | "escalate"
   | "deescalate"
   | "review_outcome"
-  | "set_outcome_lesson";
+  | "set_outcome_lesson"
+  | "revert";
 
 export type ProposalUpdateCaller = {
   username: string;
@@ -706,6 +819,14 @@ export type ProposalUpdateCaller = {
   /** set_outcome_lesson: true marks the lesson as captured; false unmarks. */
   outcome_lesson_captured?: boolean;
   outcome_lesson_note?: string;
+  /** apply (v1.0): run every check and return the merge preview; write nothing. */
+  dry_run?: boolean;
+  /** revise_entries (v1.0): toggle all-or-nothing apply. */
+  all_or_nothing?: boolean;
+  /** apply (v1.0): publish drafts whose base version is unknown (pre-1.0 drafts). */
+  confirm_base_unknown?: boolean;
+  /** apply (v1.0) of a template proposal: must equal `affected_entries.count`. */
+  confirm_affected_entries?: number;
 };
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -778,9 +899,15 @@ function mapBlocker(row: BlockerDbRow): ProposalBlocker {
   };
 }
 
+/** v1.0 derived ops view cache per loaded entry (`derived_ops_json` + key). */
+const derivedViewCache = new WeakMap<
+  ProposalEntryRow,
+  { key: string | null; json: string | null }
+>();
+
 function mapEntry(row: EntryDbRow): ProposalEntryRow {
   const { contentType, slug } = splitEntryKey(row.entry_key);
-  return {
+  const entry: ProposalEntryRow = {
     id: row.id,
     proposal_id: row.proposal_id,
     entry_key: row.entry_key,
@@ -795,7 +922,21 @@ function mapEntry(row: EntryDbRow): ProposalEntryRow {
     applied_by: row.applied_by,
     contentType,
     slug,
+    ...(row.created_draft ? { created_draft: true } : {}),
+    ...(row.published_diff_json
+      ? {
+          published_diff: parseJson<FieldChange[] | null>(
+            row.published_diff_json,
+            null,
+          ),
+        }
+      : {}),
   };
+  derivedViewCache.set(entry, {
+    key: row.derived_for_key ?? null,
+    json: row.derived_ops_json ?? null,
+  });
+  return entry;
 }
 
 function mapProposal(
@@ -825,7 +966,9 @@ function mapProposal(
     search_text: row.search_text,
     created_agent_session_id: row.created_agent_session_id ?? null,
     promote_on_apply,
-    review_mode: deriveReviewMode({ promote_on_apply, entries }),
+    review_mode: row.system_version
+      ? "draft_backed"
+      : deriveReviewMode({ promote_on_apply, entries }),
     open_blocker_count: blockers.filter((b) => b.status === "open").length,
     no_auto_retry: Boolean(row.no_auto_retry),
     escalated: Boolean(row.escalated),
@@ -864,12 +1007,116 @@ function mapProposal(
     outcome_lesson_captured_at: row.outcome_lesson_captured_at ?? null,
     outcome_lesson_captured_by: row.outcome_lesson_captured_by ?? null,
     outcome_lesson_note: row.outcome_lesson_note ?? null,
-    entries,
+    system_version: row.system_version ?? null,
+    co_authors: parseJson(row.co_authors_json ?? null, [] as CoAuthor[]),
+    all_or_nothing: Boolean(row.all_or_nothing),
+    reverts_proposal_id: row.reverts_proposal_id ?? null,
+    stale_since: row.stale_since ?? null,
+    stale_flagged_at: row.stale_flagged_at ?? null,
+    entries: row.system_version ? entries.map(withCachedView) : entries,
     blockers,
   };
 }
 
-function parseOutcomeVerdict(raw: string | null | undefined): ProposalOutcomeVerdict | null {
+/** Swap in the cached draft view (no file reads). Detail loads re-verify the key. */
+function withCachedView(entry: ProposalEntryRow): ProposalEntryRow {
+  const cached = derivedViewCache.get(entry);
+  if (!cached?.json) return entry;
+  const view = parseJson<{
+    changes: FieldChange[];
+    approximate: boolean;
+  } | null>(cached.json, null);
+  if (!view) return entry;
+  const next = {
+    ...entry,
+    ...entryViewFromDiff(entry.ops, view.changes, view.approximate),
+  };
+  derivedViewCache.set(next, cached);
+  return next;
+}
+
+/** v1.0: `ops` / `baseline_context` are a read-only view of the draft (author diff). */
+export function entryViewFromDiff(
+  requested: FieldUpdate[],
+  changes: FieldChange[],
+  approximate: boolean,
+): Pick<
+  ProposalEntryRow,
+  | "ops"
+  | "baseline_context"
+  | "author_diff"
+  | "author_diff_approximate"
+  | "requested_ops"
+  | "ops_match_request"
+> {
+  const ops: FieldUpdate[] = changes.map((c) =>
+    c.removed
+      ? { field_path: c.field_path, op: "remove" as const, reset: true }
+      : { field_path: c.field_path, value: c.after },
+  );
+  const values: Record<string, unknown> = {};
+  for (const c of changes) values[c.field_path] = c.before;
+  if (process.env.NODE_ENV !== "production") {
+    Object.freeze(ops);
+    Object.freeze(values);
+  }
+  return {
+    ops,
+    baseline_context: { values },
+    author_diff: changes,
+    author_diff_approximate: approximate,
+    requested_ops: requested,
+    ops_match_request: requestedMatchesView(requested, changes),
+  };
+}
+
+function valueUnder(value: unknown, rest: string): unknown {
+  if (!rest) return value;
+  return rest
+    .split(".")
+    .reduce<unknown>(
+      (cur, k) =>
+        cur && typeof cur === "object" && !Array.isArray(cur)
+          ? (cur as Record<string, unknown>)[k]
+          : undefined,
+      value,
+    );
+}
+
+/** Every requested op is reflected in the draft view (paths may be deeper than view fields). */
+function requestedMatchesView(
+  requested: FieldUpdate[],
+  changes: FieldChange[],
+): boolean {
+  for (const op of requested) {
+    const removal =
+      op.reset === true || op.op === "remove" || op.value === null;
+    const change = changes.find(
+      (c) =>
+        c.field_path === op.field_path ||
+        op.field_path.startsWith(`${c.field_path}.`),
+    );
+    if (!change) {
+      if (removal) continue;
+      return false;
+    }
+    const rest =
+      op.field_path === change.field_path
+        ? ""
+        : op.field_path.slice(change.field_path.length + 1);
+    if (removal) {
+      if (!change.removed && valueUnder(change.after, rest) != null)
+        return false;
+      continue;
+    }
+    if (!valuesEqual(valueUnder(change.after, rest), op.value)) return false;
+  }
+  return true;
+}
+
+function parseOutcomeVerdict(
+  raw: string | null | undefined,
+): ProposalOutcomeVerdict | null {
   return raw === "good" || raw === "bad" ? raw : null;
 }
 
@@ -1031,7 +1278,15 @@ function emitProposalEvent(
     | "proposal_outcome_reviewed"
     | "proposal_outcome_lesson_set"
     | "proposal_review_situations_set"
-    | "proposal_idea_funnel_set",
+    | "proposal_idea_funnel_set"
+    | "proposal_reverted"
+    | "proposal_stale_flagged"
+    | "proposal_closed_abandoned_stale"
+    | "proposal_needs_author"
+    | "proposal_migrated_v1"
+    | "draft_rebuilt"
+    | "draft_orphan_cleaned"
+    | "proposal_co_author_edit",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -1043,6 +1298,7 @@ function emitProposalEvent(
     type === "proposal_closed" ||
     type === "proposal_rejected" ||
     type === "proposal_withdrawn" ||
+    type === "proposal_closed_abandoned_stale" ||
     type === "proposal_applied_progress"
   ) {
     invalidateKpiCache(site);
@@ -1054,6 +1310,49 @@ function emitProposalEvent(
     payload: { proposal_id: proposalId, ...payload },
   });
 }
+
+export type AffectedEntries = {
+  count: number;
+  sample: Array<{ contentType: string; slug: string; locale: string; variant: string | null }>;
+};
+
+export type PromoteEntryOpts = {
+  confirm_end_experiment?: boolean;
+  /** Run every promote check (incl. rebuild preview) without writing. */
+  dry_run?: boolean;
+  /** Reviewer confirmed publishing a draft whose base version is unknown. */
+  confirm_base_unknown?: boolean;
+};
+
+export type PromoteEntryResult = {
+  ok: boolean;
+  error?: string;
+  code?: string;
+  traffic_siblings?: Array<{
+    slug: string;
+    locale: string;
+    allocation: number;
+  }>;
+  details?: Record<string, unknown>;
+  warnings?: Array<{ code: string; message: string; fields?: string[] }>;
+  rebuilt?: { kept_live_fields: string[]; author_fields: string[] };
+  published_diff?: FieldChange[];
+  pre_apply_snapshot?: { live: string | null; common: string | null };
+  dry_run?: boolean;
+};
+
+/** One entry of a v1.0 apply (dry run or pending list after a partial apply). */
+export type ApplyEntryPreview = {
+  entry_key: string;
+  locale: string;
+  variant: string | null;
+  ok: boolean;
+  code?: string;
+  error?: string;
+  details?: Record<string, unknown>;
+  rebuilt?: { kept_live_fields: string[]; author_fields: string[] };
+  published_diff?: FieldChange[];
+};
 
 export type ProposalServiceDeps = {
   site: string;
@@ -1072,13 +1371,13 @@ export type ProposalServiceDeps = {
   promoteEntry?: (
     entry: ProposalEntryRow,
     author: string,
-    opts: { confirm_end_experiment?: boolean },
-  ) => Promise<{
-    ok: boolean;
-    error?: string;
-    code?: string;
-    traffic_siblings?: Array<{ slug: string; locale: string; allocation: number }>;
-  }>;
+    opts: PromoteEntryOpts,
+  ) => Promise<PromoteEntryResult>;
+  /**
+   * v1.0 draft-first: when set, create / revise write updates into drafts and apply only
+   * promotes. Absent (unit tests of the legacy flow) → pre-1.0 behavior.
+   */
+  draftStore?: ProposalDraftStore;
   findSimilar?: (query: string) => Promise<SimilarProposal[]>;
   indexSearch?: (proposal: ProposalRecord) => Promise<void>;
   /** Override for tests; default uses event-store recent writes. */
@@ -1322,6 +1621,147 @@ function findOpenProposalForVariant(
   return loadProposal(db, rows[0].id);
 }
 
+export const PROPOSAL_SYSTEM_VERSION = "1.0";
+
+/** Actions still allowed on a pre-1.0 proposal (cleanup and steward retro only). */
+const LEGACY_ALLOWED_ACTIONS = new Set<ProposalUpdateAction>([
+  "withdraw",
+  "reject",
+  "release",
+  "review_outcome",
+  "set_outcome_lesson",
+  "escalate",
+  "deescalate",
+]);
+
+export function pipelineEnv(): string {
+  const env = process.env.PIPELINE_ENV?.trim();
+  return env || "unknown";
+}
+
+/** Draft files the proposal service itself is writing (create / revise) — not co-author edits. */
+const ownDraftWrites = new Map<string, number>();
+
+async function withOwnDraftWrite<T>(
+  filePath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = path.resolve(filePath);
+  ownDraftWrites.set(key, (ownDraftWrites.get(key) ?? 0) + 1);
+  try {
+    return await fn();
+  } finally {
+    const n = (ownDraftWrites.get(key) ?? 1) - 1;
+    if (n <= 0) ownDraftWrites.delete(key);
+    else ownDraftWrites.set(key, n);
+  }
+}
+
+function sameUsername(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/**
+ * Someone edited a v1.0 proposal's draft outside `revise_entries`: record the new draft
+ * fingerprint and, when it is not the proposer, add them as co-author, release the claim
+ * and send the proposal back to review. The draft base never changes here.
+ */
+export function absorbDraftEdit(
+  site: string,
+  proposalId: string,
+  filePath: string,
+  editor: string,
+): { absorbed: boolean; co_author: boolean } {
+  const db = dbFor(site);
+  const proposal = loadProposal(db, proposalId);
+  if (!proposal || !proposal.system_version)
+    return { absorbed: false, co_author: false };
+  if (proposal.status !== "open" && proposal.status !== "partial")
+    return { absorbed: false, co_author: false };
+  if (!fs.existsSync(filePath)) return { absorbed: false, co_author: false };
+  const fingerprint = hashVariantFileContents(
+    fs.readFileSync(filePath, "utf-8"),
+  );
+  const base = path.basename(filePath);
+  const dirSlug = path.basename(path.dirname(filePath));
+  const targets = proposal.entries.filter(
+    (e) =>
+      e.variant &&
+      (e.status === "pending" || e.status === "failed") &&
+      base.endsWith(`${e.variant}.${e.locale}.yml`) &&
+      (isTemplateVersioningSlug(e.slug) || dirSlug === e.slug),
+  );
+  const changed = targets.filter((e) => e.variant_fingerprint !== fingerprint);
+  if (!changed.length) return { absorbed: false, co_author: false };
+  const now = Date.now();
+  for (const e of changed) {
+    db.prepare(
+      `UPDATE content_proposal_entries SET variant_fingerprint = ? WHERE id = ?`,
+    ).run(fingerprint, e.id);
+  }
+  const who = editor.trim() || "unknown";
+  const isProposer = sameUsername(proposal.proposer_username, who);
+  if (isProposer) {
+    db.prepare(
+      `UPDATE content_proposals SET author_content_at = ?, updated_at = ? WHERE id = ?`,
+    ).run(now, now, proposalId);
+    return { absorbed: true, co_author: false };
+  }
+  const coAuthors = proposal.co_authors.filter(
+    (c) => !sameUsername(c.username, who),
+  );
+  coAuthors.push({ username: who, at: now });
+  db.prepare(
+    `UPDATE content_proposals
+     SET co_authors_json = ?, author_content_at = ?, claim_json = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(JSON.stringify(coAuthors), now, now, proposalId);
+  emitProposalEvent(site, "proposal_co_author_edit", proposalId, who, {
+    entries: changed.map((e) => ({
+      entry_key: e.entry_key,
+      locale: e.locale,
+      variant: e.variant,
+    })),
+  });
+  return { absorbed: true, co_author: true };
+}
+
+onVariantWrite((filePath, opts) => {
+  if (ownDraftWrites.has(path.resolve(filePath))) return;
+  const link = readDraftMeta(filePath)?.proposal;
+  if (!link || link.env !== pipelineEnv()) return;
+  const rel = path
+    .relative(process.cwd(), path.resolve(filePath))
+    .replace(/\\/g, "/");
+  const site = rel.split("/")[0];
+  if (!site || site.startsWith("..")) return;
+  try {
+    absorbDraftEdit(site, link.id, filePath, opts.author || "unknown");
+  } catch (err) {
+    log.warn({ err, proposal_id: link.id }, "absorb draft edit failed");
+  }
+});
+
+export function findOpenProposalLinkForDraft(
+  site: string,
+  ref: { contentType: string; slug: string; locale: string; variant: string },
+): { id: string; env: string; title?: string } | null {
+  try {
+    const found = findOpenProposalForVariant(
+      dbFor(site),
+      site,
+      ref.contentType,
+      ref.slug,
+      ref.locale,
+      ref.variant,
+    );
+    if (!found) return null;
+    return { id: found.id, env: pipelineEnv(), title: found.title };
+  } catch {
+    return null;
+  }
+}
+
 /** Open/partial edits targeting same type+slug+locale (any variant). */
 function findOpenEditsForEntry(
   db: Database.Database,
@@ -1447,6 +1887,62 @@ export function listOpenProposalsForVariant(
     status: ProposalStatus;
   }>;
   return rows;
+}
+
+export type OpenProposalForEntry = {
+  id: string;
+  title: string;
+  status: ProposalStatus;
+  locale: string;
+  variant: string | null;
+  proposer_username: string;
+  proposer_kind: "agent" | "staff";
+  proposer_role?: string;
+  created_at: number;
+};
+
+/** Open/partial proposals on any locale/variant of one page (single query, for the Versions panel). */
+export function listOpenProposalsForEntry(
+  site: string,
+  contentType: string,
+  slug: string,
+): OpenProposalForEntry[] {
+  const db = dbFor(site);
+  const entryKey = makeEntryKey(contentType, slug);
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.title, p.status, p.proposer_username, p.proposer_actor_json, p.created_at,
+              e.locale, e.variant
+       FROM content_proposals p
+       INNER JOIN content_proposal_entries e ON e.proposal_id = p.id
+       WHERE p.site = ? AND p.status IN ('open','partial') AND e.entry_key = ?
+       ORDER BY p.created_at DESC`,
+    )
+    .all(site, entryKey) as Array<{
+    id: string;
+    title: string;
+    status: ProposalStatus;
+    proposer_username: string;
+    proposer_actor_json: string;
+    created_at: number;
+    locale: string;
+    variant: string | null;
+  }>;
+  return rows.map((r) => {
+    const actor = parseJson<Record<string, unknown>>(r.proposer_actor_json, {});
+    const role = typeof actor.role === "string" ? actor.role : undefined;
+    return {
+      id: r.id,
+      title: r.title,
+      status: r.status,
+      locale: r.locale,
+      variant: r.variant,
+      proposer_username: r.proposer_username,
+      proposer_kind: actor.type === "mcp" ? "agent" : "staff",
+      ...(role ? { proposer_role: role } : {}),
+      created_at: r.created_at,
+    };
+  });
 }
 
 function proposalTargetKeys(proposal: {
@@ -1980,14 +2476,663 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return siblings.length ? { ...proposal, escalated_siblings: siblings } : proposal;
   }
 
+  // ── v1.0 draft-first ────────────────────────────────────────────────────────
+
+  const store = deps.draftStore;
+
+  function refOf(e: {
+    contentType: string;
+    slug: string;
+    locale: string;
+    variant: string | null;
+  }): ProposalDraftRef {
+    return {
+      contentType: e.contentType,
+      slug: e.slug,
+      locale: e.locale,
+      variant: e.variant ?? "",
+    };
+  }
+
+  function linkFor(
+    proposalId: string,
+    created: boolean,
+    fingerprint: string | null,
+  ) {
+    return {
+      id: proposalId,
+      env: pipelineEnv(),
+      ...(created
+        ? {
+            created_by_proposal: true,
+            ...(fingerprint ? { created_fingerprint: fingerprint } : {}),
+          }
+        : {}),
+    };
+  }
+
+  /** Open v1.0 proposal (other than `excludeId`) whose draft on this page stages page-level fields. */
+  function findOpenSharedFieldEditsForEntry(
+    contentType: string,
+    slug: string,
+    excludeId?: string,
+  ): ProposalRecord | null {
+    if (!store) return null;
+    const db = dbFor(site);
+    const entryKey = makeEntryKey(contentType, slug);
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT p.id FROM content_proposals p
+         JOIN content_proposal_entries e ON e.proposal_id = p.id
+         WHERE p.site = ? AND p.status IN ('open','partial') AND p.system_version IS NOT NULL
+           AND e.entry_key = ? AND e.status IN ('pending','failed') AND e.variant IS NOT NULL AND p.id != ?`,
+      )
+      .all(site, entryKey, excludeId ?? "") as Array<{ id: string }>;
+    for (const r of rows) {
+      const p = loadProposal(db, r.id);
+      if (!p) continue;
+      const hit = p.entries.some(
+        (e) =>
+          e.entry_key === entryKey &&
+          (e.status === "pending" || e.status === "failed") &&
+          e.variant &&
+          store.carriesCommon(refOf(e)),
+      );
+      if (hit) return p;
+    }
+    return null;
+  }
+
+  /**
+   * v1.0 read: `ops` / `baseline_context` / `author_diff` come from the draft (cached in
+   * `derived_ops_json` by draft + base + live hashes), plus base / source / merge state.
+   */
+  function affectedEntriesFor(record: ProposalRecord): AffectedEntries | null {
+    if (!store?.listAttachedEntries) return null;
+    const seen = new Set<string>();
+    const all: AffectedEntries["sample"] = [];
+    for (const e of record.entries) {
+      if (e.status === "done" || !isTemplateVersioningSlug(e.slug)) continue;
+      const key = `${e.contentType}:${e.locale}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      for (const slug of store.listAttachedEntries(e.contentType, e.locale)) {
+        all.push({ contentType: e.contentType, slug, locale: e.locale, variant: e.variant });
+      }
+    }
+    return seen.size ? { count: all.length, sample: all.slice(0, 3) } : null;
+  }
+
+  function hydrate(record: ProposalRecord | null): ProposalRecord | null {
+    if (!record || !store || !record.system_version || record.kind !== "edits")
+      return record;
+    const affected = affectedEntriesFor(record);
+    const db = dbFor(site);
+    const entries = record.entries.map((e): ProposalEntryRow => {
+      if (!e.variant || e.status === "done") return e;
+      const ref = refOf(e);
+      const requested = e.requested_ops ?? e.ops;
+      if (!store.exists(ref)) {
+        return {
+          ...e,
+          ops: [],
+          baseline_context: { values: {} },
+          requested_ops: requested,
+          draft_missing: true,
+        };
+      }
+      const key = store.derivedKey(ref);
+      const cached = derivedViewCache.get(e);
+      let view: { changes: FieldChange[]; approximate: boolean } | null =
+        cached?.key && cached.key === key && cached.json
+          ? parseJson(cached.json, null)
+          : null;
+      if (!view) {
+        const diff = store.authorDiff(ref);
+        view = {
+          changes: diff?.changes ?? [],
+          approximate: diff?.approximate ?? true,
+        };
+        try {
+          db.prepare(
+            `UPDATE content_proposal_entries SET derived_ops_json = ?, derived_for_key = ? WHERE id = ?`,
+          ).run(JSON.stringify(view), key, e.id);
+        } catch {
+          /* cache is best-effort */
+        }
+      }
+      const next: ProposalEntryRow = {
+        ...e,
+        ...entryViewFromDiff(requested, view.changes, view.approximate),
+      };
+      const base = store.checkBase(ref);
+      next.base_status = base.status;
+      if (base.status === "stale") {
+        const r = store.rebuild(ref, { preview: true });
+        next.merge_preview = r.ok
+          ? {
+              status: "rebuild",
+              author_fields: r.author_changes.map((c) => c.field_path),
+              live_changes_since_base: r.live_changes_since_base,
+              result: r.result,
+            }
+          : {
+              status: r.reason,
+              ...(r.conflicting_fields
+                ? { conflicting_fields: r.conflicting_fields }
+                : {}),
+              ...(r.live_changes_since_base
+                ? { live_changes_since_base: r.live_changes_since_base }
+                : {}),
+            };
+      }
+      const source = store.checkSource(ref, true);
+      if (source.status === "changed") {
+        next.source_changed = {
+          source_locale: source.source_locale,
+          ...(source.source_changed_fields
+            ? { fields: source.source_changed_fields }
+            : {}),
+        };
+      }
+      derivedViewCache.set(next, { key, json: JSON.stringify(view) });
+      return next;
+    });
+    return { ...record, entries, ...(affected ? { affected_entries: affected } : {}) };
+  }
+
+  function markStale(
+    proposalId: string,
+    reason: string,
+    detail: Record<string, unknown>,
+    author: string,
+  ): void {
+    const db = dbFor(site);
+    const row = db
+      .prepare(`SELECT stale_since FROM content_proposals WHERE id = ?`)
+      .get(proposalId) as { stale_since: string | null } | undefined;
+    if (!row || row.stale_since) return;
+    db.prepare(`UPDATE content_proposals SET stale_since = ? WHERE id = ?`).run(
+      new Date().toISOString(),
+      proposalId,
+    );
+    emitProposalEvent(site, "proposal_needs_author", proposalId, author, {
+      reason,
+      ...detail,
+    });
+  }
+
+  function clearStale(proposalId: string): void {
+    dbFor(site)
+      .prepare(
+        `UPDATE content_proposals SET stale_since = NULL, stale_flagged_at = NULL WHERE id = ?`,
+      )
+      .run(proposalId);
+  }
+
+  type V1Plan = {
+    input: ProposalEntryInput & { updates: FieldUpdate[] };
+    ref: ProposalDraftRef;
+    created: boolean;
+    fingerprint: string | null;
+  };
+  type V1Fail = {
+    ok: false;
+    code: string;
+    error: string;
+    duplicate_of?: string;
+    existing_proposal?: ProposalRecord;
+    details?: unknown;
+  };
+
+  /**
+   * Write each entry's updates into its draft (creating it when missing). All or nothing:
+   * a failure restores / removes every draft touched so far.
+   */
+  async function prepareV1Drafts(opts: {
+    proposalId: string;
+    entries: Array<ProposalEntryInput & { updates: FieldUpdate[] }>;
+    author: string;
+    newEntryKeys: Set<string>;
+    ideaFunnel: IdeaFunnel | null;
+    /** revise_entries: drafts this proposal already owns (entry key → variant, created). */
+    owned?: Map<string, { variant: string; created: boolean }>;
+    /** revise_entries: start drafts this proposal created from today's live (no co-author edits to keep). */
+    resetCreated?: boolean;
+  }): Promise<
+    | {
+        ok: true;
+        plans: V1Plan[];
+        warnings: Array<{ code: string; message: string }>;
+      }
+    | V1Fail
+  > {
+    const s = store!;
+    const plans: V1Plan[] = [];
+    const warnings: Array<{ code: string; message: string }> = [];
+    const undo: Array<() => unknown> = [];
+    const fail = async (r: V1Fail): Promise<V1Fail> => {
+      for (const u of undo.reverse()) {
+        try {
+          await u();
+        } catch (err) {
+          log.warn({ err }, "proposal draft rollback failed");
+        }
+      }
+      return r;
+    };
+    const db = dbFor(site);
+    for (const e of opts.entries) {
+      const key = attachedCreateKey(e.contentType, e.slug, e.locale);
+      const ownedForKey = opts.owned?.get(key);
+      const variant =
+        e.variant?.trim() ||
+        ownedForKey?.variant ||
+        s.pickVariant(e, opts.proposalId);
+      const owned =
+        ownedForKey && ownedForKey.variant === variant
+          ? ownedForKey
+          : undefined;
+      const ref: ProposalDraftRef = {
+        contentType: e.contentType,
+        slug: e.slug,
+        locale: e.locale,
+        variant,
+      };
+      const where = `${e.contentType}/${e.slug} (${e.locale})`;
+      const failed = await withOwnDraftWrite(
+        s.pathOf(ref),
+        async (): Promise<V1Fail | null> => {
+          const exists = s.exists(ref);
+          if (exists) {
+            const alloc = s.allocation(ref) ?? 0;
+            if (alloc > 0) {
+              return fail({
+                ok: false,
+                code: "variant_has_traffic",
+                error: `Variant '${variant}' on ${where} has ${alloc}% traffic, so it is an experiment. Proposals only target drafts (0% traffic).`,
+              });
+            }
+            const link = s.readLink(ref);
+            if (link && link.id !== opts.proposalId) {
+              const local =
+                link.env === pipelineEnv() ? loadProposal(db, link.id) : null;
+              const open = local
+                ? local.status === "open" || local.status === "partial"
+                : link.env !== pipelineEnv();
+              if (open) {
+                return fail({
+                  ok: false,
+                  code: "draft_in_proposal",
+                  error: `Draft '${variant}' on ${where} is under review in proposal ${link.id} (${link.env}). Join that proposal instead.`,
+                  duplicate_of: link.id,
+                  ...(local ? { existing_proposal: local } : {}),
+                });
+              }
+            }
+          }
+          const wouldCarryCommon =
+            e.updates.some((u) => fieldScope(u.field_path) === "common") ||
+            (exists && s.carriesCommon(ref));
+          if (wouldCarryCommon) {
+            const other = findOpenSharedFieldEditsForEntry(
+              e.contentType,
+              e.slug,
+              opts.proposalId,
+            );
+            if (other) {
+              return fail({
+                ok: false,
+                code: "competing_shared_fields",
+                error: `Proposal ${other.id} already changes page-level fields (funnel, robots, authors, …) of ${e.contentType}/${e.slug}. Only one open proposal per page may change them — join ${other.id}.`,
+                duplicate_of: other.id,
+                existing_proposal: other,
+              });
+            }
+          }
+          let created = false;
+          let rebaseAfterWrite = false;
+          if (!exists) {
+            const newEntry = opts.newEntryKeys.has(key)
+              ? {
+                  funnel: opts.ideaFunnel
+                    ? (ideaFunnelToYamlBlock(opts.ideaFunnel) as Record<
+                        string,
+                        unknown
+                      >)
+                    : null,
+                }
+              : undefined;
+            const res = s.create(ref, { author: opts.author, newEntry });
+            if (!res.ok) {
+              return fail({
+                ok: false,
+                code: res.code,
+                error: `${where}: ${res.error} Create the page first (create_entry), or implement an accepted idea.`,
+              });
+            }
+            created = true;
+            undo.push(() => s.remove(ref, opts.author));
+          } else {
+            const raw = s.snapshotRaw(ref);
+            if (raw != null)
+              undo.push(() => s.restoreRaw(ref, raw, opts.author));
+            if (owned) {
+              if (opts.resetCreated && owned.created) {
+                s.reset(ref, opts.author);
+              } else {
+                const base = s.checkBase(ref);
+                if (base.status === "stale") {
+                  const r = s.rebuild(ref, {
+                    preview: false,
+                    author: opts.author,
+                  });
+                  if (r.ok) {
+                    emitProposalEvent(
+                      site,
+                      "draft_rebuilt",
+                      opts.proposalId,
+                      opts.author,
+                      {
+                        ...ref,
+                        kept_live_fields: r.live_changes_since_base.map(
+                          (c) => c.field_path,
+                        ),
+                      },
+                    );
+                  }
+                } else {
+                  rebaseAfterWrite = base.status === "unknown";
+                }
+              }
+            }
+          }
+          if (e.translated_from_locale?.trim())
+            s.recordSource(ref, e.translated_from_locale.trim(), opts.author);
+          const wrote = await s.write(ref, e.updates, opts.author);
+          if (!wrote.ok) {
+            return fail({
+              ok: false,
+              code: wrote.code || "draft_write_failed",
+              error: `${where}: ${wrote.error}`,
+              ...(wrote.details !== undefined
+                ? { details: wrote.details }
+                : {}),
+            });
+          }
+          warnings.push(...wrote.warnings);
+          const structure = s.structureError(ref);
+          if (structure) {
+            return fail({
+              ok: false,
+              code: "attached_draft_structure",
+              error: `${where}: ${structure} Drafts of posts that use the shared template may only change fields.`,
+            });
+          }
+          if (rebaseAfterWrite) s.recordBase(ref, opts.author);
+          plans.push({
+            input: { ...e, variant },
+            ref,
+            created: created || owned?.created === true,
+            fingerprint: s.fingerprint(ref),
+          });
+          return null;
+        },
+      );
+      if (failed) return failed;
+    }
+    return { ok: true, plans, warnings };
+  }
+
+  /** Reject / withdraw / drop from revise: delete drafts this proposal created, unlink the rest. */
+  async function releaseV1Drafts(
+    proposalId: string,
+    entries: ProposalEntryRow[],
+    author: string,
+  ): Promise<Array<{ code: string; message: string }>> {
+    if (!store) return [];
+    const out: Array<{ code: string; message: string }> = [];
+    for (const e of entries) {
+      if (!e.variant || e.status === "done") continue;
+      const ref = refOf(e);
+      if (!store.exists(ref)) continue;
+      const link = store.readLink(ref);
+      if (link && link.id !== proposalId) continue;
+      try {
+        if (e.created_draft) {
+          const { entryDeleted } = await store.remove(ref, author);
+          out.push({
+            code: "draft_deleted",
+            message: entryDeleted
+              ? `Deleted draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) and the unpublished page it created.`
+              : `Deleted draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) (created by this proposal).`,
+          });
+        } else {
+          store.link(ref, null, author);
+          out.push({
+            code: "draft_kept",
+            message: `Kept draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) (it existed before this proposal); unlinked.`,
+          });
+        }
+      } catch (err) {
+        log.warn({ err, proposalId }, "release proposal draft failed");
+      }
+    }
+    return out;
+  }
+
+  /** Map promote failures to proposal terms (apply never overwrites newer live). */
+  function applyFailureFor(code: string | undefined, details: Record<string, unknown> | undefined) {
+    const staleDetails = (reason: string) => {
+      const { reason: inner, ...rest } = details ?? {};
+      return { ...rest, reason, ...(inner != null ? { rebuild_reason: inner } : {}) };
+    };
+    if (code === "draft_base_stale") return { code: "context_stale", details: staleDetails("live_changed") };
+    if (code === "translation_source_changed") return { code: "context_stale", details: staleDetails("source_changed") };
+    return { code: code ?? "promote_failed", details };
+  }
+
+  /** Every check promote would run, without writing (rebuild preview included). */
+  async function checkV1Entry(entry: ProposalEntryRow, caller: ProposalUpdateCaller): Promise<ApplyEntryPreview> {
+    const out: ApplyEntryPreview = { entry_key: entry.entry_key, locale: entry.locale, variant: entry.variant, ok: false };
+    if (!entry.variant) return { ...out, code: "variant_required", error: "v1.0 entries always have a draft variant" };
+    const ref = refOf(entry);
+    if (!store!.exists(ref)) {
+      return { ...out, code: "draft_missing", error: `Draft ${entry.variant}.${entry.locale}.yml no longer exists.` };
+    }
+    const fp = store!.fingerprint(ref);
+    if (entry.variant_fingerprint && fp !== entry.variant_fingerprint) {
+      return {
+        ...out,
+        code: "context_stale",
+        error: "The draft changed outside the proposal flow (for example a content sync) after the last review.",
+        details: { reason: "draft_changed" },
+      };
+    }
+    const alloc = store!.allocation(ref) ?? 0;
+    if (alloc > 0) {
+      return { ...out, code: "variant_has_traffic", error: `Variant '${entry.variant}' has ${alloc}% traffic (experiment).` };
+    }
+    if (!deps.promoteEntry) return { ...out, code: "promote_not_configured", error: "promote not configured" };
+    const dry = await deps.promoteEntry(entry, caller.username, {
+      dry_run: true,
+      confirm_end_experiment: caller.confirm_end_experiment,
+      confirm_base_unknown: caller.confirm_base_unknown,
+    });
+    if (!dry.ok) {
+      const mapped = applyFailureFor(dry.code, dry.details);
+      return {
+        ...out,
+        code: mapped.code,
+        error: dry.error ?? "promote check failed",
+        ...(mapped.details ? { details: mapped.details } : {}),
+      };
+    }
+    return {
+      ...out,
+      ok: true,
+      ...(dry.rebuilt ? { rebuilt: dry.rebuilt } : {}),
+      ...(dry.published_diff ? { published_diff: dry.published_diff } : {}),
+    };
+  }
+
+  const STALE_CODES = new Set(["context_stale", "draft_missing"]);
+
+  /** v1.0 apply: only promotes drafts. Checks every entry first (all_or_nothing / dry_run). */
+  async function applyV1(
+    proposal: ProposalRecord,
+    work: ProposalEntryRow[],
+    caller: ProposalUpdateCaller,
+    reviewForApply: ReviewContext | null,
+  ) {
+    const db = dbFor(site);
+    const id = proposal.id;
+    const checks: ApplyEntryPreview[] = [];
+    for (const entry of work) checks.push(await checkV1Entry(entry, caller));
+    const failed = checks.filter((c) => !c.ok);
+
+    const endExperiment = failed.find((c) => c.code === "confirm_end_experiment");
+    if (endExperiment && !caller.dry_run) {
+      return {
+        ok: false as const,
+        code: "confirm_end_experiment",
+        error: endExperiment.error ?? "confirm_end_experiment required",
+        proposal,
+      };
+    }
+    const affected = affectedEntriesFor(proposal);
+    if (affected && !caller.dry_run && caller.confirm_affected_entries !== affected.count) {
+      return {
+        ok: false as const,
+        code: "confirm_affected_entries",
+        error: `This proposal changes the shared template, which reaches ${affected.count} attached page(s). Re-send with confirm_affected_entries: ${affected.count} to publish.`,
+        proposal,
+        details: affected,
+      };
+    }
+    const unknownBase = failed.filter((c) => c.code === "draft_base_unknown");
+    if (unknownBase.length && !caller.dry_run) {
+      return {
+        ok: false as const,
+        code: "draft_base_unknown",
+        error:
+          "Some drafts have no recorded starting point, so changes made to live since then cannot be detected. Re-send with confirm_base_unknown: true to publish the draft as-is.",
+        proposal,
+        details: { entries: unknownBase.map((c) => ({ entry_key: c.entry_key, locale: c.locale, variant: c.variant })) },
+      };
+    }
+    if (caller.dry_run) {
+      return {
+        ok: true as const,
+        proposal,
+        dry_run: true,
+        merge_preview: checks,
+        ...(failed.length
+          ? { warnings: failed.map((c) => ({ code: c.code ?? "apply_check_failed", message: `${c.entry_key} (${c.locale}): ${c.error}` })) }
+          : {}),
+      };
+    }
+
+    const failEntry = (entryId: number, c: ApplyEntryPreview) => {
+      db.prepare(`UPDATE content_proposal_entries SET status = 'failed', last_error = ? WHERE id = ?`).run(
+        `${c.code}: ${c.error}${c.details ? ` ${JSON.stringify(c.details)}` : ""}`,
+        entryId,
+      );
+    };
+    const staleFailures = failed.filter((c) => c.code && STALE_CODES.has(c.code));
+    if (staleFailures.length) {
+      markStale(id, "context_stale", {
+        entries: staleFailures.map((c) => ({ entry_key: c.entry_key, locale: c.locale, ...(c.details ?? {}) })),
+      }, caller.username);
+    }
+
+    if (proposal.all_or_nothing && failed.length) {
+      work.forEach((entry, i) => {
+        if (!checks[i]!.ok) failEntry(entry.id, checks[i]!);
+      });
+      return {
+        ok: false as const,
+        code: "all_or_nothing_blocked",
+        error: `All-or-nothing proposal: ${failed.length} of ${checks.length} entries cannot be published, so nothing was published.`,
+        proposal: get(id)!,
+        pending: failed,
+      };
+    }
+
+    const warnings: Array<{ code: string; message: string }> = [];
+    for (let i = 0; i < work.length; i++) {
+      const entry = work[i]!;
+      const check = checks[i]!;
+      if (!check.ok) {
+        failEntry(entry.id, check);
+        continue;
+      }
+      const promoted = await deps.promoteEntry!(entry, caller.username, {
+        confirm_end_experiment: caller.confirm_end_experiment,
+        confirm_base_unknown: caller.confirm_base_unknown,
+      });
+      if (!promoted.ok) {
+        const mapped = applyFailureFor(promoted.code, promoted.details);
+        const c = { ...check, ok: false, code: mapped.code, error: promoted.error ?? "promote failed", ...(mapped.details ? { details: mapped.details } : {}) };
+        failed.push(c);
+        failEntry(entry.id, c);
+        continue;
+      }
+      db.prepare(
+        `UPDATE content_proposal_entries
+         SET status = 'done', last_error = NULL, applied_at = ?, applied_by = ?,
+             published_diff_json = ?, pre_apply_snapshot_json = ?
+         WHERE id = ?`,
+      ).run(
+        Date.now(),
+        caller.username,
+        promoted.published_diff ? JSON.stringify(promoted.published_diff) : null,
+        promoted.pre_apply_snapshot ? JSON.stringify(promoted.pre_apply_snapshot) : null,
+        entry.id,
+      );
+      if (promoted.rebuilt) {
+        emitProposalEvent(site, "draft_rebuilt", id, caller.username, {
+          entry_key: entry.entry_key,
+          locale: entry.locale,
+          variant: entry.variant,
+          ...promoted.rebuilt,
+        });
+      }
+      for (const w of promoted.warnings ?? []) {
+        warnings.push({ code: w.code, message: `${entry.entry_key} (${entry.locale}): ${w.message}` });
+      }
+    }
+    if (!failed.length) clearStale(id);
+    const updated = get(id)!;
+    const next = persistRollup(db, updated, { closedBy: caller.username });
+    const fresh = get(id)!;
+    emitProposalEvent(site, "proposal_applied_progress", id, caller.username, {
+      status: next,
+      done: fresh.entries.filter((e) => e.status === "done").length,
+      total: fresh.entries.length,
+    }, caller.actor);
+    if (next === "finished") {
+      captureDecisionDebug(proposal, "apply", caller, reviewForApply);
+      emitProposalEvent(site, "proposal_finished", id, caller.username, {}, caller.actor);
+    }
+    return {
+      ok: true as const,
+      proposal: fresh,
+      ...(warnings.length ? { warnings } : {}),
+      ...(failed.length ? { pending: failed } : {}),
+    };
+  }
+
   function get(id: string): ProposalRecord | null {
-    const raw = loadProposal(dbFor(site), id);
-    return raw ? withAttachedCreate(withSiblings(enrichRecentActivity(raw))) : null;
+    const raw = hydrate(loadProposal(dbFor(site), id));
+    return raw
+      ? withAttachedCreate(withSiblings(enrichRecentActivity(raw)))
+      : null;
   }
 
   /** Unenriched load for internal mutate paths (avoid nested activity reads mid-apply). */
   function getRaw(id: string): ProposalRecord | null {
-    return loadProposal(dbFor(site), id);
+    return hydrate(loadProposal(dbFor(site), id));
   }
 
   function stats(): ProposalStats {
@@ -2020,7 +3165,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     try {
       const attentionRows = db
         .prepare(
-          `SELECT p.id, p.kind, p.status, p.escalated, p.author_content_at, p.reviewer_action_at,
+          `SELECT p.id, p.kind, p.status, p.escalated, p.author_content_at, p.reviewer_action_at, p.stale_since,
                   (SELECT COUNT(*) FROM content_proposal_blockers b
                    WHERE b.proposal_id = p.id AND b.status = 'open') AS open_n,
                   (SELECT COUNT(*) FROM content_proposal_blockers b
@@ -2035,6 +3180,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         escalated: number;
         author_content_at: number | null;
         reviewer_action_at: number | null;
+        stale_since: string | null;
         open_n: number;
         resolved_n: number;
       }>;
@@ -2046,6 +3192,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           resolved_blocker_count: Number(row.resolved_n) || 0,
           author_content_at: row.author_content_at,
           reviewer_action_at: row.reviewer_action_at,
+          needs_author: row.stale_since != null,
         });
         if (bucket) by_attention[bucket] += 1;
         if (
@@ -2353,7 +3500,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
     input: CreateProposalInput,
     proposer: { username: string; actor?: EventActor | Record<string, unknown> },
   ): Promise<
-    | { ok: true; proposal: ProposalRecord; duplicate?: boolean; similar?: SimilarProposal[] }
+    | {
+        ok: true;
+        proposal: ProposalRecord;
+        duplicate?: boolean;
+        similar?: SimilarProposal[];
+        warnings?: Array<{ code: string; message: string }>;
+      }
     | {
         ok: false;
         code: string;
@@ -2361,7 +3514,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
         similar?: SimilarProposal[];
         duplicate_of?: string;
         existing_proposal?: ProposalRecord;
-        activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
+        activity?: Array<{
+          entryKey: string;
+          writeCount: number;
+          windowDays: number;
+        }>;
+        details?: unknown;
       }
   > {
     const summary = (input.summary || "").trim();
@@ -2384,6 +3542,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       updates: e.updates ?? [],
     }));
     const createsEntryKeys = new Set<string>();
+    let implementsIdeaForDrafts: ProposalRecord | null = null;
     let kind: ProposalKind;
     if (entriesIn.length > 0 || promote_on_apply) {
       kind = "edits";
@@ -2484,6 +3643,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       const implementsResolved = resolveImplementsForEdits(dbEarly, input.implements_proposal_id, entriesIn);
       if (!implementsResolved.ok) return implementsResolved;
       const implementsIdea = implementsResolved.idea;
+      implementsIdeaForDrafts = implementsIdea;
 
       // Existence + mixed risk
       const classTargets: Array<{
@@ -2504,7 +3664,28 @@ export function createProposalService(deps: ProposalServiceDeps) {
         const liveOk = ex.live === "exists";
         const draftOk = hasVariant && ex.draftExists;
         const liveMissing = !liveOk && ex.live !== "unknown";
-        if (liveMissing && !draftOk) {
+        if (store) {
+          // v1.0: a missing draft is created on this page; only a brand-new page needs an accepted idea.
+          if (
+            liveMissing &&
+            !draftOk &&
+            !store.entryExists(e.contentType, e.slug)
+          ) {
+            const gate = gateMissingAttachedEntry({
+              entry: e,
+              promoteOnApply: false,
+              hasVariant: false,
+              implementsIdea,
+              db: dbEarly,
+            });
+            if (!gate.ok) return gate;
+            if (gate.createsEntry) {
+              createsEntryKeys.add(
+                attachedCreateKey(e.contentType, e.slug, e.locale),
+              );
+            }
+          }
+        } else if (liveMissing && !draftOk) {
           const gate = gateMissingAttachedEntry({
             entry: e,
             promoteOnApply: promote_on_apply,
@@ -2734,7 +3915,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean };
       variant_fingerprint: string | null;
     }> = [];
-    for (const e of entriesIn) {
+    for (const e of store ? [] : entriesIn) {
       const updates = e.updates ?? [];
       const createsEntry = createsEntryKeys.has(attachedCreateKey(e.contentType, e.slug, e.locale));
       let baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean } = {
@@ -2767,8 +3948,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
       });
     }
 
-    if (promote_on_apply && captured.length === 0) {
-      return { ok: false, code: "promote_entry_required", error: "promote_on_apply requires an entry" };
+    if (promote_on_apply && captured.length === 0 && !store) {
+      return {
+        ok: false,
+        code: "promote_entry_required",
+        error: "promote_on_apply requires an entry",
+      };
     }
 
     let supersedesId: string | null = null;
@@ -2819,6 +4004,23 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const id = randomUUID();
     const sessionId = input.agent_session_id?.trim() || null;
     const noAutoRetry = kind === "notes" ? 1 : 0;
+
+    // v1.0: every edits entry is a draft; updates are written into it now, apply only promotes.
+    let draftPlans: V1Plan[] = [];
+    const draftWarnings: Array<{ code: string; message: string }> = [];
+    if (store && kind === "edits") {
+      const prepared = await prepareV1Drafts({
+        proposalId: id,
+        entries: entriesIn,
+        author: proposer.username,
+        newEntryKeys: createsEntryKeys,
+        ideaFunnel: implementsIdeaForDrafts?.idea_funnel ?? null,
+      });
+      if (!prepared.ok) return prepared;
+      draftPlans = prepared.plans;
+      draftWarnings.push(...prepared.warnings);
+    }
+
     db.prepare(
       `INSERT INTO content_proposals (
         id, site, fingerprint, status, kind, category, title, summary, rationale,
@@ -2826,8 +4028,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
         created_at, updated_at, claim_json, tags_json, search_text,
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
         review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
-        review_situations_json, implements_proposal_id, idea_funnel_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        review_situations_json, implements_proposal_id, idea_funnel_json,
+        system_version, all_or_nothing, reverts_proposal_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -2857,6 +4060,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       JSON.stringify(filedReviewSituations),
       implementsIdForInsert,
       ideaFunnelJson,
+      store ? PROPOSAL_SYSTEM_VERSION : null,
+      kind === "edits" && input.all_or_nothing ? 1 : 0,
+      input.reverts_proposal_id?.trim() || null,
     );
 
     if (supersedesId) {
@@ -2879,6 +4085,31 @@ export function createProposalService(deps: ProposalServiceDeps) {
         JSON.stringify(cap.input.updates),
         JSON.stringify(cap.baseline),
         cap.variant_fingerprint,
+      );
+    }
+    for (const plan of draftPlans) {
+      db.prepare(
+        `INSERT INTO content_proposal_entries (
+          proposal_id, entry_key, locale, variant, status, ops_json, baseline_context_json, variant_fingerprint, created_draft
+        ) VALUES (?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        id,
+        makeEntryKey(plan.ref.contentType, plan.ref.slug),
+        plan.ref.locale,
+        plan.ref.variant,
+        "pending",
+        JSON.stringify(plan.input.updates),
+        JSON.stringify({
+          values: {},
+          ...(input.situation_note ? { note: input.situation_note } : {}),
+        }),
+        plan.fingerprint,
+        plan.created ? 1 : 0,
+      );
+      store!.link(
+        plan.ref,
+        linkFor(id, plan.created, plan.fingerprint),
+        proposer.username,
       );
     }
 
@@ -2909,6 +4140,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       ok: true,
       proposal: withSnap,
       ...(reviewCtx ? { review_context: reviewCtx } : {}),
+      ...(draftWarnings.length ? { warnings: draftWarnings } : {}),
     };
   }
 
@@ -2921,22 +4153,55 @@ export function createProposalService(deps: ProposalServiceDeps) {
         ok: true;
         proposal: ProposalRecord;
         warnings?: Array<{ code: string; message: string }>;
-        traffic_siblings?: Array<{ slug: string; locale: string; allocation: number }>;
+        traffic_siblings?: Array<{
+          slug: string;
+          locale: string;
+          allocation: number;
+        }>;
+        dry_run?: boolean;
+        merge_preview?: ApplyEntryPreview[];
+        pending?: ApplyEntryPreview[];
+        reverted_from?: string;
+        conflicting_fields?: RevertConflict[];
       }
     | {
         ok: false;
         code: string;
         error: string;
         proposal?: ProposalRecord;
+        conflicting_fields?: RevertConflict[];
         claim_expired?: boolean;
         traffic_siblings?: Array<{ slug: string; locale: string; allocation: number }>;
         existing_proposal?: ProposalRecord;
-        activity?: Array<{ entryKey: string; writeCount: number; windowDays: number }>;
+        activity?: Array<{
+          entryKey: string;
+          writeCount: number;
+          windowDays: number;
+        }>;
+        duplicate_of?: string;
+        details?: unknown;
+        pending?: ApplyEntryPreview[];
       }
   > {
     const db = dbFor(site);
     const proposal = getRaw(id);
     if (!proposal) return { ok: false, code: "not_found", error: "Proposal not found" };
+
+    if (
+      store &&
+      !proposal.system_version &&
+      !LEGACY_ALLOWED_ACTIONS.has(action)
+    ) {
+      return {
+        ok: false,
+        code: "legacy_version",
+        error:
+          "This proposal was filed before proposals v1.0 (drafts as the source of truth) and is read-only. Withdraw or reject it and file a new proposal; accepted legacy ideas can still be implemented.",
+        proposal,
+      };
+    }
+
+    if (action === "revert") return revertProposal(proposal, caller);
 
     const report = caller.report?.trim() ?? "";
     const now = Date.now();
@@ -3228,8 +4493,22 @@ export function createProposalService(deps: ProposalServiceDeps) {
          WHERE id = ?`,
       ).run(now, "withdrawn", withdrawNote, caller.username, now, id);
       captureDecisionDebug(proposal, "withdraw", caller, reviewBeforeWithdraw);
-      emitProposalEvent(site, "proposal_withdrawn", id, caller.username, {}, caller.actor);
-      return { ok: true, proposal: get(id)! };
+      emitProposalEvent(
+        site,
+        "proposal_withdrawn",
+        id,
+        caller.username,
+        {},
+        caller.actor,
+      );
+      const released = proposal.system_version
+        ? await releaseV1Drafts(id, proposal.entries, caller.username)
+        : [];
+      return {
+        ok: true,
+        proposal: get(id)!,
+        ...(released.length ? { warnings: released } : {}),
+      };
     }
 
     if (action === "reject") {
@@ -3288,10 +4567,24 @@ export function createProposalService(deps: ProposalServiceDeps) {
          WHERE id = ?`,
       ).run(now, kindRaw, rejectNote, caller.username, now, id);
       captureDecisionDebug(proposal, "reject", caller, reviewBeforeReject);
-      emitProposalEvent(site, "proposal_rejected", id, caller.username, {
-        reject_kind: kindRaw,
-      }, caller.actor);
-      return { ok: true, proposal: get(id)! };
+      emitProposalEvent(
+        site,
+        "proposal_rejected",
+        id,
+        caller.username,
+        {
+          reject_kind: kindRaw,
+        },
+        caller.actor,
+      );
+      const released = proposal.system_version
+        ? await releaseV1Drafts(id, proposal.entries, caller.username)
+        : [];
+      return {
+        ok: true,
+        proposal: get(id)!,
+        ...(released.length ? { warnings: released } : {}),
+      };
     }
 
     if (action === "accept") {
@@ -3743,7 +5036,36 @@ export function createProposalService(deps: ProposalServiceDeps) {
         const liveOk = ex.live === "exists";
         const draftOk = hasVariant && ex.draftExists;
         const liveMissing = !liveOk && ex.live !== "unknown";
-        if (liveMissing && !draftOk) {
+        const ownedDraft = proposal.entries.some(
+          (pe) =>
+            pe.contentType === e.contentType &&
+            pe.slug === e.slug &&
+            pe.locale === e.locale &&
+            pe.variant &&
+            store?.exists(refOf(pe)),
+        );
+        if (store && proposal.system_version) {
+          if (
+            liveMissing &&
+            !draftOk &&
+            !ownedDraft &&
+            !store.entryExists(e.contentType, e.slug)
+          ) {
+            const gate = gateMissingAttachedEntry({
+              entry: e,
+              promoteOnApply: false,
+              hasVariant: false,
+              implementsIdea: implementsResolved.idea,
+              db: reviseDb,
+            });
+            if (!gate.ok) return gate;
+            if (gate.createsEntry) {
+              reviseCreates.add(
+                attachedCreateKey(e.contentType, e.slug, e.locale),
+              );
+            }
+          }
+        } else if (liveMissing && !draftOk) {
           const gate = gateMissingAttachedEntry({
             entry: e,
             promoteOnApply: proposal.promote_on_apply,
@@ -3873,12 +5195,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
         }
       }
 
+      const v1Revise = Boolean(store && proposal.system_version);
       const captured: Array<{
         input: ProposalEntryInput & { updates: FieldUpdate[] };
         baseline: { values: Record<string, unknown>; note?: string };
         variant_fingerprint: string | null;
       }> = [];
-      for (const e of entriesIn) {
+      for (const e of v1Revise ? [] : entriesIn) {
         const updates = e.updates ?? [];
         const createsEntry = reviseCreates.has(attachedCreateKey(e.contentType, e.slug, e.locale));
         let baseline: { values: Record<string, unknown>; note?: string; creates_entry?: boolean } = {
@@ -3946,9 +5269,81 @@ export function createProposalService(deps: ProposalServiceDeps) {
         .join(" ")
         .toLowerCase();
 
+      let revisePlans: V1Plan[] = [];
+      const reviseWarnings: Array<{ code: string; message: string }> = [];
+      if (v1Revise) {
+        const pendingBefore = proposal.entries.filter(
+          (e) => (e.status === "pending" || e.status === "failed") && e.variant,
+        );
+        const owned = new Map<string, { variant: string; created: boolean }>();
+        for (const e of pendingBefore) {
+          owned.set(attachedCreateKey(e.contentType, e.slug, e.locale), {
+            variant: e.variant!,
+            created: Boolean(e.created_draft),
+          });
+        }
+        const prepared = await prepareV1Drafts({
+          proposalId: id,
+          entries: entriesIn,
+          author: caller.username,
+          newEntryKeys: reviseCreates,
+          ideaFunnel: implementsResolved.idea?.idea_funnel ?? null,
+          owned,
+          resetCreated: proposal.co_authors.length === 0,
+        });
+        if (!prepared.ok) return prepared;
+        revisePlans = prepared.plans;
+        reviseWarnings.push(...prepared.warnings);
+        const kept = new Set(
+          revisePlans.map(
+            (p) =>
+              `${attachedCreateKey(p.ref.contentType, p.ref.slug, p.ref.locale)}\0${p.ref.variant}`,
+          ),
+        );
+        const dropped = pendingBefore.filter(
+          (e) =>
+            !kept.has(
+              `${attachedCreateKey(e.contentType, e.slug, e.locale)}\0${e.variant}`,
+            ),
+        );
+        reviseWarnings.push(
+          ...(await releaseV1Drafts(id, dropped, caller.username)),
+        );
+      }
+
       db.prepare(
         `DELETE FROM content_proposal_entries WHERE proposal_id = ? AND status IN ('pending','failed')`,
       ).run(id);
+      for (const plan of revisePlans) {
+        db.prepare(
+          `INSERT INTO content_proposal_entries (
+            proposal_id, entry_key, locale, variant, status, ops_json, baseline_context_json, variant_fingerprint, created_draft
+          ) VALUES (?,?,?,?,?,?,?,?,?)`,
+        ).run(
+          id,
+          makeEntryKey(plan.ref.contentType, plan.ref.slug),
+          plan.ref.locale,
+          plan.ref.variant,
+          "pending",
+          JSON.stringify(plan.input.updates),
+          JSON.stringify({ values: {} }),
+          plan.fingerprint,
+          plan.created ? 1 : 0,
+        );
+        store!.link(
+          plan.ref,
+          linkFor(id, plan.created, plan.fingerprint),
+          caller.username,
+        );
+      }
+      if (v1Revise) {
+        clearStale(id);
+        if (typeof caller.all_or_nothing === "boolean") {
+          db.prepare(
+            `UPDATE content_proposals SET all_or_nothing = ? WHERE id = ?`,
+          ).run(caller.all_or_nothing ? 1 : 0, id);
+        }
+      }
       for (const cap of captured) {
         db.prepare(
           `INSERT INTO content_proposal_entries (
@@ -3985,14 +5380,22 @@ export function createProposalService(deps: ProposalServiceDeps) {
       const after = getRaw(id)!;
       persistRollup(db, after);
       await classifyLive(after, { refreshSnapshot: true });
-      emitProposalEvent(site, "proposal_revised", id, caller.username, {
-        entry_count: captured.length,
-        open_blocker_count: after.open_blocker_count,
-      }, caller.actor);
+      emitProposalEvent(
+        site,
+        "proposal_revised",
+        id,
+        caller.username,
+        {
+          entry_count: v1Revise ? revisePlans.length : captured.length,
+          open_blocker_count: after.open_blocker_count,
+        },
+        caller.actor,
+      );
       return {
         ok: true,
         proposal: get(id)!,
         warnings: [
+          ...reviseWarnings,
           {
             code: "blockers_remain_after_revise",
             message:
@@ -4154,6 +5557,33 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       const variant = (caller.variant || "").trim();
       if (!variant) return { ok: false, code: "variant_required", error: "variant is required" };
+      const attachRef: ProposalDraftRef = {
+        contentType: entry.contentType,
+        slug: entry.slug,
+        locale: entry.locale,
+        variant,
+      };
+      if (store && proposal.system_version) {
+        if (!store.exists(attachRef)) {
+          return { ok: false, code: "entry_not_found", error: `Draft '${variant}' does not exist for ${entry.contentType}/${entry.slug} (${entry.locale}).` };
+        }
+        const alloc = store.allocation(attachRef) ?? 0;
+        if (alloc > 0) {
+          return {
+            ok: false,
+            code: "variant_has_traffic",
+            error: `Variant '${variant}' has ${alloc}% traffic (experiment). Proposals only target drafts (0% traffic).`,
+          };
+        }
+        const structure = store.structureError(attachRef);
+        if (structure) {
+          return {
+            ok: false,
+            code: "attached_draft_structure",
+            error: `${structure} Drafts of posts that use the shared template may only change fields.`,
+          };
+        }
+      }
 
       const existingVariant = findOpenProposalForVariant(
         db,
@@ -4184,9 +5614,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
         fingerprint = fp.fingerprint;
       }
 
+      if (store && proposal.system_version) fingerprint = store.fingerprint(attachRef);
       db.prepare(
-        `UPDATE content_proposal_entries SET variant = ?, variant_fingerprint = ? WHERE id = ?`,
+        `UPDATE content_proposal_entries SET variant = ?, variant_fingerprint = ?, created_draft = 0 WHERE id = ?`,
       ).run(variant, fingerprint, entry.id);
+      if (store && proposal.system_version) {
+        store.link(attachRef, linkFor(id, false, fingerprint), caller.username);
+      }
       if (caller.promote_on_apply) {
         db.prepare(`UPDATE content_proposals SET promote_on_apply = 1, updated_at = ? WHERE id = ?`).run(now, id);
       } else {
@@ -4214,6 +5648,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           ok: false,
           code: "four_eyes",
           error: "Four-eyes: a different agent role (or staff UI) must apply",
+        };
+      }
+      if (proposal.co_authors.some((c) => sameUsername(c.username, caller.username))) {
+        return {
+          ok: false,
+          code: "four_eyes_co_author",
+          error:
+            "Four-eyes: you edited this proposal's draft (co-author), so someone else must review and approve it.",
         };
       }
       if (proposal.open_blocker_count > 0) {
@@ -4283,6 +5725,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
             }),
           };
         }
+      }
+
+      if (store && proposal.system_version) {
+        return applyV1(proposal, work, caller, reviewForApply);
       }
 
       for (const entry of work) {
@@ -4533,8 +5979,383 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: false, code: "unknown_action", error: `Unknown action: ${action}` };
   }
 
+  /**
+   * One-shot cutover: open/partial proposals without system_version become 1.0.
+   * soft → new `draft-p{id6}` with its ops; soft_variant / draft_backed keep their draft
+   * (base unknown); ideas / notes only change version. Non-migratable → withdrawn with
+   * close_reason legacy_version.
+   */
+  async function migrateLegacy(opts: { author: string; dry_run?: boolean }): Promise<LegacyMigrationReport> {
+    const db = dbFor(site);
+    const report: LegacyMigrationReport = { migrated: [], closed: [], touched_entry_dirs: [] };
+    if (!store) throw new Error("migrateLegacy requires a draft store");
+    const ids = (
+      db
+        .prepare(
+          `SELECT id FROM content_proposals
+           WHERE site = ? AND system_version IS NULL AND status IN ('open', 'partial')
+           ORDER BY created_at ASC`,
+        )
+        .all(site) as Array<{ id: string }>
+    ).map((r) => r.id);
+    const touched = new Set<string>();
+    const nowIso = () => new Date().toISOString();
+
+    const closeLegacy = (p: ProposalRecord, reason: string) => {
+      report.closed.push({ id: p.id, kind: p.kind, reason });
+      if (opts.dry_run) return;
+      const now = Date.now();
+      db.prepare(
+        `UPDATE content_proposals
+         SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
+             close_reason = 'legacy_version', close_note = ?, closed_by = ?, closed_at = ?
+         WHERE id = ?`,
+      ).run(now, `Not migrated to proposals 1.0: ${reason}`, opts.author, now, p.id);
+      emitProposalEvent(site, "proposal_withdrawn", p.id, opts.author, {
+        close_reason: "legacy_version",
+        reason,
+      });
+    };
+    const markMigrated = (p: ProposalRecord, detail: Record<string, unknown>) => {
+      db.prepare(`UPDATE content_proposals SET system_version = ?, updated_at = ? WHERE id = ?`).run(
+        PROPOSAL_SYSTEM_VERSION,
+        Date.now(),
+        p.id,
+      );
+      emitProposalEvent(site, "proposal_migrated_v1", p.id, opts.author, { kind: p.kind, ...detail });
+    };
+
+    for (const id of ids) {
+      const p = loadProposal(db, id);
+      if (!p) continue;
+      if (p.kind !== "edits") {
+        report.migrated.push({ id, kind: p.kind, entries: [] });
+        if (!opts.dry_run) markMigrated(p, {});
+        continue;
+      }
+      const work = p.entries.filter((e) => e.status === "pending" || e.status === "failed");
+      const groups = new Map<string, { rows: ProposalEntryRow[]; updates: FieldUpdate[] }>();
+      for (const e of work) {
+        const k = `${attachedCreateKey(e.contentType, e.slug, e.locale)}\0${e.variant ?? ""}`;
+        const g = groups.get(k) ?? { rows: [], updates: [] };
+        g.rows.push(e);
+        g.updates.push(...(e.ops ?? []));
+        groups.set(k, g);
+      }
+      let blocker: string | null = null;
+      const newEntryKeys = new Set<string>();
+      const inputs: Array<ProposalEntryInput & { updates: FieldUpdate[] }> = [];
+      const inputGroups: Array<{ rows: ProposalEntryRow[]; updates: FieldUpdate[] }> = [];
+      for (const g of Array.from(groups.values())) {
+        const first = g.rows[0]!;
+        const where = `${first.contentType}/${first.slug} (${first.locale})`;
+        const createsEntry = first.baseline_context?.creates_entry === true && !first.variant;
+        if (first.variant) {
+          if (!store.exists(refOf(first))) {
+            blocker = `draft ${first.variant} of ${where} no longer exists`;
+            break;
+          }
+        } else if (createsEntry) {
+          if (!store.entryExists(first.contentType, first.slug)) newEntryKeys.add(attachedCreateKey(first.contentType, first.slug, first.locale));
+        } else if (!store.liveExists(first)) {
+          blocker = `target_missing: ${where} is not published anymore`;
+          break;
+        }
+        const variant =
+          first.variant?.trim() || store.pickVariant(first, p.id, { ownName: true });
+        const writeOps = first.variant ? !p.promote_on_apply : true;
+        inputGroups.push(g);
+        inputs.push({
+          contentType: first.contentType,
+          slug: first.slug,
+          locale: first.locale,
+          variant,
+          updates: writeOps ? g.updates : [],
+        });
+      }
+      if (blocker) {
+        closeLegacy(p, blocker);
+        continue;
+      }
+      if (opts.dry_run) {
+        report.migrated.push({
+          id,
+          kind: p.kind,
+          entries: inputs.map((i) => ({ entry_key: makeEntryKey(i.contentType, i.slug), locale: i.locale, variant: i.variant! })),
+        });
+        continue;
+      }
+      const prepared = await prepareV1Drafts({
+        proposalId: p.id,
+        entries: inputs,
+        author: opts.author,
+        newEntryKeys,
+        ideaFunnel: null,
+      });
+      if (!prepared.ok) {
+        closeLegacy(p, `${prepared.code}: ${prepared.error}`);
+        continue;
+      }
+      const stale: Array<{ entry_key: string; locale: string; fields: string[] }> = [];
+      const out: LegacyMigrationReport["migrated"][number]["entries"] = [];
+      db.transaction(() => {
+        prepared.plans.forEach((plan, i) => {
+          const g = inputGroups[i]!;
+          const [keep, ...drop] = g.rows;
+          db.prepare(
+            `UPDATE content_proposal_entries
+             SET variant = ?, created_draft = ?, variant_fingerprint = ?, ops_json = ?,
+                 baseline_context_json = ?, status = 'pending', last_error = NULL
+             WHERE id = ?`,
+          ).run(
+            plan.ref.variant,
+            plan.created ? 1 : 0,
+            plan.fingerprint,
+            JSON.stringify(g.updates),
+            JSON.stringify({ values: {} }),
+            keep!.id,
+          );
+          for (const d of drop) db.prepare(`DELETE FROM content_proposal_entries WHERE id = ?`).run(d.id);
+          const diff = store.authorDiff(plan.ref);
+          const changedFields: string[] = [];
+          for (const u of g.updates) {
+            const baseline = keep!.baseline_context?.values ?? {};
+            if (!(u.field_path in baseline)) continue;
+            const change = diff?.changes.find((c) => c.field_path === u.field_path);
+            const liveNow = change ? change.before : u.value;
+            if (JSON.stringify(liveNow) !== JSON.stringify(baseline[u.field_path])) changedFields.push(u.field_path);
+          }
+          if (changedFields.length) stale.push({ entry_key: keep!.entry_key, locale: plan.ref.locale, fields: changedFields });
+          out.push({ entry_key: keep!.entry_key, locale: plan.ref.locale, variant: plan.ref.variant, created_draft: plan.created });
+          touched.add(path.relative(process.cwd(), path.dirname(store.pathOf(plan.ref))));
+        });
+        markMigrated(p, { entries: out });
+      })();
+      for (const plan of prepared.plans) store.link(plan.ref, linkFor(p.id, plan.created, plan.fingerprint), opts.author);
+      if (stale.length) {
+        db.prepare(`UPDATE content_proposals SET stale_since = ? WHERE id = ?`).run(nowIso(), p.id);
+        emitProposalEvent(site, "proposal_needs_author", p.id, opts.author, {
+          reason: "context_stale",
+          migrated: true,
+          entries: stale,
+        });
+      }
+      report.migrated.push({ id, kind: p.kind, entries: out, ...(stale.length ? { stale } : {}) });
+    }
+    report.touched_entry_dirs = Array.from(touched).sort();
+    return report;
+  }
+
+  /**
+   * "Revert this proposal": a new v1.0 proposal (reverts_proposal_id) whose draft puts back
+   * the values from before the apply. Fields changed on live since then are conflicts and
+   * are left out. Never writes live; the revert follows four-eyes like any proposal.
+   */
+  async function revertProposal(proposal: ProposalRecord, caller: ProposalUpdateCaller) {
+    if (!store || !proposal.system_version) {
+      return { ok: false as const, code: "legacy_version", error: "Only proposals v1.0 record what they published, so only they can be reverted." };
+    }
+    if (proposal.kind !== "edits" || (proposal.status !== "finished" && proposal.status !== "partial")) {
+      return { ok: false as const, code: "not_applied", error: "Only applied (finished or partial) edits proposals can be reverted.", proposal };
+    }
+    const conflicts: RevertConflict[] = [];
+    const entries: ProposalEntryInput[] = [];
+    for (const e of proposal.entries) {
+      if (e.status !== "done" || !e.published_diff?.length) continue;
+      const updates: FieldUpdate[] = [];
+      for (const c of e.published_diff) {
+        const now = store.liveValue(e, c.field_path);
+        if (!sameValue(now, c.after)) {
+          conflicts.push({ entry_key: e.entry_key, locale: e.locale, field_path: c.field_path, published: c.after, live: now });
+          continue;
+        }
+        updates.push(
+          c.before === undefined
+            ? { field_path: c.field_path, op: "remove", reset: true }
+            : { field_path: c.field_path, value: c.before },
+        );
+      }
+      if (updates.length) entries.push({ contentType: e.contentType, slug: e.slug, locale: e.locale, updates });
+    }
+    if (!entries.length) {
+      return {
+        ok: false as const,
+        code: conflicts.length ? "revert_conflicts" : "nothing_to_revert",
+        error: conflicts.length
+          ? "Every field this proposal published was changed again on live since, so there is nothing safe to put back."
+          : "This proposal has no recorded published changes to revert.",
+        proposal,
+        ...(conflicts.length ? { conflicting_fields: conflicts } : {}),
+      };
+    }
+    const created = await create(
+      {
+        category: proposal.category,
+        title: `Revert: ${proposal.title}`.slice(0, 200),
+        summary: `Puts back the values that were live before proposal ${proposal.id} was applied (${proposal.title}). Fields changed on live since that apply are left out.`,
+        rationale: caller.body?.trim() || undefined,
+        entries,
+        reverts_proposal_id: proposal.id,
+        agent_session_id: caller.agent_session_id,
+      },
+      { username: caller.username, actor: caller.actor },
+    );
+    if (!created.ok) return { ...created, ok: false as const };
+    emitProposalEvent(site, "proposal_reverted", proposal.id, caller.username, {
+      revert_proposal_id: created.proposal.id,
+      conflicting_fields: conflicts.length,
+    }, caller.actor);
+    return {
+      ok: true as const,
+      proposal: created.proposal,
+      reverted_from: proposal.id,
+      ...(conflicts.length ? { conflicting_fields: conflicts } : {}),
+      ...(created.warnings?.length ? { warnings: created.warnings } : {}),
+    };
+  }
+
+  /**
+   * Daily: flag v1.0 proposals whose drafts fell behind live / their translation source.
+   * 30 days stale without activity → proposal_stale_flagged; 90 → closed abandoned_stale
+   * (drafts the proposal created are deleted; pre-existing drafts are only unlinked).
+   */
+  async function staleSweep(opts: { author?: string; now?: number } = {}): Promise<StaleSweepReport> {
+    const report: StaleSweepReport = { checked: 0, marked: [], cleared: [], flagged: [], closed: [] };
+    if (!store) return report;
+    const db = dbFor(site);
+    const now = opts.now ?? Date.now();
+    const author = opts.author ?? "system:proposal-stale-sweep";
+    const ids = (
+      db
+        .prepare(
+          `SELECT id FROM content_proposals
+           WHERE site = ? AND system_version IS NOT NULL AND kind = 'edits' AND status IN ('open', 'partial')`,
+        )
+        .all(site) as Array<{ id: string }>
+    ).map((r) => r.id);
+    for (const id of ids) {
+      const p = loadProposal(db, id);
+      if (!p) continue;
+      report.checked++;
+      const work = p.entries.filter((e) => e.variant && (e.status === "pending" || e.status === "failed"));
+      const drifted = work.filter((e) => {
+        const ref = refOf(e);
+        return !store.exists(ref) || store.checkBase(ref).status === "stale" || store.checkSource(ref).status === "changed";
+      });
+      if (drifted.length && !p.stale_since) {
+        markStale(id, "drift", { entries: drifted.map((e) => ({ entry_key: e.entry_key, locale: e.locale })) }, author);
+        report.marked.push(id);
+        continue;
+      }
+      if (!drifted.length && p.stale_since) {
+        clearStale(id);
+        report.cleared.push(id);
+        continue;
+      }
+      if (!p.stale_since) continue;
+      const lastActivity = Math.max(
+        Date.parse(p.stale_since) || 0,
+        p.updated_at || 0,
+        p.author_content_at ?? 0,
+        p.reviewer_action_at ?? 0,
+      );
+      const idle = now - lastActivity;
+      if (idle >= STALE_CLOSE_DAYS * DAY_MS) {
+        db.prepare(
+          `UPDATE content_proposals
+           SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
+               close_reason = 'abandoned_stale', close_note = ?, closed_by = ?, closed_at = ?
+           WHERE id = ?`,
+        ).run(
+          now,
+          `Closed automatically: the draft was out of date for ${STALE_CLOSE_DAYS} days without activity.`,
+          author,
+          now,
+          id,
+        );
+        const released = await releaseV1Drafts(id, p.entries, author);
+        emitProposalEvent(site, "proposal_closed_abandoned_stale", id, author, {
+          stale_since: p.stale_since,
+          drafts: released.map((r) => r.code),
+        });
+        report.closed.push(id);
+      } else if (idle >= STALE_FLAG_DAYS * DAY_MS && !p.stale_flagged_at) {
+        db.prepare(`UPDATE content_proposals SET stale_flagged_at = ? WHERE id = ?`).run(new Date(now).toISOString(), id);
+        emitProposalEvent(site, "proposal_stale_flagged", id, author, {
+          stale_since: p.stale_since,
+          closes_at: new Date(lastActivity + STALE_CLOSE_DAYS * DAY_MS).toISOString(),
+        });
+        report.flagged.push(id);
+      }
+    }
+    return report;
+  }
+
+  /**
+   * Daily link check: a draft whose `_draft.proposal` is not open locally nor in production
+   * gets orphan_since; after 7 days the link is removed (the draft is deleted only when the
+   * proposal created it and nobody edited it). Unreachable production → unverified, no cleanup.
+   */
+  async function verifyDraftLinks(opts: {
+    author?: string;
+    now?: number;
+    remoteStatus?: (proposalId: string, env: string) => Promise<"open" | "closed" | "unknown">;
+  } = {}): Promise<LinkCheckReport> {
+    const report: LinkCheckReport = { checked: 0, orphaned: [], cleaned: [], unverified: [], restored: [] };
+    if (!store) return report;
+    const db = dbFor(site);
+    const now = opts.now ?? Date.now();
+    const iso = new Date(now).toISOString();
+    const author = opts.author ?? "system:draft-link-check";
+    const env = pipelineEnv();
+    for (const { ref, link } of store.listLinkedDrafts()) {
+      report.checked++;
+      const where = `${ref.contentType}/${ref.slug} ${ref.variant}.${ref.locale}`;
+      const local = loadProposal(db, link.id);
+      let status: "open" | "closed" | "unknown";
+      if (local) status = local.status === "open" || local.status === "partial" ? "open" : "closed";
+      else if (link.env === env && env !== "unknown") status = "closed";
+      else status = opts.remoteStatus ? await opts.remoteStatus(link.id, link.env) : "unknown";
+
+      if (status === "open") {
+        if (link.orphan_since || link.unverified_since) {
+          const { orphan_since: _o, unverified_since: _u, ...clean } = link;
+          store.link(ref, clean, author);
+          report.restored.push(where);
+        }
+        continue;
+      }
+      if (status === "unknown") {
+        if (!link.unverified_since) store.link(ref, { ...link, unverified_since: iso }, author);
+        report.unverified.push(where);
+        continue;
+      }
+      if (!link.orphan_since) {
+        const { unverified_since: _u, ...rest } = link;
+        store.link(ref, { ...rest, orphan_since: iso }, author);
+        report.orphaned.push(where);
+        continue;
+      }
+      if (now - (Date.parse(link.orphan_since) || now) < ORPHAN_CLEANUP_DAYS * DAY_MS) continue;
+      const untouched = link.created_by_proposal === true && !!link.created_fingerprint && store.fingerprint(ref) === link.created_fingerprint;
+      if (untouched) await store.remove(ref, author);
+      else store.link(ref, null, author);
+      emitProposalEvent(site, "draft_orphan_cleaned", link.id, author, {
+        ...ref,
+        env: link.env,
+        orphan_since: link.orphan_since,
+        draft_deleted: untouched,
+      });
+      report.cleaned.push({ draft: where, deleted: untouched });
+    }
+    return report;
+  }
+
   return {
     get,
+    migrateLegacy,
+    staleSweep,
+    verifyDraftLinks,
     list,
     stats,
     kpiHistory,
@@ -4547,13 +6368,77 @@ export function createProposalService(deps: ProposalServiceDeps) {
   };
 }
 
+export type RevertConflict = {
+  entry_key: string;
+  locale: string;
+  field_path: string;
+  /** What the reverted proposal published. */
+  published: unknown;
+  /** What live shows today. */
+  live: unknown;
+};
+
+export const STALE_FLAG_DAYS = 30;
+export const STALE_CLOSE_DAYS = 90;
+export const ORPHAN_CLEANUP_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type StaleSweepReport = {
+  checked: number;
+  marked: string[];
+  cleared: string[];
+  flagged: string[];
+  closed: string[];
+};
+
+export type LinkCheckReport = {
+  checked: number;
+  orphaned: string[];
+  cleaned: Array<{ draft: string; deleted: boolean }>;
+  unverified: string[];
+  restored: string[];
+};
+
+export type LegacyMigrationReport = {
+  migrated: Array<{
+    id: string;
+    kind: ProposalKind;
+    entries: Array<{ entry_key: string; locale: string; variant: string; created_draft?: boolean }>;
+    stale?: Array<{ entry_key: string; locale: string; fields: string[] }>;
+  }>;
+  closed: Array<{ id: string; kind: ProposalKind; reason: string }>;
+  /** Entry folders (relative to cwd) whose drafts / versioning.yml changed — push these. */
+  touched_entry_dirs: string[];
+};
+
 /** Full site dump for production → local pull (includes entries + blockers). */
 export function exportAllProposals(site: string): ProposalRecord[] {
   const db = dbFor(site);
   const rows = db
     .prepare(`SELECT * FROM content_proposals WHERE site = ? ORDER BY updated_at DESC, id ASC`)
     .all(site) as ProposalRow[];
-  return rows.map((r) => mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id)));
+  const snapshots = new Map(
+    (
+      db
+        .prepare(
+          `SELECT e.id, e.pre_apply_snapshot_json FROM content_proposal_entries e
+           JOIN content_proposals p ON p.id = e.proposal_id
+           WHERE p.site = ? AND e.pre_apply_snapshot_json IS NOT NULL`,
+        )
+        .all(site) as Array<{ id: number; pre_apply_snapshot_json: string }>
+    ).map((r) => [r.id, r.pre_apply_snapshot_json]),
+  );
+  return rows.map((r) => {
+    const record = mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id));
+    if (!r.system_version) return record;
+    return {
+      ...record,
+      entries: record.entries.map((e) => {
+        const raw = snapshots.get(e.id);
+        return raw ? { ...e, pre_apply_snapshot: parseJson(raw, null) } : e;
+      }),
+    };
+  });
 }
 
 function syncAutoincrement(db: Database.Database, table: string): void {
@@ -4597,14 +6482,17 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       outcome_review, outcome_review_note, outcome_review_expected, outcome_review_at,
       outcome_review_by, outcome_review_history_json, outcome_lesson_captured_at,
       outcome_lesson_captured_by, outcome_lesson_note,
-      reviewer_action_by, reviewer_action_by_actor_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      reviewer_action_by, reviewer_action_by_actor_json,
+      system_version, co_authors_json, all_or_nothing, reverts_proposal_id,
+      stale_since, stale_flagged_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
       id, proposal_id, entry_key, locale, variant, status, ops_json, baseline_context_json,
-      last_error, applied_at, applied_by, variant_fingerprint
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      last_error, applied_at, applied_by, variant_fingerprint,
+      created_draft, derived_ops_json, published_diff_json, pre_apply_snapshot_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertBlocker = db.prepare(
     `INSERT INTO content_proposal_blockers (
@@ -4677,6 +6565,12 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.outcome_lesson_note ?? null,
         p.reviewer_action_by ?? null,
         p.reviewer_action_by ? JSON.stringify(p.reviewer_action_by_actor ?? {}) : null,
+        p.system_version ?? null,
+        JSON.stringify(p.co_authors ?? []),
+        p.all_or_nothing ? 1 : 0,
+        p.reverts_proposal_id ?? null,
+        p.stale_since ?? null,
+        p.stale_flagged_at ?? null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
@@ -4686,12 +6580,16 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
           e.locale,
           e.variant ?? null,
           e.status,
-          JSON.stringify(e.ops ?? []),
+          JSON.stringify((p.system_version ? e.requested_ops : undefined) ?? e.ops ?? []),
           JSON.stringify(e.baseline_context ?? { values: {} }),
           e.last_error ?? null,
           e.applied_at ?? null,
           e.applied_by ?? null,
           e.variant_fingerprint ?? null,
+          e.created_draft ? 1 : 0,
+          null,
+          e.published_diff ? JSON.stringify(e.published_diff) : null,
+          e.pre_apply_snapshot ? JSON.stringify(e.pre_apply_snapshot) : null,
         );
       }
       for (const b of p.blockers ?? []) {
@@ -4812,16 +6710,21 @@ export async function promoteEntryOnSite(
   ctx: SiteContext,
   entry: ProposalEntryRow,
   author: string,
-  opts: { confirm_end_experiment?: boolean },
-): Promise<{
-  ok: boolean;
-  error?: string;
-  code?: string;
-  traffic_siblings?: Array<{ slug: string; locale: string; allocation: number }>;
-}> {
-  if (!entry.variant) return { ok: false, code: "variant_required", error: "variant required for promote" };
-  const { promoteVariantWithOptionalTeardown } = await import("../versioning/promote-with-teardown");
-  const resolved = resolveWritableVersioningTarget(entry.contentType, entry.slug, ctx.contentRoot);
+  opts: PromoteEntryOpts,
+): Promise<PromoteEntryResult> {
+  if (!entry.variant)
+    return {
+      ok: false,
+      code: "variant_required",
+      error: "variant required for promote",
+    };
+  const { promoteVariantWithOptionalTeardown } =
+    await import("../versioning/promote-with-teardown");
+  const resolved = resolveWritableVersioningTarget(
+    entry.contentType,
+    entry.slug,
+    ctx.contentRoot,
+  );
   if (!resolved.ok) {
     return { ok: false, code: "not_found", error: resolved.error };
   }
@@ -4841,6 +6744,9 @@ export async function promoteEntryOnSite(
     cache: ctx.validationCache,
     confirmEndExperiment: opts.confirm_end_experiment,
     endExperimentMode: true,
+    viaProposalApply: true,
+    confirmOverwriteNewerLive: opts.confirm_base_unknown === true,
+    dryRun: opts.dry_run === true,
   });
   if (!result.ok) {
     return {
@@ -4848,9 +6754,17 @@ export async function promoteEntryOnSite(
       code: result.code,
       error: result.error,
       traffic_siblings: result.traffic_siblings,
+      details: result.details,
     };
   }
-  return { ok: true };
+  return {
+    ok: true,
+    warnings: result.warnings,
+    rebuilt: result.rebuilt,
+    published_diff: result.publishedDiff,
+    pre_apply_snapshot: result.preApplySnapshot,
+    dry_run: result.dryRun === true,
+  };
 }
 
 function proposalCollection(site: string): string {
@@ -5033,5 +6947,6 @@ export function proposalServiceForSite(ctx: SiteContext) {
     discardSeededEntry: (entry) => discardSeededEntryOnSite(ctx, entry),
     stampPublishedAt: (entry, author) => stampPublishedAtOnSite(ctx, entry, author),
     getProposalSettings: () => loadProposalSettingsFromDisk(ctx.contentRoot),
+    draftStore: draftStoreForSite(ctx),
   });
 }

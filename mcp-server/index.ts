@@ -56,6 +56,14 @@ import {
   type CatalogGrant,
 } from "./lib/tool-catalog.js";
 import { oauthPlainMcpNotice } from "./lib/role-connector-guide.js";
+import {
+  buildProtectedResourceMetadata,
+  isValidRoleId,
+  mcpResourcePathFromPath,
+  resolveMcpRoleId,
+  resolveRequestPublicBase,
+  wwwAuthenticateHeader,
+} from "./lib/protected-resource.js";
 
 const PORT = parseInt(process.env.MCP_PORT || "3001", 10);
 // MCP_SERVER_SECRET (formerly MCP_API_KEY) is used exclusively as an internal
@@ -121,23 +129,6 @@ function parseRoleIdFromResource(resource: string | undefined): string | undefin
     const m = resource.match(/\/mcp\/role\/([a-z0-9_-]+)/i);
     return m?.[1]?.toLowerCase();
   }
-}
-
-function isValidRoleId(roleId: string): boolean {
-  return /^[a-z][a-z0-9_-]*$/.test(roleId);
-}
-
-/** Deprecated connector ids — resolves before role lookup (one-release window). */
-const DEPRECATED_MCP_ROLE_ALIASES: Readonly<Record<string, string>> = {
-  webmaster: "user_admin",
-};
-
-function resolveMcpRoleId(roleId: string): string {
-  const resolved = DEPRECATED_MCP_ROLE_ALIASES[roleId] ?? roleId;
-  if (resolved !== roleId) {
-    console.warn(`[MCP] Deprecated role id '${roleId}' — use '/mcp/role/${resolved}' instead`);
-  }
-  return resolved;
 }
 
 /**
@@ -228,8 +219,11 @@ function renderAuthorizePage(opts: {
     roleHtml = `
   <div class="card role-card" data-testid="oauth-plain-mcp-notice">
     <h2>${escapeHtml(notice.title)}</h2>
-    <p class="muted"><code>/mcp</code></p>
     <p class="desc">${escapeHtml(notice.body)}</p>
+    <details>
+      <summary>Read more (advanced)</summary>
+      <p class="muted">${escapeHtml(notice.advanced)}</p>
+    </details>
   </div>`;
   }
 
@@ -274,6 +268,25 @@ function renderAuthorizePage(opts: {
     ? "Authorize with the connection token from Weblify to finish connecting."
     : "Verify your staff identity (GitHub or staff session) to grant MCP server access.";
 
+  return renderAuthorizeShell(`
+  <p class="subtitle">${escapeHtml(subtitle)}</p>
+  ${errorHtml}
+  ${roleHtml}
+  ${bodyCard}
+  <a class="cancel" href="${escapeHtml(opts.redirectUri)}?error=access_denied">Cancel</a>`);
+}
+
+function renderUnknownRolePage(roleSlug: string, redirectUri: string): string {
+  return renderAuthorizeShell(`
+  <div class="card role-card" data-testid="oauth-unknown-role">
+    <h2>This connector's role doesn't exist</h2>
+    <p class="desc">The role <code>${escapeHtml(roleSlug)}</code> in this connector's address isn't a known agent role, so sign-in can't continue.</p>
+    <p class="desc">Copy the connector address again from Private → MCP Server → Connection, then remove and re-add the connector.</p>
+  </div>
+  <a class="cancel" href="${escapeHtml(redirectUri)}?error=access_denied">Cancel</a>`);
+}
+
+function renderAuthorizeShell(bodyHtml: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -309,15 +322,13 @@ function renderAuthorizePage(opts: {
     .error { background: #fff0f0; border: 1px solid #f5c6c6; color: #c0392b; border-radius: 6px; padding: 0.65rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
     .cancel, .back { display: block; text-align: center; margin-top: 0.75rem; color: #888; font-size: 0.85rem; text-decoration: none; }
     .cancel:hover, .back:hover { color: #555; }
+    details { margin-top: 0.5rem; }
+    details summary { cursor: pointer; font-size: 0.85rem; color: #555; }
   </style>
 </head>
 <body>
   <h1>Authorize MCP Access</h1>
-  <p class="subtitle">${escapeHtml(subtitle)}</p>
-  ${errorHtml}
-  ${roleHtml}
-  ${bodyCard}
-  <a class="cancel" href="${escapeHtml(opts.redirectUri)}?error=access_denied">Cancel</a>
+  ${bodyHtml}
 </body>
 </html>`;
 }
@@ -415,9 +426,26 @@ async function createMcpServer(
 // ─── Express server ───────────────────────────────────────────────────────────
 
 const app = express();
-app.use(cors());
+app.use(cors({ exposedHeaders: ["WWW-Authenticate"] }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+function requestPublicBase(req: express.Request): string {
+  return resolveRequestPublicBase(req, getBase);
+}
+
+/** 401 with RFC 9728 `resource_metadata` so MCP clients send `resource=` on /oauth/authorize. */
+function sendMcpUnauthorized(
+  req: express.Request,
+  res: express.Response,
+  body: Record<string, unknown>,
+): void {
+  const resourcePath = mcpResourcePathFromPath(req.path);
+  if (resourcePath) {
+    res.setHeader("WWW-Authenticate", wwwAuthenticateHeader(requestPublicBase(req), resourcePath));
+  }
+  res.status(401).json(body);
+}
 
 async function authMiddleware(
   req: express.Request,
@@ -495,13 +523,13 @@ async function authMiddleware(
       return;
     }
     const errMsg = validation.error || "Staff session validation failed.";
-    res.status(401).json({ error: `Unauthorized. ${errMsg}` });
+    sendMcpUnauthorized(req, res, { error: `Unauthorized. ${errMsg}` });
     return;
   }
 
   const roleMatch = req.path.match(/^\/mcp\/role\/([a-z0-9_-]+)$/i);
   const mcpRole = roleMatch?.[1]?.toLowerCase();
-  res.status(401).json({
+  sendMcpUnauthorized(req, res, {
     error:
       "Unauthorized. This is an MCP endpoint — connect via an MCP client (Cursor, Claude, etc.) that completes the OAuth flow. Do not open /mcp directly in a browser.",
     auth: "oauth",
@@ -542,8 +570,25 @@ app.get("/tools", async (_req, res) => {
 
 // ─── OAuth 2.0 endpoints ──────────────────────────────────────────────────────
 
-app.get("/.well-known/oauth-authorization-server", (_req, res) => {
-  const base = getBase();
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  res.json(buildProtectedResourceMetadata(requestPublicBase(req), "/mcp"));
+});
+
+app.get("/.well-known/oauth-protected-resource/mcp", (req, res) => {
+  res.json(buildProtectedResourceMetadata(requestPublicBase(req), "/mcp"));
+});
+
+app.get("/.well-known/oauth-protected-resource/mcp/role/:roleId", (req, res) => {
+  const resourcePath = mcpResourcePathFromPath(`/mcp/role/${req.params.roleId}`);
+  if (!resourcePath) {
+    res.status(404).json({ error: `Invalid role id '${req.params.roleId}'` });
+    return;
+  }
+  res.json(buildProtectedResourceMetadata(requestPublicBase(req), resourcePath));
+});
+
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const base = requestPublicBase(req);
   res.json({
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -639,10 +684,8 @@ app.get("/oauth/authorize", async (req, res) => {
   if (roleId) {
     roleMeta = await fetchRoleInfo(roleId);
     if (!roleMeta) {
-      res.status(404).json({
-        error: "invalid_request",
-        error_description: `Unknown MCP role '${roleId}'`,
-      });
+      res.status(404).setHeader("Content-Type", "text/html; charset=utf-8");
+      res.send(renderUnknownRolePage(roleIdRaw, redirect_uri));
       return;
     }
   }
@@ -1121,7 +1164,7 @@ async function handleMcpRequest(
 
   if (activeRoleId) {
     if (!resolvedUsername) {
-      res.status(401).json({
+      sendMcpUnauthorized(req, res, {
         error: "Unauthorized. Complete OAuth before using a role-scoped MCP connector.",
         auth: "oauth",
         authorize_hint: `/oauth/authorize?mcp_role=${encodeURIComponent(activeRoleId)}`,

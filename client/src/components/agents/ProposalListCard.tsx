@@ -23,6 +23,7 @@ import {
 import { AttentionBadge } from "@/components/agents/AttentionBadge";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
 import {
   ProposalKindBadge,
   ProposalProgressLabel,
@@ -61,6 +62,11 @@ export type ProposalCardData = {
   reviewer_action_by_actor?: Record<string, unknown>;
   closed_by?: string | null;
   close_reason?: string | null;
+  system_version?: string | null;
+  all_or_nothing?: boolean;
+  stale_since?: string | null;
+  stale_flagged_at?: string | null;
+  reverts_proposal_id?: string | null;
   created_at: number;
   updated_at?: number;
   review_context_snapshot?: Record<string, unknown> | null;
@@ -367,6 +373,7 @@ export function ProposalListCard({
                 {p.escalated ? (
                   <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />
                 ) : null}
+                <ProposalV1Badges p={p} stopLinkNavigation />
               </div>
               <IconChevronRight
                 className="h-4 w-4 text-muted-foreground/40 transition-colors group-hover:text-foreground"

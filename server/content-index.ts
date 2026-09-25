@@ -2020,7 +2020,12 @@ export class ContentIndex {
       const contentFolder = this.getContentFolderPath(contentType, slug);
       const commonPath = path.join(contentFolder, "_common.yml");
       const raw = fs.readFileSync(filePath, "utf-8");
-      const localeData = this.safeYamlLoad(raw) as Record<string, unknown>;
+      const loadedLocale = this.safeYamlLoad(raw) as Record<string, unknown>;
+      // `_draft` is system metadata of variant files — never page content.
+      const localeData =
+        loadedLocale && "_draft" in loadedLocale
+          ? (({ _draft: _omit, ...rest }) => rest)(loadedLocale)
+          : loadedLocale;
 
       let merged: Record<string, unknown>;
       if (useSingleTemplate) {

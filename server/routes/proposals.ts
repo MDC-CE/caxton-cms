@@ -99,6 +99,7 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "deescalate",
   "review_outcome",
   "set_outcome_lesson",
+  "revert",
 ]);
 
 export function registerProposalRoutes(app: Express): void {
@@ -423,7 +424,10 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "implements_required" ||
         result.code === "idea_already_in_progress" ||
         result.code === "implements_entry_mismatch" ||
-        result.code === "implements_not_found"
+        result.code === "implements_not_found" ||
+        result.code === "competing_shared_fields" ||
+        result.code === "draft_in_proposal" ||
+        result.code === "variant_has_traffic"
           ? 409
           : 400;
       res.status(status).json(result);
@@ -599,6 +603,12 @@ export function registerProposalRoutes(app: Express): void {
       resolve_note: typeof req.body?.resolve_note === "string" ? req.body.resolve_note : undefined,
       variant: typeof req.body?.variant === "string" ? req.body.variant : undefined,
       confirm_end_experiment: req.body?.confirm_end_experiment === true,
+      confirm_base_unknown: req.body?.confirm_base_unknown === true,
+      confirm_affected_entries:
+        typeof req.body?.confirm_affected_entries === "number" ? req.body.confirm_affected_entries : undefined,
+      dry_run: req.body?.dry_run === true,
+      all_or_nothing:
+        typeof req.body?.all_or_nothing === "boolean" ? req.body.all_or_nothing : undefined,
       confirm_recent_activity: req.body?.confirm_recent_activity === true,
       confirm_new_values: req.body?.confirm_new_values === true,
       promote_on_apply: req.body?.promote_on_apply === true,
@@ -647,7 +657,8 @@ export function registerProposalRoutes(app: Express): void {
               result.code === "not_proposer" ||
               result.code === "withdraw_disabled" ||
               result.code === "steward_ui_only" ||
-              result.code === "escalated"
+              result.code === "escalated" ||
+              result.code === "four_eyes_co_author"
             ? 403
             : result.code === "proposal_exists" ||
                 result.code === "confirm_end_experiment" ||
@@ -657,7 +668,15 @@ export function registerProposalRoutes(app: Express): void {
                 result.code === "notes_no_auto_retry" ||
                 result.code === "claimed" ||
                 result.code === "not_closed" ||
-                result.code === "not_bad"
+                result.code === "not_bad" ||
+                result.code === "legacy_version" ||
+                result.code === "all_or_nothing_blocked" ||
+                result.code === "competing_shared_fields" ||
+                result.code === "draft_in_proposal" ||
+                result.code === "variant_has_traffic" ||
+                result.code === "draft_base_unknown" ||
+                result.code === "confirm_affected_entries" ||
+                result.code === "revert_conflicts"
               ? 409
               : 400;
       res.status(status).json(result);

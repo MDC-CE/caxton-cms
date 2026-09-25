@@ -40,6 +40,15 @@ export const EVENT_TYPES = [
   "proposal_outcome_lesson_set",
   "proposal_review_situations_set",
   "proposal_idea_funnel_set",
+  "proposal_reverted",
+  "proposal_stale_flagged",
+  "proposal_closed_abandoned_stale",
+  "proposal_needs_author",
+  "proposal_migrated_v1",
+  "draft_rebuilt",
+  "draft_unlinked",
+  "draft_orphan_cleaned",
+  "proposal_co_author_edit",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -96,6 +105,15 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   proposal_outcome_lesson_set: { outbox: "audit", affectsWriteGeneration: false },
   proposal_review_situations_set: { outbox: "audit", affectsWriteGeneration: false },
   proposal_idea_funnel_set: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_reverted: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_stale_flagged: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_closed_abandoned_stale: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_needs_author: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_migrated_v1: { outbox: "audit", affectsWriteGeneration: false },
+  draft_rebuilt: { outbox: "audit", affectsWriteGeneration: false },
+  draft_unlinked: { outbox: "audit", affectsWriteGeneration: false },
+  draft_orphan_cleaned: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_co_author_edit: { outbox: "audit", affectsWriteGeneration: false },
 };
 
 export function isOutboxDispatchable(type: EventType): boolean {

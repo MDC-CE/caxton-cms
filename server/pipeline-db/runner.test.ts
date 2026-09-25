@@ -940,6 +940,78 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds draft-first v1 columns and draft_bases when upgrading from v25-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v25-draft-first-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 25);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        proposer_username TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE content_proposal_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        locale TEXT NOT NULL,
+        ops_json TEXT NOT NULL DEFAULT '[]'
+      );
+      INSERT INTO content_proposals (id, site, status, proposer_username, updated_at)
+      VALUES ('legacy-1', 'site_test', 'open', 'author@x.com', 1);
+      INSERT INTO content_proposal_entries (proposal_id, content_type, slug, locale)
+      VALUES ('legacy-1', 'blog', 'post-a', 'en');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const proposal = db
+      .prepare(
+        `SELECT system_version, co_authors_json, stale_since, stale_flagged_at, all_or_nothing, reverts_proposal_id
+         FROM content_proposals WHERE id = 'legacy-1'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(proposal.system_version).toBeNull();
+    expect(proposal.co_authors_json).toBe("[]");
+    expect(proposal.all_or_nothing).toBe(0);
+    expect(proposal.stale_since).toBeNull();
+    const entry = db
+      .prepare(
+        `SELECT created_draft, derived_ops_json, derived_for_key, published_diff_json, pre_apply_snapshot_json
+         FROM content_proposal_entries WHERE proposal_id = 'legacy-1'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(entry.created_draft).toBe(0);
+    expect(entry.derived_ops_json).toBeNull();
+    const cols = (db.prepare("PRAGMA table_info(draft_bases)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        "content_type",
+        "slug",
+        "locale",
+        "variant",
+        "locale_hash",
+        "common_hash",
+        "snapshot_json",
+        "source_snapshot_json",
+        "created_at",
+      ]),
+    );
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

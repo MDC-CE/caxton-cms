@@ -185,11 +185,11 @@ Single-entry field writes. `updates` length 1 = one field; longer arrays patch m
 May mix `meta.*`, safe top-level body fields (`description`, `title`, …), and fields under **one** `sections.N.*` index.
 Rejects two or more distinct section indexes (`action_required: split_section_updates`).
 
-**Routing:** `sections.*` / safe top-level → locale; `meta.robots|priority|change_frequency` → `_common.yml`; other known `meta.*` → locale; unknown `meta.*` needs `meta_target`.
+**Routing:** fixed system rule (`shared/field-scope.ts`). Page-level fields (`funnel.*`, `meta.robots|priority|change_frequency`, `published_at`, `detached`, `authors`) → `_common.yml` (every language, warning); everything else, including unknown `meta.*`, → locale. `meta_target` is ignored with a warning.
 
 **Circular trap:** set `meta.description` and body `description` together in one `updates[]` when both are empty on live.
 
-**Parameters:** `slug`, `updates[{ field_path, value, meta_target? }]`, `locale`, optional `contentType`, `variant`, `confirm_live_edit`, `layout_target`, `site`.
+**Parameters:** `slug`, `updates[{ field_path, value }]`, `locale`, optional `contentType`, `variant`, `confirm_live_edit`, `layout_target`, `site`.
 
 ```json
 {

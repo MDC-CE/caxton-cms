@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetRegistry } from "./content-types";
 import {
   assertSeoWriteLayerAllowed,
-  SEO_DRAFT_WHILE_LIVE_FORBIDDEN,
   SEO_VARIANT_FORBIDDEN,
   yamlForPromotePreservingLiveSeo,
 } from "./seo-write-layer";
@@ -72,32 +71,42 @@ describe("assertSeoWriteLayerAllowed", () => {
     if (gate.ok) expect(gate.layer).toBe("draft_unpublished");
   });
 
-  it("rejects draft while any live locale exists", () => {
+  it("allows any 0% variant while the locale is live (decides by traffic, not name)", () => {
     fs.writeFileSync(
       path.join(contentRoot, "blog", "post-a", "en.yml"),
       "slug: post-a\n",
       "utf-8",
     );
     fs.writeFileSync(
-      path.join(contentRoot, "blog", "post-a", "draft.en.yml"),
+      path.join(contentRoot, "blog", "post-a", "rewrite.en.yml"),
       "slug: post-a\n",
+      "utf-8",
+    );
+    fs.writeFileSync(
+      path.join(contentRoot, "blog", "post-a", "versioning.yml"),
+      "en:\n  variants:\n    - slug: rewrite\n      allocation: 0\n",
       "utf-8",
     );
     const gate = assertSeoWriteLayerAllowed({
       contentType: "blog",
       slug: "post-a",
       locale: "en",
-      variant: "draft",
+      variant: "rewrite",
       contentRoot,
     });
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.code).toBe(SEO_DRAFT_WHILE_LIVE_FORBIDDEN);
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.layer).toBe("draft");
   });
 
-  it("rejects A/B experiment variants", () => {
+  it("rejects experiment variants (traffic > 0)", () => {
     fs.writeFileSync(
       path.join(contentRoot, "blog", "post-a", "en.yml"),
       "slug: post-a\n",
+      "utf-8",
+    );
+    fs.writeFileSync(
+      path.join(contentRoot, "blog", "post-a", "versioning.yml"),
+      "en:\n  variants:\n    - slug: b\n      allocation: 50\n",
       "utf-8",
     );
     const gate = assertSeoWriteLayerAllowed({
@@ -113,7 +122,7 @@ describe("assertSeoWriteLayerAllowed", () => {
 });
 
 describe("yamlForPromotePreservingLiveSeo", () => {
-  it("keeps live seo when promoting over an existing live file", () => {
+  it("uses the draft seo when promoting over an existing live file", () => {
     const live = `slug: post-a
 seo:
   main_keyword: live-kw
@@ -131,9 +140,22 @@ sections:
     title: Variant
 `;
     const { content, ignoredVariantSeo } = yamlForPromotePreservingLiveSeo(variant, live);
-    expect(ignoredVariantSeo).toBe(true);
+    expect(ignoredVariantSeo).toBe(false);
+    expect(content).toContain("main_keyword: variant-kw");
+    expect(content).not.toContain("live-kw");
+    expect(content).toContain("title: Variant");
+  });
+
+  it("keeps live seo when the draft has no seo block", () => {
+    const live = `slug: post-a
+seo:
+  main_keyword: live-kw
+`;
+    const variant = `slug: post-a
+title: Variant
+`;
+    const { content } = yamlForPromotePreservingLiveSeo(variant, live);
     expect(content).toContain("main_keyword: live-kw");
-    expect(content).not.toContain("variant-kw");
     expect(content).toContain("title: Variant");
   });
 

@@ -7,6 +7,7 @@ export const PROPOSAL_ATTENTION_VALUES = [
   "awaiting_rereview",
   "no_feedback",
   "blocked",
+  "needs_author",
 ] as const;
 
 export type ProposalAttention = (typeof PROPOSAL_ATTENTION_VALUES)[number];
@@ -20,6 +21,7 @@ const REVIEWER_RANK: Record<ProposalAttention, number> = {
   awaiting_rereview: 1,
   no_feedback: 2,
   blocked: 3,
+  needs_author: 4,
 };
 
 const AUTHOR_RANK: Record<ProposalAttention, number> = {
@@ -27,6 +29,7 @@ const AUTHOR_RANK: Record<ProposalAttention, number> = {
   blocked: 1,
   awaiting_rereview: 2,
   no_feedback: 3,
+  needs_author: 1,
 };
 
 /** Closed / non-open rows trail open attention buckets. */
@@ -89,6 +92,8 @@ export type AttentionDeriveInput = {
   author_content_at?: number | null;
   /** Last reviewer disposition that is not an author content stamp. */
   reviewer_action_at?: number | null;
+  /** v1.0: live or the translation source moved and the draft could not be rebuilt (stale_since set). */
+  needs_author?: boolean;
 };
 
 /** Author changed the packet and no later reviewer action has landed. */
@@ -113,6 +118,7 @@ export function deriveProposalAttention(input: AttentionDeriveInput): ProposalAt
   if (input.escalated) return "escalated";
   const open = input.open_blocker_count ?? 0;
   if (open > 0) return "blocked";
+  if (input.needs_author) return "needs_author";
   const resolved =
     input.resolved_blocker_count ?? resolvedBlockerCount(input.blockers);
   if (
@@ -187,5 +193,6 @@ export function emptyAttentionCounts(): Record<ProposalAttention, number> {
     awaiting_rereview: 0,
     no_feedback: 0,
     blocked: 0,
+    needs_author: 0,
   };
 }

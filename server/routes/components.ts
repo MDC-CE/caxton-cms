@@ -132,7 +132,7 @@ import {
   listAvailableMenus,
   getDirectory,
 } from "../content-types";
-import { isEntryDetached, isSharedLayoutType } from "../shared-layout-entry";
+import { attachedOverlayStructureError, isEntryDetached, isSharedLayoutType } from "../shared-layout-entry";
 import {
   resolveCommonTemplatePath,
   resolveTemplateLocalePath,
@@ -237,6 +237,7 @@ import {
 } from "../component-section-demos";
 import { getComponentServerHooks } from "@shared/component-registry/server-hooks";
 import { child } from "../logger";
+import { writeVariantFile } from "../versioning/draft-meta";
 const log = child({ module: "routes/components" });
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
@@ -1237,7 +1238,35 @@ export function registerComponentsRoutes(app: Express): void {
         return;
       }
 
-      fs.writeFileSync(fullPath, content, "utf-8");
+      const isVariantFile =
+        /^[a-z0-9-]+\.[a-z]{2}(?:-[a-z]{2})?\.ya?ml$/i.test(path.basename(fullPath)) &&
+        !path.basename(fullPath).startsWith("versioning.");
+      if (isVariantFile) {
+        const variantParts = normalizedPath.replace(/\\/g, "/").split("/");
+        if (variantParts.length === 4) {
+          const root = getContentRoot(res);
+          const variantType = getType(variantParts[1], root);
+          const entrySlug = variantParts[2];
+          if (isSharedLayoutType(variantType, root) && !isEntryDetached(variantType, entrySlug, root)) {
+            const structureErr = attachedOverlayStructureError(
+              (getCI(res).safeYamlLoad(content) as Record<string, unknown> | null) ?? {},
+            );
+            if (structureErr) {
+              res.status(400).json({
+                code: "attached_draft_structure",
+                error: `${structureErr} Drafts of posts that use the shared template may only change fields.`,
+              });
+              return;
+            }
+          }
+        }
+        const { warnings: rawWriteWarnings } = writeVariantFile(fullPath, content, { skipMark: true });
+        if (rawWriteWarnings.length > 0) {
+          res.setHeader("X-Content-Warnings", rawWriteWarnings.map((w) => w.code).join(","));
+        }
+      } else {
+        fs.writeFileSync(fullPath, content, "utf-8");
+      }
       markContentFileModified(normalizedPath, {
         author: authorName,
         req,
