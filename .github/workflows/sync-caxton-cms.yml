@@ -1,13 +1,11 @@
 name: Sync caxton-cms
 
 # Reads breatheco-de/caxton-cms and opens a pull request in THIS repo.
+# Started by the upstream webhook (workflow_dispatch) or by hand.
 # It never pushes to that repository. Merging the PR into main is still manual,
 # so a sync does not deploy by itself.
 
 on:
-  schedule:
-    # Weekdays 06:00 UTC-5 = 11:00 UTC.
-    - cron: "0 11 * * 1-5"
   workflow_dispatch:
 
 permissions:
