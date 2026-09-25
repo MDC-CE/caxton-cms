@@ -1,6 +1,7 @@
 import pino from "pino";
 import { Writable } from "stream";
 import { isWeblifyDebug } from "../shared/debug";
+import { buildErrorLogContext } from "./utils/error-log-context";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -10,7 +11,8 @@ type LogSinkFn = (
   module: string,
   message: string,
   errName: string | null,
-  errStack: string | null
+  errStack: string | null,
+  context: string | null
 ) => void;
 
 let _logSink: LogSinkFn | null = null;
@@ -24,22 +26,24 @@ class DbLogStream extends Writable {
     try {
       const line = chunk.toString().trim();
       if (line && _logSink) {
-        const obj = JSON.parse(line) as {
+        const obj = JSON.parse(line) as Record<string, unknown> & {
           level?: number;
           time?: number;
           module?: string;
           msg?: string;
-          err?: { type?: string; stack?: string };
+          err?: { type?: string; stack?: string } | string;
         };
         if (typeof obj.level === "number" && obj.level >= 40) {
           const levelStr: "error" | "warn" = obj.level >= 50 ? "error" : "warn";
+          const err = typeof obj.err === "object" && obj.err !== null ? obj.err : null;
           _logSink(
             obj.time ?? Date.now(),
             levelStr,
             obj.module ?? "unknown",
             obj.msg ?? "",
-            obj.err?.type ?? null,
-            obj.err?.stack ?? null
+            err?.type ?? null,
+            err?.stack ?? null,
+            buildErrorLogContext(obj)
           );
         }
       }

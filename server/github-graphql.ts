@@ -160,6 +160,142 @@ export async function fetchBlobsAtCommits(opts: {
   };
 }
 
+export type FolderTreeFile = {
+  /** Repo-relative path (includes the folder prefix). */
+  path: string;
+  oid: string;
+  /** null when binary or truncated by GitHub. */
+  text: string | null;
+  isBinary: boolean;
+  isTruncated: boolean;
+};
+
+function escapeGraphqlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+const BLOB_FIELDS = "... on Blob { text isBinary isTruncated }";
+
+function collectTreeFiles(prefix: string, entries: unknown, out: FolderTreeFile[]): void {
+  if (!Array.isArray(entries)) return;
+  for (const raw of entries) {
+    const entry = raw as {
+      name?: string;
+      type?: string;
+      oid?: string;
+      object?: { text?: string | null; isBinary?: boolean; isTruncated?: boolean; entries?: unknown };
+    };
+    if (!entry?.name) continue;
+    const entryPath = `${prefix}/${entry.name}`;
+    if (entry.type === "tree") {
+      collectTreeFiles(entryPath, entry.object?.entries, out);
+      continue;
+    }
+    if (entry.type !== "blob") continue;
+    const isBinary = entry.object?.isBinary === true;
+    const isTruncated = entry.object?.isTruncated === true;
+    out.push({
+      path: entryPath,
+      oid: String(entry.oid || ""),
+      text: !isBinary && !isTruncated && typeof entry.object?.text === "string" ? entry.object.text : null,
+      isBinary,
+      isTruncated,
+    });
+  }
+}
+
+/**
+ * Fetch every file under `folder` at each commit SHA in one GraphQL request
+ * (one level of subfolders). A folder missing at a SHA maps to an empty list.
+ */
+export async function fetchFolderTreeAtCommits(opts: {
+  repoUrl?: string;
+  folder: string;
+  shas: string[];
+}): Promise<{
+  success: boolean;
+  trees: Record<string, FolderTreeFile[]>;
+  error?: string;
+  repoUrl?: string;
+}> {
+  const folder = opts.folder.replace(/\/+$/, "");
+  const uniqueShas = [...new Set(opts.shas.filter((s) => /^[a-f0-9]{7,40}$/i.test(s)))];
+  if (uniqueShas.length === 0) return { success: true, trees: {} };
+
+  const config = getGitHubConfig(opts.repoUrl);
+  if (!config) {
+    return { success: false, trees: {}, error: "GitHub not configured", repoUrl: opts.repoUrl };
+  }
+  const repoUrl = `https://github.com/${config.owner}/${config.repo}`;
+
+  const aliasFields = uniqueShas
+    .map((sha, i) => {
+      const expr = escapeGraphqlString(`${sha}:${folder}`);
+      return `t${i}: object(expression: "${expr}") {
+        ... on Tree {
+          entries {
+            name type oid
+            object {
+              ${BLOB_FIELDS}
+              ... on Tree { entries { name type oid object { ${BLOB_FIELDS} } } }
+            }
+          }
+        }
+      }`;
+    })
+    .join("\n");
+
+  const query = `
+    query {
+      repository(owner: ${JSON.stringify(config.owner)}, name: ${JSON.stringify(config.repo)}) {
+        ${aliasFields}
+      }
+    }
+  `;
+
+  const result = await githubGraphqlRequest(query, config);
+  if (result.error && !result.data) {
+    return { success: false, trees: {}, error: result.error, repoUrl };
+  }
+
+  const repo = result.data?.repository;
+  const trees: Record<string, FolderTreeFile[]> = {};
+  for (let i = 0; i < uniqueShas.length; i++) {
+    const files: FolderTreeFile[] = [];
+    collectTreeFiles(folder, repo?.[`t${i}`]?.entries, files);
+    trees[uniqueShas[i]!] = files;
+  }
+  return { success: true, trees, repoUrl };
+}
+
+/** Resolve a commit's full SHA and first parent (null for a root commit). */
+export async function fetchCommitParent(opts: {
+  repoUrl?: string;
+  sha: string;
+}): Promise<{ success: boolean; sha?: string; parentSha?: string | null; error?: string }> {
+  if (!/^[a-f0-9]{7,40}$/i.test(opts.sha)) {
+    return { success: false, error: "Invalid SHA format" };
+  }
+  const config = getGitHubConfig(opts.repoUrl);
+  if (!config) return { success: false, error: "GitHub not configured" };
+
+  const query = `
+    query {
+      repository(owner: ${JSON.stringify(config.owner)}, name: ${JSON.stringify(config.repo)}) {
+        c: object(expression: "${escapeGraphqlString(opts.sha)}") {
+          ... on Commit { oid parents(first: 1) { nodes { oid } } }
+        }
+      }
+    }
+  `;
+  const result = await githubGraphqlRequest(query, config);
+  if (result.error && !result.data) return { success: false, error: result.error };
+  const commit = result.data?.repository?.c;
+  if (!commit?.oid) return { success: false, error: "Commit not found" };
+  const parent = commit.parents?.nodes?.[0]?.oid;
+  return { success: true, sha: String(commit.oid), parentSha: parent ? String(parent) : null };
+}
+
 /** Extract the target section object from page YAML text. */
 export function extractSectionFromYamlText(
   yamlText: string | undefined | null,

@@ -62,6 +62,8 @@ propose_change
 
 Optional field ops on that variant are fine in the same packet. Soft-only (no promote) is **not** this situation — keep polishing with write tools.
 
+**New language of a `layout_owner: entry` page** (landing, downloadable, detached entry, or a new template language): the translated draft must carry the full translated `sections`, not only fields. When the proposal creates the draft (no variant), send one `{ field_path: "sections", value: [...] }` — start from `get_entry_content` on the source locale; otherwise `sections_required` (`details.new_locale`). A named draft that already has sections (e.g. from `translate_entry`) is accepted as-is. `layout_owner: shared_template` entries translate fields only.
+
 ### 3. After review
 
 - Blockers → `revise_entries` / fix draft, then wait for apply.

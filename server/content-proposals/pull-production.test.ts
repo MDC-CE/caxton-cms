@@ -61,6 +61,17 @@ function sampleSnapshot(overrides: Partial<ProposalRecord> = {}): ProposalRecord
   idea_funnel: null,
     author_content_at: null,
     reviewer_action_at: null,
+    reviewer_action_by: null,
+    reviewer_action_by_actor: {},
+    outcome_review: null,
+    outcome_review_note: null,
+    outcome_review_expected: null,
+    outcome_review_at: null,
+    outcome_review_by: null,
+    outcome_review_history: [],
+    outcome_lesson_captured_at: null,
+    outcome_lesson_captured_by: null,
+    outcome_lesson_note: null,
     entries: [
       {
         id: 42,
@@ -151,15 +162,7 @@ describe("replaceProposalsFromSnapshot", () => {
     expect(dumped[0]!.blockers[0]!.author_actor).toEqual({});
     expect(dumped[0]!.blockers[0]!.resolved_by_actor).toEqual({});
 
-    const { getSiteSqlite } = await import("../db");
-    const db = getSiteSqlite(SITE);
-    const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-    const kpi = db
-      .prepare(
-        `SELECT count FROM proposal_kpi_daily WHERE site = ? AND day = ? AND kind = 'edits' AND status = 'open'`,
-      )
-      .get(SITE, y) as { count: number } | undefined;
-    expect(kpi?.count).toBe(1);
+    expect(svc.stats().by_kind_status.edits.open).toBe(1);
   });
 
   it("imports blockers that omit actor fields as empty actors and round-trips when present", () => {

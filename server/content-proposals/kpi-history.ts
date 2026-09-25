@@ -1,14 +1,18 @@
 /**
- * Proposal stock KPI history: daily end-of-day counts by kind × card status,
- * back-calculated from create/close dates. Today mode is computed live (hourly)
- * and cached briefly — never written into proposal_kpi_daily.
+ * Proposal KPI history: per-bucket flow by kind × card status, computed live
+ * from content_proposals (created_at / close time). Each bucket restarts at
+ * zero — "open" = created in the bucket, finished/rejected = closed into that
+ * status in the bucket. The bucket containing "now" is marked partial.
+ * proposal_kpi_daily is no longer read or written.
  */
 
 import type Database from "better-sqlite3";
 import type { ProposalKind, ProposalStatus } from "./service";
 
 export const KPI_RETENTION_DAYS = 90;
-export const TODAY_KPI_CACHE_MS = 15 * 60 * 1000;
+export const KPI_CACHE_MS = 15 * 60 * 1000;
+export const KPI_DAY_WINDOW = 28;
+export const KPI_WEEK_WINDOW = 12;
 
 export const KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;
 export type KpiCardStatus = (typeof KPI_CARD_STATUSES)[number];
@@ -28,7 +32,7 @@ export type ProposalKpiSourceRow = {
 
 export type KindStatusCardCounts = Record<KpiCardKind, Record<KpiCardStatus, number>>;
 
-export type KpiHistoryPoint = { day: string; count: number };
+export type KpiHistoryPoint = { day: string; count: number; partial?: boolean };
 
 export type KpiHistorySeries = {
   kind: KpiCardKind;
@@ -38,16 +42,24 @@ export type KpiHistorySeries = {
 
 export type KpiHistoryResult = {
   granularity: KpiGranularity;
+  /** open = created in bucket; finished/rejected = closed in bucket. */
+  metric: "flow";
   from: string;
   to: string;
   series: KpiHistorySeries[];
   computed_at: number;
 };
 
-type TodayCacheEntry = { computed_at: number; payload: KpiHistoryResult };
+export type KpiBucket = { key: string; startMs: number; endMs: number; partial: boolean };
 
-/** site|kind — kind is "all" when unfiltered */
-const todayKpiCache = new Map<string, TodayCacheEntry>();
+type CacheEntry = { computed_at: number; payload: KpiHistoryResult };
+
+/** site|kind|granularity|from|to — kind is "all" when unfiltered */
+const kpiCache = new Map<string, CacheEntry>();
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const WEEK_MS = 7 * DAY_MS;
 
 export function emptyCardCounts(): Record<KpiCardStatus, number> {
   return { open: 0, finished: 0, rejected: 0 };
@@ -119,7 +131,7 @@ export function endOfUtcHourMs(day: string, hour: number): number {
 
 export function addUtcDays(day: string, delta: number): string {
   const start = startOfUtcDayMs(day);
-  return utcDayString(start + delta * 24 * 60 * 60 * 1000);
+  return utcDayString(start + delta * DAY_MS);
 }
 
 export function yesterdayUtc(now = Date.now()): string {
@@ -128,6 +140,12 @@ export function yesterdayUtc(now = Date.now()): string {
 
 export function retentionFromDay(now = Date.now()): string {
   return addUtcDays(utcDayString(now), -(KPI_RETENTION_DAYS - 1));
+}
+
+/** Monday (UTC) of the week containing `day`. */
+export function mondayOfUtcWeek(day: string): string {
+  const dow = new Date(startOfUtcDayMs(day)).getUTCDay();
+  return addUtcDays(day, -((dow + 6) % 7));
 }
 
 /** Inclusive YYYY-MM-DD range. */
@@ -148,9 +166,6 @@ export function daysInRange(from: string, to: string): string[] {
  */
 export function effectiveCloseAt(row: ProposalKpiSourceRow): number | null {
   if (row.status === "open" || row.status === "partial") return null;
-  if (row.status === "finished" || row.status === "rejected" || row.status === "withdrawn") {
-    return row.closed_at ?? row.updated_at;
-  }
   return row.closed_at ?? row.updated_at;
 }
 
@@ -173,20 +188,11 @@ export function stockAsOf(rows: ProposalKpiSourceRow[], endMs: number): KindStat
       continue;
     }
 
-    if (row.status === "finished") {
+    if (row.status === "finished" || row.status === "rejected") {
       if (close != null && close > endMs) {
         out[row.kind].open += 1;
       } else {
-        out[row.kind].finished += 1;
-      }
-      continue;
-    }
-
-    if (row.status === "rejected") {
-      if (close != null && close > endMs) {
-        out[row.kind].open += 1;
-      } else {
-        out[row.kind].rejected += 1;
+        out[row.kind][row.status] += 1;
       }
     }
   }
@@ -199,31 +205,135 @@ export function stockForDay(rows: ProposalKpiSourceRow[], day: string): KindStat
   return stockAsOf(rows, endOfUtcDayMs(day));
 }
 
-function todayCacheKey(site: string, kind: KpiCardKind | null | undefined): string {
-  return `${site}|${kind ?? "all"}`;
+/** Hourly buckets for the UTC day containing `now`, hour 0 through the current hour. */
+export function hourBuckets(now: number): KpiBucket[] {
+  const today = utcDayString(now);
+  const dayStart = startOfUtcDayMs(today);
+  const currentHour = new Date(now).getUTCHours();
+  const out: KpiBucket[] = [];
+  for (let h = 0; h <= currentHour; h++) {
+    const startMs = dayStart + h * HOUR_MS;
+    out.push({
+      key: utcHourKey(startMs),
+      startMs,
+      endMs: startMs + HOUR_MS - 1,
+      partial: h === currentHour,
+    });
+  }
+  return out;
 }
 
-/** Clear all Today KPI cache entries for a site (all kind filters). */
-export function invalidateTodayKpiCache(site: string): void {
+/** Daily buckets for [from, to] inclusive; the bucket for today is partial. */
+export function dayBuckets(from: string, to: string, now: number): KpiBucket[] {
+  const today = utcDayString(now);
+  return daysInRange(from, to).map((day) => {
+    const startMs = startOfUtcDayMs(day);
+    return { key: day, startMs, endMs: startMs + DAY_MS - 1, partial: day === today };
+  });
+}
+
+/** Monday-start UTC week buckets from the week of `from` through the week of `to`. */
+export function weekBuckets(from: string, to: string, now: number): KpiBucket[] {
+  const currentMonday = mondayOfUtcWeek(utcDayString(now));
+  const lastMonday = mondayOfUtcWeek(to);
+  const out: KpiBucket[] = [];
+  let cur = mondayOfUtcWeek(from);
+  while (cur <= lastMonday) {
+    const startMs = startOfUtcDayMs(cur);
+    out.push({ key: cur, startMs, endMs: startMs + WEEK_MS - 1, partial: cur === currentMonday });
+    cur = addUtcDays(cur, 7);
+  }
+  return out;
+}
+
+/**
+ * Per-bucket flow. Buckets must be contiguous and equal width (hour/day/week).
+ * open += created in bucket; finished/rejected += closed in bucket. Withdrawn skipped.
+ */
+export function flowSeries(
+  rows: ProposalKpiSourceRow[],
+  kinds: KpiCardKind[],
+  buckets: KpiBucket[],
+): KpiHistorySeries[] {
+  const counts = buckets.map(() => emptyKindStatusCounts());
+  if (buckets.length > 0) {
+    const start0 = buckets[0]!.startMs;
+    const width = buckets[0]!.endMs - start0 + 1;
+    const lastEnd = buckets[buckets.length - 1]!.endMs;
+    const indexOf = (t: number): number => {
+      if (t < start0 || t > lastEnd) return -1;
+      return Math.floor((t - start0) / width);
+    };
+
+    for (const row of rows) {
+      if (!isKpiCardKind(row.kind)) continue;
+      if (row.status === "withdrawn") continue;
+
+      const createdIdx = indexOf(row.created_at);
+      if (createdIdx >= 0) counts[createdIdx]![row.kind].open += 1;
+
+      if (row.status === "finished" || row.status === "rejected") {
+        const close = effectiveCloseAt(row);
+        const closeIdx = close == null ? -1 : indexOf(close);
+        if (closeIdx >= 0) counts[closeIdx]![row.kind][row.status] += 1;
+      }
+    }
+  }
+
+  const series: KpiHistorySeries[] = [];
+  for (const kind of kinds) {
+    for (const status of KPI_CARD_STATUSES) {
+      series.push({
+        kind,
+        status,
+        points: buckets.map((b, i) => ({
+          day: b.key,
+          count: counts[i]![kind][status],
+          ...(b.partial ? { partial: true } : {}),
+        })),
+      });
+    }
+  }
+  return series;
+}
+
+function cacheKey(
+  site: string,
+  kind: KpiCardKind | null | undefined,
+  granularity: KpiGranularity,
+  from: string,
+  to: string,
+): string {
+  return `${site}|${kind ?? "all"}|${granularity}|${from}|${to}`;
+}
+
+/** Clear all KPI history cache entries for a site (all kinds and granularities). */
+export function invalidateKpiCache(site: string): void {
   const prefix = `${site}|`;
-  for (const key of [...todayKpiCache.keys()]) {
-    if (key.startsWith(prefix)) todayKpiCache.delete(key);
+  for (const key of Array.from(kpiCache.keys())) {
+    if (key.startsWith(prefix)) kpiCache.delete(key);
   }
 }
 
-/** Test helper — wipe entire Today cache. */
-export function clearAllTodayKpiCache(): void {
-  todayKpiCache.clear();
+/** Test helper — wipe the entire KPI cache. */
+export function clearAllKpiCache(): void {
+  kpiCache.clear();
 }
 
-export function loadKpiSourceRows(db: Database.Database, site: string): ProposalKpiSourceRow[] {
+/** Rows that can land in a bucket starting at `sinceMs` (created or closed since then). */
+export function loadKpiSourceRows(
+  db: Database.Database,
+  site: string,
+  sinceMs = 0,
+): ProposalKpiSourceRow[] {
   try {
     return db
       .prepare(
         `SELECT kind, status, created_at, closed_at, updated_at
-         FROM content_proposals WHERE site = ?`,
+         FROM content_proposals
+         WHERE site = ? AND (created_at >= ? OR COALESCE(closed_at, updated_at) >= ?)`,
       )
-      .all(site) as ProposalKpiSourceRow[];
+      .all(site, sinceMs, sinceMs) as ProposalKpiSourceRow[];
   } catch {
     return [];
   }
@@ -244,194 +354,37 @@ export function liveByKindStatus(db: Database.Database, site: string): KindStatu
   }
 }
 
-function listStoredDays(db: Database.Database, site: string): Set<string> {
-  try {
-    const rows = db
-      .prepare(`SELECT DISTINCT day FROM proposal_kpi_daily WHERE site = ?`)
-      .all(site) as Array<{ day: string }>;
-    return new Set(rows.map((r) => r.day));
-  } catch {
-    return new Set();
-  }
-}
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function insertDayStock(
-  db: Database.Database,
-  site: string,
-  day: string,
-  stock: KindStatusCardCounts,
-): void {
-  const upsert = db.prepare(
-    `INSERT INTO proposal_kpi_daily (site, day, kind, status, count)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(site, day, kind, status) DO UPDATE SET count = excluded.count`,
-  );
-  for (const kind of KPI_CARD_KINDS) {
-    for (const status of KPI_CARD_STATUSES) {
-      upsert.run(site, day, kind, status, stock[kind][status]);
-    }
-  }
-}
-
-function pruneOlderThan(db: Database.Database, site: string, keepFrom: string): void {
-  try {
-    db.prepare(`DELETE FROM proposal_kpi_daily WHERE site = ? AND day < ?`).run(site, keepFrom);
-  } catch {
-    /* table missing on older DBs mid-migration */
-  }
-}
-
-/**
- * Fill missing days in [from, to] (inclusive) via back-calc.
- * Never writes today (or future). Prunes rows older than retention.
- */
-export function ensureKpiCatchUp(
-  db: Database.Database,
-  site: string,
-  opts?: { from?: string; to?: string; now?: number },
-): void {
-  const now = opts?.now ?? Date.now();
-  const yesterday = yesterdayUtc(now);
-  const keepFrom = retentionFromDay(now);
-  const from = opts?.from && opts.from >= keepFrom ? opts.from : keepFrom;
-  let to = opts?.to ?? yesterday;
-  if (to > yesterday) to = yesterday;
-  if (from > to) {
-    pruneOlderThan(db, site, keepFrom);
-    return;
-  }
-
-  const stored = listStoredDays(db, site);
-  const missing = daysInRange(from, to).filter((d) => !stored.has(d));
-  if (missing.length > 0) {
-    const rows = loadKpiSourceRows(db, site);
-    const write = db.transaction(() => {
-      for (const day of missing) {
-        insertDayStock(db, site, day, stockForDay(rows, day));
-      }
-    });
-    try {
-      write();
-    } catch {
-      /* proposal_kpi_daily may be absent */
-    }
-  }
-  pruneOlderThan(db, site, keepFrom);
-}
-
-export function wipeAndBackfillKpiHistory(
-  db: Database.Database,
-  site: string,
-  opts?: { now?: number },
-): void {
-  const now = opts?.now ?? Date.now();
-  try {
-    db.prepare(`DELETE FROM proposal_kpi_daily WHERE site = ?`).run(site);
-  } catch {
-    return;
-  }
-  ensureKpiCatchUp(db, site, { now });
-  invalidateTodayKpiCache(site);
-}
-
-function clampHistoryRange(
+function resolveBuckets(
+  granularity: KpiGranularity,
   fromRaw: string | undefined,
   toRaw: string | undefined,
   now: number,
-  granularity: "day" | "week",
-): { from: string; to: string } {
-  const yesterday = yesterdayUtc(now);
+): { from: string; to: string; buckets: KpiBucket[] } {
+  const today = utcDayString(now);
+
+  if (granularity === "today") {
+    return { from: today, to: today, buckets: hourBuckets(now) };
+  }
+
+  let to = toRaw && DAY_RE.test(toRaw) ? toRaw : today;
+  if (to > today) to = today;
+
+  if (granularity === "week") {
+    const floor = addUtcDays(mondayOfUtcWeek(today), -7 * KPI_WEEK_WINDOW);
+    const defaultFrom = addUtcDays(mondayOfUtcWeek(to), -7 * KPI_WEEK_WINDOW);
+    let from = fromRaw && DAY_RE.test(fromRaw) ? mondayOfUtcWeek(fromRaw) : defaultFrom;
+    if (from < floor) from = floor;
+    if (from > to) from = mondayOfUtcWeek(to);
+    return { from, to, buckets: weekBuckets(from, to, now) };
+  }
+
   const keepFrom = retentionFromDay(now);
-  let to = toRaw && /^\d{4}-\d{2}-\d{2}$/.test(toRaw) ? toRaw : yesterday;
-  const defaultFrom =
-    granularity === "week" ? addUtcDays(yesterday, -6) : addUtcDays(to, -27);
-  let from = fromRaw && /^\d{4}-\d{2}-\d{2}$/.test(fromRaw) ? fromRaw : defaultFrom;
-  if (to > yesterday) to = yesterday;
+  let from = fromRaw && DAY_RE.test(fromRaw) ? fromRaw : addUtcDays(to, -(KPI_DAY_WINDOW - 1));
   if (from < keepFrom) from = keepFrom;
   if (from > to) from = to;
-  return { from, to };
-}
-
-function buildTodayHistory(
-  rows: ProposalKpiSourceRow[],
-  kinds: KpiCardKind[],
-  now: number,
-): KpiHistoryResult {
-  const today = utcDayString(now);
-  const currentHour = new Date(now).getUTCHours();
-  const series: KpiHistorySeries[] = [];
-
-  for (const kind of kinds) {
-    for (const status of KPI_CARD_STATUSES) {
-      const points: KpiHistoryPoint[] = [];
-      for (let h = 0; h < currentHour; h++) {
-        const end = endOfUtcHourMs(today, h);
-        points.push({
-          day: utcHourKey(end),
-          count: stockAsOf(rows, end)[kind][status],
-        });
-      }
-      points.push({
-        day: utcHourKey(now),
-        count: stockAsOf(rows, now)[kind][status],
-      });
-      series.push({ kind, status, points });
-    }
-  }
-
-  return {
-    granularity: "today",
-    from: today,
-    to: today,
-    series,
-    computed_at: now,
-  };
-}
-
-function readDailySeries(
-  db: Database.Database,
-  site: string,
-  from: string,
-  to: string,
-  kinds: KpiCardKind[],
-  granularity: "day" | "week",
-  computed_at: number,
-): KpiHistoryResult {
-  let rows: Array<{ day: string; kind: string; status: string; count: number }> = [];
-  try {
-    rows = db
-      .prepare(
-        `SELECT day, kind, status, count
-         FROM proposal_kpi_daily
-         WHERE site = ? AND day >= ? AND day <= ?
-         ORDER BY day ASC`,
-      )
-      .all(site, from, to) as Array<{ day: string; kind: string; status: string; count: number }>;
-  } catch {
-    rows = [];
-  }
-
-  const byKey = new Map<string, number>();
-  for (const r of rows) {
-    if (!isKpiCardKind(r.kind) || !isKpiCardStatus(r.status)) continue;
-    byKey.set(`${r.day}|${r.kind}|${r.status}`, Number(r.count) || 0);
-  }
-
-  const days = daysInRange(from, to);
-  const series: KpiHistorySeries[] = [];
-
-  for (const kind of kinds) {
-    for (const status of KPI_CARD_STATUSES) {
-      // week = last N completed days as a day series (no ISO week rollup)
-      const points: KpiHistoryPoint[] = days.map((day) => ({
-        day,
-        count: byKey.get(`${day}|${kind}|${status}`) ?? 0,
-      }));
-      series.push({ kind, status, points });
-    }
-  }
-
-  return { granularity, from, to, series, computed_at };
+  return { from, to, buckets: dayBuckets(from, to, now) };
 }
 
 export function getKpiHistory(
@@ -452,21 +405,23 @@ export function getKpiHistory(
     raw === "today" ? "today" : raw === "week" ? "week" : "day";
   const kinds: KpiCardKind[] = opts?.kind ? [opts.kind] : [...KPI_CARD_KINDS];
 
-  if (granularity === "today") {
-    const cacheKey = todayCacheKey(site, opts?.kind ?? null);
-    if (!opts?.fresh) {
-      const hit = todayKpiCache.get(cacheKey);
-      if (hit && now - hit.computed_at <= TODAY_KPI_CACHE_MS) {
-        return hit.payload;
-      }
-    }
-    const source = loadKpiSourceRows(db, site);
-    const payload = buildTodayHistory(source, kinds, now);
-    todayKpiCache.set(cacheKey, { computed_at: now, payload });
-    return payload;
+  const { from, to, buckets } = resolveBuckets(granularity, opts?.from, opts?.to, now);
+  const key = cacheKey(site, opts?.kind ?? null, granularity, from, to);
+  if (!opts?.fresh) {
+    const hit = kpiCache.get(key);
+    if (hit && now - hit.computed_at <= KPI_CACHE_MS) return hit.payload;
   }
 
-  const { from, to } = clampHistoryRange(opts?.from, opts?.to, now, granularity);
-  ensureKpiCatchUp(db, site, { from, to, now });
-  return readDailySeries(db, site, from, to, kinds, granularity, now);
+  const sinceMs = buckets[0]?.startMs ?? now;
+  const rows = loadKpiSourceRows(db, site, sinceMs);
+  const payload: KpiHistoryResult = {
+    granularity,
+    metric: "flow",
+    from,
+    to,
+    series: flowSeries(rows, kinds, buckets),
+    computed_at: now,
+  };
+  kpiCache.set(key, { computed_at: now, payload });
+  return payload;
 }

@@ -4,11 +4,13 @@ import {
   DEFAULT_PROPOSAL_LIST_VIEW,
   clearProposalListFilters,
   countActiveProposalFilters,
+  parseProposalListPerspective,
   parseProposalListSearch,
   proposalKpiCardsForKindFilter,
   proposalListApiSearchParams,
   serializeProposalListSearch,
   toProposalListApiQuery,
+  withProposalListPerspective,
 } from "./proposals-list-filters";
 
 describe("parseProposalListSearch", () => {
@@ -35,7 +37,9 @@ describe("parseProposalListSearch", () => {
         proposerActorType: "all",
         proposerActorRole: "",
         agentSessionId: "",
+        reviewerUsername: "",
         escalatedOnly: false,
+        outcomeFocus: "off" as const,
         attention: "all",
         stalledOnly: false,
         needsReviewOnly: false,
@@ -59,10 +63,46 @@ describe("parseProposalListSearch", () => {
     expect(view.filters.agentSessionId).toBe("sess-1");
   });
 
+  it("parses reviewer_username and maps it to the API", () => {
+    const view = parseProposalListSearch("reviewer_username=blake%40x.com");
+    expect(view.filters.reviewerUsername).toBe("blake@x.com");
+    expect(serializeProposalListSearch(view)).toBe("reviewer_username=blake%40x.com");
+    expect(toProposalListApiQuery(view.filters, "").reviewer_username).toBe("blake@x.com");
+    expect(
+      new URLSearchParams(proposalListApiSearchParams(toProposalListApiQuery(view.filters, ""))).get(
+        "reviewer_username",
+      ),
+    ).toBe("blake@x.com");
+    expect(countActiveProposalFilters(view.filters)).toBe(1);
+    expect(clearProposalListFilters(view.filters).reviewerUsername).toBe("");
+  });
+
   it("parses escalated=1 as escalatedOnly", () => {
     expect(parseProposalListSearch("escalated=1").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("escalated=true").filters.escalatedOnly).toBe(true);
     expect(parseProposalListSearch("").filters.escalatedOnly).toBe(false);
+  });
+
+  it("parses outcome_review=bad_open as outcomeFocus bad and maps it to the API", () => {
+    const view = parseProposalListSearch("status=all&outcome_review=bad_open");
+    expect(view.filters.outcomeFocus).toBe("bad");
+    expect(parseProposalListSearch("outcome_review=bad").filters.outcomeFocus).toBe("off");
+    expect(serializeProposalListSearch(view)).toContain("outcome_review=bad_open");
+    expect(toProposalListApiQuery(view.filters, "").outcome_review).toBe("bad_open");
+    expect(countActiveProposalFilters(view.filters)).toBe(2);
+  });
+
+  it("parses outcome_review=none as outcomeFocus missing and maps it to the API", () => {
+    const view = parseProposalListSearch("status=all&outcome_review=none");
+    expect(view.filters.outcomeFocus).toBe("missing");
+    expect(serializeProposalListSearch(view)).toContain("outcome_review=none");
+    expect(toProposalListApiQuery(view.filters, "").outcome_review).toBe("none");
+    expect(clearProposalListFilters(view.filters).outcomeFocus).toBe("off");
+  });
+
+  it("omits outcome_review when outcomeFocus is off", () => {
+    expect(parseProposalListSearch("").filters.outcomeFocus).toBe("off");
+    expect(toProposalListApiQuery(DEFAULT_PROPOSAL_LIST_FILTERS, "").outcome_review).toBeUndefined();
   });
 
   it("parses stalled=1 as stalledOnly", () => {
@@ -120,7 +160,9 @@ describe("serializeProposalListSearch", () => {
         proposerActorType: "ui" as const,
         proposerActorRole: "copy_editor",
         agentSessionId: "sess-9",
+        reviewerUsername: "dana@x.com",
         escalatedOnly: true,
+        outcomeFocus: "off" as const,
         attention: "blocked" as const,
         stalledOnly: false,
         needsReviewOnly: false,
@@ -196,7 +238,9 @@ describe("clearProposalListFilters", () => {
       proposerActorType: "all",
       proposerActorRole: "",
       agentSessionId: "",
+      reviewerUsername: "",
       escalatedOnly: false,
+      outcomeFocus: "off" as const,
       attention: "all",
       stalledOnly: false,
       needsReviewOnly: false,
@@ -318,5 +362,30 @@ describe("proposalKpiCardsForKindFilter", () => {
     const cards = proposalKpiCardsForKindFilter("idea");
     expect(cards).toHaveLength(1);
     expect(cards[0]).toEqual({ kind: "idea", label: "Ideas" });
+  });
+});
+
+describe("proposal list perspective", () => {
+  it("defaults to cards and ignores unknown values", () => {
+    expect(parseProposalListPerspective("")).toBe("cards");
+    expect(parseProposalListPerspective("perspective=grid")).toBe("cards");
+    expect(parseProposalListPerspective("?perspective=table&status=all")).toBe("table");
+  });
+
+  it("omits the default and keeps other params", () => {
+    expect(withProposalListPerspective("status=all&perspective=table", "cards")).toBe("status=all");
+    const next = withProposalListPerspective("?status=all", "table");
+    expect(parseProposalListPerspective(next)).toBe("table");
+    expect(new URLSearchParams(next).get("status")).toBe("all");
+  });
+
+  it("survives filter serialization", () => {
+    const search = withProposalListPerspective("", "table");
+    const view = parseProposalListSearch(search);
+    const next = serializeProposalListSearch(
+      { ...view, filters: { ...view.filters, status: "all" } },
+      search,
+    );
+    expect(parseProposalListPerspective(next)).toBe("table");
   });
 });

@@ -114,36 +114,39 @@ export function normalizeToSingleSection(parsed: unknown): {
   return { section: parsed };
 }
 
-function collectRequiredPropPaths(
+/**
+ * Dotted paths of schema.yml props marked `required: true` that are empty on `value`.
+ * Nested required props only apply when their parent object is present, so an optional
+ * `cta_button` with required `text`/`url` may be omitted entirely.
+ */
+export function collectMissingRequiredProps(
   props: Record<string, unknown> | undefined,
+  value: unknown,
   prefix = "",
 ): string[] {
   if (!props || typeof props !== "object") return [];
-  const required: string[] = [];
+  const missing: string[] = [];
   for (const [key, def] of Object.entries(props)) {
     if (!def || typeof def !== "object" || Array.isArray(def)) continue;
+    if (!prefix && SECTION_META_ROOT_KEYS.has(key)) continue;
     const propDef = def as Record<string, unknown>;
     const pathKey = prefix ? `${prefix}.${key}` : key;
-    if (propDef.required === true) {
-      required.push(pathKey);
+    const current = isPlainObject(value) ? value[key] : undefined;
+    if (current === undefined || current === null || current === "") {
+      if (propDef.required === true) missing.push(pathKey);
+      continue;
     }
     if (propDef.type === "object" && isPlainObject(propDef.properties)) {
-      required.push(
-        ...collectRequiredPropPaths(propDef.properties as Record<string, unknown>, pathKey),
+      missing.push(
+        ...collectMissingRequiredProps(
+          propDef.properties as Record<string, unknown>,
+          current,
+          pathKey,
+        ),
       );
     }
   }
-  return required;
-}
-
-function getAtPath(obj: Record<string, unknown>, dotted: string): unknown {
-  const parts = dotted.split(".");
-  let cur: unknown = obj;
-  for (const part of parts) {
-    if (!isPlainObject(cur)) return undefined;
-    cur = cur[part];
-  }
-  return cur;
+  return missing;
 }
 
 export function validateSectionAgainstSchema(
@@ -217,18 +220,10 @@ export function validateSectionAgainstSchema(
     };
   }
 
-  const requiredPaths = collectRequiredPropPaths(
+  const missing = collectMissingRequiredProps(
     schema.props as Record<string, unknown> | undefined,
+    section,
   );
-  const missing: string[] = [];
-  for (const propPath of requiredPaths) {
-    const root = propPath.split(".")[0]!;
-    if (SECTION_META_ROOT_KEYS.has(root)) continue;
-    const value = getAtPath(section, propPath);
-    if (value === undefined || value === null || value === "") {
-      missing.push(propPath);
-    }
-  }
 
   if (missing.length > 0) {
     return {

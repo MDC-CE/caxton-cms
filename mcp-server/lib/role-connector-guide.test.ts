@@ -93,17 +93,22 @@ describe("mcpWriteDisabledGuide", () => {
 });
 
 describe("oauthPlainMcpNotice", () => {
-  it("warns read-only in production", () => {
+  it("says no role was detected and plain /mcp cannot edit in production", () => {
     const n = oauthPlainMcpNotice("production");
     expect(n.isProduction).toBe(true);
-    expect(n.title).toMatch(/read-only/i);
-    expect(n.body).toMatch(/swarm/i);
+    expect(n.title).toBe("No agent role detected");
+    expect(n.body).toMatch(/\/mcp\/role\/<name>/);
+    expect(n.body).toMatch(/can't make edits in production/i);
+    expect(n.advanced).toMatch(/remove and re-add/i);
+    expect(n.advanced).toMatch(/Private → MCP Server → Connection/);
   });
 
   it("allows writes in development with production caveat", () => {
     const n = oauthPlainMcpNotice("development");
     expect(n.isProduction).toBe(false);
-    expect(n.body).toMatch(/development/i);
-    expect(n.body).toMatch(/read-only in production/i);
+    expect(n.title).toBe("No agent role detected");
+    expect(n.body).toMatch(/In development/);
+    expect(n.body).toMatch(/in production it can only read/i);
+    expect(n.advanced.length).toBeGreaterThan(0);
   });
 });

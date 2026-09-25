@@ -78,6 +78,7 @@ import {
   deleteContentEntry,
   renameContentSlug,
 } from "../content-editor";
+import { findNewDeprecatedVarRefs, getDeprecatedFieldsForType } from "../deprecated-field-guard";
 import { flushAfterContentWrites, collectEntryHtmlPaths, fileMentionsRedirects } from "../content-write-flush";
 import {
   bulkUpdateMeta,
@@ -662,6 +663,11 @@ export function registerSectionsRoutes(app: Express): void {
         ? (entryData.sections as Record<string, unknown>[])
         : [];
       entryData.sections = [...entrySections, newSection];
+      const deprecatedTemplateRefs = findNewDeprecatedVarRefs(
+        entrySections,
+        entryData.sections,
+        getDeprecatedFieldsForType(contentType, getContentRoot(res)),
+      );
 
       const { escapeObjectVars, unescapeYamlDump } = await import("@shared/templateVars");
       const { escaped, map } = escapeObjectVars(entryData);
@@ -677,7 +683,11 @@ export function registerSectionsRoutes(app: Express): void {
 
       // Return updated merged section list so the client can update without a full page reload
       const updatedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
-      res.json({ success: true, sections: updatedPage?.sections ?? [] });
+      res.json({
+        success: true,
+        sections: updatedPage?.sections ?? [],
+        ...(deprecatedTemplateRefs.length > 0 ? { deprecated_template_refs: deprecatedTemplateRefs } : {}),
+      });
     } catch (error) {
       log.error({ err: error }, "[per-entry-section-add] Error:");
       res.status(500).json({ error: error instanceof Error ? error.message : "Unknown error" });
@@ -987,6 +997,12 @@ export function registerSectionsRoutes(app: Express): void {
       delete patchEntry.id; // never persist the legacy identity field
       filtered.push(patchEntry);
       entryData.sections = filtered;
+      const deprecatedTemplateRefs = findNewDeprecatedVarRefs(
+        [targetSection],
+        [patchEntry],
+        getDeprecatedFieldsForType(contentType, getContentRoot(res)),
+        `sections[${sectionIndex}]`,
+      );
 
       const { escapeObjectVars, unescapeYamlDump } = await import("@shared/templateVars");
       const { escaped, map } = escapeObjectVars(entryData);
@@ -994,7 +1010,10 @@ export function registerSectionsRoutes(app: Express): void {
       fs.writeFileSync(entryFilePath, unescapeYamlDump(dumped, map), "utf-8");
       markFileAsModified(entryFilePath, authorName);
 
-      res.json({ success: true });
+      res.json({
+        success: true,
+        ...(deprecatedTemplateRefs.length > 0 ? { deprecated_template_refs: deprecatedTemplateRefs } : {}),
+      });
     } catch (error) {
       log.error({ err: error }, "[per-entry-section-update] Error:");
       res.status(500).json({ error: error instanceof Error ? error.message : "Unknown error" });
@@ -1341,12 +1360,16 @@ export function registerSectionsRoutes(app: Express): void {
           boundUpdates?: string[];
           clearedFields?: unknown;
           shared_template_html_cache?: string;
+          deprecated_template_refs?: unknown;
         } = {
           success: true,
           updatedSections: result.updatedSections,
         };
         if (boundUpdates.length > 0) {
           response.boundUpdates = boundUpdates;
+        }
+        if (result.deprecatedTemplateRefs?.length) {
+          response.deprecated_template_refs = result.deprecatedTemplateRefs;
         }
         if (wroteSharedTemplate) {
           response.shared_template_html_cache =
@@ -1373,6 +1396,7 @@ export function registerSectionsRoutes(app: Express): void {
           ...(result.missingFields?.length
             ? { missing_fields: result.missingFields }
             : {}),
+          ...(result.deprecated ? { deprecated: result.deprecated } : {}),
         });
       }
     } catch (error) {
@@ -1737,6 +1761,7 @@ export function registerSectionsRoutes(app: Express): void {
           ...(result.missingFields?.length
             ? { missing_fields: result.missingFields }
             : {}),
+          ...(result.deprecated ? { deprecated: result.deprecated } : {}),
         });
       }
     } catch (error) {
@@ -1964,7 +1989,14 @@ export function registerSectionsRoutes(app: Express): void {
           contentRootName: getContentRootName(res),
         }),
       );
-      if (!result.success) { res.status(result.statusCode).json({ error: result.error }); return; }
+      if (!result.success) {
+        res.status(result.statusCode).json({
+          error: result.error,
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.deprecated ? { deprecated: result.deprecated } : {}),
+        });
+        return;
+      }
       res.json(result.data);
     } catch (error) {
       log.error({ err: error }, "Content create error:");

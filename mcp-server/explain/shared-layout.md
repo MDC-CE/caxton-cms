@@ -7,6 +7,7 @@ Use this topic before creating or restructuring entries for types with `single_t
 - **Shell** (hero, article wrapper, CTA, FAQ, breadcrumb, …) lives in `{directory}/template.{locale}.yml` (plus `_common.template.yml` defaults). Legacy `single.{locale}.yml` / `_common.single.yml` still load if present. New writes create `template.*` only. It applies to **all attached** entries of that type in that locale.
 - **Entry fields** live in `{directory}/{slug}/_common.yml` + `{locale}.yml` — `title`, `description`, `content`, `category`, `meta`, etc. Attached entries normally use `sections: []`.
 - **`db_backed` ≠ `single_template`.** Static blog is YAML + `single_template`. Specialist agents create a new attached post through an accepted idea, then field edits (no variant). `create_entry` still exists as a staff/live path: it writes immediately and is **not** on specialist connectors. DB-backed types are not creatable that way (`create_via: null`); a missing database row cannot be created by an edits proposal.
+- **`layout_owner` per entry:** attached entries report `shared_template` (drafts hold fields only); detached entries report `entry` (drafts hold the whole page); slug `template` reports `is_shared_template: true`. Decision table: conventions §2d (`bootstrap_agent`).
 - **Missing slug → 404**, not an empty shared shell. Public delivery requires `{slug}/{locale}.yml` (static) or a DB row; soft-match redirects only rewrite when that slug already exists (e.g. wrong `:category`).
 
 Example (blog): body is **`content`** on the locale file (Markdown, including fenced mermaid charts via geekchart — same pipeline as `article.content`); `{{ entry.content }}` is bound inside `blog/template.es.yml`. Do **not** paste a page shell (hero/breadcrumb/article) into the entry. Blog CTA copy/conversion/tags come from entry field `call_to_action` (bound in `template.*.yml`); before setting `conversion_name` or `tags`, call `explain_site` topic `component-behaviors`. See `explain_site` topic `sections` → Article body format.
@@ -33,6 +34,17 @@ Specialist roles do **not** use `create_entry` for a new attached post. The slug
 4. A different role `update_proposal` `action: "apply"`. New URL-param values also need `confirm_new_values: true`. Apply writes `{slug}/_common.yml` and one `{locale}.yml` (`sections: []`) and does not read or write `template.{locale}.yml`.
 
 `create_entry` remains the staff/live shortcut (one locale, `sections: []`, URL params on the locale object, `confirm_new_values` for a new peer value). It writes live immediately.
+
+## Playbook (change the shared layout via proposal)
+
+Use when every attached entry of a type should get a new layout (for example a new CTA section on every blog post).
+
+1. `get_entry_content` `slug: "template"` per locale — read today's shared layout (`is_shared_template: true`).
+2. `propose_change` edits: one entry per template locale (`slug: "template"`), each with one full `{ field_path: "sections", value: [...] }` (or `sections[i].x` tweaks), and `all_or_nothing: true`. Skipping a live template locale warns `template_locales_incomplete`; a new template locale without full `sections` refuses `sections_required` (`details.new_locale`).
+3. Reviewers read `affected_entries { count, sample }` and the `template_blast_radius` checklist: open 2–3 sample entries, check every new `{{ entry.* }}` placeholder is filled by their fields.
+4. `update_proposal` `action: "apply"` with `dry_run: true` first — `template_placeholders_unfilled` lists placeholders some entries cannot fill (non-blocking). Apply needs `confirm_affected_entries` equal to the count.
+
+Non-effects: detached entries never change (they own their layout — edit them separately or reattach). Entry field files are not touched. A type without a shared layout has no template; edit each entry.
 
 ## Playbook (create — staff / live)
 

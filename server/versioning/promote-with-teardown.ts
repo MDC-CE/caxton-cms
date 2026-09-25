@@ -1,14 +1,36 @@
 /**
  * Shared promote + optional experiment teardown for versioning routes and proposal apply.
  * Teardown of traffic-bearing siblings bypasses variantTrafficBlock (confirm already required).
+ *
+ * Promote routes page-level fields staged in the draft (fieldScope "common") to
+ * `_common.yml` — `null` deletes the key there — and writes only locale fields to the
+ * live locale file. `_draft` metadata never reaches a published file.
  */
 import fs from "fs";
 import path from "path";
-import { createHash } from "crypto";
 import type { ContentType } from "@shared/schema";
+import { splitByFieldScope } from "@shared/field-scope";
+import { deleteAtPath, isPlainObject, setAtPath } from "@shared/object-path";
 import type { ContentIndex } from "../content-index";
 import type { VersioningManager, VersioningFile } from "./VersioningManager";
 import { pruneVersioningAfterVariantRemove } from "./delete-variant";
+import {
+  hashVariantFileContents,
+  readDraftMetaFromRaw,
+  safeDumpYaml,
+  safeLoadYaml,
+  stripDraftMetaFromRaw,
+} from "./draft-meta";
+import {
+  checkDraftBase,
+  checkTranslationSource,
+  diffSnapshots,
+  forgetDraftBase,
+  rebuildDraftFromBase,
+  type BaseSnapshot,
+  type DraftRef,
+  type FieldChange,
+} from "./draft-base";
 import { markFileAsModified } from "../sync-state";
 import { deepMerge } from "../utils/deepMerge";
 import {
@@ -16,6 +38,7 @@ import {
   variantTemplateBasename,
   isReservedTemplateVariantSlug,
 } from "../shared-layout-paths";
+import { attachedOverlayStructureError, isEntryDetached, isSharedLayoutType } from "../shared-layout-entry";
 import { hasAnyLiveLocale, liveLocaleFileName } from "../draft-entry";
 import { validateYamlIdentity } from "../validate-content-identity";
 import { assertLocaleUrlAvailable } from "../locale-url-slug";
@@ -26,17 +49,21 @@ import { buildEntryKey } from "../../scripts/validation/shared/entryKey";
 import { scheduleOnSaveValidation } from "../services/onSaveValidation";
 import { emitEntryLocalePromoted } from "../content-events";
 import { refreshSitemapEntriesForContentKey } from "../sitemap";
+import { findTopLevelKeySpan, surgicalRemoveTopLevelKey } from "../seo-fields";
+import { normalizeFunnelBlock } from "@shared/funnel";
+import { assertFunnelAudienceGates } from "../product/funnel-audience-gates";
+import { stripFunnelFromAllLocaleYamls } from "../funnel-fields";
+import { urlParamsForContentType } from "../field-scope-config";
 import type { ValidationCacheService } from "../services/validationCacheService";
+import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
+
+export { hashVariantFileContents };
 
 export type TrafficSibling = {
   slug: string;
   locale: string;
   allocation: number;
 };
-
-export function hashVariantFileContents(raw: string): string {
-  return createHash("sha256").update(raw).digest("hex").slice(0, 24);
-}
 
 export function listTrafficSiblings(opts: {
   versioning: VersioningFile | null | undefined;
@@ -52,6 +79,8 @@ export function listTrafficSiblings(opts: {
       allocation: v.allocation ?? 0,
     }));
 }
+
+export type OpenProposalLink = { id: string; env?: string; title?: string };
 
 export type PromoteWithTeardownArgs = {
   contentType: string;
@@ -70,13 +99,38 @@ export type PromoteWithTeardownArgs = {
   endExperimentMode?: boolean;
   /** When true in endExperimentMode, delete other variants on this locale with allocation > 0. */
   confirmEndExperiment?: boolean;
+  /** Publish even if live changed after the draft was created (discards those live changes). */
+  confirmOverwriteNewerLive?: boolean;
+  /** Publish a translation whose source locale changed after translating. */
+  confirmSourceChanged?: boolean;
+  /** Internal: proposal apply — skips the proposal_required / draft_in_proposal guards. */
+  viaProposalApply?: boolean;
+  /** Caller holds an agentic swarm role: direct publish is not allowed. */
+  callerIsSwarm?: boolean;
+  /** Open proposal owning this draft (local DB); `_draft.proposal` is checked first. */
+  findOpenProposalForDraft?: (ref: DraftRef) => OpenProposalLink | null;
+  /** Run every check, write nothing. */
+  dryRun?: boolean;
 };
+
+export type PromoteWarning = { code: string; message: string; fields?: string[] };
+
+export type PromoteSnapshot = { live: string | null; common: string | null };
 
 export type PromoteWithTeardownResult =
   | {
       ok: true;
       ignoredVariantSeo: boolean;
       deletedSiblings: TrafficSibling[];
+      warnings: PromoteWarning[];
+      /** Draft was rebuilt on top of newer live before publishing. */
+      rebuilt?: { kept_live_fields: string[]; author_fields: string[] };
+      /** What changed on the published page (fields, before/after). */
+      publishedDiff: FieldChange[];
+      /** Raw files before the write (for revert). */
+      preApplySnapshot: PromoteSnapshot;
+      versioningDeleted: boolean;
+      dryRun?: boolean;
     }
   | {
       ok: false;
@@ -84,7 +138,94 @@ export type PromoteWithTeardownResult =
       error: string;
       traffic_siblings?: TrafficSibling[];
       status?: number;
+      details?: Record<string, unknown>;
     };
+
+function surgicalSetTopLevelKey(raw: string, key: string, value: unknown): string {
+  const block = safeDumpYaml({ [key]: value }).replace(/\s+$/, "");
+  const span = findTopLevelKeySpan(raw, key);
+  if (!span) {
+    const base = raw.replace(/\s+$/, "");
+    return `${base ? `${base}\n` : ""}${block}\n`;
+  }
+  const before = raw.slice(0, span.start);
+  let after = raw.slice(span.end);
+  if (after.startsWith("\n")) after = after.slice(1);
+  return `${before}${block}\n${after}`;
+}
+
+/** Top-level keys + nested (`meta.robots`) page-level paths staged in the draft. */
+function commonPathsOf(draftCommon: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(draftCommon)) {
+    if (key === "meta" && isPlainObject(value)) {
+      for (const sub of Object.keys(value)) out.push(`meta.${sub}`);
+    } else {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+function valueAt(obj: Record<string, unknown>, p: string): unknown {
+  return p.split(".").reduce<unknown>((cur, k) => (isPlainObject(cur) ? cur[k] : undefined), obj);
+}
+
+/**
+ * Apply the draft's page-level fields to `_common.yml` text and drop them from the
+ * locale text. `null` in the draft deletes the key from `_common.yml`; the locale
+ * file never receives page-level keys (nor their `null` markers).
+ */
+export function routeSharedFieldsOnPromote(opts: {
+  draftRaw: string;
+  commonRaw: string | null;
+  urlParams?: string[];
+}): { localeRaw: string; commonRaw: string | null; commonChanged: boolean; paths: string[]; draftCommon: Record<string, unknown> } {
+  const parsed = safeLoadYaml(opts.draftRaw) ?? {};
+  const { common: draftCommon } = splitByFieldScope(parsed, { urlParams: opts.urlParams });
+  const paths = commonPathsOf(draftCommon);
+  if (paths.length === 0) {
+    return { localeRaw: opts.draftRaw, commonRaw: opts.commonRaw, commonChanged: false, paths, draftCommon };
+  }
+
+  const nested = paths.some((p) => p.includes("."));
+  let localeRaw: string;
+  if (nested) {
+    const localeObj = { ...parsed };
+    for (const p of paths) deleteAtPath(localeObj, p);
+    localeRaw = safeDumpYaml(localeObj);
+  } else {
+    localeRaw = paths.reduce((raw, key) => surgicalRemoveTopLevelKey(raw, key), opts.draftRaw);
+  }
+
+  let commonRaw = opts.commonRaw ?? "";
+  if (nested) {
+    const commonObj = safeLoadYaml(commonRaw) ?? {};
+    for (const p of paths) {
+      const v = valueAt(draftCommon, p);
+      if (v === null) deleteAtPath(commonObj, p);
+      else setAtPath(commonObj, p, v);
+    }
+    commonRaw = Object.keys(commonObj).length ? safeDumpYaml(commonObj) : "{}\n";
+  } else {
+    for (const key of paths) {
+      const v = draftCommon[key];
+      commonRaw = v === null ? surgicalRemoveTopLevelKey(commonRaw, key) : surgicalSetTopLevelKey(commonRaw, key, v);
+    }
+    if (!commonRaw.trim()) commonRaw = "{}\n";
+  }
+  return {
+    localeRaw,
+    commonRaw,
+    commonChanged: commonRaw !== (opts.commonRaw ?? ""),
+    paths,
+    draftCommon,
+  };
+}
+
+function parseOrNull(raw: string | null): Record<string, unknown> | null {
+  return raw == null ? null : safeLoadYaml(raw);
+}
 
 export async function promoteVariantWithOptionalTeardown(
   args: PromoteWithTeardownArgs,
@@ -105,6 +246,7 @@ export async function promoteVariantWithOptionalTeardown(
     endExperimentMode,
     confirmEndExperiment,
   } = args;
+  const warnings: PromoteWarning[] = [];
 
   if (!/^[a-z0-9-]+$/.test(variantSlug)) {
     return { ok: false, code: "invalid_variant", error: "variantSlug must be lowercase letters, numbers, and hyphens only" };
@@ -132,6 +274,7 @@ export async function promoteVariantWithOptionalTeardown(
     contentDir,
     templateMode ? liveLocaleFileName(locale, true) : `${locale}.yml`,
   );
+  const commonFilePath = path.resolve(contentDir, "_common.yml");
 
   if (
     !variantFilePath.startsWith(contentDir + path.sep) ||
@@ -151,6 +294,50 @@ export async function promoteVariantWithOptionalTeardown(
     };
   }
 
+  if (!templateMode) {
+    const deprecatedGate = checkDeprecatedFileWrite({
+      contentType,
+      slug,
+      contentRoot,
+      before: null,
+      after: safeLoadYaml(fs.readFileSync(variantFilePath, "utf-8")),
+    });
+    if (!deprecatedGate.ok) {
+      return {
+        ok: false,
+        code: deprecatedGate.code,
+        error: `${deprecatedGate.error} Remove it from the draft (${variantSlug}.${locale}.yml) before publishing.`,
+        details: { deprecated: deprecatedErrorInfo(deprecatedGate) },
+      };
+    }
+  }
+
+  const ref: DraftRef = { contentType, slug, locale, variant: variantSlug, contentRoot };
+
+  // --- Who may publish this draft directly ---
+  if (!args.viaProposalApply) {
+    if (args.callerIsSwarm) {
+      return {
+        ok: false,
+        code: "proposal_required",
+        error:
+          "Agents with a swarm role cannot publish directly. Create a proposal (proposals_create) — it publishes when someone with permission approves it.",
+        status: 403,
+      };
+    }
+    const link = readDraftMetaFromRaw(fs.readFileSync(variantFilePath, "utf-8"))?.proposal;
+    const open = link ? { id: link.id, env: link.env } : args.findOpenProposalForDraft?.(ref) ?? null;
+    if (open) {
+      return {
+        ok: false,
+        code: "draft_in_proposal",
+        error: `This draft is under review in proposal ${open.id}${open.env ? ` (${open.env})` : ""}. Approve the proposal to publish it.`,
+        status: 409,
+        details: { proposal_id: open.id, ...(open.env ? { env: open.env } : {}) },
+      };
+    }
+  }
+
   const existing = versioningManager.getVersioningForContent(contentType, slug) || {};
   const trafficSiblings = listTrafficSiblings({
     versioning: existing,
@@ -168,10 +355,190 @@ export async function promoteVariantWithOptionalTeardown(
     };
   }
 
+  // --- Attached entries: the draft carries copy only (structure lives on the template) ---
+  const attached =
+    !templateMode && isSharedLayoutType(contentType, contentRoot) && !isEntryDetached(contentType, slug, contentRoot);
+  if (attached) {
+    const parsedForStructure = safeLoadYaml(fs.readFileSync(variantFilePath, "utf-8"));
+    const structureErr = attachedOverlayStructureError(parsedForStructure);
+    if (structureErr) {
+      return {
+        ok: false,
+        code: "attached_draft_structure",
+        error: `Cannot promote: ${structureErr}`,
+        details: {
+          property_path: Array.isArray(parsedForStructure?.sections) && parsedForStructure!.sections.length > 0 ? "sections" : "layout",
+        },
+      };
+    }
+  }
+
+  // --- Live moved after the draft was created? ---
+  let rebuilt: { kept_live_fields: string[]; author_fields: string[] } | undefined;
+  let rebuiltContent: string | null = null;
+  const baseCheck = checkDraftBase(ref);
+  if (baseCheck.status === "stale") {
+    const rebuild = rebuildDraftFromBase(ref, { preview: args.dryRun === true, author });
+    if (rebuild.ok) {
+      rebuilt = {
+        kept_live_fields: rebuild.live_changes_since_base.map((c) => c.field_path),
+        author_fields: rebuild.author_changes.map((c) => c.field_path),
+      };
+      if (args.dryRun) rebuiltContent = safeDumpYaml(rebuild.result);
+      warnings.push({
+        code: "draft_rebuilt",
+        message: "Live changed after this draft was created; the draft was rebuilt on top of today's live and keeps both sets of changes.",
+        fields: rebuilt.kept_live_fields,
+      });
+    } else if (!args.confirmOverwriteNewerLive) {
+      return {
+        ok: false,
+        code: "draft_base_stale",
+        error:
+          rebuild.reason === "conflict"
+            ? `This draft was created from an older version. Publishing it would undo recent live changes to: ${(rebuild.conflicting_fields ?? []).map((c) => c.field_path).join(", ")}.`
+            : "This draft was created from an older version. Publishing it would undo recent live changes.",
+        status: 409,
+        details: {
+          reason: rebuild.reason,
+          changed_files: baseCheck.changed,
+          ...(rebuild.conflicting_fields ? { conflicting_fields: rebuild.conflicting_fields } : {}),
+          ...(rebuild.live_changes_since_base
+            ? { live_changes_since_base: rebuild.live_changes_since_base.map((c) => c.field_path) }
+            : {}),
+        },
+      };
+    }
+  } else if (baseCheck.status === "unknown" && !args.confirmOverwriteNewerLive) {
+    return {
+      ok: false,
+      code: "draft_base_unknown",
+      error: "We don't know which live version this draft came from; publishing it may undo recent changes.",
+      status: 409,
+      details: { reason: "no_based_on" },
+    };
+  }
+
+  const source = checkTranslationSource(ref, { withFields: true });
+  if (source.status === "changed" && !args.confirmSourceChanged) {
+    return {
+      ok: false,
+      code: "translation_source_changed",
+      error: `The ${source.source_locale} source changed after translating. Publishing now shows a translation of the previous version.`,
+      status: 409,
+      details: {
+        source_locale: source.source_locale,
+        ...(source.source_changed_fields ? { source_changed_fields: source.source_changed_fields } : {}),
+      },
+    };
+  }
+
   const wasUnpublished = !templateMode && !hasAnyLiveLocale(contentDir, templateMode);
   const deletedSiblings: TrafficSibling[] = [];
 
   try {
+    const variantContent = stripDraftMetaFromRaw(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8"));
+    const identityErr = validateYamlIdentity(variantContent, {
+      contentType,
+      contentSlug: slug,
+    });
+    if (identityErr) {
+      return {
+        ok: false,
+        code: "identity",
+        error:
+          `Cannot promote: ${identityErr}. ` +
+          `Set conversion_name / CTA tracking / funnel.products on _common.yml (Funnel tab) before promoting.`,
+      };
+    }
+    const parsedVariant = (ci.safeYamlLoad(variantContent) as Record<string, unknown>) || {};
+    const commonForGate = ci.loadCommonData(contentType, slug) || {};
+    const mergedForGate = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
+    const { assertLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
+    const seoGateErr = assertLiveEntrySeoAndRequiredFields({
+      contentType,
+      slug,
+      locale,
+      pageData: mergedForGate,
+      contentRoot,
+      mode: "publish",
+      intent: "publish",
+      isDraftWrite: false,
+    });
+    if (seoGateErr) {
+      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGateErr}` };
+    }
+    if (!templateMode) {
+      const urlCheck = assertLocaleUrlAvailable({
+        contentType,
+        entryIdentity: slug,
+        locale,
+        mergedPageData: mergedForGate,
+        ci,
+      });
+      if (!urlCheck.ok) {
+        return {
+          ok: false,
+          code: urlCheck.code || "url_conflict",
+          error: `Cannot promote: ${urlCheck.error}`,
+          status: urlCheck.statusCode,
+        };
+      }
+    }
+
+    const liveContent = fs.existsSync(defaultFilePath) ? fs.readFileSync(defaultFilePath, "utf-8") : null;
+    const commonBefore = !templateMode && fs.existsSync(commonFilePath) ? fs.readFileSync(commonFilePath, "utf-8") : null;
+    const routed = templateMode
+      ? { localeRaw: variantContent, commonRaw: commonBefore, commonChanged: false, paths: [] as string[], draftCommon: {} as Record<string, unknown> }
+      : routeSharedFieldsOnPromote({
+          draftRaw: variantContent,
+          commonRaw: commonBefore,
+          urlParams: urlParamsForContentType(contentType, contentRoot),
+        });
+
+    if ("funnel" in routed.draftCommon && routed.draftCommon.funnel !== null) {
+      const gates = assertFunnelAudienceGates(normalizeFunnelBlock(routed.draftCommon.funnel as never), {
+        contentType,
+        contentSlug: slug,
+        contentRoot,
+      });
+      if (!gates.ok) {
+        return { ok: false, code: gates.code, error: `Cannot promote: ${gates.error}`, details: { funnel: gates.details } };
+      }
+    }
+
+    const { yamlForPromotePreservingLiveSeo } = await import("../seo-write-layer");
+    const promoted = yamlForPromotePreservingLiveSeo(routed.localeRaw, liveContent);
+    const publishedDiff = diffSnapshots(
+      { live: parseOrNull(liveContent), common: parseOrNull(commonBefore) } as BaseSnapshot,
+      {
+        live: parseOrNull(promoted.content),
+        common: routed.commonChanged ? parseOrNull(routed.commonRaw) : parseOrNull(commonBefore),
+      } as BaseSnapshot,
+    );
+    const preApplySnapshot: PromoteSnapshot = { live: liveContent, common: commonBefore };
+    if (routed.paths.length > 0) {
+      warnings.push({
+        code: "common_fields_all_languages",
+        message: `${routed.paths.join(", ")} ${routed.paths.length === 1 ? "is a page-level field" : "are page-level fields"}: written to _common.yml and changed in every language.`,
+        fields: routed.paths,
+      });
+    }
+
+    if (args.dryRun) {
+      return {
+        ok: true,
+        ignoredVariantSeo: promoted.ignoredVariantSeo,
+        deletedSiblings: [],
+        warnings,
+        rebuilt,
+        publishedDiff,
+        preApplySnapshot,
+        versioningDeleted: false,
+        dryRun: true,
+      };
+    }
+
     if (endExperimentMode && trafficSiblings.length > 0 && confirmEndExperiment) {
       let versioningState: VersioningFile = { ...existing };
       for (const sib of trafficSiblings) {
@@ -204,73 +571,42 @@ export async function promoteVariantWithOptionalTeardown(
       versioningManager.updateVersioning(contentType, slug, versioningState);
     }
 
-    const variantContent = fs.readFileSync(variantFilePath, "utf-8");
-    const identityErr = validateYamlIdentity(variantContent, {
-      contentType,
-      contentSlug: slug,
-    });
-    if (identityErr) {
-      return {
-        ok: false,
-        code: "identity",
-        error:
-          `Cannot promote: ${identityErr}. ` +
-          `Set conversion_name / CTA tracking / funnel.products on _common.yml (Funnel tab) before promoting.`,
-      };
-    }
-    const parsedVariant = (ci.safeYamlLoad(variantContent) as Record<string, unknown>) || {};
-    const commonForGate = ci.loadCommonData(contentType, slug) || {};
-    const { assertLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
-    const seoGateErr = assertLiveEntrySeoAndRequiredFields({
-      contentType,
-      slug,
-      locale,
-      pageData: deepMerge(commonForGate, parsedVariant) as Record<string, unknown>,
-      contentRoot,
-      mode: "publish",
-      intent: "publish",
-      isDraftWrite: false,
-    });
-    if (seoGateErr) {
-      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGateErr}` };
-    }
-    if (!templateMode) {
-      const mergedForUrl = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
-      const urlCheck = assertLocaleUrlAvailable({
-        contentType,
-        entryIdentity: slug,
-        locale,
-        mergedPageData: mergedForUrl,
-        ci,
-      });
-      if (!urlCheck.ok) {
-        return {
-          ok: false,
-          code: urlCheck.code || "url_conflict",
-          error: `Cannot promote: ${urlCheck.error}`,
-          status: urlCheck.statusCode,
-        };
+    // Write `_common.yml` first, then the live locale; undo both if anything fails.
+    try {
+      if (routed.commonChanged && routed.commonRaw != null) {
+        fs.writeFileSync(commonFilePath, routed.commonRaw, "utf-8");
       }
+      fs.writeFileSync(defaultFilePath, promoted.content, "utf-8");
+    } catch (writeErr) {
+      if (commonBefore == null) {
+        if (routed.commonChanged && fs.existsSync(commonFilePath)) fs.unlinkSync(commonFilePath);
+      } else {
+        fs.writeFileSync(commonFilePath, commonBefore, "utf-8");
+      }
+      if (liveContent == null) {
+        if (fs.existsSync(defaultFilePath)) fs.unlinkSync(defaultFilePath);
+      } else {
+        fs.writeFileSync(defaultFilePath, liveContent, "utf-8");
+      }
+      throw writeErr;
     }
-
-    const liveExisted = fs.existsSync(defaultFilePath);
-    const liveContent = liveExisted ? fs.readFileSync(defaultFilePath, "utf-8") : null;
-    const { yamlForPromotePreservingLiveSeo } = await import("../seo-write-layer");
-    const promoted = yamlForPromotePreservingLiveSeo(variantContent, liveContent);
-    fs.writeFileSync(defaultFilePath, promoted.content, "utf-8");
 
     const afterTeardown =
       versioningManager.getVersioningForContent(contentType, slug) || {};
-    const localeData = afterTeardown[locale];
-    if (localeData) {
-      const updatedVariants = (localeData.variants || []).filter((v) => v.slug !== variantSlug);
-      versioningManager.updateVersioning(contentType, slug, {
-        ...afterTeardown,
-        [locale]: { variants: updatedVariants },
-      });
+    const pruned = pruneVersioningAfterVariantRemove(afterTeardown, locale, variantSlug);
+    let versioningDeleted = false;
+    if (pruned.isEmpty) {
+      versioningDeleted = versioningManager.deleteVersioningConfig(contentType, slug, author, contentRoot);
+    } else if (afterTeardown[locale]) {
+      versioningManager.updateVersioning(contentType, slug, pruned.data);
     }
 
     fs.unlinkSync(variantFilePath);
+    forgetDraftBase(ref);
+
+    if ("funnel" in routed.draftCommon) {
+      stripFunnelFromAllLocaleYamls(contentType, slug, contentRoot, author);
+    }
 
     if (wasUnpublished) {
       ensurePublishedAtOnce(contentType, slug, {
@@ -301,6 +637,9 @@ export async function promoteVariantWithOptionalTeardown(
         undefined,
         contentRoot,
       );
+      if (routed.commonChanged) {
+        markFileAsModified(`${folder}/${slug}/_common.yml`, author, undefined, contentRoot);
+      }
       ci.refresh();
       refreshSitemapEntriesForContentKey(contentType, slug, [locale]);
     }
@@ -343,6 +682,11 @@ export async function promoteVariantWithOptionalTeardown(
       ok: true,
       ignoredVariantSeo: promoted.ignoredVariantSeo,
       deletedSiblings,
+      warnings,
+      rebuilt,
+      publishedDiff,
+      preApplySnapshot,
+      versioningDeleted,
     };
   } catch (error) {
     return { ok: false, code: "promote_failed", error: String(error), status: 500 };

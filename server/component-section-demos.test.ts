@@ -4,6 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import {
   DEMO_HASH_RE,
+  collectMissingRequiredProps,
   createDemo,
   demosDir,
   normalizeToSingleSection,
@@ -39,7 +40,96 @@ describe("normalizeToSingleSection", () => {
   });
 });
 
+describe("collectMissingRequiredProps", () => {
+  const button = {
+    type: "object",
+    required: false,
+    properties: {
+      text: { type: "string", required: true },
+      url: { type: "string", required: true },
+      variant: { type: "string", required: true },
+      icon: { type: "string", required: false },
+    },
+  };
+  const column = {
+    type: "object",
+    required: false,
+    properties: { heading: { type: "string", required: false }, button },
+  };
+  const twoColumnLike = { left: column, right: column, cta_button: button };
+  const fullButton = { text: "Go", url: "/go", variant: "primary" };
+
+  it("allows omitting every optional button", () => {
+    expect(
+      collectMissingRequiredProps(twoColumnLike, {
+        type: "two_column",
+        left: { heading: "A" },
+        right: { heading: "B" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("allows only a column button", () => {
+    expect(
+      collectMissingRequiredProps(twoColumnLike, {
+        left: { heading: "A", button: fullButton },
+        right: { heading: "B" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("allows only a section cta_button", () => {
+    expect(
+      collectMissingRequiredProps(twoColumnLike, {
+        left: { heading: "A" },
+        cta_button: fullButton,
+      }),
+    ).toEqual([]);
+  });
+
+  it("still reports required fields inside a present optional object", () => {
+    expect(
+      collectMissingRequiredProps(twoColumnLike, { cta_button: { text: "Go" } }),
+    ).toEqual(["cta_button.url", "cta_button.variant"]);
+  });
+
+  it("reports a missing required parent once, not its children", () => {
+    const props = { cta: { ...button, required: true }, title: { type: "string", required: true } };
+    expect(collectMissingRequiredProps(props, { title: "" })).toEqual(["cta", "title"]);
+  });
+
+  it("ignores section meta keys at the root", () => {
+    const props = { variant: { type: "string", required: true } };
+    expect(collectMissingRequiredProps(props, {})).toEqual([]);
+  });
+});
+
 describe("parseAndValidateDemoYaml", () => {
+  it("accepts a two_column section with a single column button", () => {
+    const result = parseAndValidateDemoYaml({
+      yamlText: [
+        "type: two_column",
+        "left:",
+        "  heading: What's inside the kit",
+        "  bullets:",
+        "    - text: Item",
+        "  button:",
+        "    text: Get the kit",
+        "    url: /kit",
+        "    variant: primary",
+        "right:",
+        "  image: https://example.test/kit.png",
+        "",
+      ].join("\n"),
+      componentType: "two_column",
+    });
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/not found|Schema not found/i);
+      return;
+    }
+    expect(result.section.type).toBe("two_column");
+  });
+
   it("rejects invalid YAML", () => {
     const result = parseAndValidateDemoYaml({
       yamlText: "type: [unterminated",

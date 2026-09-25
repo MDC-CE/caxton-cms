@@ -1,12 +1,14 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import yaml from "js-yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createContentEntry,
   SINGLE_LOCALE_CREATE_ERROR,
 } from "./content-editor";
 import { resetRegistry } from "./content-types";
+import { isDraftEntry, rejectLiveWriteIfDraft } from "./draft-entry";
 
 const ORIGINAL_CWD = process.cwd();
 let tempDir: string;
@@ -72,5 +74,39 @@ describe("single-locale create (all types)", () => {
     if (!result.success) {
       expect(result.error).toBe(SINGLE_LOCALE_CREATE_ERROR);
     }
+  });
+});
+
+describe("shared-template create starts as a draft", () => {
+  it("writes draft.{locale}.yml + versioning.yml, no live file and no published_at", async () => {
+    const result = await createContentEntry({
+      type: "blog",
+      title: "Draft Post",
+      slugEn: "draft-post",
+      skipLocales: ["es"],
+      contentRootName: rootName,
+    });
+    expect(result.success).toBe(true);
+    const dir = path.join(contentRoot, "blog", "draft-post");
+    expect(fs.existsSync(path.join(dir, "en.yml"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "draft.en.yml"))).toBe(true);
+    const versioning = yaml.load(fs.readFileSync(path.join(dir, "versioning.yml"), "utf-8")) as Record<string, any>;
+    expect(versioning.en.variants).toEqual([{ slug: "draft", allocation: 0 }]);
+    const common = (yaml.load(fs.readFileSync(path.join(dir, "_common.yml"), "utf-8")) as Record<string, unknown>) ?? {};
+    expect(common.published_at).toBeUndefined();
+    const draft = yaml.load(fs.readFileSync(path.join(dir, "draft.en.yml"), "utf-8")) as Record<string, any>;
+    expect(draft.title).toBe("Draft Post");
+    expect(draft.sections ?? []).toEqual([]);
+    expect(draft._draft.based_on.locale).toBeNull();
+    expect(isDraftEntry("blog", "draft-post", contentRoot)).toBe(true);
+  });
+
+  it("rejects live writes on an attached draft-only entry without a variant", () => {
+    const dir = path.join(contentRoot, "blog", "only-draft");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "draft.en.yml"), "slug: only-draft\ntitle: X\n");
+    const gate = rejectLiveWriteIfDraft({ contentType: "blog", slug: "only-draft", locale: "en", contentRoot });
+    expect(gate.ok).toBe(false);
+    expect(rejectLiveWriteIfDraft({ contentType: "blog", slug: "only-draft", locale: "en", variant: "draft", contentRoot }).ok).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import { getOrganizationTwitterHandle, getWebsiteDefaultSocialImage } from "./sc
 import { contentIndex } from "./content-index";
 import { getContentTypeConfig, resolveUrlPatternWithMapping, resolveEntryUpdatedAt } from "./content-types";
 import { getBaseUrl, generateHreflangTags, generateListingHreflangTags, generateHomepageHreflangTags } from "./hreflang";
+import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
 import { getHomePage, resolveEffectiveRobots, isIndexingBlocked } from "./settings";
 import { mergeSingleTemplate } from "./database-single-loader";
 import { resolveAllTemplateVars } from "./resolve-template-vars";
@@ -282,7 +283,14 @@ export async function generateDatabaseSsrHtml(
       }
     }
   }
-  const recordUrl = `${baseUrl}${resolveUrlPatternWithMapping(urlPattern, recordForUrl, locale, null)}`;
+  const recordUrl = resolveEffectiveCanonical({
+    meta: (record.meta as Record<string, unknown>) || null,
+    contentType,
+    record: recordForUrl,
+    locale,
+    contentRoot,
+    baseUrl,
+  }) || `${baseUrl}${resolveUrlPatternWithMapping(urlPattern, recordForUrl, locale, null)}`;
   const scripts: string[] = [];
 
   const image = (record.preview as string) || (record.image as string) || "";

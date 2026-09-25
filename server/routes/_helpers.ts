@@ -173,7 +173,7 @@ import {
 import { resolveDynamicEntries } from "../dynamic-entries";
 import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { coerceProgramSlug } from "@shared/safe-href";
-import { getBaseUrl } from "../hreflang";
+import { resolveEffectiveCanonical } from "../resolve-effective-canonical";
 import * as userStore from "../user-store";
 import type { CapabilityName } from "../user-store";
 import { getCapabilityScopeKind } from "../user-store";
@@ -1153,13 +1153,22 @@ export function injectCanonicalIfMissing(
   data: Record<string, unknown>,
   contentType: string,
   locale: string,
+  contentRoot?: string,
 ): void {
   if (!data.meta || typeof data.meta !== "object") return;
   const meta = data.meta as Record<string, unknown>;
-  if (meta.canonical_url) return;
-  const urlPath = resolveContentTypeUrl(contentType, data, locale);
-  if (!urlPath) return;
-  meta.canonical_url = getBaseUrl() + urlPath;
+  const existing =
+    typeof meta.canonical_url === "string" ? meta.canonical_url.trim() : "";
+  if (existing && !existing.includes("{{")) return;
+  const resolved = resolveEffectiveCanonical({
+    meta,
+    contentType,
+    record: data,
+    locale,
+    contentRoot,
+  });
+  if (!resolved) return;
+  meta.canonical_url = resolved;
 }
 
 export function loadCareerProgram(slug: string, locale: string, ci: typeof contentIndex = contentIndex): CareerProgram | null {

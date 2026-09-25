@@ -54,6 +54,9 @@ type FieldProvenance = {
   layer_has_key?: boolean;
   writable?: boolean;
   group?: "seo";
+  deprecated?: { replaced_by: string | null; reason: string | null };
+  /** Retired and this entry has no stored value — the server rejects new values. */
+  deprecated_locked?: boolean;
 };
 
 type ProvenanceResponse = {
@@ -2150,7 +2153,29 @@ export function MappingFieldsTab({
                           portalContainer={portalContainer}
                         />
                       )}
+                      {row.deprecated && (
+                        <Badge
+                          variant="outline"
+                          className="text-[9px] font-sans font-normal"
+                          data-testid={`badge-deprecated-field-${row.field}`}
+                        >
+                          {row.deprecated.replaced_by ? `Deprecated → use ${row.deprecated.replaced_by}` : "Deprecated"}
+                        </Badge>
+                      )}
                     </span>
+                    {row.deprecated && (
+                      <p
+                        className="text-[10px] text-muted-foreground font-sans mt-0.5 max-w-[200px]"
+                        data-testid={`text-deprecated-field-${row.field}`}
+                      >
+                        {row.deprecated_locked
+                          ? row.deprecated.replaced_by
+                            ? `Retired. This entry has no value, so it can't be set — use ${row.deprecated.replaced_by}.`
+                            : "Retired. This entry has no value, so it can't be set."
+                          : "Retired. This entry keeps its value and can still edit or clear it."}
+                        {row.deprecated.reason ? ` ${row.deprecated.reason}` : ""}
+                      </p>
+                    )}
                     {(localeEmptyNote || hreflangsStaticNote) && (
                       <p className="text-[10px] text-muted-foreground font-sans mt-0.5 max-w-[160px]">
                         {localeEmptyNote
@@ -2179,7 +2204,7 @@ export function MappingFieldsTab({
                   </td>
                   <td className="px-3 py-2 align-top">
                     <div className="flex items-center gap-0.5">
-                      {!row.calculated && !special && (
+                      {!row.calculated && !special && !row.deprecated_locked && (
                         <Button
                           variant="ghost"
                           size="icon"

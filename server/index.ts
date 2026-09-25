@@ -335,7 +335,16 @@ app.use((req, res, next) => {
       }
     }
 
-    const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `127.0.0.1:${MCP_PORT}` };
+    const firstHeaderValue = (v: string | string[] | undefined) =>
+      (Array.isArray(v) ? v[0] : v)?.split(",")[0]?.trim() || undefined;
+    const forwardedHost = firstHeaderValue(req.headers["x-forwarded-host"]) ?? req.get("host");
+    const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"]) ?? req.protocol;
+    const headers: http.OutgoingHttpHeaders = {
+      ...req.headers,
+      host: `127.0.0.1:${MCP_PORT}`,
+      ...(forwardedHost ? { "x-forwarded-host": forwardedHost } : {}),
+      "x-forwarded-proto": forwardedProto,
+    };
     // Remove hop-by-hop headers that conflict with our re-serialized body
     delete headers["transfer-encoding"];
     delete headers["connection"];
@@ -373,6 +382,8 @@ app.use((req, res, next) => {
   app.all("/mcp/*", pipeToMcp as any);
   app.all("/oauth/*", pipeToMcp as any);
   app.all("/.well-known/oauth-authorization-server", pipeToMcp as any);
+  app.all("/.well-known/oauth-protected-resource", pipeToMcp as any);
+  app.all("/.well-known/oauth-protected-resource/*", pipeToMcp as any);
   // ─────────────────────────────────────────────────────────────────────────────
 
   // sGTM + IPN proxies — registered early so they fire before static file handlers
@@ -544,6 +555,9 @@ app.use((req, res, next) => {
 
     // All deferred background tasks fire here — server is already ready to handle requests.
     startEventWebhookDueScan();
+    void import("./jobs/definitions/proposal-maintenance")
+      .then(({ scheduleProposalMaintenance }) => scheduleProposalMaintenance())
+      .catch((err) => logger.warn({ err }, "failed to schedule proposal maintenance jobs"));
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();
     }

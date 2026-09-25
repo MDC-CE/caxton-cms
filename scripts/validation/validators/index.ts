@@ -51,6 +51,7 @@ import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
 import { unassignedVariablesValidator } from "./unassigned-variables";
 import { funnelCompletenessValidator } from "./funnel-completeness";
+import { draftIntegrityValidator } from "./draft-integrity";
 
 export const validators: Validator[] = [
   redirectValidator,
@@ -98,6 +99,7 @@ export const validators: Validator[] = [
   siteLinkIndexValidator,
   siteRelationIndexValidator,
   unassignedVariablesValidator,
+  draftIntegrityValidator,
 ];
 
 /** @deprecated Lighthouse removed from platform diagnostics — use external tools. */

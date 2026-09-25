@@ -494,6 +494,13 @@ export const SCENARIOS: Scenario[] = [
     buildArgs: (ctx) => withSite(ctx, { status: "open", limit: 20 }),
   },
   {
+    id: "list_proposals_kpi_history_day",
+    tool: "list_proposals",
+    about:
+      "Unscoped proposals + opt-in kpi_history (day): live per-day flow over 28 days + today for all kinds (one pass over recent proposals, cached ≤15m).",
+    buildArgs: (ctx) => withSite(ctx, { kpi_history: true, kpi_granularity: "day" }),
+  },
+  {
     id: "get_entry_activity",
     tool: "get_entry_activity",
     about: "Recent write history for the heavy entry (14-day window, limit 20).",

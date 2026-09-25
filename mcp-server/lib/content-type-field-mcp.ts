@@ -12,6 +12,7 @@ import {
   type NextAction,
 } from "./respond.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
+import { parseDeprecated } from "../../shared/deprecatedField.js";
 import {
   prepareFieldPatch,
   buildFieldPatchWarnings,
@@ -73,6 +74,29 @@ export async function fetchContentTypeConfigSlice(
       database: (data.database as ContentTypeConfigSlice["database"]) ?? undefined,
     },
   };
+}
+
+/** Files in the type that reference {{ entry.<field> }} / {{ single.<field> }}; empty on failure. */
+export async function fetchFieldTemplateUsages(
+  contentType: string,
+  field: string,
+  domain: string | undefined,
+  mainServerPort: string,
+  internalHeaders: (token?: string) => Record<string, string>,
+  mcpToken?: string,
+): Promise<string[]> {
+  const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${mainServerPort}/api/content-types/${encodeURIComponent(contentType)}/fields/${encodeURIComponent(field)}/usages${q}`,
+      { headers: internalHeaders(mcpToken) },
+    );
+    if (!res.ok) return [];
+    const data = (await res.json().catch(() => ({}))) as { files?: unknown };
+    return Array.isArray(data.files) ? data.files.filter((f): f is string => typeof f === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchDatabaseNameList(
@@ -242,7 +266,22 @@ export async function runContentTypeFieldPatch(input: FieldPatchToolInput) {
 
   const ymlPath = `${path.basename(input.contentPath)}/content-types.yml`;
   const siteHint = input.site ? { site: input.site } : {};
-  const warnings = buildFieldPatchWarnings(patchInput, fetched.config, isNewField) as McpWarning[];
+  const templateRefCount =
+    input.field_action !== "remove" && parseDeprecated(prepared.nextEditor?.[fieldKey])
+      ? (
+          await fetchFieldTemplateUsages(
+            input.contentType,
+            fieldKey,
+            input.domain,
+            input.mainServerPort,
+            input.internalHeaders,
+            input.mcpToken,
+          )
+        ).length
+      : undefined;
+  const warnings = buildFieldPatchWarnings(patchInput, fetched.config, isNewField, {
+    templateRefCount,
+  }) as McpWarning[];
 
   if (input.confirm !== true) {
     return actionRequired(

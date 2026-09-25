@@ -172,6 +172,84 @@ export function promoteWarnings(sharedLayout: boolean): McpWarning[] {
   return warnings;
 }
 
+/**
+ * next_actions for draft-first promote rejections (publish_draft / promote_variant).
+ * `retryTool` is the tool that failed; confirm flags are only suggested after asking the user.
+ */
+export function promoteFailureNextActions(opts: {
+  code: string | undefined;
+  details?: Record<string, unknown>;
+  retryTool: "publish_draft" | "promote_variant";
+  contentType: string;
+  slug: string;
+  locale?: string;
+  variantSlug: string;
+  site?: string;
+}): NextAction[] {
+  const base = {
+    contentType: opts.contentType,
+    slug: opts.slug,
+    ...(opts.locale ? { locale: opts.locale } : {}),
+    variantSlug: opts.variantSlug,
+    ...(opts.site ? { site: opts.site } : {}),
+  };
+  switch (opts.code) {
+    case "draft_in_proposal": {
+      const proposalId = opts.details?.proposal_id;
+      return [
+        {
+          tool: "list_proposals",
+          priority: "required",
+          reason:
+            "This draft belongs to an open proposal. Review and apply that proposal with update_proposal (four-eyes applies); do not publish the draft directly.",
+          args_hint: { proposal_id: proposalId, ...(opts.site ? { site: opts.site } : {}) },
+        },
+      ];
+    }
+    case "proposal_required":
+      return [
+        {
+          tool: "propose_change",
+          priority: "required",
+          reason: "Swarm roles never publish directly. Open an edits proposal with promote_on_apply so someone else applies it.",
+          args_hint: { entries: [{ contentType: opts.contentType, slug: opts.slug, locale: opts.locale, variant: opts.variantSlug }] },
+        },
+      ];
+    case "draft_base_stale":
+    case "draft_base_unknown":
+      return [
+        {
+          tool: opts.retryTool,
+          priority: "recommended",
+          reason:
+            "Live changed after this draft was created (or the draft has no recorded base). Show the user details.conflicting_fields / live_changes_since_base; retry with confirm_overwrite_newer_live: true only after they agree to discard those live changes.",
+          args_hint: { ...base, confirm_overwrite_newer_live: true },
+        },
+      ];
+    case "translation_source_changed":
+      return [
+        {
+          tool: opts.retryTool,
+          priority: "recommended",
+          reason:
+            "The source locale changed after this translation was made. Update the translation, or retry with confirm_source_changed: true after the user agrees.",
+          args_hint: { ...base, confirm_source_changed: true },
+        },
+      ];
+    case "attached_draft_structure":
+      return [
+        {
+          tool: "get_entry_content",
+          priority: "required",
+          reason: `Attached drafts may only change fields. Remove ${String(opts.details?.property_path ?? "sections/layout")} from the draft, or detach the entry first.`,
+          args_hint: { contentType: opts.contentType, slug: opts.slug, locale: opts.locale, variant: opts.variantSlug },
+        },
+      ];
+    default:
+      return [];
+  }
+}
+
 /** Required follow-up after publish_draft / promote_variant — scoped hard refresh. */
 export function diagnosticsAfterGoLiveNextAction(slug: string, site?: string): NextAction {
   return {

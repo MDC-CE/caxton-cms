@@ -230,20 +230,25 @@ function CrawlerStatusCard({
   formatStaleness,
   onOpenChange,
   inspectError,
+  action,
 }: {
   crawler: CrawlerPageStatus;
   formatStaleness: (iso: string) => string;
   onOpenChange: (open: boolean) => void;
   inspectError?: string | null;
+  action?: ReactNode;
 }) {
   const isGoogle = crawler.id === "google";
 
   return (
     <Card data-testid={isGoogle ? "card-google-indexing-kpi" : `card-crawler-${crawler.id}`}>
       <CardContent className="pt-4 pb-3 space-y-1">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {isGoogle ? <IconBrandGoogle className="h-3.5 w-3.5" /> : null}
-          <span>{crawler.label}</span>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {isGoogle ? <IconBrandGoogle className="h-3.5 w-3.5" /> : null}
+            <span>{crawler.label}</span>
+          </div>
+          {action}
         </div>
         {crawler.status === "loading" ? (
           <p className="text-sm text-muted-foreground">Loading cache…</p>
@@ -1227,43 +1232,7 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
                   </ToggleButtonBarTrigger>
                 </ToggleButtonBarList>
                 <div className="flex items-center gap-2">
-                  {activeTab === "crawlers" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => inspectMutation.mutate()}
-                      disabled={
-                        inspectMutation.isPending ||
-                        !canInspect ||
-                        isDraftNoPublic ||
-                        !inspectLookupUrl ||
-                        !gscQuery.data?.configured ||
-                        !!gscQuery.data?.resolved?.isDraft
-                      }
-                      title={
-                        isDraftNoPublic || !inspectLookupUrl
-                          ? "Draft pages are not sent to Google"
-                          : !gscQuery.data?.configured
-                            ? "Search Console is not configured"
-                            : gscQuery.data?.resolved?.isDraft
-                              ? "Draft pages are not sent to Google"
-                              : "Check Google"
-                      }
-                      data-testid="button-check-google"
-                    >
-                      {inspectMutation.isPending ? (
-                        <>
-                          <IconLoader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                          <span className="hidden sm:inline">Checking…</span>
-                        </>
-                      ) : (
-                        <>
-                          <IconBrandGoogle className="h-3.5 w-3.5 shrink-0" />
-                          <span className="hidden sm:inline">Check Google</span>
-                        </>
-                      )}
-                    </Button>
-                  ) : activeTab !== "completed" ? (
+                  {activeTab !== "crawlers" && activeTab !== "completed" ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -1416,8 +1385,8 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
                   <p className="text-xs text-muted-foreground">
                     Badge counts crawlers that are not OK (never checked, not indexed, errors, or not
                     configured). Green check means every applicable crawler has this URL indexed —
-                    drafts do not count. Cached Search Console data only; Check Google spends daily
-                    quota.
+                    drafts do not count. Cached Search Console data only; Check on the Google card spends
+                    daily quota.
                   </p>
                   <Collapsible>
                     <CollapsibleTrigger className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground">
@@ -1450,6 +1419,45 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
                           ? inspectMutation.error.message
                           : "Inspect failed"
                         : null
+                    }
+                    action={
+                      crawler.id === "google" && crawler.status !== "not_configured" ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => inspectMutation.mutate()}
+                          disabled={
+                            inspectMutation.isPending ||
+                            !canInspect ||
+                            isDraftNoPublic ||
+                            !inspectLookupUrl ||
+                            !gscQuery.data?.configured ||
+                            !!gscQuery.data?.resolved?.isDraft
+                          }
+                          title={
+                            isDraftNoPublic || !inspectLookupUrl
+                              ? "Draft pages are not sent to Google"
+                              : !gscQuery.data?.configured
+                                ? "Search Console is not configured"
+                                : gscQuery.data?.resolved?.isDraft
+                                  ? "Draft pages are not sent to Google"
+                                  : "Check this URL with Google now (uses daily quota)"
+                          }
+                          data-testid="button-check-google"
+                        >
+                          {inspectMutation.isPending ? (
+                            <>
+                              <IconLoader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                              Checking…
+                            </>
+                          ) : (
+                            <>
+                              <IconRefresh className="h-3.5 w-3.5 shrink-0" />
+                              Check
+                            </>
+                          )}
+                        </Button>
+                      ) : null
                     }
                   />
                 ))}

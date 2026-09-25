@@ -143,13 +143,14 @@ export async function assertAgenticContentWriteAllowed(opts: {
 
   if (intent === "publish" || intent === "create_entry") {
     const kind = intent === "create_entry" ? "create entries" : "publish, promote, or demote";
+    const code = intent === "publish" ? "proposal_required" : "agentic_propose_required";
     return {
       allowed: false,
       response: actionRequired(
         {
           success: false,
-          action_required: "agentic_propose_required",
-          code: "agentic_propose_required",
+          action_required: code,
+          code,
           message:
             `Agentic swarm roles cannot ${kind} via MCP tools. ` +
             `Use propose_change (edits and/or promote_on_apply) so someone else can apply.`,

@@ -5,6 +5,7 @@
 import {
   parseProposalSort,
   parseProposerActorType,
+  type OutcomeReviewFilter,
   type ProposalSortDir,
   type ProposalSortField,
   type ProposerActorType,
@@ -35,8 +36,12 @@ export type ListProposalsArgs = {
     role?: string;
   };
   agent_session_id?: string;
+  /** Latest non-author feedback or finished/rejected closer (exact, case-insensitive). */
+  reviewer_username?: string;
   /** When true, only escalated proposals. */
   escalated?: boolean;
+  /** Steward outcome review on closed proposals (human-only, informational). */
+  outcome_review?: OutcomeReviewFilter;
   attention?: ProposalAttention;
   /** Accepted ideas with no successful implements follow-up. */
   stalled?: boolean;
@@ -59,8 +64,10 @@ export function isProposalsScoped(args: ListProposalsArgs): boolean {
       args.proposer_actor?.type ||
       args.proposer_actor?.role?.trim() ||
       args.agent_session_id?.trim() ||
+      args.reviewer_username?.trim() ||
       args.escalated === true ||
       args.escalated === false ||
+      args.outcome_review ||
       args.attention ||
       args.stalled === true ||
       args.stalled === false ||

@@ -156,10 +156,10 @@ describe("validateBulkMetaUpdates", () => {
     ).toMatch(/Duplicate/i);
   });
 
-  it("requires meta_target for unknown meta keys", () => {
+  it("accepts unknown meta keys without meta_target (routed by field scope)", () => {
     expect(
       validateBulkMetaUpdates([{ field_path: "meta.twitter_card", value: "summary" }]),
-    ).toMatch(/meta_target/);
+    ).toBeNull();
   });
 
   it("accepts known meta paths", () => {

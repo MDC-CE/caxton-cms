@@ -1,4 +1,5 @@
 import { parsePipeFallback } from "@shared/json-field";
+import { ARTICLE_HTML_MARKER } from "@shared/reading-time";
 import {
   EXACT_ENTRY_OR_SINGLE_VAR_PATTERN,
   entryBagFieldPathFromVarName,
@@ -562,6 +563,9 @@ export function patchVariableFieldHighlights(
     // Only patch string fields; keep structured values (arrays/objects) intact in edit mode.
     const currentValue = getAtDotPath(patched, dotPath);
     if (typeof currentValue !== "string") continue;
+    // Server-rendered article HTML (charts, code colors, math) — the raw entry
+    // markdown would replace it with a plain client render.
+    if (currentValue.startsWith(ARTICLE_HTML_MARKER)) continue;
     const { text } = resolveTemplateString(templateExpr, {}, context, {
       preserveTemplate: true,
       singleEntry,

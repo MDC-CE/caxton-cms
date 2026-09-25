@@ -125,6 +125,14 @@ const REGISTRY = [
       "Decide on proposals (apply, reject, accept, close, blockers). Does not authorize creating proposals or free-editing pages.",
   },
   {
+    name: "proposals_delete",
+    label: "Delete proposals",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Permanently delete proposals from the staff UI and remove drafts they created. Does not authorize review or apply.",
+  },
+  {
     name: "seo_edit",
     label: "Edit page SEO",
     scoped: true,

@@ -14,12 +14,14 @@ import {
   IconFilter,
   IconInbox,
   IconInfoCircle,
+  IconLayoutList,
   IconLink,
   IconLoader2,
   IconLock,
   IconLockOpen,
   IconMessage,
   IconSearch,
+  IconTable,
   IconX,
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
@@ -95,7 +97,18 @@ import {
 } from "@/components/agents/SituationReviewBadge";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
+import { entryPreviewHref } from "@/lib/variable-usage-href";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
+import {
+  ProposalDraftEntryDetails,
+  type DraftEntryV1,
+} from "@/components/agents/ProposalDraftEntryDetails";
+import {
+  ProposalOutcomeReview,
+  type OutcomeHistoryEntry,
+  type OutcomeVerdict,
+} from "@/components/agents/ProposalOutcomeReview";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import {
   ProposalKindBadge,
@@ -132,15 +145,27 @@ import {
   PROPOSAL_STATUS_OPTIONS,
   clearProposalListFilters,
   countActiveProposalFilters,
+  parseProposalListPerspective,
   parseProposalListSearch,
   proposalListApiSearchParams,
   proposalSortFromPreset,
   proposalSortPresetValue,
   serializeProposalListSearch,
   toProposalListApiQuery,
+  withProposalListPerspective,
   type ProposalListFilters,
+  type ProposalListPerspective,
   type ProposalListStats,
 } from "@/pages/proposals-list-filters";
+import {
+  ProposalBulkActionsBar,
+  ProposalBulkDeleteDialog,
+  ProposalListTable,
+} from "@/components/agents/ProposalListTable";
+import {
+  summarizeProposalBulkDelete,
+  type ProposalBulkDeleteResult,
+} from "@/lib/proposalBulkDelete";
 
 export const AGENTS_PROPOSALS_BASE = "/private/agents/proposals";
 
@@ -151,7 +176,7 @@ function proposalsListHref(search: string): string {
   return qs ? `${AGENTS_PROPOSALS_BASE}?${qs}` : AGENTS_PROPOSALS_BASE;
 }
 
-type EntryRow = {
+type EntryRow = Omit<DraftEntryV1, "ops"> & {
   id: number;
   contentType: string;
   slug: string;
@@ -159,9 +184,47 @@ type EntryRow = {
   variant: string | null;
   status: string;
   last_error: string | null;
-  ops: Array<{ field_path: string; value?: unknown }>;
+  ops: Array<{ field_path: string; value?: unknown; op?: "set" | "remove" }>;
   baseline_context: { values: Record<string, unknown>; note?: string };
+  created_draft?: boolean;
 };
+
+const ACCEPTED_ENTRY_NOT_CREATABLE_COPY =
+  "This page type can't be created from an idea. Someone must create the page in the CMS before edits can follow.";
+
+const ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY =
+  "This page builds its own layout, so the follow-up proposal must include the whole page layout (every section), not only text fields.";
+
+type ProposalWarning = {
+  code?: string;
+  message: string;
+  details?: { placeholders?: Array<{ name: string; missing: number; total: number }> };
+};
+
+/** "12 of 80 pages have no value for hero_image — those pages will show an empty spot." */
+function plainPlaceholderGaps(w: ProposalWarning): string[] {
+  return (w.details?.placeholders ?? []).map(
+    (g) =>
+      `${g.missing} of ${g.total} page${g.total === 1 ? "" : "s"} have no value for ${g.name} — those pages will show an empty spot.`,
+  );
+}
+
+function plainWarningTitle(warnings: ProposalWarning[]): string {
+  const byCode = (code: string) => warnings.find((w) => w.code === code);
+  if (byCode("accepted_entry_not_creatable")) return ACCEPTED_ENTRY_NOT_CREATABLE_COPY;
+  if (byCode("accepted_entry_needs_layout")) return ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY;
+  const gaps = byCode("template_placeholders_unfilled");
+  if (gaps) return plainPlaceholderGaps(gaps).join(" ") || gaps.message;
+  return warnings[0]!.message;
+}
+
+/** "sections[2].image.src: …" → "Section 3: …" for staff toasts. */
+function plainSectionIssue(details?: { property_path?: string; message?: string }): string {
+  const match = /^sections\[(\d+)\]/.exec(details?.property_path ?? "");
+  const where = match ? `Section ${Number(match[1]) + 1}` : "A section";
+  const what = details?.message ? `: ${details.message}` : " is not valid";
+  return `${where}${what}. Fix it in the proposal and resubmit — nothing was saved.`;
+}
 
 type BlockerRow = {
   id: number;
@@ -203,9 +266,24 @@ type Proposal = {
   close_note?: string | null;
   closed_by?: string | null;
   closed_at?: number | null;
+  reviewer_action_at?: number | null;
+  reviewer_action_by?: string | null;
+  reviewer_action_by_actor?: Record<string, unknown>;
   supersedes_proposal_id?: string | null;
   replaced_by_proposal_id?: string | null;
+  system_version?: string | null;
+  all_or_nothing?: boolean;
+  stale_since?: string | null;
+  stale_flagged_at?: string | null;
+  reverts_proposal_id?: string | null;
+  co_authors?: Array<{ username: string }>;
+  affected_entries?: {
+    count: number;
+    sample: Array<{ contentType: string; slug: string; locale: string; variant: string | null }>;
+  } | null;
   accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  accepted_entry_create_mode?: "attached" | "page" | "manual" | null;
+  accepted_entry_layout_owner?: "shared_template" | "entry" | null;
   idea_funnel?: {
     stage: string;
     products: "all" | Array<{ product: string; persona?: string }>;
@@ -233,17 +311,62 @@ type Proposal = {
     action?: string;
     source?: string;
     actor?: { username?: string; type?: string; role?: string };
+    agent_session_id?: string | null;
     review_context?: {
       damage_class?: string;
+      undo_cost?: string;
+      summary?: string;
       active_checklists?: string[];
       think_items?: Array<{ id: string; title: string; why: string; look_for: string[] }>;
+      warnings?: Array<{ code: string; message: string }>;
     };
-    discovery_path?: unknown;
+    discovery_path?: { goal?: string } | null;
   } | null;
+  outcome_review?: OutcomeVerdict | null;
+  outcome_review_note?: string | null;
+  outcome_review_expected?: string | null;
+  outcome_review_at?: number | null;
+  outcome_review_by?: string | null;
+  outcome_review_history?: OutcomeHistoryEntry[];
+  outcome_lesson_captured_at?: number | null;
+  outcome_lesson_captured_by?: string | null;
+  outcome_lesson_note?: string | null;
 };
 
 function headers(): Record<string, string> {
   return { "Content-Type": "application/json", ...getSessionHeaders() };
+}
+
+/** Template apply dialog: dry-run placeholder scan (non-blocking). */
+function TemplatePlaceholderNotice({ proposalId }: { proposalId: string }) {
+  const { data } = useQuery({
+    queryKey: ["/api/admin/proposals", proposalId, "apply-dry-run"],
+    queryFn: async () => {
+      const res = await apiFetch(`/api/admin/proposals/${proposalId}/apply`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ dry_run: true }),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as { warnings?: ProposalWarning[] };
+    },
+    staleTime: 30_000,
+  });
+  const lines = (data?.warnings ?? [])
+    .filter((w) => w.code === "template_placeholders_unfilled")
+    .flatMap(plainPlaceholderGaps);
+  if (!lines.length) return null;
+  return (
+    <div
+      className="space-y-1 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground"
+      data-testid="apply-template-placeholders-notice"
+    >
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+      <p className="text-xs text-muted-foreground">You can still publish; fill those fields later.</p>
+    </div>
+  );
 }
 
 function reviewModeBadge(p: Proposal): { label: string; variant: "default" | "secondary" | "outline" } {
@@ -414,7 +537,7 @@ function ReviewModeBadge({
 
 function previewHref(entry: EntryRow): string | null {
   if (!entry.variant) return null;
-  return `/private/preview/${encodeURIComponent(entry.contentType)}/${encodeURIComponent(entry.slug)}?locale=${encodeURIComponent(entry.locale)}&force_variant=${encodeURIComponent(entry.variant)}`;
+  return entryPreviewHref(entry);
 }
 
 function NoAutoRetryBadge({
@@ -501,12 +624,22 @@ export function ProposalListPanel() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pullProductionOpen, setPullProductionOpen] = useState(false);
   const [pullingProduction, setPullingProduction] = useState(false);
+  const perspective = useMemo(() => parseProposalListPerspective(searchString), [searchString]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const { hasCapability } = useDebugAuth();
+  const canDeleteProposals = hasCapability("proposals_delete");
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
   useEffect(() => {
     setQInput(view.q);
   }, [view.q]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [searchString]);
 
   useEffect(() => {
     const trimmed = qInput.trim();
@@ -525,6 +658,12 @@ export function ProposalListPanel() {
 
   const writeView = (next: { filters: ProposalListFilters; q: string }) => {
     const qs = serializeProposalListSearch(next, searchString);
+    const pathOnly = pathname.split("?")[0];
+    setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
+  };
+
+  const writePerspective = (next: ProposalListPerspective) => {
+    const qs = withProposalListPerspective(searchString, next);
     const pathOnly = pathname.split("?")[0];
     setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
   };
@@ -564,7 +703,11 @@ export function ProposalListPanel() {
     if (session) {
       parts.push(`Session ${session.length > 8 ? `${session.slice(0, 8)}…` : session}`);
     }
+    const reviewer = view.filters.reviewerUsername.trim();
+    if (reviewer) parts.push(`Reviewer ${reviewer}`);
     if (view.filters.escalatedOnly) parts.push("Escalated");
+    if (view.filters.outcomeFocus === "bad") parts.push("Bad outcome (needs lesson)");
+    if (view.filters.outcomeFocus === "missing") parts.push("Missing outcome review");
     if (view.filters.attention !== "all") {
       parts.push(
         PROPOSAL_ATTENTION_OPTIONS.find((o) => o.value === view.filters.attention)?.label ??
@@ -579,7 +722,9 @@ export function ProposalListPanel() {
     view.filters.proposerActorType,
     view.filters.proposerActorRole,
     view.filters.agentSessionId,
+    view.filters.reviewerUsername,
     view.filters.escalatedOnly,
+    view.filters.outcomeFocus,
     view.filters.attention,
   ]);
 
@@ -598,6 +743,38 @@ export function ProposalListPanel() {
 
   const proposals = data?.proposals ?? [];
   const resultCount = data?.total ?? proposals.length;
+  const selectionActive = perspective === "table" && selectedIds.size > 0;
+  const proposalHref = (id: string) =>
+    listSearch ? `${AGENTS_PROPOSALS_BASE}/${id}?${listSearch}` : `${AGENTS_PROPOSALS_BASE}/${id}`;
+
+  const runBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    const titles = new Map(proposals.map((p) => [p.id, p.title]));
+    setBulkDeleting(true);
+    try {
+      const res = await apiRequestWithAuth("POST", "/api/admin/proposals/bulk-delete", { ids });
+      const body = (await res.json()) as { results?: ProposalBulkDeleteResult[] };
+      const summary = summarizeProposalBulkDelete(body.results ?? [], (id) => titles.get(id));
+      setBulkDeleteOpen(false);
+      setSelectedIds(new Set());
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals/kpis"] });
+      toast({
+        title: summary.headline,
+        description: summary.details.length ? summary.details.join(" ") : undefined,
+        variant: summary.deleted === 0 && (summary.blocked || summary.failed) ? "destructive" : undefined,
+      });
+    } catch (err) {
+      toast({
+        title: "Could not delete proposals",
+        description: err instanceof Error ? err.message : "Delete failed.",
+        variant: "destructive",
+      });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
 
   const pullProduction = async () => {
     if (!import.meta.env.DEV) return;
@@ -686,6 +863,15 @@ export function ProposalListPanel() {
           <EventWebhooksKpiButton onClick={() => setLocation("/private/webhooks/hooks")} />
         }
       />
+      {selectionActive ? (
+        <ProposalBulkActionsBar
+          count={selectedIds.size}
+          canDelete={canDeleteProposals}
+          deleting={bulkDeleting}
+          onClear={() => setSelectedIds(new Set())}
+          onDelete={() => setBulkDeleteOpen(true)}
+        />
+      ) : (
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <IconSearch
@@ -755,6 +941,45 @@ export function ProposalListPanel() {
             })}
           </DropdownMenuContent>
         </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              className="shrink-0 gap-1.5"
+              title="List perspective"
+              data-testid="button-list-perspective"
+            >
+              {perspective === "table" ? (
+                <IconTable className="h-4 w-4" />
+              ) : (
+                <IconLayoutList className="h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">{perspective === "table" ? "Table" : "Cards"}</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {(
+              [
+                { value: "cards", label: "Cards", Icon: IconLayoutList },
+                { value: "table", label: "Table", Icon: IconTable },
+              ] as const
+            ).map(({ value, label, Icon }) => (
+              <DropdownMenuItem
+                key={value}
+                className="gap-2"
+                onClick={() => writePerspective(value)}
+                data-testid={`menu-perspective-${value}`}
+              >
+                <IconCheck
+                  className={cn("h-3.5 w-3.5", perspective === value ? "opacity-100" : "opacity-0")}
+                />
+                <Icon className="h-4 w-4" />
+                {label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
         {import.meta.env.DEV ? (
           <Button
             type="button"
@@ -772,6 +997,16 @@ export function ProposalListPanel() {
           </Button>
         ) : null}
       </div>
+      )}
+      <ProposalBulkDeleteDialog
+        open={bulkDeleteOpen}
+        onOpenChange={(open) => {
+          if (!bulkDeleting) setBulkDeleteOpen(open);
+        }}
+        count={selectedIds.size}
+        deleting={bulkDeleting}
+        onConfirm={() => void runBulkDelete()}
+      />
       <ProposalListFiltersDialog
         open={filtersOpen}
         onOpenChange={setFiltersOpen}
@@ -779,15 +1014,7 @@ export function ProposalListPanel() {
         stats={data?.stats}
         onApply={(dims) =>
           writeView({
-            filters: {
-              ...view.filters,
-              status: dims.status,
-              kind: dims.kind,
-              proposerUsername: dims.proposerUsername,
-              proposerActorType: dims.proposerActorType,
-              proposerActorRole: dims.proposerActorRole,
-              agentSessionId: dims.agentSessionId,
-            },
+            filters: { ...view.filters, ...dims },
             q: view.q,
           })
         }
@@ -832,19 +1059,32 @@ export function ProposalListPanel() {
               {listSummary ? ` · ${listSummary}` : ""}
             </p>
           ) : null}
-          <div className="space-y-2.5">
-            {proposals.map((p) => (
-              <ProposalListCard
-                key={p.id}
-                proposal={p}
-                href={
-                  listSearch
-                    ? `${AGENTS_PROPOSALS_BASE}/${p.id}?${listSearch}`
-                    : `${AGENTS_PROPOSALS_BASE}/${p.id}`
+          {perspective === "table" ? (
+            proposals.length > 0 ? (
+              <ProposalListTable
+                proposals={proposals}
+                selected={selectedIds}
+                hrefFor={proposalHref}
+                onToggle={(id, checked) =>
+                  setSelectedIds((prev) => {
+                    const next = new Set(prev);
+                    if (checked) next.add(id);
+                    else next.delete(id);
+                    return next;
+                  })
+                }
+                onToggleAll={(checked) =>
+                  setSelectedIds(checked ? new Set(proposals.map((p) => p.id)) : new Set())
                 }
               />
-            ))}
-          </div>
+            ) : null
+          ) : (
+            <div className="space-y-2.5">
+              {proposals.map((p) => (
+                <ProposalListCard key={p.id} proposal={p} href={proposalHref(p.id)} />
+              ))}
+            </div>
+          )}
           {proposals.length === 0 && (
             <div
               className="flex flex-col items-center gap-3 rounded-card border border-dashed border-card-border px-6 py-12 text-center"
@@ -920,10 +1160,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [blockerBody, setBlockerBody] = useState("");
   const [resolveNotes, setResolveNotes] = useState<Record<number, string>>({});
   const [confirmExperiment, setConfirmExperiment] = useState(false);
+  const [confirmBaseUnknown, setConfirmBaseUnknown] = useState(false);
+  const [, setDetailLocation] = useLocation();
   const [advanced, setAdvanced] = useState(false);
   const [claimOpen, setClaimOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [activityAck, setActivityAck] = useState(false);
+  const [affectedAck, setAffectedAck] = useState(false);
   const [closeOpen, setCloseOpen] = useState(false);
   const [closeReason, setCloseReason] = useState<ProposalCloseReasonValue>("wont_fix");
   const [closeNote, setCloseNote] = useState("");
@@ -957,14 +1200,30 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     }, 350);
   };
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error: detailError } = useQuery({
     queryKey: ["/api/admin/proposals", id],
     queryFn: async () => {
       const res = await apiFetch(`/api/admin/proposals/${id}`, { headers: headers() });
+      if (res.status === 410) {
+        const body = (await res.json().catch(() => ({}))) as {
+          deleted_by?: string;
+          deleted_at?: string;
+        };
+        throw Object.assign(new Error("Proposal was deleted"), {
+          deleted: { by: body.deleted_by ?? "staff", at: body.deleted_at ?? null },
+        });
+      }
       if (!res.ok) throw new Error("Not found");
-      return res.json() as Promise<{ proposal: Proposal; review_context?: ReviewContextPayload | null }>;
+      return res.json() as Promise<{
+        proposal: Proposal;
+        review_context?: ReviewContextPayload | null;
+        deleted_refs?: string[];
+      }>;
     },
   });
+  const deletedInfo = (detailError as { deleted?: { by: string; at: string | null } } | null)
+    ?.deleted;
+  const deletedRefs = new Set(data?.deleted_refs ?? []);
 
   const mut = useMutation({
     mutationFn: async (payload: { action: string; body?: Record<string, unknown> }) => {
@@ -982,25 +1241,57 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       toast({ title: "Updated" });
       if (json.warnings?.length) {
         toast({
-          title: json.warnings[0].message,
+          title: plainWarningTitle(json.warnings as ProposalWarning[]),
           variant: "default",
         });
       }
     },
-    onError: (e: Error & { data?: { code?: string; traffic_siblings?: unknown } }) => {
+    onError: (
+      e: Error & {
+        data?: { code?: string; traffic_siblings?: unknown; details?: { property_path?: string; message?: string } };
+      },
+    ) => {
       const code = e.data?.code;
       const plainByCode: Record<string, string> = {
         entry_not_found:
           "That page (or draft) does not exist yet — create the page/draft first, or file an idea instead of edits.",
+        sections_required:
+          "This new page or language has no sections yet. The proposal must include the whole page layout (translated, for a new language).",
+        invalid_sections: plainSectionIssue(e.data?.details),
+        empty_page:
+          "This page would publish empty — it has no sections. Add sections before publishing.",
         mixed_risk_bundle:
           "This proposal mixes different risk levels (for example selling pages with other edits). Split into separate proposals.",
         competing_entry_edits:
           "Another open edits proposal already targets this same page. Join that one, or reject the weaker proposal first.",
         target_missing:
           "The page this proposal edits no longer exists — apply is blocked. Reject or withdraw, or restore the page and file fresh.",
+        legacy_version:
+          "This proposal was filed before proposals 1.0 and can only be withdrawn or rejected. File a new proposal for this change.",
+        context_stale:
+          "The live page changed after this draft was made. It went back to the author to update — nothing was published.",
+        draft_missing:
+          "The draft for this page no longer exists, so nothing was published. The author needs to revise the proposal.",
+        four_eyes_co_author:
+          "You edited this draft directly, so you count as a co-author. Someone else must approve it.",
+        all_or_nothing_blocked:
+          "This proposal publishes all pages or none, and at least one page cannot be published yet. Nothing was published.",
+        competing_shared_fields:
+          "Another open proposal already changes the same whole-page fields. Finish or close that one first.",
+        draft_in_proposal:
+          "That draft already belongs to another open proposal.",
+        variant_has_traffic:
+          "That version is receiving visitor traffic, so it cannot be used as a proposal draft.",
+        revert_conflicts:
+          "Some fields changed again after this proposal was applied, so they cannot be reverted automatically.",
+        nothing_to_revert: "There is nothing left to revert on this proposal.",
+        not_applied: "Only applied proposals can be reverted.",
+        confirm_affected_entries:
+          "The number of pages this template change reaches has changed. Reload and confirm again.",
       };
+      const emptyPage = e.message.includes("EMPTY_PAGE") ? plainByCode.empty_page : undefined;
       toast({
-        title: (code && plainByCode[code]) || e.message,
+        title: (code && plainByCode[code]) || emptyPage || e.message,
         variant: "destructive",
       });
       if (e.data?.code === "confirm_end_experiment") {
@@ -1010,6 +1301,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       if (e.data?.code === "confirm_recent_activity") {
         setApplyOpen(true);
         setActivityAck(false);
+      }
+      if (e.data?.code === "draft_base_unknown") {
+        setConfirmBaseUnknown(true);
+        setApplyOpen(true);
       }
     },
   });
@@ -1107,6 +1402,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         proposerUsername: p.proposer_username,
         proposerActor: p.proposer_actor,
         claim: p.claim,
+        status: p.status,
+        closeReason: p.close_reason,
+        closedBy: p.closed_by,
+        reviewer: p.reviewer_action_by,
+        reviewerActor: p.reviewer_action_by_actor,
+        reviewerAt: p.reviewer_action_at,
       })
     : null;
   const progress = p && p.kind === "edits" ? proposalEntryProgress(p.entries ?? []) : null;
@@ -1188,6 +1489,17 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         node: <span className="text-muted-foreground/70">{attribution.expiredLine}</span>,
       });
     }
+    // Terminal proposals already show the closer in the decision banner below.
+    if (attribution.reviewLine && !isTerminal) {
+      detailMeta.push({
+        key: "review",
+        node: (
+          <span title={attribution.reviewLine.title} data-testid="text-proposal-detail-review">
+            {attribution.reviewLine.text}
+          </span>
+        ),
+      });
+    }
     if (progress) {
       detailMeta.push({
         key: "progress",
@@ -1221,6 +1533,24 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           <Skeleton className="h-3 w-1/2" />
         </Card>
       )}
+      {deletedInfo ? (
+        <div
+          className="flex flex-col items-center gap-3 rounded-card border border-dashed border-card-border px-6 py-12 text-center"
+          data-testid="proposal-deleted-state"
+        >
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <IconBan className="h-5 w-5" aria-hidden />
+          </span>
+          <div className="space-y-1">
+            <p className="text-sm font-medium">Deleted proposal</p>
+            <p className="text-xs text-muted-foreground">
+              Deleted by {deletedInfo.by}
+              {deletedInfo.at ? ` on ${new Date(deletedInfo.at).toLocaleString()}` : ""}. It can&apos;t
+              be opened anymore.
+            </p>
+          </div>
+        </div>
+      ) : null}
       {p && mode && attribution && ui && (
         <>
           <Card className={cn("border-l-2", ui.accentClassName)}>
@@ -1262,6 +1592,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}
+                  <ProposalV1Badges
+                    p={p}
+                    revertsDeleted={Boolean(
+                      p.reverts_proposal_id && deletedRefs.has(p.reverts_proposal_id),
+                    )}
+                  />
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
                 {p.escalated ? (
@@ -1342,6 +1678,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 ) : null}
                 {isTerminal && p.decision_debug ? (
                   <DecisionDebugPanel debug={p.decision_debug} />
+                ) : null}
+                {isTerminal ? (
+                  <ProposalOutcomeReview
+                    proposal={p}
+                    isSteward={isSteward}
+                    saving={mut.isPending}
+                    onAction={(action, body, onSuccess) =>
+                      mut.mutate({ action, body }, onSuccess ? { onSuccess } : undefined)
+                    }
+                  />
                 ) : null}
                 <div
                   className="flex flex-wrap items-center gap-2"
@@ -1484,6 +1830,21 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       {p.accepted_entry.contentType}/{p.accepted_entry.slug}
                       <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
                     </Badge>
+                    {p.accepted_entry_create_mode === "manual" ? (
+                      <p
+                        className="basis-full text-xs text-muted-foreground"
+                        data-testid="text-idea-entry-not-creatable"
+                      >
+                        {ACCEPTED_ENTRY_NOT_CREATABLE_COPY}
+                      </p>
+                    ) : p.accepted_entry_create_mode === "page" ? (
+                      <p
+                        className="basis-full text-xs text-muted-foreground"
+                        data-testid="text-idea-entry-needs-layout"
+                      >
+                        {ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {p.kind === "idea" ? (
@@ -1605,13 +1966,24 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     data-testid="proposal-implements-idea"
                   >
                     <span className="text-xs text-muted-foreground">Implements idea</span>
-                    <Badge
-                      variant="outline"
-                      className="font-mono font-normal"
-                      data-testid="badge-implements-proposal"
-                    >
-                      {p.implements_proposal_id.slice(0, 8)}…
-                    </Badge>
+                    {deletedRefs.has(p.implements_proposal_id) ? (
+                      <Badge
+                        variant="outline"
+                        className="font-normal text-muted-foreground"
+                        title={p.implements_proposal_id}
+                        data-testid="badge-implements-proposal-deleted"
+                      >
+                        Deleted proposal
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className="font-mono font-normal"
+                        data-testid="badge-implements-proposal"
+                      >
+                        {p.implements_proposal_id.slice(0, 8)}…
+                      </Badge>
+                    )}
                   </div>
                 ) : null}
                 <ProposalMetaRow items={detailMeta} className="text-xs" />
@@ -1849,6 +2221,42 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             </div>
           ) : null}
 
+          {p.system_version &&
+          p.kind === "edits" &&
+          (p.status === "finished" || p.status === "partial") &&
+          p.entries.some((e) => e.status === "done") ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="panel-proposal-revert"
+            >
+              <p className="text-muted-foreground">
+                Want to undo this? Revert opens a new proposal that puts back the values that were
+                live before. Nothing changes until that proposal is approved.
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={mut.isPending}
+                onClick={() =>
+                  mut.mutate(
+                    { action: "revert" },
+                    {
+                      onSuccess: (json: { proposal?: { id?: string } }) => {
+                        if (json.proposal?.id) {
+                          setDetailLocation(`${AGENTS_PROPOSALS_BASE}/${json.proposal.id}`);
+                        }
+                      },
+                    },
+                  )
+                }
+                data-testid="button-revert-proposal"
+              >
+                Revert
+              </Button>
+            </div>
+          ) : null}
+
           {p.status === "rejected" && (p.close_reason || p.close_note) ? (
             <div
               className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm"
@@ -1862,7 +2270,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   {p.closed_by ? ` by ${p.closed_by}` : ""}
                   {p.close_note ? `: ${p.close_note}` : ""}
                 </p>
-                {p.replaced_by_proposal_id ? (
+                {p.replaced_by_proposal_id && deletedRefs.has(p.replaced_by_proposal_id) ? (
+                  <p
+                    className="text-muted-foreground"
+                    title={p.replaced_by_proposal_id}
+                    data-testid="text-replaced-by-proposal-deleted"
+                  >
+                    Replacement: Deleted proposal
+                  </p>
+                ) : p.replaced_by_proposal_id ? (
                   <p>
                     <Link
                       href={`${AGENTS_PROPOSALS_BASE}/${p.replaced_by_proposal_id}`}
@@ -1981,6 +2397,36 @@ export function ProposalDetailPanel({ id }: { id: string }) {
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Proposed changes ({p.entries.length})
               </h3>
+              {p.affected_entries ? (
+                <div
+                  className="space-y-1.5 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+                  data-testid="panel-proposal-affected-entries"
+                >
+                  <p className="font-medium text-foreground">
+                    Affects {p.affected_entries.count} page{p.affected_entries.count === 1 ? "" : "s"} that use this template
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    This changes the shared template, so every attached page in that language changes when it is
+                    published. Pages detached from the template are not affected.
+                  </p>
+                  {p.affected_entries.sample.length ? (
+                    <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                      {p.affected_entries.sample.map((a) => (
+                        <li key={`${a.contentType}:${a.slug}:${a.locale}`}>
+                          <a
+                            href={entryPreviewHref(a)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary hover:underline"
+                          >
+                            Preview {a.slug}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
               {p.entries.map((e) => {
                 const href = previewHref(e);
                 return (
@@ -2087,19 +2533,23 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           <p className="whitespace-pre-wrap">{e.last_error}</p>
                         </div>
                       )}
-                      {e.ops.length === 0 && (p.promote_on_apply || p.review_mode === "draft_backed") && (
+                      {e.ops.length === 0 && !e.draft_missing && (p.promote_on_apply || p.review_mode === "draft_backed") && (
                         <p className="text-xs text-muted-foreground">
                           No field-diff list — the attached draft is the change. Preview it before approve.
                         </p>
                       )}
-                      {e.ops.map((op) => (
-                        <ProposalFieldDiff
-                          key={op.field_path}
-                          fieldPath={op.field_path}
-                          current={e.baseline_context.values[op.field_path]}
-                          proposed={op.value}
-                        />
-                      ))}
+                      {p.system_version ? (
+                        <ProposalDraftEntryDetails entry={e} />
+                      ) : (
+                        e.ops.map((op) => (
+                          <ProposalFieldDiff
+                            key={op.field_path}
+                            fieldPath={op.field_path}
+                            current={e.baseline_context.values[op.field_path]}
+                            proposed={op.value}
+                          />
+                        ))
+                      )}
                     </div>
                   </Card>
                 );
@@ -2285,6 +2735,16 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           Approving copies the prepared draft over the live page for this locale.
                           Visitors will see that version.
                         </p>
+                        {p.all_or_nothing ? (
+                          <p>All pages publish together. If any page cannot be published, nothing is published.</p>
+                        ) : null}
+                        {confirmBaseUnknown ? (
+                          <p className="text-destructive" data-testid="apply-base-unknown-warning">
+                            Some drafts have no recorded starting point, so changes made to the live
+                            page since then cannot be detected. Confirming publishes the draft as-is
+                            and may undo those changes.
+                          </p>
+                        ) : null}
                         {confirmExperiment ? (
                           <p className="text-destructive">
                             Other versions still have traffic. Confirming will remove those
@@ -2314,6 +2774,24 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         </p>
                       </>
                     )}
+                    {p.affected_entries ? (
+                      <label
+                        className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground cursor-pointer"
+                        data-testid="apply-affected-entries-ack"
+                      >
+                        <Checkbox
+                          checked={affectedAck}
+                          onCheckedChange={(v) => setAffectedAck(v === true)}
+                          className="mt-0.5"
+                          data-testid="checkbox-affected-entries-ack"
+                        />
+                        <span>
+                          I understand this changes {p.affected_entries.count} page
+                          {p.affected_entries.count === 1 ? "" : "s"} that use the template.
+                        </span>
+                      </label>
+                    ) : null}
+                    {p.affected_entries && applyOpen ? <TemplatePlaceholderNotice proposalId={p.id} /> : null}
                     {needsActivityAck ? (
                       <div
                         className="space-y-2 rounded-md border border-card-border bg-muted/40 p-3"
@@ -2348,12 +2826,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     mut.isPending ||
                     blockersOpen ||
                     Boolean(p.recent_activity_error) ||
-                    (needsActivityAck && !activityAck)
+                    (needsActivityAck && !activityAck) ||
+                    (Boolean(p.affected_entries) && !affectedAck)
                   }
                   onClick={() => {
                     const body: Record<string, unknown> = {};
                     if (confirmExperiment) body.confirm_end_experiment = true;
                     if (needsActivityAck) body.confirm_recent_activity = true;
+                    if (confirmBaseUnknown) body.confirm_base_unknown = true;
+                    if (p.affected_entries) body.confirm_affected_entries = p.affected_entries.count;
                     mut.mutate(
                       {
                         action: "apply",
@@ -2363,6 +2844,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         onSuccess: () => {
                           setApplyOpen(false);
                           setActivityAck(false);
+                          setConfirmBaseUnknown(false);
                         },
                       },
                     );

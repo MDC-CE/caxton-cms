@@ -37,7 +37,9 @@ export type ChecklistId =
   | "adjacent_findings"
   | "disposition"
   | "existence_unknown"
-  | "target_missing";
+  | "target_missing"
+  | "layout_structure"
+  | "template_blast_radius";
 
 /** Staff always-visible line when idea_opportunity_harm is active. */
 export const IDEA_OPPORTUNITY_HARM_STAFF_NOTE =
@@ -119,7 +121,7 @@ export const DAMAGE_CLASS_META: Record<DamageClass, DamageClassMeta> = {
     id: "new_public_content",
     badge_label: "New public content",
     situation_description:
-      "New public page. Judge angle, facts, and funnel — not only whether apply is easy. For an attached post with no file yet, apply creates that post and does not change the shared template.",
+      "New public page or language. Judge angle, facts, and funnel — not only whether apply is easy. A post that uses the shared template gets fields only; the template does not change. A page that owns its layout is published from its draft, including its full layout.",
     risk: "High — brand and spam risk for new public content.",
   },
 };
@@ -273,6 +275,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "next_step is concrete (min 20 characters)",
       "new-URL ideas: structured idea_funnel (stage + products) required before accept — missing → add_blocker; do not invent funnel for the author; products \"all\" only with awareness",
       "follow-up edits use implements_proposal_id matching this idea",
+      "if the accepted_entry type is layout_owner entry (landing, downloadable…), the brief should describe the page structure; missing structure → add_blocker",
       "do not report the page as live after accept",
       "close/park means no — not yes",
     ],
@@ -429,6 +432,34 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "do not invent selling-page vs new-content from a failed lookup",
     ],
     priority: 5,
+  },
+  layout_structure: {
+    id: "layout_structure",
+    title: "Review the page layout",
+    why: "The draft adds, removes, or reorders sections (or builds a whole page or language). The layout is what visitors see — fields alone do not tell you that.",
+    look_for: [
+      "components fit this page type and the order makes sense (a hero-type opener, a CTA present)",
+      "compare with one or two sibling pages of the same type (list_entries → get_entry_content)",
+      "no placeholder or lorem text, no made-up image URLs",
+      "section CTAs and links point to real programs",
+      "the registry check only covers shape (type, version, required props, variant) — images, links, and ecommerce scope are still yours to check",
+      "sections_summary on each entry lists added / removed / moved / changed sections; full arrays stay in ops",
+      "wrong structure → add_blocker",
+    ],
+    priority: 15,
+  },
+  template_blast_radius: {
+    id: "template_blast_radius",
+    title: "Check the shared template's reach",
+    why: "This draft is the shared template itself. Apply changes the layout of every attached page in that language at once.",
+    look_for: [
+      "affected_entries.count and sample: open 2–3 affected entries with the template draft in mind",
+      "every new {{ entry.* }} placeholder must be filled by those entries' fields — missing fields render empty on every page (apply dry_run reports template_placeholders_unfilled)",
+      "all template languages are covered, or the difference is intentional (template_locales_incomplete)",
+      "detached entries do not change; if the goal is \"all entries\", they need their own edits",
+      "apply needs confirm_affected_entries equal to the count",
+    ],
+    priority: 12,
   },
   target_missing: {
     id: "target_missing",

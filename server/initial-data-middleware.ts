@@ -36,7 +36,8 @@ import {
   extractImageRefsFromValue,
   type ImageRefs,
 } from "./image-registry-subset";
-import { buildListingCanonicalHref } from "../shared/listing-canonical";
+import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
+import { isLocaleHomeAlias } from "@shared/public-app-routes";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -99,41 +100,9 @@ export async function resolvePageQuery(
 
   const cleanUrl = url.split("?")[0].split("#")[0];
 
-  if (
-    cleanUrl === "/" ||
-    cleanUrl === "/en" ||
-    cleanUrl === "/en/" ||
-    cleanUrl === "/es" ||
-    cleanUrl === "/es/"
-  ) {
-    const locale = cleanUrl.startsWith("/es") ? "es" : "en";
-    const slug = "home";
-    const result = ci.loadContent({
-      contentType: "page",
-      slug,
-      localeOrVariant: locale,
-    });
-    if (result.success) {
-      const data = result.data as any;
-      if (data.sections && Array.isArray(data.sections)) {
-        applyComponentSectionDefaults(data.sections);
-        data.sections = (await resolveDynamicEntries(
-          data.sections,
-          locale,
-          { db: dbm, contentRoot: ci.contentRoot, contentIndex: ci },
-        )) as any;
-        applyComponentImageSizes(data.sections);
-      }
-      const pageRaw = ci.loadMergedContent("page", slug, locale);
-      const layout = resolveLayout("page", pageRaw.data || {}, ci.contentRoot);
-      data.layout = layout;
-      return {
-        queryKey: ["/api/pages", slug, locale],
-        data,
-      };
-    }
-    return null;
-  }
+  // Locale-home aliases (`/`, `/en`, `/es`, `/us`, `/es/home`) must 301 via
+  // redirectMiddleware — never soft-serve the homepage document here.
+  if (isLocaleHomeAlias(cleanUrl)) return null;
 
   try {
     const resolved = ci.resolveUrl(cleanUrl);
@@ -625,7 +594,9 @@ export function injectSsrMetaTags(
     return html;
   }
   let meta = data.meta as Record<string, unknown> | undefined;
-  if (!meta) return html;
+  if (!meta) {
+    meta = {};
+  }
 
   const singleEntry = data.singleEntry as Record<string, unknown> | undefined;
   const region =
@@ -679,20 +650,85 @@ export function injectSsrMetaTags(
     html = html.replace("</head>", `<meta name="robots" content="${escapeAttr(robotsValue)}" />\n</head>`);
   }
 
-  if (typeof meta.canonical_url === "string" && meta.canonical_url.trim() && !meta.canonical_url.includes("{{")) {
-    const canonicalHref = buildListingCanonicalHref(meta.canonical_url.trim(), requestUrl);
-    const escaped = escapeAttr(canonicalHref);
-    const canonicalTag = `<link rel="canonical" href="${escaped}" />`;
-    if (/\brel\s*=\s*["']canonical["']/i.test(html)) {
-      html = html.replace(
-        /<link\b(?:(?!\/>)[\s\S])*?\brel\s*=\s*["']canonical["'](?:(?!\/>)[\s\S])*?\/?>\s*/gi,
-        "",
-      );
+  const contentTypeForCanonical = contentTypeFromPageQuery(pageQuery);
+  const localeForCanonical =
+    (typeof data.locale === "string" && data.locale) ||
+    payload.locale ||
+    "en";
+  const recordForCanonical = {
+    ...data,
+    ...(singleEntry && typeof singleEntry === "object" ? singleEntry : {}),
+    slug:
+      (typeof data.slug === "string" && data.slug) ||
+      (typeof singleEntry?.slug === "string" && singleEntry.slug) ||
+      (contentTypeForCanonical?.slug ?? undefined),
+  };
+  if (contentTypeForCanonical?.contentType) {
+    const canonicalHref = resolveEffectiveCanonical({
+      meta,
+      contentType: contentTypeForCanonical.contentType,
+      record: recordForCanonical,
+      locale: localeForCanonical,
+      requestUrl,
+      contentRoot,
+    });
+    if (canonicalHref) {
+      const escaped = escapeAttr(canonicalHref);
+      const canonicalTag = `<link rel="canonical" href="${escaped}" />`;
+      if (/\brel\s*=\s*["']canonical["']/i.test(html)) {
+        html = html.replace(
+          /<link\b(?:(?!\/>)[\s\S])*?\brel\s*=\s*["']canonical["'](?:(?!\/>)[\s\S])*?\/?>\s*/gi,
+          "",
+        );
+      }
+      html = html.replace("</head>", `${canonicalTag}\n</head>`);
+
+      if (html.includes('property="og:url"')) {
+        html = replaceMetaContent(html, "property", "og:url", canonicalHref);
+      } else {
+        html = html.replace(
+          "</head>",
+          `<meta property="og:url" content="${escaped}" />\n</head>`,
+        );
+      }
     }
-    html = html.replace("</head>", `${canonicalTag}\n</head>`);
   }
 
   return html;
+}
+
+function contentTypeFromPageQuery(
+  pageQuery: SingleQuery,
+): { contentType: string; slug?: string } | null {
+  const key = pageQuery.queryKey;
+  const key0 = key[0];
+  if (typeof key0 !== "string") return null;
+
+  if (key0 === "/api/database-single") {
+    const contentType = typeof key[1] === "string" ? key[1] : null;
+    if (!contentType) return null;
+    return {
+      contentType,
+      slug: typeof key[2] === "string" ? key[2] : undefined,
+    };
+  }
+
+  if (key0.startsWith("/api/content-pages/")) {
+    return {
+      contentType: key0.slice("/api/content-pages/".length),
+      slug: typeof key[1] === "string" ? key[1] : undefined,
+    };
+  }
+
+  for (const type of Object.keys(getAllConfigs())) {
+    if (getApiPath(type) === key0) {
+      return {
+        contentType: type,
+        slug: typeof key[1] === "string" ? key[1] : undefined,
+      };
+    }
+  }
+  return null;
 }
 
 export async function resolveInitialData(

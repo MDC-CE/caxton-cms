@@ -265,9 +265,12 @@ const AddSectionButton = lazy(() =>
   import("@/components/editing/AddSectionButton").then((m) => ({ default: m.AddSectionButton }))
 );
 const ComponentPickerModal = lazy(() => import("@/components/editing/ComponentPickerModal"));
+const SectionEditorPanel = lazy(() =>
+  import("@/components/editing/SectionEditorPanel").then((m) => ({ default: m.SectionEditorPanel }))
+);
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken, resolveAuthorName } from "@/hooks/useDebugAuth";
-import { emitContentUpdated } from "@/lib/contentEvents";
+import { emitContentUpdated, emitEditStarted } from "@/lib/contentEvents";
 import {
   Dialog,
   DialogContent,
@@ -411,8 +414,12 @@ interface SectionRendererProps {
   /** When false, hide entry-scoped structural actions on attached shared-layout pages. */
   allowEntryStructuralOverrides?: boolean;
   perEntryRemovedSections?: Array<{ section: Record<string, unknown>; originalIndex: number }>;
-  /** Staff preview: open raw YAML editor when a section fails to render. */
-  onEditYaml?: () => void;
+  /**
+   * Staff surfaces (e.g. private preview): show Edit YAML on section render
+   * failures even when edit chrome is off. Opens SectionEditorPanel for that
+   * section only (not the full page file).
+   */
+  allowErrorYamlEdit?: boolean;
 }
 
 function EmptyPageState({ 
@@ -607,10 +614,22 @@ function toSingularLabel(ct: string | undefined, rawTypes: { name: string; label
   return lower;
 }
 
-export function SectionRenderer({ sections, settings, contentType, slug, locale, variant, version, programSlug, landingLocations, isSharedTemplate, singleEntry, meta, param, funnel, allowEntryStructuralOverrides = true, perEntryRemovedSections, onEditYaml }: SectionRendererProps) {
+export function SectionRenderer({ sections, settings, contentType, slug, locale, variant, version, programSlug, landingLocations, isSharedTemplate, singleEntry, meta, param, funnel, allowEntryStructuralOverrides = true, perEntryRemovedSections, allowErrorYamlEdit }: SectionRendererProps) {
   const { toast } = useToast();
   const editMode = useEditModeOptional();
   const isEditMode = editMode?.isEditMode ?? false;
+  const canOfferErrorYamlEdit = !!(
+    contentType &&
+    slug &&
+    locale &&
+    (isEditMode || allowErrorYamlEdit)
+  );
+  /** Section index opened from render-error "Edit YAML" (SectionEditorPanel). */
+  const [errorYamlEditIndex, setErrorYamlEditIndex] = useState<number | null>(null);
+  /** Bump to remount the error boundary after save so it retries render. */
+  const [errorBoundaryRemountKeys, setErrorBoundaryRemountKeys] = useState<
+    Record<number, number>
+  >({});
   const previewBreakpoint = editMode?.previewBreakpoint;
   const { session } = useSession();
   const { sectionBackgroundOverlapsMenu, topChromeHeightDesktop, topChromeHeightMobile } = useMenuVisualContext();
@@ -1620,9 +1639,23 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
               )}
               <div style={contentLayerStyles}>
                 <SectionRenderErrorBoundary
+                  key={`section-err-${index}-${errorBoundaryRemountKeys[index] ?? 0}`}
                   sectionType={sectionType}
                   sectionId={sectionId}
-                  onEditYaml={onEditYaml}
+                  onEditYaml={
+                    canOfferErrorYamlEdit
+                      ? () => {
+                          emitEditStarted({
+                            contentType: contentType || "",
+                            slug: slug || "",
+                            locale: locale || "en",
+                            sectionIndex: index,
+                            variant: variant || "",
+                            resume: () => setErrorYamlEditIndex(index),
+                          });
+                        }
+                      : undefined
+                  }
                 >
                   {isEditMode ? (
                     <Suspense fallback={null}>
@@ -1997,6 +2030,36 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {errorYamlEditIndex !== null &&
+        sections[errorYamlEditIndex] &&
+        contentType &&
+        slug &&
+        locale && (
+          <Suspense fallback={null}>
+            <SectionEditorPanel
+              section={sections[errorYamlEditIndex]}
+              sectionIndex={errorYamlEditIndex}
+              contentType={contentType}
+              slug={slug}
+              locale={locale}
+              variant={variant}
+              version={version}
+              onUpdate={() => {
+                const idx = errorYamlEditIndex;
+                if (idx === null) return;
+                setErrorBoundaryRemountKeys((prev) => ({
+                  ...prev,
+                  [idx]: (prev[idx] ?? 0) + 1,
+                }));
+              }}
+              onClose={() => setErrorYamlEditIndex(null)}
+              allSections={sections}
+              isSharedTemplate={isSharedTemplate}
+              singleEntry={singleEntry}
+              allowEntryStructuralOverrides={allowEntryStructuralOverrides}
+            />
+          </Suspense>
+        )}
       </div>
   </PageSectionsProvider>
   </PageFunnelProvider>

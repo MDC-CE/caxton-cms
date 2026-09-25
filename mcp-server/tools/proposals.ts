@@ -39,20 +39,272 @@ function stripDecisionDebugFromPayload(data: Record<string, unknown>): Record<st
 
 type AttachedCreateHint = { contentType: string; slug: string; locale: string };
 
-function proposalCreatesAttachedEntry(proposal: unknown): boolean {
-  if (!proposal || typeof proposal !== "object") return false;
-  const entries = (
-    proposal as {
-      entries?: Array<{ variant?: string | null; baseline_context?: { creates_entry?: boolean } }>;
-    }
-  ).entries;
-  return Boolean(
-    entries?.some((e) => e.baseline_context?.creates_entry === true && !String(e.variant ?? "").trim()),
-  );
+const ENTRY_UPDATE_SCHEMA = z.object({
+  field_path: z.string(),
+  value: z.unknown().optional(),
+  reset: z.boolean().optional(),
+  op: z
+    .enum(["set", "remove"])
+    .optional()
+    .describe(
+      'remove = delete the field when published (value null works too). Page-level (common) fields are removed from {slug}/_common.yml in every locale; the draft stores null until then.',
+    ),
+});
+
+const ENTRY_INPUT_SCHEMA = z.object({
+  contentType: z.string(),
+  slug: z.string(),
+  locale: z.string(),
+  variant: z
+    .string()
+    .optional()
+    .describe(
+      "Existing 0%-traffic draft to use. Omit → the proposal creates `draft` (or `draft-p{id6}` when taken) from today's live.",
+    ),
+  updates: z.array(ENTRY_UPDATE_SCHEMA).optional(),
+  translated_from_locale: z
+    .string()
+    .optional()
+    .describe(
+      "The draft is a translation of this published locale. Apply goes context_stale if that source changes before approval.",
+    ),
+});
+
+/** v1.0 create/revise: the drafts the proposal wrote (for side_effects). */
+function draftsWritten(proposal: unknown): Array<Record<string, unknown>> {
+  const entries = (proposal as { entries?: Array<Record<string, unknown>> } | undefined)?.entries ?? [];
+  return entries
+    .filter((e) => typeof e.variant === "string" && e.status !== "done")
+    .map((e) => ({
+      contentType: e.contentType,
+      slug: e.slug,
+      locale: e.locale,
+      draft: `${e.variant}.${e.locale}.yml`,
+      created_by_proposal: e.created_draft === true,
+    }));
 }
 
-function attachedIdeaEditsAction(
-  proposal: { id?: string; attached_create_entry?: AttachedCreateHint | null },
+/** Shared error mapping for v1.0 draft-first codes (create + update). */
+function draftFirstFailure(
+  data: Record<string, unknown>,
+  ctx: { tool: "propose_change" | "update_proposal"; proposal_id?: string; site?: string },
+) {
+  const code = String(data.code ?? "");
+  const details = (data.details ?? {}) as Record<string, unknown>;
+  const existing = data.existing_proposal as { id?: string } | undefined;
+  const siteArg = ctx.site ? { site: ctx.site } : {};
+  switch (code) {
+    case "legacy_version":
+      return fail(String(data.error ?? "legacy proposal"), {
+        code,
+        warnings: [
+          {
+            code: "legacy_read_only",
+            message:
+              "Filed before proposals 1.0 (no system_version). Only withdraw / reject / release / outcome review work. Nothing was written.",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "propose_change",
+            reason: "Re-file the same change as a new 1.0 proposal (updates are written into a draft; apply promotes it).",
+            priority: "required",
+            args_hint: { supersedes_proposal_id: ctx.proposal_id, ...siteArg },
+          },
+          {
+            tool: "update_proposal",
+            reason: "Withdraw the legacy proposal once the replacement exists.",
+            priority: "recommended",
+            args_hint: { proposal_id: ctx.proposal_id, action: "withdraw", ...siteArg },
+          },
+        ],
+      });
+    case "context_stale":
+    case "draft_missing":
+      return fail(String(data.error ?? code), {
+        code,
+        ...(details.conflicting_fields ? { conflicting_fields: details.conflicting_fields } : {}),
+        details,
+        warnings: [
+          {
+            code: "needs_author",
+            message:
+              code === "draft_missing"
+                ? "The proposal's draft file is gone. Nothing was published. The proposal moved to attention needs_author."
+                : details.reason === "layout_owner_changed"
+                  ? "layout_owner_changed: the entry was reattached to the shared template (layout_owner entry → shared_template) after filing, so the draft's sections would be ignored. Nothing was published. The proposal moved to attention needs_author — revise to fields only, or withdraw."
+                  : "Live (or the translation source) changed after the draft was made and could not be merged automatically. Nothing was published. The proposal moved to attention needs_author (out of the reviewer queue).",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "update_proposal",
+            reason:
+              "Author (or staff co-author): revise_entries with the full intended updates — resets the draft from today's live and clears stale.",
+            priority: "required",
+            args_hint: { proposal_id: ctx.proposal_id, action: "revise_entries", ...siteArg },
+          },
+          {
+            tool: "list_proposals",
+            reason: "Read merge_preview / conflicting_fields / source_changed per entry.",
+            priority: "recommended",
+            args_hint: { proposal_id: ctx.proposal_id },
+          },
+        ],
+      });
+    case "draft_base_unknown":
+      return actionRequired(
+        { success: false, action_required: "confirm_base_unknown", ...data },
+        [
+          {
+            tool: "update_proposal",
+            reason:
+              "The draft has no recorded starting point (pre-1.0 draft), so live changes since then cannot be detected. Preview with dry_run, then retry apply with confirm_base_unknown: true to publish the draft as-is (may undo recent live edits).",
+            priority: "required",
+            args_hint: { proposal_id: ctx.proposal_id, action: "apply", confirm_base_unknown: true, ...siteArg },
+          },
+        ],
+      );
+    case "confirm_affected_entries":
+      return actionRequired(
+        { success: false, action_required: "confirm_affected_entries", ...data },
+        [
+          {
+            tool: "update_proposal",
+            reason: `Template change reaches ${String(details.count ?? "N")} attached page(s) in that locale (detached pages unaffected). Preview a sample, then retry apply with confirm_affected_entries equal to that count.`,
+            priority: "required",
+            args_hint: {
+              proposal_id: ctx.proposal_id,
+              action: "apply",
+              confirm_affected_entries: details.count,
+              ...siteArg,
+            },
+          },
+        ],
+      );
+    case "all_or_nothing_blocked":
+      return fail(String(data.error ?? code), {
+        code,
+        details,
+        warnings: [
+          {
+            code: "nothing_published",
+            message: "all_or_nothing: at least one entry cannot publish, so no entry was published. Failed entries carry last_error.",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "list_proposals",
+            reason: "Read each pending entry's last_error, fix via revise_entries, then apply again.",
+            priority: "required",
+            args_hint: { proposal_id: ctx.proposal_id },
+          },
+        ],
+      });
+    case "four_eyes_co_author":
+      return fail(String(data.error ?? code), {
+        code,
+        next_actions: [
+          {
+            tool: "list_proposals",
+            reason: "You edited this proposal's draft directly (co-author). A different human+role must apply it.",
+            priority: "required",
+            args_hint: { proposal_id: ctx.proposal_id },
+          },
+        ],
+      });
+    case "revert_conflicts":
+      return fail(String(data.error ?? code), {
+        code,
+        conflicting_fields: data.conflicting_fields ?? details.conflicting_fields,
+        warnings: [
+          {
+            code: "revert_not_created",
+            message: "No revert proposal was created. These fields changed again after the proposal was applied; live is unchanged.",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "propose_change",
+            reason: "File a normal edits proposal with the values you want for the conflicting fields.",
+            priority: "recommended",
+            args_hint: { ...siteArg },
+          },
+        ],
+      });
+    case "not_applied":
+    case "nothing_to_revert":
+      return fail(String(data.error ?? code), { code, next_actions: [] });
+    case "competing_shared_fields":
+      return fail(String(data.error ?? code), {
+        code,
+        warnings: [
+          {
+            code: "common_fields_all_languages",
+            message: "Page-level (common) fields live in {slug}/_common.yml and change every locale — only one open proposal per page may stage them.",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "update_proposal",
+            reason: "Join the open proposal that already stages page-level fields: revise_entries on it instead of filing a second one.",
+            priority: "required",
+            args_hint: { proposal_id: existing?.id ?? details.proposal_id, action: "revise_entries", ...siteArg },
+          },
+        ],
+      });
+    case "draft_in_proposal":
+      return fail(String(data.error ?? code), {
+        code,
+        ...(details.env ? { env: details.env } : {}),
+        next_actions: [
+          {
+            tool: "list_proposals",
+            reason: details.env
+              ? `That draft belongs to a proposal in ${String(details.env)} — review it there, or omit variant so this proposal creates its own draft.`
+              : "That draft already belongs to an open proposal — join it, or omit variant so this proposal creates its own draft.",
+            priority: "required",
+            args_hint: { proposal_id: details.proposal_id },
+          },
+        ],
+      });
+    case "variant_has_traffic":
+      return fail(String(data.error ?? code), {
+        code,
+        next_actions: [
+          {
+            tool: ctx.tool,
+            reason: "Variants with traffic cannot be proposal drafts. Omit variant (the proposal creates a new 0% draft) or name a 0% draft.",
+            priority: "required",
+            args_hint: ctx.tool === "update_proposal" ? { proposal_id: ctx.proposal_id, action: "revise_entries", ...siteArg } : { ...siteArg },
+          },
+        ],
+      });
+    case "attached_draft_structure":
+      return fail(String(data.error ?? code), {
+        code,
+        next_actions: [
+          {
+            tool: ctx.tool,
+            reason: "Attached posts take field updates only (structure lives on the shared template). Drop sections/layout updates, or detach the page first.",
+            priority: "required",
+            args_hint: ctx.tool === "update_proposal" ? { proposal_id: ctx.proposal_id, action: "revise_entries", ...siteArg } : { ...siteArg },
+          },
+        ],
+      });
+    default:
+      return null;
+  }
+}
+
+type AcceptedEntryCreateMode = "attached" | "page" | "manual";
+
+export function attachedIdeaEditsAction(
+  proposal: {
+    id?: string;
+    attached_create_entry?: AttachedCreateHint | null;
+    accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+  },
   site?: string,
 ): {
   tool: string;
@@ -62,10 +314,31 @@ function attachedIdeaEditsAction(
 } | null {
   const ae = proposal.attached_create_entry;
   if (!ae?.contentType || !ae.slug || !ae.locale || !proposal.id) return null;
+  if (proposal.accepted_entry_create_mode === "page") {
+    return {
+      tool: "propose_change",
+      reason:
+        "This accepted idea reserved a new section-built page (no shared template) and there is no file yet. File edits with implements_proposal_id, review_situations [\"new_public_content\"], no variant, and field updates that include the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty; each section checked against the component registry) plus required fields. The proposal creates the entry folder, _common.yml, and an unpublished draft; a different role’s apply publishes it. Do not call create_entry. Publishing a page with no sections is refused (empty_page).",
+      priority: "required",
+      args_hint: {
+        implements_proposal_id: proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: ae.contentType,
+            slug: ae.slug,
+            locale: ae.locale,
+            updates: [{ field_path: "sections", value: ["<section objects>"] }],
+          },
+        ],
+        ...(site ? { site } : {}),
+      },
+    };
+  }
   return {
     tool: "propose_change",
     reason:
-      "This accepted idea reserved an attached slug and there is no file yet. File edits with implements_proposal_id, review_situations [\"new_public_content\"], and field updates only — no variant. Do not call create_entry or add a draft. A different role’s apply creates the post and does not change the shared template.",
+      "This accepted idea reserved an attached slug and there is no file yet. File edits with implements_proposal_id, review_situations [\"new_public_content\"], and field updates only — no variant. The proposal creates the entry folder and its draft (unpublished); a different role’s apply publishes it. Do not call create_entry. The shared template is not changed.",
     priority: "required",
     args_hint: {
       implements_proposal_id: proposal.id,
@@ -102,6 +375,7 @@ export const PROPOSAL_AUTHOR_ACTIONS = [
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "revert",
 ] as const;
 
 export const PROPOSAL_ALL_UPDATE_ACTIONS = [
@@ -121,6 +395,7 @@ export const PROPOSAL_ALL_UPDATE_ACTIONS = [
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "revert",
 ] as const;
 
 export type ProposalUpdateActionName = (typeof PROPOSAL_ALL_UPDATE_ACTIONS)[number];
@@ -208,8 +483,13 @@ export function registerProposalTools(
 ): void {
   mcp.tool(
     "propose_change",
-    "Create a proposal (does not write live YAML). Requires proposals_create. " +
+    "Create a proposal (never writes live YAML). Requires proposals_create. " +
       "Pass entries[] (or promote_on_apply) → kind edits. " +
+      "Edits (1.0): updates are written into a 0%-traffic draft now (named variant, or `draft` / `draft-p{id6}` created from today's live); apply only promotes that draft. Live is unchanged until apply. " +
+      "Page-level (common) fields — funnel.*, meta.robots/priority/change_frequency, published_at, detached, authors — publish to {slug}/_common.yml for every locale (warning common_fields_all_languages). Remove a field with {field_path, op:\"remove\"}. " +
+      "Check layout_owner (get_content_type_info / get_entry_content): entry → a new page or new language needs one full sections update (registry-checked); shared_template → fields only. " +
+      "To change the layout of every attached entry, target slug template (one entry per locale, all_or_nothing: true); apply needs confirm_affected_entries. " +
+      "Optional all_or_nothing (publish every entry or none) and per-entry translated_from_locale. " +
       "Pass kind:\"idea\" for a pre-work brief (new page, update, or config pitch) — no YAML until a later edits proposal. " +
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
       "Do not use notes for new-spoke pitches — use kind idea. " +
@@ -223,7 +503,7 @@ export function registerProposalTools(
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] (subtopic serp-title-description). " +
       "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] (subtopic funnel-classification; persona → product → stage). " +
       "Locale translation go-live → prefer review_situations:[\"locale_translation\"] with variant + promote_on_apply (subtopic translations). Soft-only polish without promote is not this pack. " +
-      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale), implements_required / idea_already_in_progress. " +
+      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale), competing_shared_fields (another open proposal stages page-level fields), draft_in_proposal, variant_has_traffic, implements_required / idea_already_in_progress, sections_required (new page/language of a layout_owner entry or template without a full sections update), page_create_no_draft, invalid_sections (registry shape). " +
       "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
       "Four-eyes apply/reject/accept compare human+role (not username alone). Apply/reject need proposals_review (Proposal Reviewer or Publisher).",
@@ -294,6 +574,10 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe("When true with a variant entry, approve promotes that draft to live (empty updates allowed)."),
+      all_or_nothing: z
+        .boolean()
+        .optional()
+        .describe("Edits: apply publishes every entry or none (all_or_nothing_blocked lists what failed)."),
       supersedes_proposal_id: z
         .string()
         .optional()
@@ -325,25 +609,7 @@ export function registerProposalTools(
         .describe(
           'Ideas (new-URL): structured funnel. products "all" only when stage is awareness. Soft warning if missing; accept refuses until set.',
         ),
-      entries: z
-        .array(
-          z.object({
-            contentType: z.string(),
-            slug: z.string(),
-            locale: z.string(),
-            variant: z.string().optional(),
-            updates: z
-              .array(
-                z.object({
-                  field_path: z.string(),
-                  value: z.unknown().optional(),
-                  reset: z.boolean().optional(),
-                }),
-              )
-              .optional(),
-          }),
-        )
-        .optional(),
+      entries: z.array(ENTRY_INPUT_SCHEMA).optional(),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -372,6 +638,7 @@ export function registerProposalTools(
             entries: args.entries,
             agent_session_id: args.agent_session_id,
             promote_on_apply: args.promote_on_apply,
+            all_or_nothing: args.all_or_nothing,
             supersedes_proposal_id: args.supersedes_proposal_id,
             implements_proposal_id: args.implements_proposal_id,
             idea_funnel: args.idea_funnel,
@@ -492,28 +759,8 @@ export function registerProposalTools(
               ],
             );
           }
-          if (data.code === "attached_no_draft") {
-            const entries = (args.entries ?? []).map(({ variant: _variant, ...rest }) => rest);
-            return fail(String(data.error ?? "attached posts do not use a draft"), {
-              code: "attached_no_draft",
-              next_actions: [
-                {
-                  tool: "propose_change",
-                  reason:
-                    "Resubmit the same packet with no variant and no promote_on_apply. Pass implements_proposal_id, review_situations [\"new_public_content\"], and field updates only. Apply creates the files. Do not create a draft.",
-                  priority: "required",
-                  args_hint: {
-                    title: args.title,
-                    summary: args.summary,
-                    implements_proposal_id: args.implements_proposal_id,
-                    review_situations: ["new_public_content"],
-                    entries,
-                    ...(args.site ? { site: args.site } : {}),
-                  },
-                },
-              ],
-            });
-          }
+          const draftFirst = draftFirstFailure(data, { tool: "propose_change", site: args.site });
+          if (draftFirst) return draftFirst;
           if (data.code === "database_entry_required") {
             return fail(String(data.error ?? "database row required"), {
               code: "database_entry_required",
@@ -537,7 +784,7 @@ export function registerProposalTools(
                   reason:
                     data.code === "attached_sections_refused"
                       ? "Drop sections[] updates. Attached posts take field updates only. The accepted idea still holds the slug."
-                      : "Add the named required field updates and retry. The accepted idea still holds the slug. Do not create a draft.",
+                      : "Add the named required field updates and retry. The accepted idea still holds the slug. The proposal creates the draft — do not call create_entry.",
                   priority: "required",
                   args_hint: {
                     implements_proposal_id: args.implements_proposal_id,
@@ -548,14 +795,127 @@ export function registerProposalTools(
               ],
             });
           }
+          if (data.code === "sections_required" && (data.details as { new_locale?: boolean } | undefined)?.new_locale) {
+            const details = data.details as {
+              layout_owner?: string;
+              detached?: boolean;
+              is_shared_template?: boolean;
+              entry?: { contentType?: string; slug?: string; locale?: string };
+            };
+            const target = details.entry ?? {};
+            const siteHint = args.site ? { site: args.site } : {};
+            return fail(String(data.error ?? data.code), {
+              code: "sections_required",
+              details,
+              next_actions: [
+                {
+                  tool: "get_entry_content",
+                  reason:
+                    "Read the source-locale page (e.g. en) as the starting point: copy its full sections array and translate every section. Nothing was written.",
+                  priority: "required",
+                  args_hint: {
+                    contentType: target.contentType,
+                    slug: target.slug,
+                    locale: "en",
+                    ...siteHint,
+                  },
+                },
+                {
+                  tool: "propose_change",
+                  reason: details.is_shared_template
+                    ? "New template language: resubmit with ONE full { field_path: \"sections\", value: [...] } update (the whole translated shared layout). It applies to every attached entry in that language."
+                    : `New language of a layout_owner entry${details.detached ? " (detached)" : ""} page: resubmit with ONE full { field_path: "sections", value: [...] } update (the whole translated layout) plus the translated fields.`,
+                  priority: "required",
+                },
+                {
+                  tool: "get_component_schema",
+                  reason: "Check component contracts (variants, required props) for the translated sections.",
+                  priority: "recommended",
+                  args_hint: { componentType: "hero", ...siteHint },
+                },
+              ],
+            });
+          }
+          if (data.code === "sections_required" || data.code === "page_create_no_draft") {
+            return fail(String(data.error ?? data.code), {
+              code: String(data.code),
+              next_actions: [
+                {
+                  tool: "propose_change",
+                  reason:
+                    "New section-built page: resubmit with implements_proposal_id, no variant, no promote_on_apply, and the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty) plus required fields. The proposal creates the folder and draft — do not call create_entry.",
+                  priority: "required",
+                  args_hint: {
+                    implements_proposal_id: args.implements_proposal_id,
+                    review_situations: ["new_public_content"],
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+                {
+                  tool: "get_component_schema",
+                  reason: "Pick components and variants for the sections array (shared + site registry).",
+                  priority: "recommended",
+                  args_hint: { componentType: "hero", ...(args.site ? { site: args.site } : {}) },
+                },
+              ],
+            });
+          }
+          if (data.code === "invalid_sections") {
+            const details = (data.details ?? {}) as {
+              property_path?: string;
+              issues?: Array<{ property_path: string; message: string }>;
+            };
+            const failingIdx = /^sections\[(\d+)\]/.exec(details.property_path ?? "")?.[1];
+            const firstEntry = args.entries?.[0] as { updates?: Array<{ field_path: string; value?: unknown }> } | undefined;
+            const sectionsValue = firstEntry?.updates?.find((u) => u.field_path === "sections")?.value;
+            const failingType =
+              failingIdx != null && Array.isArray(sectionsValue)
+                ? (sectionsValue[Number(failingIdx)] as { type?: unknown } | undefined)?.type
+                : undefined;
+            return fail(String(data.error ?? "invalid sections"), {
+              code: "invalid_sections",
+              property_path: details.property_path,
+              issues: details.issues ?? [],
+              next_actions: [
+                {
+                  tool: "get_component_schema",
+                  reason: `Check the component contract for the failing section (${details.property_path ?? "sections"}): valid variants and required props.`,
+                  priority: "required",
+                  args_hint: {
+                    ...(typeof failingType === "string" ? { componentType: failingType } : {}),
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+                {
+                  tool: "propose_change",
+                  reason: "Fix every listed issue in the sections array and resubmit. Nothing was written.",
+                  priority: "required",
+                },
+              ],
+            });
+          }
           if (data.code === "entry_not_found") {
+            if (args.implements_proposal_id) {
+              return fail(String(data.error ?? "entry not found"), {
+                code: "entry_not_found",
+                next_actions: [
+                  {
+                    tool: "list_proposals",
+                    reason:
+                      "This page type cannot be created from a proposal. Tell the human a person must create the page in the CMS first; then resubmit with the same implements_proposal_id.",
+                    priority: "required",
+                    args_hint: { proposal_id: args.implements_proposal_id },
+                  },
+                ],
+              });
+            }
             return fail(String(data.error ?? "entry not found"), {
               code: "entry_not_found",
               next_actions: [
                 {
                   tool: "propose_change",
                   reason:
-                    "For a new attached post, accept an idea that locks the slug, then resubmit field edits with implements_proposal_id and no variant. Do not create a draft. A detached page still needs its draft first.",
+                    "For a new page, accept an idea that locks the slug, then resubmit edits with implements_proposal_id and no variant — the proposal creates the entry folder and draft. Section-built types (downloadable, landing, …) also need a full { field_path: \"sections\", value: [...] } update. Do not call create_entry.",
                   priority: "required",
                   args_hint: {
                     kind: "idea",
@@ -636,6 +996,8 @@ export function registerProposalTools(
         const proposal = (data as {
           proposal?: {
             id?: string;
+            kind?: string;
+            system_version?: string | null;
             review_mode?: string;
             promote_on_apply?: boolean;
             escalated_siblings?: Array<{ id: string; title: string }>;
@@ -644,26 +1006,22 @@ export function registerProposalTools(
               slug?: string;
               locale?: string;
               variant?: string | null;
-              baseline_context?: { creates_entry?: boolean };
             }>;
           };
         }).proposal;
-        const createsAttached = proposalCreatesAttachedEntry(proposal);
-        const seededEntry = createsAttached
-          ? proposal?.entries?.find((e) => e.baseline_context?.creates_entry)
-          : undefined;
+        const drafts = proposal?.kind === "edits" ? draftsWritten(proposal) : [];
         const reviewCtx = (data as {
           review_context?: {
             agent_preview?: { warnings?: Array<{ code: string; message: string }> };
           };
         }).review_context;
         const warnings: Array<{ code: string; message: string }> = [
-          createsAttached
+          ...(Array.isArray(data.warnings) ? (data.warnings as Array<{ code: string; message: string }>) : []),
+          drafts.length
             ? {
-                code: "creates_attached_entry",
-                message: seededEntry
-                  ? `No YAML yet. Do not preview this post or create a draft. A different role’s update_proposal action apply creates ${seededEntry.contentType}/${seededEntry.slug}/_common.yml and ${seededEntry.locale}.yml and does not touch template.${seededEntry.locale}.yml.`
-                  : "No YAML yet. Do not preview this post or create a draft. A different role’s apply creates the post files and does not change the shared template.",
+                code: "not_applied",
+                message:
+                  "Updates were written into the draft(s) in side_effects.drafts_written (0% traffic — visitors do not see them). Live is unchanged until apply promotes them. Editing those drafts outside the proposal makes you a co-author (cannot approve).",
               }
             : {
                 code: "not_applied",
@@ -701,41 +1059,38 @@ export function registerProposalTools(
               "This soft proposal targets a draft variant. Preview that variant; apply writes field patches into the draft (does not promote).",
           });
         }
-        const createdEntry = seededEntry;
         return ok({
           ...stripDecisionDebugFromPayload(data as Record<string, unknown>),
           warnings,
-          next_actions: createsAttached
-            ? [
-                {
-                  tool: "update_proposal",
-                  reason:
-                    "A different role with proposals_review applies this. That creates the post files. Do not call get_entry_content or create a draft — there is no YAML yet.",
-                  args_hint: {
-                    proposal_id: proposal?.id,
-                    action: "apply",
-                    ...(args.site ? { site: args.site } : {}),
+          next_actions: [
+            ...(drafts.length
+              ? [
+                  {
+                    tool: "get_entry_content",
+                    reason: "Preview the draft the proposal wrote (pass variant).",
+                    args_hint: {
+                      contentType: drafts[0]!.contentType,
+                      slug: drafts[0]!.slug,
+                      locale: drafts[0]!.locale,
+                      variant: String(drafts[0]!.draft).split(".")[0],
+                      ...(args.site ? { site: args.site } : {}),
+                    },
+                    priority: "optional" as const,
                   },
-                  priority: "optional",
-                },
-              ]
-            : [
-                {
-                  tool: "list_proposals",
-                  reason: "Re-read the stored proposal.",
-                  args_hint: { proposal_id: proposal?.id },
-                  priority: "optional",
-                },
-              ],
-          ...(createdEntry
+                ]
+              : []),
+            {
+              tool: "list_proposals",
+              reason: "Re-read the stored proposal (author_diff, undo_cost, merge state).",
+              args_hint: { proposal_id: proposal?.id },
+              priority: "optional" as const,
+            },
+          ],
+          ...(drafts.length
             ? {
                 side_effects: {
-                  creates_entry: {
-                    contentType: createdEntry.contentType,
-                    slug: createdEntry.slug,
-                    locale: createdEntry.locale,
-                  },
-                  non_effects: ["no YAML written", "shared template unchanged"],
+                  drafts_written: drafts,
+                  non_effects: ["live YAML unchanged until apply", "no GitHub push by itself", "linked issues not completed"],
                 },
               }
             : {}),
@@ -751,19 +1106,25 @@ export function registerProposalTools(
     "List or fetch content proposals (stats-first). With no filters, returns proposal_stats only " +
       "(by_attention, by_kind_status = live KPI strip Ideas/Edits/Notes × Open/Done/Rej with zeros filled, stalled_ideas, needs_review_edits). " +
       "kpi_history is opt-in only (never default). Event Webhooks are not included. " +
-      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, escalated, attention, stalled, or needs_review for paginated summary rows " +
-      "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, slim stubs — no ops/values/baselines). " +
+      "Pass status, kind, query, issue_id, proposer_username, proposer_actor, agent_session_id, reviewer_username, escalated, attention, stalled, or needs_review for paginated summary rows " +
+      "(detail:\"summary\": identity, entry_count, field_paths, attention, open/resolved blocker counts, " +
+      "reviewer_action_by/_at = latest non-author feedback (not approval), closed_by/close_reason, slim stubs — no ops/values/baselines). " +
       "Filtered calls still return site-wide by_kind_status (warning proposal_stats_site_wide) — not counts for this page. " +
       "stalled:true → accepted ideas with a locked page and no open/partial/finished implements follow-up (legacy accepts without a lock are excluded). " +
       "needs_review:true → open|partial edits whose attention is awaiting_rereview or no_feedback (author rewrite or cleared blockers, nothing still waiting on the author). Excludes blocked and escalated. Forces that queue even if status/kind differ. " +
       "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted (unless stalled). " +
-      "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked. " +
+      "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked|needs_author. " +
+      "needs_author = 1.0 draft went stale (live or translation source moved, conflict, or draft missing) — out of the reviewer queue until the author revises; stale_flagged_at set after 30 idle days, closes as abandoned_stale after 90. " +
       "awaiting_rereview = blockers fixed, or the author rewrote entries / marked a blocker fixed, and no open blockers remain. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
-      "Opt-in kpi_history attaches stock series: granularity today = hourly UTC for today (computed, not stored); " +
-      "day ≈ last 28 completed days; week = last 7 completed UTC days (not ISO week). Open includes partial; withdrawn omitted. " +
+      "Opt-in kpi_history attaches per-bucket flow series (metric:\"flow\", each bucket restarts at 0): open = created in bucket, " +
+      "finished/rejected = closed into that status in bucket. today = UTC hours 0..now; day = last 28 UTC days + today; " +
+      "week = last 12 Monday-start UTC weeks + current week. Last point partial:true when its bucket contains now. " +
+      "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
+      "outcome_review* / outcome_lesson* fields = human-only steward retro on closed proposals (good|bad, what went wrong, what should have happened, lesson captured). " +
+      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured). " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
@@ -805,15 +1166,30 @@ export function registerProposalTools(
           "Exact match on created_agent_session_id. Copy from agent_session start or a proposal row. " +
             "Staff-UI proposals are usually null and never match.",
         ),
+      reviewer_username: z
+        .string()
+        .optional()
+        .describe(
+          "Exact case-insensitive username match on row.reviewer_action_by (latest non-author blocker add/resolve/reopen) " +
+            "OR closed_by when status is finished|rejected. Withdrawn closers never match; earlier reviewers replaced by a later one never match. " +
+            "Username only — agents acting as a staff subject match that subject. Combine with status to narrow; omit status to include closed.",
+        ),
       escalated: z
         .boolean()
         .optional()
         .describe("When true, only proposals with a steward escalate hold. When false, only non-escalated."),
-      attention: z
-        .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked"])
+      outcome_review: z
+        .enum(["good", "bad", "none", "bad_open"])
         .optional()
         .describe(
-          "Triage bucket filter. awaiting_rereview = blockers fixed, or the author rewrote the packet / marked a blocker fixed, and nothing is still waiting on the author; " +
+          "Steward outcome review on closed proposals (finished|rejected|withdrawn). good | bad; bad_open = bad with no lesson captured yet; " +
+            "none = closed and not reviewed. Omit status (or use a closed status) — open/partial never match.",
+        ),
+      attention: z
+        .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked", "needs_author"])
+        .optional()
+        .describe(
+          "Triage bucket filter. needs_author = stale 1.0 draft waiting on the author (revise_entries); awaiting_rereview = blockers fixed, or the author rewrote the packet / marked a blocker fixed, and nothing is still waiting on the author; " +
             "no_feedback = never had blockers and no author update since filing; " +
             "blocked = open needs-changes (wins over a later author rewrite); escalated = steward hold.",
         ),
@@ -848,28 +1224,29 @@ export function registerProposalTools(
         .boolean()
         .optional()
         .describe(
-          "When true, attach kpi_history stock series. Default false keeps payloads small. " +
-            "today = hourly UTC for the current day; day/week = completed days through yesterday.",
+          "When true, attach kpi_history per-bucket flow series (open = created, finished/rejected = closed in bucket). " +
+            "Default false keeps payloads small. Buckets include the in-progress one (partial:true).",
         ),
       kpi_granularity: z
         .enum(["today", "day", "week"])
         .optional()
         .describe(
           "Only when kpi_history is true. Default day. " +
-            "today = hourly computed stock for today (UTC); day ≈ 28 completed days; " +
-            "week = last 7 completed UTC days (not ISO week).",
+            "today = per UTC hour for today; day = per UTC day, last 28 days + today; " +
+            "week = per Monday-start UTC week, last 12 weeks + current (point day = week-start date).",
         ),
       kpi_from: z
         .string()
         .optional()
         .describe(
-          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), within 90-day retention.",
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC). day: clamped to the last 90 days; " +
+            "week: snapped to its Monday, no earlier than 12 weeks before the current week.",
         ),
       kpi_to: z
         .string()
         .optional()
         .describe(
-          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), capped at yesterday.",
+          "Only when kpi_history is true (day/week). YYYY-MM-DD (UTC), capped at today (today's bucket is partial).",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
@@ -892,7 +1269,7 @@ export function registerProposalTools(
           message:
             "Unscoped list_proposals returns proposal_stats only (by_kind_status = live KPI strip counts; " +
             "kpi_history not included unless requested). Pass status, kind, query, issue_id, proposal_id, " +
-            "proposer_username, proposer_actor, agent_session_id, escalated, attention, or stalled to load proposals[].",
+            "proposer_username, proposer_actor, agent_session_id, reviewer_username, escalated, outcome_review, attention, or stalled to load proposals[].",
         });
         if (args.limit != null || args.offset != null) {
           warnings.push({
@@ -942,8 +1319,10 @@ export function registerProposalTools(
           qs.set("proposer_actor_role", args.proposer_actor.role.trim());
         }
         if (args.agent_session_id?.trim()) qs.set("agent_session_id", args.agent_session_id.trim());
+        if (args.reviewer_username?.trim()) qs.set("reviewer_username", args.reviewer_username.trim());
         if (args.escalated === true) qs.set("escalated", "1");
         if (args.escalated === false) qs.set("escalated", "0");
+        if (args.outcome_review) qs.set("outcome_review", args.outcome_review);
         if (args.attention) qs.set("attention", args.attention);
         if (args.stalled === true) qs.set("stalled", "1");
         if (args.stalled === false) qs.set("stalled", "0");
@@ -1007,17 +1386,19 @@ export function registerProposalTools(
             return fail(String(kData.error ?? "kpi_history failed"), { code: "kpi_history_failed" });
           }
           kpi_history = kData;
+          const bucketDesc =
+            g === "today"
+              ? "per UTC hour for today"
+              : g === "week"
+                ? "per Monday-start UTC week (last 12 + current; point day = week-start date)"
+                : "per UTC day (last 28 + today)";
           warnings.push({
-            code: "kpi_history_stock",
+            code: "kpi_history_flow",
             message:
-              g === "today"
-                ? "kpi_history today is hourly UTC stock for the current day (computed; not written to daily history). " +
-                  "Open includes partial; withdrawn is omitted. Last point is as-of-now."
-                : g === "week"
-                  ? "kpi_history week is last 7 completed UTC days through yesterday (day keys, not ISO week). " +
-                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows."
-                  : "kpi_history is end-of-day stock through yesterday (not throughput). " +
-                    "Open includes partial; withdrawn is omitted. Finish times use closed_at with updated_at fallback on older rows.",
+              `kpi_history is flow ${bucketDesc}, not stock — each bucket restarts at 0. ` +
+              "Series open = proposals created in the bucket (partial status counts); finished/rejected = closed into that status in the bucket " +
+              "(closed_at, updated_at fallback on older rows). Withdrawn omitted. Last point partial:true = bucket still in progress. " +
+              "Current pile (open now / finished / rejected totals) = proposal_stats.by_kind_status.",
           });
         }
 
@@ -1033,13 +1414,26 @@ export function registerProposalTools(
         }
 
         const proposals = data.proposals ?? [];
-        const attachedNext = (proposals as Array<{
+        const ideaRows = proposals as Array<{
           id?: string;
+          accepted_entry?: AttachedCreateHint | null;
           attached_create_entry?: AttachedCreateHint | null;
-        }>)
+          accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+        }>;
+        const attachedNext = ideaRows
           .map((p) => attachedIdeaEditsAction(p, args.site))
           .filter((action): action is NonNullable<typeof action> => action != null)
           .slice(0, 3);
+        for (const p of ideaRows) {
+          if (p.accepted_entry_create_mode !== "manual" || !p.accepted_entry) continue;
+          const ae = p.accepted_entry;
+          warnings.push({
+            code: "accepted_entry_not_creatable",
+            message:
+              `Accepted idea ${p.id} reserved ${ae.contentType}/${ae.slug} (${ae.locale}), which does not exist and cannot be created by a proposal (database row). ` +
+              "A human must create the page in the CMS first; then file edits with implements_proposal_id. Do not retry propose_change until it exists.",
+          });
+        }
         const total = typeof data.total === "number" ? data.total : proposals.length;
         const next_offset = proposalNextOffset(offset, limit, total, proposals.length);
         const proposals_view =
@@ -1197,7 +1591,10 @@ export function registerProposalTools(
     "update_proposal",
     "Lifecycle for a proposal. Requires proposals_create and/or proposals_review — actions depend on caps. " +
       "proposals_review (Reviewer): claim | release | apply | reject | accept | close | acknowledge | blockers. Approve can change live/draft. " +
-      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations | set_idea_funnel — cannot apply/reject/accept. " +
+      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations | set_idea_funnel | revert — cannot apply/reject/accept. " +
+      "1.0 edits: apply promotes the proposal's draft(s); dry_run returns merge_preview without writing. Stale drafts rebuild on today's live when fields do not overlap; otherwise context_stale (needs_author). " +
+      "revert (finished/partial 1.0 edits): files a new proposal that puts back pre-apply values; live unchanged until that one is approved; revert_conflicts when fields changed again. " +
+      "Legacy (pre-1.0) proposals return legacy_version for anything but withdraw/reject/release — re-file. " +
       "Both (Publisher): full set. " +
       "Reject is rare (bad/impossible/illegal/harmful/duplicate/target missing): confirm_reject + reject_kind + close_note (min 80). Prefer add_blocker for polish; then revise_entries (proposer; idle or self-claim). " +
       "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page); new-URL ideas need idea_funnel first (no YAML). " +
@@ -1223,6 +1620,7 @@ export function registerProposalTools(
         "revise_entries",
         "set_review_situations",
         "set_idea_funnel",
+        "revert",
       ]),
       report: z.string().optional(),
       agent_session_id: z.string().describe("Required. From agent_session start."),
@@ -1247,6 +1645,23 @@ export function registerProposalTools(
         .describe(
           "For apply of a new attached post: true only after principal approval of a URL param (for example category) not seen on same-locale peers.",
         ),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe("For apply (1.0): run every check and return merge_preview per entry; writes nothing."),
+      all_or_nothing: z
+        .boolean()
+        .optional()
+        .describe("For revise_entries (1.0): toggle publish-every-entry-or-none."),
+      confirm_base_unknown: z
+        .boolean()
+        .optional()
+        .describe("For apply (1.0): publish drafts with no recorded base as-is, only after draft_base_unknown and a dry_run preview."),
+      confirm_affected_entries: z
+        .number()
+        .int()
+        .optional()
+        .describe("For apply of a shared-template proposal: must equal affected_entries.count from list_proposals(proposal_id)."),
       close_reason: z
         .enum(["wont_fix", "fixed_elsewhere", "tracked_elsewhere", "other"])
         .optional()
@@ -1291,25 +1706,11 @@ export function registerProposalTools(
         .optional()
         .describe("For reject: why this must die (not polish)"),
       entries: z
-        .array(
-          z.object({
-            contentType: z.string(),
-            slug: z.string(),
-            locale: z.string(),
-            variant: z.string().optional(),
-            updates: z
-              .array(
-                z.object({
-                  field_path: z.string(),
-                  value: z.unknown().optional(),
-                  reset: z.boolean().optional(),
-                }),
-              )
-              .optional(),
-          }),
-        )
+        .array(ENTRY_INPUT_SCHEMA)
         .optional()
-        .describe("For revise_entries: full replacement of pending/failed entries (done rows kept)"),
+        .describe(
+          "For revise_entries: full replacement of pending/failed entries (done rows kept). 1.0: drafts this proposal created restart from today's live, then updates are written.",
+        ),
       review_situations: z
         .array(
           z.enum([
@@ -1388,6 +1789,10 @@ export function registerProposalTools(
             confirm_end_experiment: args.confirm_end_experiment,
             confirm_recent_activity: args.confirm_recent_activity,
             confirm_new_values: args.confirm_new_values,
+            dry_run: args.dry_run,
+            all_or_nothing: args.all_or_nothing,
+            confirm_base_unknown: args.confirm_base_unknown,
+            confirm_affected_entries: args.confirm_affected_entries,
             close_reason: args.close_reason,
             close_note: args.close_note,
             next_step: args.next_step,
@@ -1402,6 +1807,12 @@ export function registerProposalTools(
         });
         const data = (await res.json()) as Record<string, unknown>;
         if (!res.ok) {
+          const draftFirst = draftFirstFailure(data, {
+            tool: "update_proposal",
+            proposal_id: args.proposal_id,
+            site: args.site,
+          });
+          if (draftFirst) return draftFirst;
           if (data.code === "confirm_reject") {
             return actionRequired(
               {
@@ -1569,6 +1980,18 @@ export function registerProposalTools(
               ],
             );
           }
+          if (data.code === "proposal_deleted") {
+            return fail(String(data.error ?? "Proposal was deleted by staff"), {
+              code: "proposal_deleted",
+              proposal_id: args.proposal_id,
+              deleted_by: data.deleted_by,
+              deleted_at: data.deleted_at,
+              warnings: [
+                "Staff permanently deleted this proposal (staff UI bulk delete). Do not re-file the same change unless staff ask.",
+              ],
+              next_actions: [],
+            });
+          }
           if (data.code === "proposal_blocked") {
             return fail(String(data.error ?? "proposal blocked"), {
               code: "proposal_blocked",
@@ -1677,24 +2100,59 @@ export function registerProposalTools(
             });
           }
           if (
-            data.code === "attached_no_draft" ||
             data.code === "required_fields_missing" ||
             data.code === "attached_sections_refused" ||
-            data.code === "database_entry_required"
+            data.code === "database_entry_required" ||
+            data.code === "sections_required" ||
+            data.code === "invalid_sections"
           ) {
+            const sectionDetails = (data.details ?? {}) as {
+              property_path?: string;
+              issues?: Array<{ property_path: string; message: string }>;
+              new_locale?: boolean;
+              is_shared_template?: boolean;
+              entry?: { contentType?: string; slug?: string; locale?: string };
+            };
+            const newLocale = data.code === "sections_required" && sectionDetails.new_locale === true;
             return fail(String(data.error ?? data.code), {
               code: String(data.code),
+              ...(data.code === "invalid_sections"
+                ? { property_path: sectionDetails.property_path, issues: sectionDetails.issues ?? [] }
+                : {}),
+              ...(data.details && data.code !== "invalid_sections" ? { details: data.details } : {}),
               next_actions: [
+                ...(newLocale
+                  ? [
+                      {
+                        tool: "get_entry_content",
+                        reason:
+                          "Read the source-locale page (e.g. en): copy its full sections array and translate every section.",
+                        priority: "required" as const,
+                        args_hint: {
+                          contentType: sectionDetails.entry?.contentType,
+                          slug: sectionDetails.entry?.slug,
+                          locale: "en",
+                          site: args.site,
+                        },
+                      },
+                    ]
+                  : []),
                 {
                   tool: "update_proposal",
                   reason:
-                    data.code === "attached_no_draft"
-                      ? "Retry revise_entries with no variant and no promote_on_apply. Field updates only. Do not create a draft."
-                      : data.code === "database_entry_required"
-                        ? "This workflow cannot create a database row. The accepted idea can stay. Field updates work once the row exists."
-                        : data.code === "attached_sections_refused"
-                          ? "Drop sections[] updates and retry revise_entries. The accepted idea still holds the slug."
-                          : "Add the named required fields and retry revise_entries. The accepted idea still holds the slug. Do not create a draft.",
+                    data.code === "database_entry_required"
+                      ? "This workflow cannot create a database row. The accepted idea can stay. Field updates work once the row exists."
+                      : data.code === "attached_sections_refused"
+                        ? "Drop sections[] updates and retry revise_entries. The accepted idea still holds the slug."
+                        : newLocale
+                          ? sectionDetails.is_shared_template
+                            ? "New template language: include the whole translated shared layout as ONE update { field_path: \"sections\", value: [...] } and retry revise_entries. It applies to every attached entry in that language."
+                            : "New language of a layout_owner entry page: include the whole translated layout as ONE update { field_path: \"sections\", value: [...] } and retry revise_entries."
+                          : data.code === "sections_required"
+                            ? "Include the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty) and retry revise_entries."
+                            : data.code === "invalid_sections"
+                              ? `Fix the listed section issues (${sectionDetails.property_path ?? "sections"}) — see get_component_schema — and retry revise_entries. Nothing was written.`
+                              : "Add the named required fields and retry revise_entries. The accepted idea still holds the slug.",
                   priority: "required",
                   args_hint: {
                     proposal_id: args.proposal_id,
@@ -1702,6 +2160,16 @@ export function registerProposalTools(
                     site: args.site,
                   },
                 },
+                ...(newLocale
+                  ? [
+                      {
+                        tool: "get_component_schema",
+                        reason: "Check component contracts (variants, required props) for the translated sections.",
+                        priority: "recommended" as const,
+                        args_hint: { componentType: "hero", site: args.site },
+                      },
+                    ]
+                  : []),
               ],
             });
           }
@@ -1716,12 +2184,12 @@ export function registerProposalTools(
               related_issue_ids?: string[];
               open_blocker_count?: number;
               review_mode?: string;
+              system_version?: string | null;
               entries?: Array<{
                 contentType?: string;
                 slug?: string;
                 locale?: string;
                 variant?: string | null;
-                baseline_context?: { creates_entry?: boolean };
               }>;
             };
           }
@@ -1729,7 +2197,12 @@ export function registerProposalTools(
         const warnings: Array<{ code: string; message: string }> = [
           ...(Array.isArray(data.warnings) ? (data.warnings as Array<{ code: string; message: string }>) : []),
         ];
-        if (!warnings.some((w) => w.code === "partial_progress") && args.action === "apply") {
+        if (args.action === "apply" && args.dry_run) {
+          warnings.push({
+            code: "dry_run_no_write",
+            message: "dry_run: nothing was published. merge_preview shows what apply would publish per entry (rebuild keeps newer live fields).",
+          });
+        } else if (!warnings.some((w) => w.code === "partial_progress") && args.action === "apply") {
           warnings.push({
             code: "partial_progress",
             message:
@@ -1771,6 +2244,31 @@ export function registerProposalTools(
           });
         }
 
+        if (args.action === "revert") {
+          const created = (data as { proposal?: { id?: string } }).proposal;
+          warnings.push({
+            code: "revert_proposal_created",
+            message:
+              "A new proposal was filed that puts back the pre-apply values (reverts_proposal_id set). Live is unchanged until a different human+role approves it.",
+          });
+          next.push({
+            tool: "list_proposals",
+            reason: "Review the revert proposal (it goes through normal four-eyes approval).",
+            priority: "recommended",
+            args_hint: { proposal_id: created?.id },
+          });
+        }
+
+        if (args.action === "accept" && warnings.some((w) => w.code === "accepted_entry_needs_layout")) {
+          next.push({
+            tool: "get_component_schema",
+            reason:
+              "Optional: the follow-up edits for this layout_owner entry page must send the whole layout as ONE full sections update — pick components and variants from the registry.",
+            priority: "optional",
+            args_hint: { componentType: "hero", site: args.site },
+          });
+        }
+
         if (args.action === "revise_entries") {
           next.push({
             tool: "update_proposal",
@@ -1786,32 +2284,23 @@ export function registerProposalTools(
 
         if (args.action === "resolve_blocker" && proposal?.open_blocker_count === 0) {
           const entry = proposal.entries?.[0];
-          const createsAttached = proposalCreatesAttachedEntry(proposal);
-          if (createsAttached) {
-            warnings.push({
-              code: "creates_attached_entry",
-              message:
-                "Blockers cleared. There is still no YAML. Do not preview or create a draft. A different role’s apply creates the post and does not change the shared template.",
-            });
-          } else {
-            warnings.push({
-              code: "blockers_cleared_repreview",
-              message:
-                "All blockers cleared. Re-preview before apply — cleared blockers do not mean approved.",
-            });
-            next.push({
-              tool: "get_entry_content",
-              reason: "Re-preview the draft (or live entry) after fixes before apply.",
-              priority: "required",
-              args_hint: {
-                slug: entry?.slug,
-                contentType: entry?.contentType,
-                locale: entry?.locale,
-                ...(entry?.variant ? { variant: entry.variant } : {}),
-                site: args.site,
-              },
-            });
-          }
+          warnings.push({
+            code: "blockers_cleared_repreview",
+            message:
+              "All blockers cleared. Re-preview before apply — cleared blockers do not mean approved.",
+          });
+          next.push({
+            tool: "get_entry_content",
+            reason: "Re-preview the draft (or live entry) after fixes before apply.",
+            priority: "required",
+            args_hint: {
+              slug: entry?.slug,
+              contentType: entry?.contentType,
+              locale: entry?.locale,
+              ...(entry?.variant ? { variant: entry.variant } : {}),
+              site: args.site,
+            },
+          });
         }
 
         if (proposal?.status === "finished" && proposal.related_issue_ids?.length) {

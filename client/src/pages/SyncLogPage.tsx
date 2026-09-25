@@ -8,7 +8,13 @@ import {
   IconMinus,
   IconGitCommit,
 } from "@tabler/icons-react";
-import { useState, useEffect, useRef } from "react";
+import { Fragment, useState, useEffect, useRef, type ReactNode } from "react";
+import { toContentFileRef } from "@shared/formatSitePath";
+import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
+import {
+  ManagedSeoModal,
+  type ManagedSeoModalTarget,
+} from "@/components/editing/ManagedSeoModal";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
 import { Badge } from "@/components/ui/badge";
@@ -49,7 +55,9 @@ import { apiRequest } from "@/lib/queryClient";
 import { downloadSiteArchive } from "@/lib/download-site-archive";
 import { openSyncModal } from "@/components/SyncConflictBanner";
 import { useToast } from "@/hooks/use-toast";
+import { normalizeContentType, useContentTypes } from "@/hooks/useContentTypes";
 import { cn } from "@/lib/utils";
+import { entryPreviewHref, parseContentEntryFile } from "@/lib/variable-usage-href";
 import {
   disconnectGitHub,
   startGitHubConnect,
@@ -139,7 +147,25 @@ function toParseEntry(entry: SyncLogEntry): ParsedEntry {
   return { ts: entry.ts, timeOnly, dateOnly, category: entry.category, message: entry.message, person: entry.person, meta: entry.meta };
 }
 
-function renderMessageWithLinks(message: string, repoUrl: string | null | undefined) {
+const CONTENT_PATH_RE = /((?:site_[^/\s]+\/)?[a-z0-9_-]+\/[a-z0-9_-]+\/[a-z0-9_.-]+\.ya?ml)/i;
+
+function renderMessageWithLinks(
+  message: string,
+  repoUrl: string | null | undefined,
+  renderPath: (path: string, key: string) => ReactNode | null,
+): ReactNode {
+  const parts = message.split(CONTENT_PATH_RE);
+  if (parts.length === 1) return renderShaLinks(message, repoUrl);
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      renderPath(part, `path-${i}`) ?? <Fragment key={`path-${i}`}>{part}</Fragment>
+    ) : (
+      <Fragment key={`text-${i}`}>{renderShaLinks(part, repoUrl)}</Fragment>
+    ),
+  );
+}
+
+function renderShaLinks(message: string, repoUrl: string | null | undefined): ReactNode {
   if (!repoUrl) return message;
   const cleanRepoUrl = repoUrl.replace(/\.git$/, '');
   const parts = message.split(/\b([0-9a-f]{7})\b/);
@@ -558,6 +584,36 @@ export default function SyncLogPage() {
     refetchInterval: 30000,
   });
 
+  const contentTypes = useContentTypes();
+  const [metaTarget, setMetaTarget] = useState<ManagedSeoModalTarget | null>(null);
+
+  const renderEntryPath = (path: string, key: string, rowIndex: number): ReactNode | null => {
+    const contentFolder = siteInfo?.contentFolder;
+    if (!contentFolder) return null;
+    const entry = parseContentEntryFile(
+      toContentFileRef(path, { contentFolder }),
+      (dir) => normalizeContentType(dir, contentTypes),
+    );
+    if (!entry) return null;
+    return (
+      <RelatedEntryPopover
+        key={key}
+        contentType={entry.contentType}
+        slug={entry.slug}
+        locale={entry.locale}
+        variant={entry.variant}
+        primaryHref={entryPreviewHref(entry)}
+        primaryLabel="Open current preview"
+        metaLabel="Open meta (current)"
+        onOpenMeta={setMetaTarget}
+        triggerClassName="inline text-primary hover:underline font-semibold"
+        testId={`popover-log-entry-path-${rowIndex}-${key}`}
+      >
+        <span data-testid={`link-log-entry-path-${rowIndex}-${key}`}>{path}</span>
+      </RelatedEntryPopover>
+    );
+  };
+
   const entries = (() => {
     if (!logData?.entries) return [];
     return logData.entries.map(toParseEntry);
@@ -585,6 +641,19 @@ export default function SyncLogPage() {
     }
     return true;
   });
+
+  const visibleRows = (() => {
+    const seen = new Map<string, number>();
+    return filtered
+      .slice()
+      .reverse()
+      .map((entry) => {
+        const base = `${entry.ts}|${entry.category}|${entry.message}`;
+        const n = seen.get(base) ?? 0;
+        seen.set(base, n + 1);
+        return { entry, key: n ? `${base}|${n}` : base };
+      });
+  })();
 
   const categoryCounts = (() => {
     const counts: Record<string, number> = {};
@@ -1013,12 +1082,9 @@ export default function SyncLogPage() {
             ) : (
               <ScrollArea className="h-[calc(100vh-320px)]">
                 <div className="font-mono text-xs">
-                  {filtered
-                    .slice()
-                    .reverse()
-                    .map((entry, i) => (
+                  {visibleRows.map(({ entry, key: rowKey }, i) => (
                       <div
-                        key={i}
+                        key={rowKey}
                         className={`flex gap-3 px-4 py-1.5 border-b border-border/50 items-start ${
                           entry.category === "ERROR"
                             ? "bg-red-50/50 dark:bg-red-950/20"
@@ -1048,7 +1114,9 @@ export default function SyncLogPage() {
                           </span>
                         )}
                         <span className="text-foreground break-all min-w-0 flex-1">
-                          {renderMessageWithLinks(entry.message, syncInfo?.repoUrl)}
+                          {renderMessageWithLinks(entry.message, syncInfo?.repoUrl, (path, key) =>
+                            renderEntryPath(path, key, i),
+                          )}
                         </span>
                         {entry.category === "WEBHOOK" && entry.meta && (
                           <Button
@@ -1647,6 +1715,12 @@ export default function SyncLogPage() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <ManagedSeoModal
+      open={metaTarget !== null}
+      onOpenChange={(open) => { if (!open) setMetaTarget(null); }}
+      target={metaTarget}
+    />
 
     <Dialog open={webhookPayloadMeta !== null} onOpenChange={(open) => { if (!open) setWebhookPayloadMeta(null); }}>
       <DialogContent className="sm:max-w-lg" data-testid="dialog-webhook-payload">

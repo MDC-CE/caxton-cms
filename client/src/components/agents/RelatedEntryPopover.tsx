@@ -1,8 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconExternalLink, IconSearch } from "@tabler/icons-react";
+import { IconCopy, IconExternalLink, IconSearch } from "@tabler/icons-react";
 import { deslugifyLabel } from "@shared/relation-field";
-import { formatSitePath } from "@shared/formatSitePath";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
 import {
   ManagedSeoModal,
@@ -12,6 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 
 type RelatedEntryInfo = {
   title: string | null;
@@ -50,6 +51,11 @@ export function RelatedEntryPopover({
   locale,
   variant,
   previewHref,
+  primaryHref,
+  primaryLabel,
+  metaLabel,
+  onOpenMeta,
+  triggerClassName,
   children,
   testId,
 }: {
@@ -58,12 +64,20 @@ export function RelatedEntryPopover({
   locale: string;
   variant?: string | null;
   previewHref?: string | null;
+  /** Replaces the public page URL on the main button; stays enabled while the entry lookup loads or fails. */
+  primaryHref?: string | null;
+  primaryLabel?: string;
+  metaLabel?: string;
+  /** When set, the parent owns the meta modal instead of this popover. */
+  onOpenMeta?: (target: ManagedSeoModalTarget) => void;
+  triggerClassName?: string;
   children: ReactNode;
   testId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [seoModalOpen, setSeoModalOpen] = useState(false);
   const [seoModalTarget, setSeoModalTarget] = useState<ManagedSeoModalTarget | null>(null);
+  const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<RelatedEntryInfo>({
     queryKey: ["/api/seo/entry", contentType, slug, locale, "related-entry"],
     enabled: open && !!contentType && !!slug,
@@ -82,8 +96,10 @@ export function RelatedEntryPopover({
     },
   });
 
-  const href = data?.path || "";
+  const href = primaryHref || data?.path || "";
+  const hrefLabel = primaryHref ? (primaryLabel ?? "Open preview") : "Open page";
   const heading = data?.title || data?.page_title || deslugifyLabel(slug);
+  const slugValue = data?.slug || slug;
   const lastmod = data?.lastmod || null;
   const manageHref = `/private/type/${encodeURIComponent(contentType)}`;
 
@@ -93,7 +109,10 @@ export function RelatedEntryPopover({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex max-w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className={cn(
+            "inline-flex max-w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+            triggerClassName,
+          )}
         >
           {children}
         </button>
@@ -139,8 +158,25 @@ export function RelatedEntryPopover({
                 </a>
               </dd>
               <dt className="text-muted-foreground">Slug</dt>
-              <dd className="text-foreground font-mono truncate" title={data?.slug || slug}>
-                {data?.slug || slug}
+              <dd className="min-w-0">
+                <button
+                  type="button"
+                  className="flex min-w-0 max-w-full items-center gap-1 rounded-sm text-left text-foreground font-mono hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  title="Click to copy slug"
+                  aria-label="Copy slug"
+                  data-testid={`button-related-entry-copy-slug-${slug}`}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(slugValue).then(
+                      () => toast({ title: "Copied", description: "Slug copied to clipboard." }),
+                      () => toast({ title: "Copy failed", variant: "destructive" }),
+                    );
+                  }}
+                >
+                  <span className="min-w-0 truncate" title={slugValue}>
+                    {slugValue}
+                  </span>
+                  <IconCopy className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                </button>
               </dd>
               <dt className="text-muted-foreground">Locale</dt>
               <dd className="text-foreground uppercase">{data?.locale || locale}</dd>
@@ -150,11 +186,11 @@ export function RelatedEntryPopover({
                   <dd className="text-foreground font-mono truncate">{variant}</dd>
                 </>
               ) : null}
-              {href ? (
+              {data?.path ? (
                 <>
                   <dt className="text-muted-foreground">Path</dt>
-                  <dd className="text-foreground font-mono truncate" title={href}>
-                    {href}
+                  <dd className="text-foreground font-mono truncate" title={data.path}>
+                    {data.path}
                   </dd>
                 </>
               ) : null}
@@ -171,14 +207,6 @@ export function RelatedEntryPopover({
                 </>
               ) : null}
             </dl>
-            {data?.file ? (
-              <p
-                className="text-[11px] text-muted-foreground font-mono truncate"
-                title={data.file}
-              >
-                {formatSitePath(data.file)}
-              </p>
-            ) : null}
             {variant ? (
               <Badge variant="secondary" className="text-[10px] font-normal">
                 Soft draft · {variant}
@@ -197,7 +225,7 @@ export function RelatedEntryPopover({
               >
                 <a href={href} target="_blank" rel="noopener noreferrer">
                   <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
-                  Open page
+                  {hrefLabel}
                 </a>
               </Button>
             ) : (
@@ -208,7 +236,7 @@ export function RelatedEntryPopover({
                 data-testid={`button-related-entry-url-${slug}`}
               >
                 <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
-                Open page
+                {hrefLabel}
               </Button>
             )}
             <Button
@@ -217,18 +245,23 @@ export function RelatedEntryPopover({
               className="min-w-0 flex-1"
               data-testid={`button-related-entry-meta-${slug}`}
               onClick={() => {
-                setSeoModalTarget({
+                const target: ManagedSeoModalTarget = {
                   contentType: data?.contentType || contentType,
                   slug: data?.slug || slug,
                   locale: data?.locale || locale,
                   variant: variant || undefined,
-                });
-                setSeoModalOpen(true);
+                };
                 setOpen(false);
+                if (onOpenMeta) {
+                  onOpenMeta(target);
+                  return;
+                }
+                setSeoModalTarget(target);
+                setSeoModalOpen(true);
               }}
             >
               <IconSearch className="h-3.5 w-3.5" aria-hidden />
-              Open meta
+              {metaLabel ?? "Open meta"}
             </Button>
           </div>
           {previewHref ? (
@@ -241,14 +274,16 @@ export function RelatedEntryPopover({
         </div>
       </PopoverContent>
     </Popover>
-    <ManagedSeoModal
-      open={seoModalOpen}
-      onOpenChange={(next) => {
-        setSeoModalOpen(next);
-        if (!next) setSeoModalTarget(null);
-      }}
-      target={seoModalTarget}
-    />
+    {onOpenMeta ? null : (
+      <ManagedSeoModal
+        open={seoModalOpen}
+        onOpenChange={(next) => {
+          setSeoModalOpen(next);
+          if (!next) setSeoModalTarget(null);
+        }}
+        target={seoModalTarget}
+      />
+    )}
     </>
   );
 }

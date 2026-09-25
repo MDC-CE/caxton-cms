@@ -1,6 +1,6 @@
 /**
- * SEO write-layer rules: live locale, or draft only when the entry has no live locales.
- * A/B experiment variants cannot change seo: (leftover YAML is left alone; promote preserves live seo:).
+ * SEO write-layer rules: live locale, or any draft (0% traffic).
+ * A/B experiment variants cannot change seo:. Promote applies the draft's seo:.
  */
 
 import * as fs from "fs";
@@ -13,23 +13,22 @@ import {
 import { isTemplateVersioningSlug } from "./shared-layout-entry";
 import {
   readSeoBlockFromYamlText,
-  surgicalRemoveTopLevelKey,
   surgicalReplaceSeoBlock,
   yamlHasSeoKey,
   type SeoBlock,
 } from "./seo-fields";
+import { variantHasTraffic } from "./versioning/variant-traffic";
 
 export const SEO_VARIANT_FORBIDDEN = "seo_variant_forbidden";
-export const SEO_DRAFT_WHILE_LIVE_FORBIDDEN = "seo_draft_while_live_forbidden";
 
 export type SeoWriteLayerOk = {
   ok: true;
-  layer: "live" | "draft_unpublished";
+  layer: "live" | "draft" | "draft_unpublished";
 };
 
 export type SeoWriteLayerErr = {
   ok: false;
-  code: typeof SEO_VARIANT_FORBIDDEN | typeof SEO_DRAFT_WHILE_LIVE_FORBIDDEN;
+  code: typeof SEO_VARIANT_FORBIDDEN;
   error: string;
   statusCode: 400;
 };
@@ -54,8 +53,9 @@ export function entryHasAnyLiveLocale(
 }
 
 /**
- * Cluster SEO may be written only on live `{locale}.yml`, or on `draft.{locale}.yml`
- * when the entry has no live locales yet.
+ * Cluster SEO may be written on live `{locale}.yml` or on any draft (a variant at 0%
+ * traffic, registered or not), published locale or not. Experiments (traffic > 0)
+ * cannot change seo:.
  */
 export function assertSeoWriteLayerAllowed(opts: {
   contentType: string;
@@ -69,19 +69,16 @@ export function assertSeoWriteLayerAllowed(opts: {
     return { ok: true, layer: "live" };
   }
 
-  const hasLive = entryHasAnyLiveLocale(opts.contentType, opts.slug, opts.contentRoot);
-
-  if (variant === DEFAULT_DRAFT_VARIANT) {
-    if (hasLive) {
-      return {
-        ok: false,
-        code: SEO_DRAFT_WHILE_LIVE_FORBIDDEN,
-        statusCode: 400,
-        error:
-          "Cluster SEO cannot be edited on draft while a live locale exists. Edit the live page instead.",
-      };
-    }
-    return { ok: true, layer: "draft_unpublished" };
+  const hasTraffic = variantHasTraffic({
+    contentType: opts.contentType,
+    slug: opts.slug,
+    locale: opts.locale,
+    variant,
+    contentRoot: opts.contentRoot,
+  });
+  if (!hasTraffic) {
+    const hasLive = entryHasAnyLiveLocale(opts.contentType, opts.slug, opts.contentRoot);
+    return { ok: true, layer: hasLive ? "draft" : "draft_unpublished" };
   }
 
   return {
@@ -89,34 +86,23 @@ export function assertSeoWriteLayerAllowed(opts: {
     code: SEO_VARIANT_FORBIDDEN,
     statusCode: 400,
     error:
-      "Cluster SEO cannot be edited on experiment variants. Use the live locale (or draft only when the page is not live yet).",
+      "Cluster SEO cannot be edited on experiment variants (traffic > 0). Edit a draft (0% traffic) or the live locale.",
   };
 }
 
 /**
- * When promoting over an existing live file, keep live `seo:` and drop variant `seo:`.
- * First go-live (no live file yet) keeps the variant/draft SEO as-is.
+ * Promote: the draft's `seo:` replaces the live one. When the draft carries no
+ * `seo:`, the live block is kept.
  */
 export function yamlForPromotePreservingLiveSeo(
   variantContent: string,
   liveContent: string | null,
 ): { content: string; ignoredVariantSeo: boolean } {
-  if (!liveContent) {
+  if (!liveContent || yamlHasSeoKey(variantContent) || !yamlHasSeoKey(liveContent)) {
     return { content: variantContent, ignoredVariantSeo: false };
   }
-
-  const variantHadSeo = yamlHasSeoKey(variantContent);
-  const liveHadSeo = yamlHasSeoKey(liveContent);
-  let out = variantContent;
-
-  if (liveHadSeo) {
-    const liveSeo = readSeoBlockFromYamlText(liveContent) as SeoBlock;
-    out = surgicalReplaceSeoBlock(out, liveSeo);
-  } else if (variantHadSeo) {
-    out = surgicalRemoveTopLevelKey(out, "seo");
-  }
-
-  return { content: out, ignoredVariantSeo: variantHadSeo };
+  const liveSeo = readSeoBlockFromYamlText(liveContent) as SeoBlock;
+  return { content: surgicalReplaceSeoBlock(variantContent, liveSeo), ignoredVariantSeo: false };
 }
 
 /** Basename helpers for tests / UI. */

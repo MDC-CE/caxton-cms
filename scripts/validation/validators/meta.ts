@@ -6,16 +6,14 @@
  * - Priority values (0-1)
  * - Change frequency values
  *
- * Resolves {{ single.* }} / {{ entry.* }} and site vars (global.* / brand.*)
- * the same way as the live SEO gate before required checks.
+ * Resolves {{ single.* }} / {{ entry.* }} (field-mapped) and site vars
+ * (global.* / brand.*) via resolveEntryMeta — same as the live SEO gate.
  */
 
-import * as path from "path";
 import type { Validator, ValidatorResult, ValidationContext, ValidationIssue } from "../shared/types";
 import { validateRequiredMeta } from "../../../shared/validateRequiredMeta";
-import { resolveAllTemplateVars } from "../../../server/resolve-template-vars";
-import { getDefaultContentRoot } from "../../../server/site-config";
 import { liveFilesForSeo } from "../shared/seoValidationScope";
+import { getResolvedMeta, hasTemplate } from "../shared/resolvedMeta";
 import { META_ISSUE_CODES } from "./meta.issueCodes";
 
 const VALID_CHANGE_FREQUENCIES = [
@@ -27,40 +25,6 @@ const VALID_CHANGE_FREQUENCIES = [
   "yearly",
   "never",
 ];
-
-const TEMPLATE_RE = /\{\{[\s\S]*?\}\}/;
-
-function resolveContentRoot(context: ValidationContext): string {
-  if (context.contentRoot) {
-    return path.isAbsolute(context.contentRoot)
-      ? context.contentRoot
-      : path.join(process.cwd(), context.contentRoot);
-  }
-  return path.resolve(getDefaultContentRoot());
-}
-
-function buildSingleEntry(file: {
-  entryFields?: Record<string, unknown>;
-  title?: string;
-  description?: string;
-  slug?: string;
-  locale?: string;
-}): Record<string, unknown> {
-  const fromEntry =
-    file.entryFields && typeof file.entryFields === "object" ? { ...file.entryFields } : {};
-  return {
-    ...fromEntry,
-    title: fromEntry.title ?? file.title,
-    description: fromEntry.description ?? file.description,
-    slug: fromEntry.slug ?? file.slug,
-  };
-}
-
-function entryRegion(entryFields: Record<string, unknown> | undefined): string | undefined {
-  const region = entryFields?.region;
-  if (typeof region === "string" && region.trim()) return region.trim();
-  return undefined;
-}
 
 export const metaValidator: Validator = {
   name: "meta",
@@ -74,28 +38,16 @@ export const metaValidator: Validator = {
     const startTime = Date.now();
     const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
-    const contentRoot = resolveContentRoot(context);
 
     for (const file of liveFilesForSeo(context)) {
-      const rawMeta =
-        file.meta && typeof file.meta === "object" && !Array.isArray(file.meta)
-          ? (file.meta as Record<string, unknown>)
-          : {};
-      const singleEntry = buildSingleEntry(file);
-      const region = entryRegion(file.entryFields);
+      const resolved = getResolvedMeta(file, context);
+      // Resolve failures are reported once by seo-depth (META_RESOLVE_FAILED).
+      const meta = resolved.ok ? resolved.meta : null;
 
-      const meta = resolveAllTemplateVars(rawMeta, {
-        singleEntry,
-        meta: rawMeta,
-        contentRoot,
-        context: { locale: file.locale, region },
-        skipSiteVars: false,
-      }) as Record<string, unknown>;
+      const titleHasTemplate = meta ? hasTemplate(meta.page_title) : false;
+      const descHasTemplate = meta ? hasTemplate(meta.description) : false;
 
-      const titleHasTemplate = TEMPLATE_RE.test(String(meta.page_title ?? "").trim());
-      const descHasTemplate = TEMPLATE_RE.test(String(meta.description ?? "").trim());
-
-      if (titleHasTemplate || descHasTemplate) {
+      if (meta && (titleHasTemplate || descHasTemplate)) {
         errors.push({
           type: "error",
           code: "UNRESOLVED_META_TEMPLATE",
@@ -106,8 +58,8 @@ export const metaValidator: Validator = {
         });
       }
 
-      const required = validateRequiredMeta(meta);
-      if (!required.ok) {
+      const required = meta ? validateRequiredMeta(meta) : null;
+      if (required && !required.ok) {
         for (const err of required.errors) {
           const fieldHasTemplate =
             err.field === "meta.page_title" ? titleHasTemplate : descHasTemplate;

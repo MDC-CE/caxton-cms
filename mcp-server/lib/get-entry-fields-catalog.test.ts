@@ -68,6 +68,25 @@ describe("buildAvailableFieldsCatalog", () => {
     expect(catalog.find((r) => r.field === "content")?.pick_hint).toMatch(/Large body/);
     expect(catalog.every((r) => !("effective" in r))).toBe(true);
   });
+
+  it("keeps deprecated fields listed with replaced_by and a pick_hint", () => {
+    const catalog = buildAvailableFieldsCatalog({
+      contentType: "blog",
+      config: {
+        directory: "blog",
+        editor: {
+          title: { type: "text" },
+          content: { type: "markdown", deprecated: { replaced_by: "title" } },
+          authors: { type: "relation", source: "authors", deprecated: true },
+        },
+      } as Parameters<typeof buildAvailableFieldsCatalog>[0]["config"],
+    });
+    const content = catalog.find((r) => r.field === "content");
+    expect(content).toMatchObject({ deprecated: true, replaced_by: "title", pick_hint: "Deprecated; use title" });
+    const authors = catalog.find((r) => r.field === "authors");
+    expect(authors).toMatchObject({ deprecated: true, replaced_by: null, pick_hint: "Deprecated; no replacement" });
+    expect(catalog.find((r) => r.field === "title")?.deprecated).toBeUndefined();
+  });
 });
 
 describe("findUnknownFields / selectFieldsGatePayload", () => {

@@ -36,6 +36,8 @@ describe("list-proposals-mcp", () => {
     expect(isProposalsScoped({ proposer_actor: { role: "copy_editor" } })).toBe(true);
     expect(isProposalsScoped({ proposer_actor: {} })).toBe(false);
     expect(isProposalsScoped({ agent_session_id: "sess-1" })).toBe(true);
+    expect(isProposalsScoped({ reviewer_username: "blake@4geeks.com" })).toBe(true);
+    expect(isProposalsScoped({ reviewer_username: "  " })).toBe(false);
   });
 
   it("clamps limit and computes next_offset", () => {

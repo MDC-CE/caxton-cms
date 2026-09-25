@@ -185,7 +185,7 @@ describe("writeSeoFields", () => {
     expect(loadSeoIndex(contentRoot).entries["blog/post-a/en"]?.refresh_tier).toBe("fast");
   });
 
-  it("rejects SEO writes on draft while live exists", () => {
+  it("allows SEO writes on a draft while live exists (staged until promote)", () => {
     fs.writeFileSync(
       path.join(contentRoot, "blog", "post-a", "draft.en.yml"),
       `slug: post-a
@@ -204,8 +204,9 @@ meta:
       variant: "draft",
       ci: stubCi("/en/blog/post-a"),
     });
-    expect(result.success).toBe(false);
-    if (!result.success) expect(result.code).toBe("seo_draft_while_live_forbidden");
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.isVariantLayer).toBe(true);
+    expect(loadSeoIndex(contentRoot).entries["blog/post-a/en"]?.main_keyword).not.toBe("draft kw");
   });
 
   it("allows draft SEO when unpublished and does not index until live", () => {
@@ -234,7 +235,12 @@ meta:
     expect(index.entries["blog/post-a/en"]).toBeUndefined();
   });
 
-  it("rejects SEO writes on A/B variants", () => {
+  it("rejects SEO writes on experiment variants (traffic > 0)", () => {
+    fs.writeFileSync(
+      path.join(contentRoot, "blog", "post-a", "versioning.yml"),
+      "en:\n  variants:\n    - slug: b\n      allocation: 50\n",
+      "utf-8",
+    );
     fs.writeFileSync(
       path.join(contentRoot, "blog", "post-a", "b.en.yml"),
       `slug: post-a

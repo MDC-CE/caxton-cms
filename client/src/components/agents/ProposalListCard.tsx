@@ -20,8 +20,10 @@ import {
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
+import { AttentionBadge } from "@/components/agents/AttentionBadge";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
+import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
 import {
   ProposalKindBadge,
   ProposalProgressLabel,
@@ -55,6 +57,16 @@ export type ProposalCardData = {
   related_issue_ids: string[];
   entries: Array<{ status: string; variant: string | null }>;
   claim?: { by: string; expiresAt: string; actor?: Record<string, unknown> } | null;
+  reviewer_action_at?: number | null;
+  reviewer_action_by?: string | null;
+  reviewer_action_by_actor?: Record<string, unknown>;
+  closed_by?: string | null;
+  close_reason?: string | null;
+  system_version?: string | null;
+  all_or_nothing?: boolean;
+  stale_since?: string | null;
+  stale_flagged_at?: string | null;
+  reverts_proposal_id?: string | null;
   created_at: number;
   updated_at?: number;
   review_context_snapshot?: Record<string, unknown> | null;
@@ -188,6 +200,12 @@ export function ProposalListCard({
     proposerUsername: p.proposer_username,
     proposerActor: p.proposer_actor,
     claim: p.claim,
+    status: p.status,
+    closeReason: p.close_reason,
+    closedBy: p.closed_by,
+    reviewer: p.reviewer_action_by,
+    reviewerActor: p.reviewer_action_by_actor,
+    reviewerAt: p.reviewer_action_at,
   });
   const progress = p.kind === "edits" ? proposalEntryProgress(p.entries ?? []) : null;
   const blockers = p.open_blocker_count ?? 0;
@@ -255,6 +273,20 @@ export function ProposalListCard({
   }
   for (const line of attribution.lines) {
     meta.push({ key: `attr-${line}`, node: <span className="truncate">{line}</span> });
+  }
+  if (attribution.reviewLine) {
+    meta.push({
+      key: "review",
+      node: (
+        <span
+          className="truncate"
+          title={attribution.reviewLine.title}
+          data-testid={`text-proposal-review-${p.id}`}
+        >
+          {attribution.reviewLine.text}
+        </span>
+      ),
+    });
   }
   if (attribution.expiredLine) {
     meta.push({
@@ -330,30 +362,18 @@ export function ProposalListCard({
                     testIdSuffix={`-${p.id}`}
                   />
                 ) : null}
-                {p.attention === "awaiting_rereview" ? (
-                  <Badge
-                    variant="secondary"
-                    className="font-normal"
-                    data-testid={`badge-attention-awaiting_rereview-${p.id}`}
-                  >
-                    Ready for re-check
-                    {(p.resolved_blocker_count ?? 0) > 0
-                      ? ` (${p.resolved_blocker_count})`
-                      : ""}
-                  </Badge>
-                ) : null}
-                {p.attention === "no_feedback" ? (
-                  <Badge
-                    variant="outline"
-                    className="font-normal"
-                    data-testid={`badge-attention-no_feedback-${p.id}`}
-                  >
-                    No feedback yet
-                  </Badge>
+                {p.attention === "awaiting_rereview" || p.attention === "no_feedback" ? (
+                  <AttentionBadge
+                    attention={p.attention}
+                    resolvedBlockerCount={p.resolved_blocker_count ?? 0}
+                    stopLinkNavigation
+                    testIdSuffix={`-${p.id}`}
+                  />
                 ) : null}
                 {p.escalated ? (
                   <EscalatedBadge stopLinkNavigation testIdSuffix={`-${p.id}`} />
                 ) : null}
+                <ProposalV1Badges p={p} stopLinkNavigation />
               </div>
               <IconChevronRight
                 className="h-4 w-4 text-muted-foreground/40 transition-colors group-hover:text-foreground"

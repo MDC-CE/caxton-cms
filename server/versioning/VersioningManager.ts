@@ -8,6 +8,13 @@ import { addFileModifiedListener, markFileAsModified } from "../sync-state";
 import { siteSyncGcsKey, SYNC_FILENAMES, versioningStateReadKeys } from "@shared/gcsKeys";
 import { gcs } from "../gcs";
 import { hashUserId } from "./cookie-utils";
+
+/** `_draft` is variant-file system metadata, never page content (see draft-meta.ts). */
+function stripDraftMeta(data: Record<string, unknown>): Record<string, unknown> {
+  if (!("_draft" in data)) return data;
+  const { _draft: _omit, ...rest } = data;
+  return rest;
+}
 import { child } from "../logger";
 import { getDefaultContentFolder, getDefaultContentRoot } from "../site-config";
 import {
@@ -473,7 +480,9 @@ export class VersioningManager {
         const content = fs.readFileSync(filePath, "utf-8");
         const { escaped: vEsc, map: vMap } = escapeTemplateVars(content);
         const vParsed = yaml.load(vEsc) as Record<string, unknown>;
-        const variantData = (vParsed ? unescapeObjectVars(vParsed, vMap) : {}) as Record<string, unknown>;
+        const variantData = stripDraftMeta(
+          (vParsed ? unescapeObjectVars(vParsed, vMap) : {}) as Record<string, unknown>,
+        );
         this.contentCache.set(cacheKey, variantData);
         return { ok: true, data: variantData };
       }
@@ -490,7 +499,9 @@ export class VersioningManager {
       const content = fs.readFileSync(filePath, "utf-8");
       const { escaped: vEsc, map: vMap } = escapeTemplateVars(content);
       const vParsed = yaml.load(vEsc) as Record<string, unknown>;
-      const variantData = (vParsed ? unescapeObjectVars(vParsed, vMap) : {}) as Record<string, unknown>;
+      const variantData = stripDraftMeta(
+        (vParsed ? unescapeObjectVars(vParsed, vMap) : {}) as Record<string, unknown>,
+      );
 
       const merged = deepMerge(commonData, variantData);
       this.contentCache.set(cacheKey, merged);

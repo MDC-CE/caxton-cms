@@ -46,6 +46,11 @@ import { resolveEffectiveSeo, seoBaselineFromDbItem } from "./seo-effective-seo"
 import { assertSeoWriteLayerAllowed } from "./seo-write-layer";
 import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
 import {
+  checkDeprecatedWrites,
+  entryHasLiveStoredValue,
+  getDeprecatedFieldsForType,
+} from "./deprecated-field-guard";
+import {
   DEFAULT_DRAFT_VARIANT,
   getEntryContentDir,
   hasLiveLocaleFile,
@@ -109,6 +114,8 @@ export type WriteMappedFieldsResult = {
   /** True when writing a non-live variant/draft layer. */
   isVariantLayer?: boolean;
   noop?: boolean;
+  /** Set when code === "deprecated_field". */
+  deprecated?: { field: string; replaced_by: string | null; reason: string | null };
 };
 
 function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
@@ -137,6 +144,10 @@ export type FieldProvenance = {
   layer_has_key?: boolean;
   /** Platform SEO fields (locale `seo:`), not field_mapping. */
   group?: "seo";
+  /** Set when editor.<field>.deprecated is configured. */
+  deprecated?: { replaced_by: string | null; reason: string | null };
+  /** Deprecated and this entry has no live stored value → writes are rejected. */
+  deprecated_locked?: boolean;
 };
 
 function contentRootPath(contentRoot?: string): string {
@@ -460,6 +471,20 @@ export function writeMappedFields(
       error:
         "purchasable is a computed system field (from _product.yml). Do not write it on the entry. Edit programs/{slug}/_product.yml (staff Store) or use get_product / create_or_update_product for audience.",
       statusCode: 400,
+    };
+  }
+  const deprecatedCheck = checkDeprecatedWrites({ contentType, slug, contentRoot, updates });
+  if (!deprecatedCheck.ok) {
+    return {
+      success: false,
+      error: deprecatedCheck.error,
+      code: deprecatedCheck.code,
+      statusCode: 400,
+      deprecated: {
+        field: deprecatedCheck.field,
+        replaced_by: deprecatedCheck.replaced_by,
+        reason: deprecatedCheck.reason,
+      },
     };
   }
   const isStatic = !config.database?.slug;
@@ -961,6 +986,7 @@ export async function buildFieldProvenance(opts: {
   }
 
   const fields: FieldProvenance[] = [];
+  const deprecatedForType = getDeprecatedFieldsForType(contentType, contentRoot);
 
   for (const field of fieldKeys) {
     const sourceRaw = mappingSourceString(fmFull[field] ?? fmRegular[field]);
@@ -1029,6 +1055,11 @@ export async function buildFieldProvenance(opts: {
     if (hasDatabase || baseline !== undefined) row.baseline = baseline;
     if (hasDb) row.db_value = dbValue;
     if (hasCt) row.ct_value = ctValue;
+    const dep = deprecatedForType[field];
+    if (dep) {
+      row.deprecated = { replaced_by: dep.replaced_by ?? null, reason: dep.reason ?? null };
+      row.deprecated_locked = !entryHasLiveStoredValue(contentType, slug, field, contentRoot);
+    }
     fields.push(row);
   }
 

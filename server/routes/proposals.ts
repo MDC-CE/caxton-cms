@@ -2,12 +2,18 @@ import type { Express, Request, Response } from "express";
 import { api } from "../rate-limit/api";
 import * as userStore from "../user-store";
 import { requireAnyCapability } from "./_helpers";
-import { proposalServiceForSite, exportAllProposals, toProposalSummary } from "../content-proposals";
+import {
+  proposalServiceForSite,
+  exportAllProposals,
+  toProposalSummary,
+  proposalDeletedError,
+} from "../content-proposals";
 import type { SiteContext } from "../site-manager";
 import {
   parseProposalSort,
   parseProposerActorType,
   parseEscalatedQuery,
+  parseOutcomeReviewQuery,
   type CreateProposalInput,
   type ProposalUpdateAction,
 } from "../content-proposals/service";
@@ -15,6 +21,7 @@ import {
   parseProposalAttention,
   parseAttentionPerspective,
 } from "../content-proposals/attention";
+import { checkBulkDeleteRequest } from "../content-proposals/bulk-delete-gate";
 import { child } from "../logger";
 import { resolveEventActor } from "./_helpers";
 import { getProposalSettings } from "../settings";
@@ -71,7 +78,11 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "set_idea_funnel",
   "escalate",
   "deescalate",
+  "review_outcome",
+  "set_outcome_lesson",
 ]);
+
+const OUTCOME_ACTIONS = new Set<ProposalUpdateAction>(["review_outcome", "set_outcome_lesson"]);
 
 const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "claim",
@@ -92,6 +103,9 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "set_idea_funnel",
   "escalate",
   "deescalate",
+  "review_outcome",
+  "set_outcome_lesson",
+  "revert",
 ]);
 
 export function registerProposalRoutes(app: Express): void {
@@ -186,10 +200,19 @@ export function registerProposalRoutes(app: Express): void {
       typeof req.query.proposer_actor_role === "string" ? req.query.proposer_actor_role : undefined;
     const agentSessionId =
       typeof req.query.agent_session_id === "string" ? req.query.agent_session_id : undefined;
+    const reviewerUsername =
+      typeof req.query.reviewer_username === "string" ? req.query.reviewer_username : undefined;
     const escalatedRaw = typeof req.query.escalated === "string" ? req.query.escalated : undefined;
     const parsedEscalated = parseEscalatedQuery(escalatedRaw);
     if (!parsedEscalated.ok) {
       res.status(400).json({ error: parsedEscalated.error });
+      return;
+    }
+    const outcomeReviewRaw =
+      typeof req.query.outcome_review === "string" ? req.query.outcome_review : undefined;
+    const parsedOutcomeReview = parseOutcomeReviewQuery(outcomeReviewRaw);
+    if (!parsedOutcomeReview.ok) {
+      res.status(400).json({ error: parsedOutcomeReview.error });
       return;
     }
     const attentionRaw = typeof req.query.attention === "string" ? req.query.attention : undefined;
@@ -268,7 +291,9 @@ export function registerProposalRoutes(app: Express): void {
       proposer_actor_type: parsedActorType.type,
       proposer_actor_role: proposerActorRole,
       agent_session_id: agentSessionId,
+      reviewer_username: reviewerUsername,
       escalated: parsedEscalated.escalated,
+      outcome_review: parsedOutcomeReview.outcome_review,
       attention: parsedAttention.attention,
       stalled: stalled === true ? true : undefined,
       needs_review: needsReview === true ? true : undefined,
@@ -324,6 +349,17 @@ export function registerProposalRoutes(app: Express): void {
     res.json({ proposers, days: Math.min(Math.max(days, 1), 365) });
   });
 
+  api.get(app, "/api/admin/proposals/reviewers", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireProposalRead(req, res);
+    if (!auth) return;
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const daysRaw = req.query.days != null ? Number(req.query.days) : 30;
+    const days = Number.isFinite(daysRaw) ? daysRaw : 30;
+    const reviewers = svc.listRecentReviewers({ days });
+    res.json({ reviewers, days: Math.min(Math.max(days, 1), 365) });
+  });
+
   api.get(app, "/api/admin/proposals/kpis", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireProposalRead(req, res);
     if (!auth) return;
@@ -351,12 +387,45 @@ export function registerProposalRoutes(app: Express): void {
     if (!svc) return;
     const proposal = svc.get(req.params.id);
     if (!proposal) {
+      const deleted = svc.deletion(req.params.id);
+      if (deleted) {
+        res.status(410).json(proposalDeletedError(deleted));
+        return;
+      }
       res.status(404).json({ error: "Proposal not found" });
       return;
     }
     const review_context = await svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
     const fresh = svc.get(req.params.id) ?? proposal;
-    res.json({ proposal: fresh, review_context });
+    res.json({ proposal: fresh, review_context, deleted_refs: svc.missingReferencedIds(fresh) });
+  });
+
+  api.post(app, "/api/admin/proposals/bulk-delete", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireProposalRead(req, res);
+    if (!auth) return;
+    const gate = checkBulkDeleteRequest({
+      actorType: resolveEventActor(req)?.type ?? null,
+      username: auth.username,
+      hasDeleteCapability: Boolean(
+        auth.username && userStore.hasCapability(auth.username, "proposals_delete"),
+      ),
+      ids: req.body?.ids,
+    });
+    if (!gate.ok) {
+      res.status(gate.status).json({ ok: false, code: gate.code, error: gate.error });
+      return;
+    }
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const { results } = await svc.deleteProposals(gate.ids, {
+      username: auth.username!,
+      actor: resolveEventActor(req),
+    });
+    res.json({
+      ok: true,
+      results,
+      deleted: results.filter((r) => r.status === "deleted").length,
+    });
   });
 
   api.post(app, "/api/admin/proposals", { rate: "staffWrite" }, async (req, res) => {
@@ -394,7 +463,10 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "implements_required" ||
         result.code === "idea_already_in_progress" ||
         result.code === "implements_entry_mismatch" ||
-        result.code === "implements_not_found"
+        result.code === "implements_not_found" ||
+        result.code === "competing_shared_fields" ||
+        result.code === "draft_in_proposal" ||
+        result.code === "variant_has_traffic"
           ? 409
           : 400;
       res.status(status).json(result);
@@ -451,6 +523,26 @@ export function registerProposalRoutes(app: Express): void {
       }
     }
 
+    if (OUTCOME_ACTIONS.has(action)) {
+      if (actor?.type === "mcp") {
+        res.status(403).json({
+          ok: false,
+          code: "steward_ui_only",
+          error:
+            "Outcome reviews are set by staff stewards in the UI only — agents can read outcome_review fields but cannot set them.",
+        });
+        return;
+      }
+      if (!auth.username || !userStore.userHasRole(auth.username, "platform_steward")) {
+        res.status(403).json({
+          ok: false,
+          code: "steward_required",
+          error: "Only a Platform Steward can review a proposal outcome.",
+        });
+        return;
+      }
+    }
+
     let asStaff = needsWrite && action !== "attach_variant" && action !== "add_blocker";
     if (action === "set_no_auto_retry") {
       // Staff UI may flip without claim; MCP must claim (enforced in service via actor.type).
@@ -463,7 +555,7 @@ export function registerProposalRoutes(app: Express): void {
     if (action === "set_idea_funnel") {
       asStaff = actor?.type !== "mcp";
     }
-    if (action === "escalate" || action === "deescalate") {
+    if (action === "escalate" || action === "deescalate" || OUTCOME_ACTIONS.has(action)) {
       asStaff = true;
     }
     if (action === "withdraw") {
@@ -550,6 +642,12 @@ export function registerProposalRoutes(app: Express): void {
       resolve_note: typeof req.body?.resolve_note === "string" ? req.body.resolve_note : undefined,
       variant: typeof req.body?.variant === "string" ? req.body.variant : undefined,
       confirm_end_experiment: req.body?.confirm_end_experiment === true,
+      confirm_base_unknown: req.body?.confirm_base_unknown === true,
+      confirm_affected_entries:
+        typeof req.body?.confirm_affected_entries === "number" ? req.body.confirm_affected_entries : undefined,
+      dry_run: req.body?.dry_run === true,
+      all_or_nothing:
+        typeof req.body?.all_or_nothing === "boolean" ? req.body.all_or_nothing : undefined,
       confirm_recent_activity: req.body?.confirm_recent_activity === true,
       confirm_new_values: req.body?.confirm_new_values === true,
       promote_on_apply: req.body?.promote_on_apply === true,
@@ -574,17 +672,34 @@ export function registerProposalRoutes(app: Express): void {
           : undefined,
       escalated_note:
         typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
+      outcome_review:
+        typeof req.body?.outcome_review === "string" ? req.body.outcome_review : undefined,
+      outcome_review_note:
+        typeof req.body?.outcome_review_note === "string" ? req.body.outcome_review_note : undefined,
+      outcome_review_expected:
+        typeof req.body?.outcome_review_expected === "string"
+          ? req.body.outcome_review_expected
+          : undefined,
+      outcome_lesson_captured:
+        typeof req.body?.outcome_lesson_captured === "boolean"
+          ? req.body.outcome_lesson_captured
+          : undefined,
+      outcome_lesson_note:
+        typeof req.body?.outcome_lesson_note === "string" ? req.body.outcome_lesson_note : undefined,
     });
     if (!result.ok) {
       const status =
         result.code === "not_found"
           ? 404
+          : result.code === "proposal_deleted"
+            ? 410
           : result.code === "four_eyes" ||
               result.code === "not_claimant" ||
               result.code === "not_proposer" ||
               result.code === "withdraw_disabled" ||
               result.code === "steward_ui_only" ||
-              result.code === "escalated"
+              result.code === "escalated" ||
+              result.code === "four_eyes_co_author"
             ? 403
             : result.code === "proposal_exists" ||
                 result.code === "confirm_end_experiment" ||
@@ -592,7 +707,17 @@ export function registerProposalRoutes(app: Express): void {
                 result.code === "confirm_reject" ||
                 result.code === "activity_unavailable" ||
                 result.code === "notes_no_auto_retry" ||
-                result.code === "claimed"
+                result.code === "claimed" ||
+                result.code === "not_closed" ||
+                result.code === "not_bad" ||
+                result.code === "legacy_version" ||
+                result.code === "all_or_nothing_blocked" ||
+                result.code === "competing_shared_fields" ||
+                result.code === "draft_in_proposal" ||
+                result.code === "variant_has_traffic" ||
+                result.code === "draft_base_unknown" ||
+                result.code === "confirm_affected_entries" ||
+                result.code === "revert_conflicts"
               ? 409
               : 400;
       res.status(status).json(result);

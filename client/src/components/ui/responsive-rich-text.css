@@ -1,0 +1,31 @@
+/**
+ * Single-DOM RTE: below the breakpoint, neutralize inline font metrics so
+ * parent Tailwind sizes win. Above the breakpoint, leave RTE styles intact.
+ * Breakpoints match Tailwind: md = 768px, lg = 1024px.
+ */
+
+@media (max-width: 767px) {
+  .rte-responsive--md,
+  .rte-responsive--md [style] {
+    font-size: inherit !important;
+    line-height: inherit !important;
+    letter-spacing: inherit !important;
+  }
+
+  .rte-responsive--md.rte-responsive--hide-br br {
+    display: none;
+  }
+}
+
+@media (max-width: 1023px) {
+  .rte-responsive--lg,
+  .rte-responsive--lg [style] {
+    font-size: inherit !important;
+    line-height: inherit !important;
+    letter-spacing: inherit !important;
+  }
+
+  .rte-responsive--lg.rte-responsive--hide-br br {
+    display: none;
+  }
+}

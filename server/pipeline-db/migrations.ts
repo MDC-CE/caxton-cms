@@ -7,8 +7,9 @@ import {
   systemJobSourceForType,
   type SystemJobFollowUpType,
 } from "../events/types";
+import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 23;
+export const PIPELINE_SCHEMA_VERSION = 26;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -466,7 +467,167 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
       }
     },
   },
+  {
+    version: 24,
+    name: "content_proposals_outcome_review",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      const columns: Array<[string, string]> = [
+        ["outcome_review", "TEXT"],
+        ["outcome_review_note", "TEXT"],
+        ["outcome_review_expected", "TEXT"],
+        ["outcome_review_at", "INTEGER"],
+        ["outcome_review_by", "TEXT"],
+        ["outcome_review_history_json", "TEXT NOT NULL DEFAULT '[]'"],
+        ["outcome_lesson_captured_at", "INTEGER"],
+        ["outcome_lesson_captured_by", "TEXT"],
+        ["outcome_lesson_note", "TEXT"],
+      ];
+      for (const [name, type] of columns) {
+        if (!tableHasColumn(db, "content_proposals", name)) {
+          db.exec(`ALTER TABLE content_proposals ADD COLUMN ${name} ${type}`);
+        }
+      }
+    },
+  },
+  {
+    version: 25,
+    name: "content_proposals_reviewer_action_by",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "reviewer_action_by")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_by TEXT");
+      }
+      if (!tableHasColumn(db, "content_proposals", "reviewer_action_by_actor_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN reviewer_action_by_actor_json TEXT");
+      }
+      backfillReviewerActionBy(db);
+    },
+  },
+  {
+    version: 26,
+    name: "content_proposals_draft_first_v1",
+    up(db) {
+      if (tableExists(db, "content_proposals")) {
+        const proposalColumns: Array<[string, string]> = [
+          ["system_version", "TEXT"],
+          ["co_authors_json", "TEXT NOT NULL DEFAULT '[]'"],
+          ["stale_since", "TEXT"],
+          ["stale_flagged_at", "TEXT"],
+          ["all_or_nothing", "INTEGER NOT NULL DEFAULT 0"],
+          ["reverts_proposal_id", "TEXT"],
+        ];
+        for (const [name, type] of proposalColumns) {
+          if (!tableHasColumn(db, "content_proposals", name)) {
+            db.exec(`ALTER TABLE content_proposals ADD COLUMN ${name} ${type}`);
+          }
+        }
+      }
+      if (tableExists(db, "content_proposal_entries")) {
+        const entryColumns: Array<[string, string]> = [
+          ["created_draft", "INTEGER NOT NULL DEFAULT 0"],
+          ["derived_ops_json", "TEXT"],
+          ["derived_for_key", "TEXT"],
+          ["published_diff_json", "TEXT"],
+          ["pre_apply_snapshot_json", "TEXT"],
+        ];
+        for (const [name, type] of entryColumns) {
+          if (!tableHasColumn(db, "content_proposal_entries", name)) {
+            db.exec(`ALTER TABLE content_proposal_entries ADD COLUMN ${name} ${type}`);
+          }
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS draft_bases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_type TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          locale TEXT NOT NULL,
+          variant TEXT NOT NULL,
+          locale_hash TEXT,
+          common_hash TEXT,
+          snapshot_json TEXT,
+          source_snapshot_json TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_bases_draft
+          ON draft_bases (content_type, slug, locale, variant);
+      `);
+    },
+  },
 ];
+
+function parseActorJson(raw: string | null | undefined): AgentActorLike | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const type = (parsed as { type?: unknown }).type;
+    if (type !== "ui" && type !== "mcp" && type !== "system") return null;
+    return parsed as AgentActorLike;
+  } catch {
+    return null;
+  }
+}
+
+/** Latest non-proposer blocker add/resolve per reviewed proposal (reopens were never attributed). */
+function backfillReviewerActionBy(db: Database.Database): void {
+  if (!tableExists(db, "content_proposal_blockers")) return;
+  if (!tableHasColumn(db, "content_proposals", "reviewer_action_at")) return;
+  if (!tableHasColumn(db, "content_proposals", "proposer_username")) return;
+  const hasProposerActor = tableHasColumn(db, "content_proposals", "proposer_actor_json");
+  const hasAuthorActor = tableHasColumn(db, "content_proposal_blockers", "author_actor_json");
+  const hasResolvedActor = tableHasColumn(db, "content_proposal_blockers", "resolved_by_actor_json");
+
+  const proposals = db
+    .prepare(
+      `SELECT id, proposer_username${hasProposerActor ? ", proposer_actor_json" : ""}
+       FROM content_proposals
+       WHERE reviewer_action_at IS NOT NULL AND reviewer_action_by IS NULL`,
+    )
+    .all() as Array<{ id: string; proposer_username: string; proposer_actor_json?: string | null }>;
+  if (proposals.length === 0) return;
+
+  const blockersStmt = db.prepare(
+    `SELECT author, created_at, resolved_by, resolved_at
+       ${hasAuthorActor ? ", author_actor_json" : ""}
+       ${hasResolvedActor ? ", resolved_by_actor_json" : ""}
+     FROM content_proposal_blockers
+     WHERE proposal_id = ?`,
+  );
+  const update = db.prepare(
+    `UPDATE content_proposals SET reviewer_action_by = ?, reviewer_action_by_actor_json = ? WHERE id = ?`,
+  );
+
+  const run = db.transaction(() => {
+    for (const p of proposals) {
+      const proposerActor = parseActorJson(p.proposer_actor_json);
+      const rows = blockersStmt.all(p.id) as Array<{
+        author: string;
+        created_at: number;
+        resolved_by: string | null;
+        resolved_at: number | null;
+        author_actor_json?: string | null;
+        resolved_by_actor_json?: string | null;
+      }>;
+      let best: { at: number; username: string; actorJson: string | null } | null = null;
+      const consider = (username: string | null, at: number | null, actorJson: string | null) => {
+        if (!username?.trim() || at == null || !Number.isFinite(at)) return;
+        if (sameAgentIdentity(p.proposer_username, proposerActor, username, parseActorJson(actorJson))) {
+          return;
+        }
+        if (!best || at > best.at) best = { at, username, actorJson };
+      };
+      for (const b of rows) {
+        consider(b.author, b.created_at, b.author_actor_json ?? null);
+        consider(b.resolved_by, b.resolved_at, b.resolved_by_actor_json ?? null);
+      }
+      const picked = best as { at: number; username: string; actorJson: string | null } | null;
+      if (picked) update.run(picked.username, picked.actorJson ?? "{}", p.id);
+    }
+  });
+  run();
+}
 
 /** Conservative legacy baseline when pipeline_schema_version is missing. */
 export function detectLegacyBaseline(db: Database.Database): number {

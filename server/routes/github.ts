@@ -10,7 +10,8 @@ import { getAllQueueState } from "../image-queue-state";
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import { execSync as _execSync, execFile } from "child_process";
+import { execFile } from "child_process";
+import { api } from "../rate-limit/api";
 import {
   versioningUpdateSchema,
   type CareerProgram,
@@ -1154,136 +1155,127 @@ export function registerGithubRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/git/folder-history", (req, res) => {
+  api.get(app, "/api/git/folder-history", { rate: "staffWrite" }, async (req, res) => {
     try {
-      const exec = _execSync;
-      const folder = req.query.folder as string;
+      const site = res.locals.site as SiteContext | undefined;
+      const contentRootName = site?.contentRootName ?? "";
+      const folder = typeof req.query.folder === "string" ? req.query.folder : "";
+      const { validateRestoreFolder, listFolderHistory } = await import("../content-restore");
+      const folderErr = validateRestoreFolder(folder, contentRootName);
+      if (folderErr) {
+        res.status(400).json({ error: folderErr, entries: [] });
+        return;
+      }
       const limit = Math.min(parseInt(String(req.query.limit || "30"), 10) || 30, 50);
-      if (!folder || typeof folder !== "string") {
-        res.status(400).json({ error: "folder query param required" });
+      const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+      const result = await listFolderHistory({
+        folder,
+        repoUrl: site?.config?.githubRepoUrl,
+        limit,
+        page,
+      });
+      if (!result.success) {
+        const status = result.error === "GitHub not configured" ? 503 : 502;
+        res.status(status).json({ error: result.error, entries: [], hasMore: false, repoUrl: result.repoUrl });
         return;
       }
-      if (/[;&|`$<>]/.test(folder)) {
-        res.status(400).json({ error: "Invalid folder path" });
-        return;
-      }
-      let raw: string;
-      try {
-        raw = exec(
-          `git log --pretty=format:"%H|%aI|%an|%s" -n ${limit} -- "${folder}"`,
-          { encoding: "utf-8", cwd: process.cwd() }
-        ) as string;
-      } catch {
-        res.json({ entries: [], repoUrl: null });
-        return;
-      }
-      const entries = raw
-        .split("\n")
-        .filter(l => l.trim())
-        .map(line => {
-          const idx1 = line.indexOf("|");
-          const idx2 = line.indexOf("|", idx1 + 1);
-          const idx3 = line.indexOf("|", idx2 + 1);
-          return {
-            sha: line.slice(0, idx1),
-            date: line.slice(idx1 + 1, idx2),
-            author: line.slice(idx2 + 1, idx3),
-            subject: line.slice(idx3 + 1),
-          };
-        });
-      const repoUrl = (process.env.GITHUB_REPO_URL || "").replace(/\.git$/, "") || null;
-      res.json({ entries, repoUrl });
+      res.json({ entries: result.entries, hasMore: result.hasMore, repoUrl: result.repoUrl });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
   });
 
-  app.post("/api/git/restore-folder", async (req, res) => {
+  api.get(app, "/api/git/folder-commit-files", { rate: "staffWrite" }, async (req, res) => {
     try {
-      const exec = _execSync;
-      const { folder, sha } = req.body;
-      if (!folder || !sha) {
-        res.status(400).json({ error: "folder and sha are required" });
+      const site = res.locals.site as SiteContext | undefined;
+      const { getFolderCommitFiles, parseRestoreMode } = await import("../content-restore");
+      const mode = parseRestoreMode(req.query.mode);
+      if (!mode) {
+        res.status(400).json({ error: "mode must be 'undo' or 'restore'" });
         return;
       }
-      if (!/^[a-f0-9]{7,40}$/.test(sha)) {
-        res.status(400).json({ error: "Invalid SHA format" });
+      const result = await getFolderCommitFiles({
+        folder: typeof req.query.folder === "string" ? req.query.folder : "",
+        sha: typeof req.query.sha === "string" ? req.query.sha : "",
+        mode,
+        contentRootName: site?.contentRootName ?? "",
+        repoUrl: site?.config?.githubRepoUrl,
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error, code: result.code, files: result.files });
         return;
       }
-      if (/[;&|`$<>]/.test(folder)) {
-        res.status(400).json({ error: "Invalid folder path" });
-        return;
-      }
-      const fs = await import("fs");
-      const path = await import("path");
+      const { ok: _ok, ...body } = result;
+      res.json(body);
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
 
-      // List files that existed in the folder at the given SHA
-      let lsOutput: string;
-      try {
-        lsOutput = exec(
-          `git ls-tree -r --name-only "${sha}" -- "${folder}"`,
-          { encoding: "utf-8", cwd: process.cwd() }
-        ) as string;
-      } catch {
-        res.status(400).json({ error: "Could not list files at that commit" });
+  api.post(app, "/api/git/restore-folder", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const { folder, sha, mode: rawMode, files, removeExtra, contentType } = req.body ?? {};
+      const auth = await requireCapability(
+        req,
+        res,
+        "content_edit_structure",
+        typeof contentType === "string" ? contentType : undefined,
+      );
+      if (!auth.authorized) return;
+
+      const site = res.locals.site as SiteContext | undefined;
+      const contentRootName = site?.contentRootName ?? "";
+      const { restoreFolder, parseRestoreMode } = await import("../content-restore");
+      const mode = parseRestoreMode(rawMode);
+      if (!mode) {
+        res.status(400).json({ error: "mode must be 'undo' or 'restore'" });
         return;
       }
-      const filesAtSha = lsOutput.split("\n").filter(l => l.trim());
-      if (filesAtSha.length === 0) {
-        res.status(400).json({ error: "No files found in folder at that commit" });
+      if (files !== undefined && !Array.isArray(files)) {
+        res.status(400).json({ error: "files must be an array of paths" });
         return;
       }
 
-      // Collect current files in the folder
-      const getAllFiles = (dir: string, base: string): string[] => {
-        const items: string[] = [];
-        if (!fs.default.existsSync(dir)) return items;
-        for (const entry of fs.default.readdirSync(dir)) {
-          const full = path.default.join(dir, entry);
-          const rel = path.default.join(base, entry).replace(/\\/g, "/");
-          if (fs.default.statSync(full).isDirectory()) {
-            items.push(...getAllFiles(full, rel));
-          } else {
-            items.push(rel);
+      const result = await restoreFolder({
+        folder: typeof folder === "string" ? folder : "",
+        sha: typeof sha === "string" ? sha : "",
+        mode,
+        files: Array.isArray(files) ? files.map(String) : undefined,
+        removeExtra: removeExtra === true,
+        author: auth.author || undefined,
+        contentRootName,
+        repoUrl: site?.config?.githubRepoUrl,
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error, code: result.code, files: result.files });
+        return;
+      }
+
+      const touched = [...result.restoredFiles, ...result.deletedFiles];
+      if (touched.length > 0) {
+        const versioningManager = site?.versioningManager ?? getVersioningManager();
+        versioningManager.clearCache();
+        const ci = site?.contentIndex ?? contentIndex;
+        ci.refresh();
+
+        const contentRoot = site?.contentRoot;
+        if (contentRoot && site?.validationCache) {
+          const { scheduleOnSaveValidation } = await import("../services/onSaveValidation");
+          for (const filePath of result.restoredFiles) {
+            if (!/\.ya?ml$/i.test(filePath) || filePath.endsWith("/versioning.yml")) continue;
+            scheduleOnSaveValidation({
+              contentRoot,
+              contentRootName,
+              ci,
+              cache: site.validationCache,
+              filePath: path.join(process.cwd(), filePath),
+            });
           }
         }
-        return items;
-      };
-      const currentFiles = getAllFiles(
-        path.default.join(process.cwd(), folder),
-        folder
-      );
-
-      // Write each file from the historical SHA
-      for (const filePath of filesAtSha) {
-        const content = exec(
-          `git show "${sha}:${filePath}"`,
-          { encoding: "buffer", cwd: process.cwd() }
-        ) as Buffer;
-        const absPath = path.default.join(process.cwd(), filePath);
-        fs.default.mkdirSync(path.default.dirname(absPath), { recursive: true });
-        fs.default.writeFileSync(absPath, content);
       }
 
-      // Remove files that exist locally but were not present at that SHA
-      const filesAtShaSet = new Set(filesAtSha);
-      for (const currentFile of currentFiles) {
-        if (!filesAtShaSet.has(currentFile)) {
-          try { fs.default.unlinkSync(path.default.join(process.cwd(), currentFile)); } catch {}
-        }
-      }
-
-      // Commit the restore
-      const { commitAndPush } = await import("../github");
-      const result = await commitAndPush(
-        `Restore: ${folder} to ${sha.slice(0, 7)}`,
-        { force: false }
-      );
-      if (!result.success) {
-        res.status(500).json({ error: result.error || "Commit failed" });
-        return;
-      }
-      res.json({ success: true, commitHash: result.commitHash });
+      const { ok: _ok, ...body } = result;
+      res.json({ success: true, ...body });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }

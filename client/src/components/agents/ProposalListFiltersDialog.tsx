@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import {
   Select,
   SelectContent,
@@ -39,6 +40,7 @@ import {
   type ProposalListAttention,
   type ProposalListFilters,
   type ProposalListKind,
+  type ProposalListOutcomeFocus,
   type ProposalListStats,
   type ProposalListStatus,
 } from "@/pages/proposals-list-filters";
@@ -51,9 +53,45 @@ export type ProposalListFilterDims = Pick<
   | "proposerActorType"
   | "proposerActorRole"
   | "agentSessionId"
+  | "reviewerUsername"
   | "escalatedOnly"
+  | "outcomeFocus"
   | "attention"
 >;
+
+const PEOPLE_POPOVER_SELECTORS = [
+  '[data-testid="popover-proposal-proposer-filter"]',
+  '[data-testid="popover-proposal-reviewer-filter"]',
+];
+
+function isNestedPickerTarget(target: HTMLElement): boolean {
+  return Boolean(
+    target.closest("[data-radix-popper-content-wrapper]") ||
+      target.closest('[data-testid="dialog-agent-session-picker"]') ||
+      PEOPLE_POPOVER_SELECTORS.some((sel) => target.closest(sel)),
+  );
+}
+
+const OUTCOME_FOCUS_OPTIONS: Array<{ value: ProposalListOutcomeFocus; label: string }> = [
+  { value: "bad", label: "Bad" },
+  { value: "missing", label: "Missing" },
+  { value: "off", label: "Off" },
+];
+
+const OUTCOME_FOCUS_COPY: Record<ProposalListOutcomeFocus, { title: string; description: string }> = {
+  off: {
+    title: "Outcome review",
+    description: "Not filtering by outcome. Pick Missing to judge outcomes, or Bad to capture lessons.",
+  },
+  missing: {
+    title: "Missing outcome review",
+    description: "Closed proposals nobody has marked good or bad yet — judge whether they were the right call.",
+  },
+  bad: {
+    title: "Bad outcome (needs lesson)",
+    description: "Closed proposals a steward marked as a bad outcome, with no lesson captured yet.",
+  },
+};
 
 const ROLE_ANY = "__any__";
 const SESSION_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
@@ -66,7 +104,9 @@ function dimsFromFilters(filters: ProposalListFilters): ProposalListFilterDims {
     proposerActorType: filters.proposerActorType,
     proposerActorRole: filters.proposerActorRole,
     agentSessionId: filters.agentSessionId,
+    reviewerUsername: filters.reviewerUsername,
     escalatedOnly: filters.escalatedOnly,
+    outcomeFocus: filters.outcomeFocus,
     attention: filters.attention,
   };
 }
@@ -100,6 +140,8 @@ export function ProposalListFiltersDialog({
   const [draft, setDraft] = useState<ProposalListFilterDims>(() => dimsFromFilters(filters));
   const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
   const [proposerPickerOpen, setProposerPickerOpen] = useState(false);
+  const [reviewerPickerOpen, setReviewerPickerOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -113,7 +155,9 @@ export function ProposalListFiltersDialog({
     filters.proposerActorType,
     filters.proposerActorRole,
     filters.agentSessionId,
+    filters.reviewerUsername,
     filters.escalatedOnly,
+    filters.outcomeFocus,
     filters.attention,
   ]);
 
@@ -139,7 +183,7 @@ export function ProposalListFiltersDialog({
   });
 
   const sessions = sessionsQuery.data ?? [];
-  const nestedOpen = sessionPickerOpen || proposerPickerOpen;
+  const nestedOpen = sessionPickerOpen || proposerPickerOpen || reviewerPickerOpen;
 
   const patchDraft = (patch: Partial<ProposalListFilterDims>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
@@ -151,6 +195,7 @@ export function ProposalListFiltersDialog({
       proposerUsername: draft.proposerUsername.trim(),
       proposerActorRole: draft.proposerActorRole.trim(),
       agentSessionId: draft.agentSessionId.trim(),
+      reviewerUsername: draft.reviewerUsername.trim(),
     });
     onOpenChange(false);
   }
@@ -197,6 +242,7 @@ export function ProposalListFiltersDialog({
           if (!next) {
             setSessionPickerOpen(false);
             setProposerPickerOpen(false);
+            setReviewerPickerOpen(false);
           }
         }}
       >
@@ -205,45 +251,48 @@ export function ProposalListFiltersDialog({
           className="max-h-[85vh] overflow-y-auto"
           data-testid="dialog-proposal-filters"
           onPointerDownOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
           onFocusOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
           onInteractOutside={(e) => {
-            const target = e.target as HTMLElement;
-            if (
-              target.closest("[data-radix-popper-content-wrapper]") ||
-              target.closest('[data-testid="dialog-agent-session-picker"]') ||
-              target.closest('[data-testid="popover-proposal-proposer-filter"]')
-            ) {
-              e.preventDefault();
-            }
+            if (isNestedPickerTarget(e.target as HTMLElement)) e.preventDefault();
           }}
         >
           <DialogHeader>
             <DialogTitle>Filters</DialogTitle>
             <DialogDescription>
-              Narrow which proposals appear in the list by status, kind, attention, or who filed them.
-              Nothing is written until someone acts on a proposal. Sort stays on the Sort control next
-              to Filters — use Needs attention for steward holds, re-checks, then first-pass reviews.
-              Ready for re-check means reviewers should look again: blockers are cleared, or the author
-              rewrote the proposal or marked a blocker fixed, and nothing is still waiting on the author.
+              Choose which proposals show in the list by status, kind, attention, or who filed or
+              reviewed them. Filtering only changes what you see; no proposal is changed.
             </DialogDescription>
+            <div>
+              <button
+                type="button"
+                className="text-xs text-primary underline-offset-2 hover:underline"
+                onClick={() => setShowAdvanced((v) => !v)}
+                data-testid="button-proposal-filters-read-more"
+              >
+                {showAdvanced ? "Hide advanced" : "Read more (advanced)"}
+              </button>
+              {showAdvanced ? (
+                <ul
+                  className="mt-1.5 list-disc space-y-1 pl-5 text-left text-[11px] text-muted-foreground"
+                  data-testid="proposal-filters-advanced-help"
+                >
+                  <li>Sorting lives on the Sort control next to Filters, not here.</li>
+                  <li>
+                    Sort by Needs attention to see steward holds first, then re-checks, then
+                    first-pass reviews.
+                  </li>
+                  <li>
+                    Ready for re-check means reviewers should look again: blockers are cleared, or
+                    the author rewrote the proposal or marked a blocker fixed, and nothing is still
+                    waiting on the author.
+                  </li>
+                </ul>
+              ) : null}
+            </div>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
@@ -334,20 +383,39 @@ export function ProposalListFiltersDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">
-                Proposer
-              </Label>
-              <ProposalProposerCombobox
-                value={draft.proposerUsername}
-                onChange={(proposerUsername) => patchDraft({ proposerUsername })}
-                enabled={open}
-                onOpenChange={setProposerPickerOpen}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                People with a proposal touched in the last 30 days. Type a full username if they’re not
-                listed (exact match).
-              </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="proposal-proposer-username-filter" className="text-xs text-muted-foreground">
+                  Proposer
+                </Label>
+                <ProposalProposerCombobox
+                  value={draft.proposerUsername}
+                  onChange={(proposerUsername) => patchDraft({ proposerUsername })}
+                  enabled={open}
+                  onOpenChange={setProposerPickerOpen}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  People with a proposal touched in the last 30 days. Type a full username if they’re not
+                  listed (exact match).
+                </p>
+              </div>
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="proposal-reviewer-username-filter" className="text-xs text-muted-foreground">
+                  Reviewer
+                </Label>
+                <ProposalProposerCombobox
+                  source="reviewers"
+                  value={draft.reviewerUsername}
+                  onChange={(reviewerUsername) => patchDraft({ reviewerUsername })}
+                  enabled={open}
+                  onOpenChange={setReviewerPickerOpen}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Person who gave the latest feedback, or who finished or rejected the proposal (last 30
+                  days). Earlier reviewers don’t match. Type a full username if they’re not listed (exact
+                  match).
+                </p>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
@@ -460,6 +528,41 @@ export function ProposalListFiltersDialog({
                 onCheckedChange={(checked) => patchDraft({ escalatedOnly: checked })}
                 data-testid="switch-proposal-escalated-only-filter"
               />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <div className="space-y-0.5" data-testid="proposal-outcome-focus-copy">
+                <p className="text-xs font-medium text-foreground">
+                  {OUTCOME_FOCUS_COPY[draft.outcomeFocus].title}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {OUTCOME_FOCUS_COPY[draft.outcomeFocus].description}
+                </p>
+              </div>
+              <ToggleButtonBar
+                value={draft.outcomeFocus}
+                onValueChange={(v) => {
+                  const outcomeFocus = v as ProposalListOutcomeFocus;
+                  patchDraft({
+                    outcomeFocus,
+                    ...(outcomeFocus !== "off" &&
+                    (draft.status === "open" || draft.status === "partial")
+                      ? { status: "all" as const }
+                      : {}),
+                  });
+                }}
+                className="shrink-0"
+                listTestId="toggle-proposal-outcome-focus"
+              >
+                {OUTCOME_FOCUS_OPTIONS.map((opt) => (
+                  <ToggleButtonBarTrigger
+                    key={opt.value}
+                    value={opt.value}
+                    data-testid={`toggle-proposal-outcome-focus-${opt.value}`}
+                  >
+                    {opt.label}
+                  </ToggleButtonBarTrigger>
+                ))}
+              </ToggleButtonBar>
             </div>
           </div>
           <DialogFooter className="gap-2 sm:gap-0">

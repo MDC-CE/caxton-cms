@@ -14,8 +14,8 @@ import {
   AGENT_SESSION_IDLE_MS,
   normalizeMcpClientName,
 } from "../../shared/agent-identity";
-import { createRequire } from "node:module";
 import { getSiteSqlite } from "../db";
+import { child } from "../logger";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import type {
   ContentEvent,
@@ -34,7 +34,7 @@ import {
   unionAttribution,
 } from "./types";
 
-const requireFromEsm = createRequire(import.meta.url);
+const log = child({ module: "event-store" });
 
 /** Stamp window: only recent writes without a SHA get commitSha (R2-4A). */
 export const COMMIT_SHA_STAMP_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -171,15 +171,16 @@ export function emitEvent(opts: EmitEventOpts): EmitResult {
   if (published === 0) {
     _wakeDispatcher();
   }
-  try {
-    const {
-      maybeEnqueueEventWebhook,
-      resolveContentRootForSite,
-    } = requireFromEsm("./event-webhooks") as typeof import("./event-webhooks");
-    maybeEnqueueEventWebhook(event, resolveContentRootForSite(opts.site));
-  } catch {
-    // Never fail emit because of webhooks
-  }
+  // Lazy import breaks the event-store ↔ event-webhooks cycle. Do not use
+  // createRequire here: relative requires do not resolve inside the esbuild bundle.
+  // Never fail emit because of webhooks.
+  void import("./event-webhooks")
+    .then(({ maybeEnqueueEventWebhook, resolveContentRootForSite }) => {
+      maybeEnqueueEventWebhook(event, resolveContentRootForSite(opts.site));
+    })
+    .catch((err) => {
+      log.warn({ err, eventId: event.id, type: event.type }, "[EventStore] webhook fan-out failed");
+    });
   return event;
 }
 

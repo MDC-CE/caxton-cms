@@ -169,11 +169,44 @@ describe("evaluateLiveEntrySeoAndRequiredFields", () => {
         },
         title: "How to pay",
         description: "A helpful overview of financing options.",
+        sections: [{ type: "hero" }],
       },
       intent: "publish",
       isDraftWrite: false,
     });
     expect(failure).toBeNull();
+  });
+
+  it("publish refuses an empty section-built page (empty_page); micro save does not", () => {
+    const pageData = {
+      meta: {
+        page_title: "Free AI Engineering Interview Kit",
+        description: "Practice questions and a score card used by students.",
+      },
+      title: "Kit",
+      description: "Kit description.",
+    };
+    const publish = evaluateLiveEntrySeoAndRequiredFields({
+      contentType: "downloadable",
+      slug: "kit",
+      locale: "en",
+      pageData,
+      intent: "publish",
+      isDraftWrite: false,
+    });
+    expect(publish?.code).toBe("empty_page");
+    expect(publish?.message).toMatch(/^EMPTY_PAGE: downloadable\/kit \(en\)/);
+
+    const micro = evaluateLiveEntrySeoAndRequiredFields({
+      contentType: "downloadable",
+      slug: "kit",
+      locale: "en",
+      pageData,
+      intent: "micro",
+      touchedPaths: ["title"],
+      isDraftWrite: false,
+    });
+    expect(micro).toBeNull();
   });
 
   it("passes after meta.robots patch when title and description remain on meta", () => {
@@ -188,6 +221,7 @@ describe("evaluateLiveEntrySeoAndRequiredFields", () => {
         robots: "index, follow",
         change_frequency: "weekly",
       },
+      sections: [{ type: "hero" }],
     };
     pageData.meta.robots = "noindex, nofollow";
 

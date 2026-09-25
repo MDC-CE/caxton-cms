@@ -10,10 +10,12 @@ import type { ContentIndex } from "./content-index";
 import { getContentTypeConfig, getDirectory, getAllConfigs } from "./content-types";
 import { normalizeLocale } from "./settings";
 import type { DatabaseManager } from "./database";
+import { COMMON_META_KEYS, isCommonField } from "@shared/field-scope";
 
 export const BULK_META_MAX_SLUGS = 50;
 
-export const META_COMMON_KEYS = new Set(["robots", "priority", "change_frequency"]);
+/** Page-level meta keys (`_common.yml`) — derived from the system field scope. */
+export const META_COMMON_KEYS: ReadonlySet<string> = COMMON_META_KEYS;
 export const META_LOCALE_KEYS = new Set([
   "page_title",
   "description",
@@ -28,7 +30,7 @@ export const ALL_KNOWN_META_KEYS = new Set([...META_COMMON_KEYS, ...META_LOCALE_
 export type BulkMetaUpdateItem = {
   field_path: string;
   value: unknown;
-  /** Required for unknown meta.* keys. */
+  /** Deprecated and ignored — routing is the fixed field scope (`@shared/field-scope`). */
   meta_target?: "locale" | "common";
 };
 
@@ -85,11 +87,6 @@ export function validateBulkMetaUpdates(updates: BulkMetaUpdateItem[]): string |
       return `Duplicate field_path: ${normalized}`;
     }
     seen.add(normalized);
-
-    const key = metaKeyFromPath(normalized);
-    if (!ALL_KNOWN_META_KEYS.has(key) && !u.meta_target) {
-      return `Unknown meta field '${key}' requires meta_target: "locale" | "common"`;
-    }
   }
   return null;
 }
@@ -136,11 +133,7 @@ function splitUpdates(updates: BulkMetaUpdateItem[]): {
 
   for (const u of updates) {
     const fieldPath = normalizeMetaPath(u.field_path);
-    const key = metaKeyFromPath(fieldPath);
-    const toCommon =
-      META_COMMON_KEYS.has(key) ||
-      (!ALL_KNOWN_META_KEYS.has(key) && u.meta_target === "common");
-    if (toCommon) {
+    if (isCommonField(fieldPath)) {
       commonMetaTouched = true;
       commonOps.push({ action: "update_field", path: fieldPath, value: u.value });
     } else {
@@ -167,9 +160,19 @@ export async function bulkUpdateMeta(request: BulkMetaRequest): Promise<{
   const results: BulkMetaSlugResult[] = [];
 
   const { localeOps, commonOps, commonMetaTouched } = splitUpdates(request.updates);
+  if (request.updates.some((u) => u.meta_target !== undefined)) {
+    warnings.push(
+      "meta_target_ignored: page-level vs locale is a fixed system rule (fieldScope); meta_target was ignored.",
+    );
+  }
+  if (commonMetaTouched) {
+    warnings.push(
+      `common_fields_all_languages: ${commonOps.map((o) => o.path).join(", ")} write each page's _common.yml and change every language.`,
+    );
+  }
   if (request.variant && commonMetaTouched) {
     warnings.push(
-      "common_meta_ignores_variant: robots/priority/change_frequency (and common-targeted custom meta) write to _common.yml and ignore variant.",
+      "common_meta_ignores_variant: page-level meta (robots/priority/change_frequency) writes _common.yml and ignores variant.",
     );
   }
 

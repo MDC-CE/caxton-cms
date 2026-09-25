@@ -5,6 +5,8 @@ import yaml from "js-yaml";
 import { escapeObjectVars, unescapeYamlDump } from "@shared/templateVars";
 import { entryBagFieldPathFromVarName, getLegacySingleVarWriteError } from "@shared/entryTemplateVars";
 import { getConsentKeyError } from "@shared/consentLegacyKeys";
+import { deleteAtPath } from "@shared/object-path";
+import { isCommonField } from "@shared/field-scope";
 import {
   wipeSectionOnDuplicate,
   wipeDocumentSectionsOnDuplicate,
@@ -79,6 +81,24 @@ import {
   validateTouchedJsonFieldsInDocument,
 } from "./json-field-validate";
 import { getTrackingSettings } from "./settings";
+import {
+  checkDeprecatedWrites,
+  deprecatedErrorInfo,
+  deprecatedStripPayload,
+  findNewDeprecatedVarRefs,
+  getDeprecatedFieldsForType,
+  stripDeprecatedFromEntryFolder,
+  stripDeprecatedKeys,
+  updateFieldOpsToWrites,
+  type DeprecatedFieldErrorInfo,
+  type DeprecatedTemplateRef,
+} from "./deprecated-field-guard";
+import {
+  DEPRECATED_FIELD_CODE,
+  deprecatedFieldMessage,
+  isNonEmptyFieldValue,
+  listDeprecatedFields,
+} from "@shared/deprecatedField";
 
 
 function applySeoUpdatesAfterWrite<T extends { success: boolean; error?: string; errorCode?: string }>(
@@ -167,6 +187,8 @@ import {
   writeVersioningFile,
   rejectLiveWriteIfDraft,
 } from "./draft-entry";
+import { recordDraftBase } from "./versioning/draft-base";
+import { notifyVariantWritten } from "./versioning/draft-meta";
 
 /** Create/duplicate: exactly one locale at a time (all content types). */
 export const SINGLE_LOCALE_CREATE_ERROR =
@@ -623,6 +645,10 @@ export async function editContent(request: ContentEditRequest): Promise<{
   warning?: string;
   updatedSections?: unknown[];
   clearedFields?: ClearedField[];
+  /** Set when errorCode === "deprecated_field". */
+  deprecated?: DeprecatedFieldErrorInfo;
+  /** New `{{ entry.X }}` references to deprecated fields (warning only). */
+  deprecatedTemplateRefs?: DeprecatedTemplateRef[];
 }> {
   const { contentType, slug, locale: rawLocale, operations: requestOperations, variant, version, contentRoot } = request;
   // Use per-site ContentIndex when provided (avoids resolving files against default site)
@@ -698,6 +724,21 @@ export async function editContent(request: ContentEditRequest): Promise<{
           "funnel.* must write _common.yml via the Funnel API or applyFieldUpdates — not editContent (locale YAML).",
       };
     }
+  }
+
+  const deprecatedGate = checkDeprecatedWrites({
+    contentType,
+    slug,
+    contentRoot,
+    updates: updateFieldOpsToWrites(operations),
+  });
+  if (!deprecatedGate.ok) {
+    return {
+      success: false,
+      error: deprecatedGate.error,
+      errorCode: deprecatedGate.code,
+      deprecated: deprecatedErrorInfo(deprecatedGate),
+    };
   }
   
   try {
@@ -1462,6 +1503,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
     });
     
     fs.writeFileSync(filePath, updatedYaml, "utf-8");
+    if (variant) notifyVariantWritten(filePath, { author: request.author, contentRoot });
 
     if (Object.keys(seoUpdates).length === 0) {
       markFileAsModified(filePath, request.author, undefined, contentRoot);
@@ -1504,10 +1546,17 @@ export async function editContent(request: ContentEditRequest): Promise<{
       });
     }
 
+    const deprecatedTemplateRefs = findNewDeprecatedVarRefs(
+      previousLocaleData.sections,
+      localeData.sections,
+      getDeprecatedFieldsForType(contentType, contentRoot),
+    );
+
     return {
       success: true,
       updatedSections,
       ...(clearedFields.length > 0 ? { clearedFields } : {}),
+      ...(deprecatedTemplateRefs.length > 0 ? { deprecatedTemplateRefs } : {}),
     };
   } catch (error) {
     log.error({ err: error }, "Content edit error:");
@@ -2485,10 +2534,26 @@ export function editCommonContent(request: CommonEditRequest): {
   error?: string;
   errorCode?: string;
   missingFields?: string[];
+  deprecated?: DeprecatedFieldErrorInfo;
 } {
   const { contentType, slug, operations, author } = request;
   const ci = request.ci ?? contentIndex;
   const contentRootName = request.contentRootName;
+
+  const deprecatedGate = checkDeprecatedWrites({
+    contentType,
+    slug,
+    contentRoot: contentRootName,
+    updates: updateFieldOpsToWrites(operations),
+  });
+  if (!deprecatedGate.ok) {
+    return {
+      success: false,
+      error: deprecatedGate.error,
+      errorCode: deprecatedGate.code,
+      deprecated: deprecatedErrorInfo(deprecatedGate),
+    };
+  }
 
   try {
     const commonPath = ci.getCommonFilePath(contentType, slug);
@@ -2519,8 +2584,8 @@ export function editCommonContent(request: CommonEditRequest): {
           };
         }
       }
-      if (op.value === undefined) {
-        delete commonData[op.path];
+      if (op.value === undefined || op.value === null) {
+        deleteAtPath(commonData, op.path);
       } else {
         setValueAtPath(commonData, op.path, op.value);
       }
@@ -2593,10 +2658,11 @@ export function getContentForEdit(
       return { content: null, error: loadError || `Content file not found` };
     }
 
+    const { _draft: _draftMeta, ...localeContent } = localeData;
     const commonData = index.loadCommonData(contentType, slug);
     const content = commonData
-      ? deepMerge(commonData, localeData)
-      : localeData;
+      ? deepMerge(commonData, localeContent)
+      : localeContent;
 
     return { content };
   } catch (error) {
@@ -2702,7 +2768,7 @@ function invalidateContentCaches(contentType?: string): void {
 
 type ContentLifecycleResult<T extends Record<string, unknown>> =
   | { success: true; data: T }
-  | { success: false; statusCode: number; error: string };
+  | { success: false; statusCode: number; error: string; code?: string; deprecated?: DeprecatedFieldErrorInfo };
 
 // ─── renameContentSlug ────────────────────────────────────────────────────────
 
@@ -3146,6 +3212,20 @@ export async function createContentEntry(
   }
 
   const typeConfigForParams = getContentTypeConfig(type, contentRootAbs);
+  const deprecatedForType = listDeprecatedFields(typeConfigForParams?.editor);
+  if (isFreshCreate) {
+    for (const [key, value] of Object.entries(uniqueFieldValues)) {
+      const cfg = deprecatedForType[key];
+      if (!cfg || !isNonEmptyFieldValue(value)) continue;
+      return {
+        success: false,
+        statusCode: 400,
+        code: DEPRECATED_FIELD_CODE,
+        error: deprecatedFieldMessage(key, cfg),
+        deprecated: { field: key, replaced_by: cfg.replaced_by, reason: cfg.reason ?? null, field_path: key },
+      };
+    }
+  }
   const urlParams = listExtraUrlPatternParams(typeConfigForParams?.url_pattern);
   const urlParamShapes = inferUrlParamShapes(type, urlParams, rootName);
 
@@ -3239,6 +3319,12 @@ export async function createContentEntry(
       author,
       contentRootAbs,
     );
+    for (const loc of locales) {
+      recordDraftBase(
+        { contentType: type, slug: folderSlug, locale: loc, variant: draftVariant, contentRoot: contentRootAbs },
+        { author },
+      );
+    }
   };
 
   const draftSuccessData = (extra: Record<string, unknown> = {}) => ({
@@ -3304,6 +3390,10 @@ export async function createContentEntry(
           for (const file of result.copiedFiles) {
             markFileAsModified(`${rootName}/${getFolder(type)}/${folderSlug}/${file}`, author);
           }
+          const crossTypeStripInfo = deprecatedStripPayload(
+            stripDeprecatedFromEntryFolder(folderPath, typeConfigForParams?.editor),
+            deprecatedForType,
+          );
 
           if (draftFirst) {
             // Convert live locale files → draft.{locale}.yml
@@ -3352,6 +3442,7 @@ export async function createContentEntry(
                   replacedVars: result.replacedVars,
                 },
                 ...(result.clearedFields.length > 0 ? { clearedFields: result.clearedFields } : {}),
+                ...crossTypeStripInfo,
               }),
             };
           }
@@ -3380,11 +3471,13 @@ export async function createContentEntry(
               duplicatedFrom: sourceUrl || `${resolvedSourceType}/${sourceSlug}`, typeChanged: true,
               conversion: { from: resolvedSourceType, to: type, copiedFiles: result.copiedFiles, strippedFields: result.strippedFields, replacedVars: result.replacedVars },
               ...(result.clearedFields.length > 0 ? { clearedFields: result.clearedFields } : {}),
+              ...crossTypeStripInfo,
             },
           };
         }
 
         // Same-type duplication
+        const strippedDeprecated = new Set<string>();
         const sourceFiles = fs.readdirSync(foundSourceFolder);
         const parsedDupFiles: Array<{ file: string; parsed: Record<string, unknown> }> = [];
         const sourceLocaleFiles = new Set(
@@ -3513,6 +3606,9 @@ export async function createContentEntry(
               else parsed[FIELD_OVERRIDES_KEY] = nextOvr;
             }
           }
+          for (const f of stripDeprecatedKeys(parsed, typeConfigForParams?.editor)) {
+            strippedDeprecated.add(f);
+          }
           parsedDupFiles.push({ file: outFile, parsed });
         }
 
@@ -3563,6 +3659,9 @@ export async function createContentEntry(
                 }
               }
               const synthFile = draftFirst ? `${draftVariant}.${loc}.yml` : `${loc}.yml`;
+              for (const f of stripDeprecatedKeys(cloned, typeConfigForParams?.editor)) {
+                strippedDeprecated.add(f);
+              }
               parsedDupFiles.push({ file: synthFile, parsed: cloned });
             }
           }
@@ -3587,6 +3686,8 @@ export async function createContentEntry(
           if (dm) draftLocalesWritten.push(dm[1]);
         }
 
+        const deprecatedStripInfo = deprecatedStripPayload(strippedDeprecated, deprecatedForType);
+
         if (draftFirst) {
           writeDraftVersioning(draftLocalesWritten.length > 0
             ? draftLocalesWritten
@@ -3598,6 +3699,7 @@ export async function createContentEntry(
             data: draftSuccessData({
               duplicatedFrom: sourceUrl || `${resolvedSourceType}/${sourceSlug}`,
               ...(clearedFields.length > 0 ? { clearedFields } : {}),
+              ...deprecatedStripInfo,
             }),
           };
         }
@@ -3625,6 +3727,7 @@ export async function createContentEntry(
             directory: `${rootName}/${getFolder(type)}/${folderSlug}`,
             duplicatedFrom: sourceUrl || `${resolvedSourceType}/${sourceSlug}`,
             ...(clearedFields.length > 0 ? { clearedFields } : {}),
+            ...deprecatedStripInfo,
           },
         };
       }
@@ -3638,32 +3741,33 @@ export async function createContentEntry(
   const typeConfig = typeConfigForParams;
   const fieldMappingRaw = typeConfig?.field_mapping ?? {};
   const fieldKeys = Object.keys(fieldMappingRaw).filter(k => !k.startsWith("_"));
-  const activeLocale = getSupportedLocales().find(l => !skipLocales.includes(l)) ?? getDefaultLocale();
-
+  // Page-level fields (fieldScope "common") seed _common.yml; everything else seeds
+  // each locale file so _common.yml never carries locale-scoped fields.
   const commonObj: Record<string, unknown> = {};
+  const localeSeed: Record<string, unknown> = {};
   for (const key of fieldKeys) {
-    if (key === "slug") commonObj.slug = folderSlug;
-    else if (key === "title") commonObj.title = title;
-    else if (key === "locale") commonObj.locale = activeLocale;
-    else if (key === RESERVED_PUBLISHED_AT_FIELD) {
+    if (key === "slug" || key === "title" || key === "locale") continue;
+    if (deprecatedForType[key]) continue;
+    if (key === RESERVED_PUBLISHED_AT_FIELD) {
       // Draft-first: omit until publish/promote. Live create: stamp now.
       if (!draftFirst) commonObj[key] = new Date().toISOString();
-    } else if (urlParams.includes(key)) {
-      // URL pattern params are locale-only; omit from _common.yml
-    } else if (uniqueFieldValues[key] !== undefined) {
-      const ufv = uniqueFieldValues[key];
-      commonObj[key] = typeof ufv === "boolean" ? ufv : coerceStringValue(ufv as string);
-    } else {
-      commonObj[key] = "";
+      continue;
     }
+    if (urlParams.includes(key)) continue; // URL pattern params: per-locale below
+    const ufv = uniqueFieldValues[key];
+    const value =
+      ufv !== undefined ? (typeof ufv === "boolean" ? ufv : coerceStringValue(ufv as string)) : "";
+    if (isCommonField(key, { urlParams })) commonObj[key] = value;
+    else localeSeed[key] = value;
   }
   const commonYml = yaml.dump(commonObj, { lineWidth: 120, noRefs: true, sortKeys: false });
 
   const makeLocaleObj = (slug: string, loc: string) => {
-    const obj: Record<string, unknown> = { slug, sections: [] };
+    const obj: Record<string, unknown> = { slug, ...localeSeed, sections: [] };
+    if (fieldKeys.includes("locale")) obj.locale = loc;
     const localeTitle = localeTitles[loc];
     const effectiveTitle = localeTitle || title;
-    if (localeTitle) obj.title = localeTitle;
+    if (effectiveTitle && (fieldKeys.includes("title") || localeTitle)) obj.title = effectiveTitle;
     if (effectiveTitle) obj.meta = { page_title: effectiveTitle };
     // Locale-specific URL params (e.g. category slug that differs per language)
     for (const param of perLocaleUrlParams) {

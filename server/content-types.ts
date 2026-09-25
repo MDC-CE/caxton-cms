@@ -4,6 +4,7 @@ import path from "path";
 import yaml from "js-yaml";
 import { normalizeFlexibleDate } from "@shared/normalizeFlexibleDate";
 import { isLocaleIndexField, LOCALE_INDEX_FIELD_NAMES } from "@shared/locale";
+import { validateDeprecations } from "@shared/deprecatedField";
 import { getSupportedLocales, getDefaultLocale } from "./settings";
 import { markFileAsModified } from "./sync-state";
 import {
@@ -115,6 +116,16 @@ export type ContentTypeEditorHint = {
     items_path?: string;
   };
   on_error?: string;
+  /**
+   * Retired field. Entries whose live files already store a value keep it (and may edit it);
+   * new entries and entries without a value cannot set it. Cannot combine with required.
+   * See shared/deprecatedField.ts.
+   */
+  deprecated?: {
+    replaced_by?: string | null;
+    reason?: string;
+    since?: string;
+  };
 };
 
 export interface ContentTypeEntry {
@@ -299,6 +310,13 @@ const CONFIG_HEADER = `# Content Types Configuration
 #     namespaces). Optional: value (default slug), label (default title/name), multiple.
 #     Stores slug string or string[] (multiple). Empty [] fails when required. Page/SSR
 #     hydrate to related objects via resolve-relations; listings keep pointers.
+#   deprecated: { replaced_by?: <field>|null, reason?, since? } — retire a field.
+#     Entries whose live files (_common.yml / {locale}.yml) already store a non-empty value
+#     keep it and may edit it; new entries and entries without a value cannot set it
+#     (code: deprecated_field). Clearing is always allowed. Defaults do not count as a value.
+#     Duplicates strip deprecated keys. replaced_by must be an existing, non-deprecated field
+#     (not itself). Cannot combine with required. A field named as replaced_by cannot be
+#     removed or deprecated until its referrers point elsewhere.
 #
 # strategy (optional until a field is required):
 #   Type-level main strategy for staff and agents — not the same as insights_intent
@@ -1475,6 +1493,13 @@ export function writeRawContentTypesYml(content: string, contentRoot?: string, a
     validateUrlPatterns(normalized);
     if (config.database && !(config.field_mapping as Record<string, unknown> | undefined)?._slug) {
       throw new Error(`Database-backed content type "${name}" requires _slug in field_mapping`);
+    }
+    const depCheck = validateDeprecations(
+      config.editor as Record<string, ContentTypeEditorHint> | undefined,
+      config.field_mapping as Record<string, unknown> | undefined,
+    );
+    if (!depCheck.ok) {
+      throw new Error(`Entry "${name}": ${depCheck.error}`);
     }
   }
 

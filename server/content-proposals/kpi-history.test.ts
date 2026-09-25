@@ -1,25 +1,22 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  addUtcDays,
-  clearAllTodayKpiCache,
+  clearAllKpiCache,
   effectiveCloseAt,
   emptyKindStatusCounts,
-  ensureKpiCatchUp,
   getKpiHistory,
-  invalidateTodayKpiCache,
+  invalidateKpiCache,
+  mondayOfUtcWeek,
   stockAsOf,
   stockForDay,
   toCardBuckets,
-  utcDayString,
   utcHourKey,
-  wipeAndBackfillKpiHistory,
-  yesterdayUtc,
+  type KpiHistoryResult,
   type ProposalKpiSourceRow,
 } from "./kpi-history";
 import Database from "better-sqlite3";
 
 afterEach(() => {
-  clearAllTodayKpiCache();
+  clearAllKpiCache();
 });
 
 function row(
@@ -50,116 +47,48 @@ describe("toCardBuckets", () => {
   });
 });
 
-describe("stockForDay", () => {
+describe("stockForDay / stockAsOf", () => {
   const day = "2026-09-10";
   const endPrev = Date.parse("2026-09-09T12:00:00.000Z");
   const midDay = Date.parse("2026-09-10T12:00:00.000Z");
   const after = Date.parse("2026-09-11T12:00:00.000Z");
 
-  it("counts still-open proposals as open", () => {
-    const stock = stockForDay(
-      [row({ kind: "idea", status: "open", created_at: endPrev })],
-      day,
-    );
-    expect(stock.idea.open).toBe(1);
-    expect(stock.idea.finished).toBe(0);
-  });
-
-  it("counts partial as open", () => {
-    const stock = stockForDay(
-      [row({ kind: "edits", status: "partial", created_at: endPrev })],
-      day,
-    );
-    expect(stock.edits.open).toBe(1);
-  });
-
   it("finished after EOD still counts as open that day", () => {
     const stock = stockForDay(
-      [
-        row({
-          kind: "idea",
-          status: "finished",
-          created_at: endPrev,
-          closed_at: after,
-          updated_at: after,
-        }),
-      ],
+      [row({ kind: "idea", status: "finished", created_at: endPrev, closed_at: after, updated_at: after })],
       day,
     );
     expect(stock.idea.open).toBe(1);
     expect(stock.idea.finished).toBe(0);
-  });
-
-  it("finished during day counts as finished at EOD", () => {
-    const stock = stockForDay(
-      [
-        row({
-          kind: "idea",
-          status: "finished",
-          created_at: endPrev,
-          closed_at: midDay,
-          updated_at: midDay,
-        }),
-      ],
-      day,
-    );
-    expect(stock.idea.open).toBe(0);
-    expect(stock.idea.finished).toBe(1);
   });
 
   it("uses updated_at when closed_at missing", () => {
-    expect(
-      effectiveCloseAt(
-        row({
-          kind: "edits",
-          status: "finished",
-          created_at: endPrev,
-          closed_at: null,
-          updated_at: midDay,
-        }),
-      ),
-    ).toBe(midDay);
-    const stock = stockForDay(
-      [
-        row({
-          kind: "edits",
-          status: "finished",
-          created_at: endPrev,
-          closed_at: null,
-          updated_at: midDay,
-        }),
-      ],
-      day,
-    );
-    expect(stock.edits.finished).toBe(1);
+    const r = row({ kind: "edits", status: "finished", created_at: endPrev, closed_at: null, updated_at: midDay });
+    expect(effectiveCloseAt(r)).toBe(midDay);
+    expect(stockForDay([r], day).edits.finished).toBe(1);
   });
 
-  it("ignores withdrawn entirely", () => {
-    const stock = stockForDay(
-      [
-        row({
-          kind: "notes",
-          status: "withdrawn",
-          created_at: endPrev,
-          closed_at: midDay,
-          updated_at: midDay,
-        }),
-      ],
-      day,
-    );
-    expect(stock.notes).toEqual(emptyKindStatusCounts().notes);
-  });
-
-  it("ignores proposals created after the day", () => {
-    const stock = stockForDay(
-      [row({ kind: "idea", status: "open", created_at: after })],
-      day,
-    );
-    expect(stock.idea.open).toBe(0);
+  it("stockAsOf matches stockForDay at end of day", () => {
+    const rows = [
+      row({ kind: "idea", status: "finished", created_at: endPrev, closed_at: midDay, updated_at: midDay }),
+    ];
+    expect(stockAsOf(rows, Date.parse("2026-09-10T23:59:59.999Z"))).toEqual(stockForDay(rows, day));
   });
 });
 
-describe("ensureKpiCatchUp / getKpiHistory", () => {
+describe("mondayOfUtcWeek", () => {
+  it("snaps any day to its Monday (UTC)", () => {
+    expect(mondayOfUtcWeek("2026-09-14")).toBe("2026-09-14");
+    expect(mondayOfUtcWeek("2026-09-16")).toBe("2026-09-14");
+    expect(mondayOfUtcWeek("2026-09-20")).toBe("2026-09-14");
+    expect(mondayOfUtcWeek("2026-09-13")).toBe("2026-09-07");
+  });
+});
+
+describe("getKpiHistory (flow per bucket)", () => {
+  /** Wednesday 2026-09-16 15:30 UTC; that week starts Monday 2026-09-14. */
+  const NOW = Date.parse("2026-09-16T15:30:00.000Z");
+
   function setupDb() {
     const db = new Database(":memory:");
     db.exec(`
@@ -172,178 +101,156 @@ describe("ensureKpiCatchUp / getKpiHistory", () => {
         updated_at INTEGER NOT NULL,
         closed_at INTEGER
       );
-      CREATE TABLE proposal_kpi_daily (
-        site TEXT NOT NULL,
-        day TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        count INTEGER NOT NULL,
-        PRIMARY KEY (site, day, kind, status)
-      );
     `);
     return db;
   }
 
-  it("back-fills missing days and does not write today", () => {
-    const db = setupDb();
-    const now = Date.parse("2026-09-16T15:00:00.000Z");
-    const created = Date.parse("2026-09-01T12:00:00.000Z");
+  let seq = 0;
+  function insert(
+    db: Database.Database,
+    p: { kind?: string; status: string; created: string; closed?: string | null; updated?: string },
+  ) {
+    const created = Date.parse(p.created);
+    const closed = p.closed ? Date.parse(p.closed) : null;
+    const updated = p.updated ? Date.parse(p.updated) : (closed ?? created);
     db.prepare(
       `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("p1", "site_a", "idea", "open", created, created, null);
+    ).run(`p${++seq}`, "site_a", p.kind ?? "idea", p.status, created, updated, closed);
+  }
 
-    ensureKpiCatchUp(db, "site_a", {
-      from: "2026-09-14",
-      to: "2026-09-16",
-      now,
+  function points(hist: KpiHistoryResult, status: "open" | "finished" | "rejected", kind = "idea") {
+    return hist.series.find((s) => s.kind === kind && s.status === status)?.points ?? [];
+  }
+
+  function countAt(hist: KpiHistoryResult, status: "open" | "finished" | "rejected", key: string) {
+    return points(hist, status).find((p) => p.day === key)?.count;
+  }
+
+  it("day buckets restart each day: created vs closed land in their own day", () => {
+    const db = setupDb();
+    insert(db, { status: "open", created: "2026-09-14T09:00:00.000Z" });
+    insert(db, {
+      status: "finished",
+      created: "2026-09-14T10:00:00.000Z",
+      closed: "2026-09-15T11:00:00.000Z",
+    });
+    insert(db, { status: "partial", created: "2026-09-15T08:00:00.000Z" });
+
+    const hist = getKpiHistory(db, "site_a", { kind: "idea", granularity: "day", now: NOW });
+    expect(hist.metric).toBe("flow");
+    expect(hist.from).toBe("2026-08-20");
+    expect(hist.to).toBe("2026-09-16");
+
+    const open = points(hist, "open");
+    expect(open).toHaveLength(28);
+    expect(countAt(hist, "open", "2026-09-14")).toBe(2);
+    expect(countAt(hist, "open", "2026-09-15")).toBe(1);
+    expect(countAt(hist, "open", "2026-09-16")).toBe(0);
+    expect(countAt(hist, "finished", "2026-09-14")).toBe(0);
+    expect(countAt(hist, "finished", "2026-09-15")).toBe(1);
+    expect(countAt(hist, "finished", "2026-09-16")).toBe(0);
+
+    expect(open[open.length - 1]).toEqual({ day: "2026-09-16", count: 0, partial: true });
+    expect(open.slice(0, -1).every((p) => p.partial === undefined)).toBe(true);
+  });
+
+  it("omits withdrawn and uses updated_at fallback for rejected", () => {
+    const db = setupDb();
+    insert(db, {
+      status: "withdrawn",
+      created: "2026-09-15T08:00:00.000Z",
+      closed: "2026-09-15T09:00:00.000Z",
+    });
+    insert(db, {
+      status: "rejected",
+      created: "2026-09-10T08:00:00.000Z",
+      closed: null,
+      updated: "2026-09-15T12:00:00.000Z",
     });
 
-    const days = db
-      .prepare(`SELECT DISTINCT day FROM proposal_kpi_daily WHERE site = ? ORDER BY day`)
-      .all("site_a") as Array<{ day: string }>;
-    expect(days.map((d) => d.day)).toEqual(["2026-09-14", "2026-09-15"]);
-    expect(days.some((d) => d.day === utcDayString(now))).toBe(false);
-
-    const open = db
-      .prepare(
-        `SELECT count FROM proposal_kpi_daily WHERE site=? AND day=? AND kind='idea' AND status='open'`,
-      )
-      .get("site_a", "2026-09-15") as { count: number };
-    expect(open.count).toBe(1);
+    const hist = getKpiHistory(db, "site_a", { kind: "idea", granularity: "day", now: NOW });
+    expect(countAt(hist, "open", "2026-09-15")).toBe(0);
+    expect(countAt(hist, "open", "2026-09-10")).toBe(1);
+    expect(countAt(hist, "rejected", "2026-09-15")).toBe(1);
   });
 
-  it("wipeAndBackfill replaces rows", () => {
+  it("today = one bucket per UTC hour through now; last hour partial", () => {
     const db = setupDb();
-    const now = Date.parse("2026-09-16T15:00:00.000Z");
-    const outsideRetention = addUtcDays(utcDayString(now), -120);
-    db.prepare(
-      `INSERT INTO proposal_kpi_daily (site, day, kind, status, count) VALUES (?, ?, ?, ?, ?)`,
-    ).run("site_a", outsideRetention, "idea", "open", 99);
-    db.prepare(
-      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("p1", "site_a", "idea", "open", Date.parse("2026-09-10T00:00:00.000Z"), 0, null);
+    insert(db, { status: "open", created: "2026-09-16T10:05:00.000Z" });
+    insert(db, { status: "open", created: "2026-09-15T23:00:00.000Z" });
 
-    wipeAndBackfillKpiHistory(db, "site_a", { now });
-    const stale = db
-      .prepare(`SELECT count FROM proposal_kpi_daily WHERE site=? AND day=? AND kind='idea' AND status='open'`)
-      .get("site_a", outsideRetention) as { count: number } | undefined;
-    expect(stale).toBeUndefined();
-    const y = yesterdayUtc(now);
-    const open = db
-      .prepare(
-        `SELECT count FROM proposal_kpi_daily WHERE site=? AND day=? AND kind='idea' AND status='open'`,
-      )
-      .get("site_a", y) as { count: number };
-    expect(open.count).toBe(1);
+    const hist = getKpiHistory(db, "site_a", { kind: "idea", granularity: "today", now: NOW });
+    const open = points(hist, "open");
+    expect(open).toHaveLength(16);
+    expect(open[10]).toEqual({ day: "2026-09-16T10:00Z", count: 1 });
+    expect(open.filter((p) => p.count > 0)).toHaveLength(1);
+    expect(open[open.length - 1]).toEqual({ day: utcHourKey(NOW), count: 0, partial: true });
   });
 
-  it("getKpiHistory returns day series through yesterday", () => {
+  it("week = Monday-start UTC buckets, last 12 + current", () => {
     const db = setupDb();
-    const now = Date.parse("2026-09-16T15:00:00.000Z");
-    db.prepare(
-      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("p1", "site_a", "idea", "open", Date.parse("2026-09-01T00:00:00.000Z"), 0, null);
+    insert(db, { status: "open", created: "2026-09-13T23:59:00.000Z" });
+    insert(db, { status: "open", created: "2026-09-14T00:00:00.000Z" });
 
-    const hist = getKpiHistory(db, "site_a", {
+    const hist = getKpiHistory(db, "site_a", { kind: "idea", granularity: "week", now: NOW });
+    const open = points(hist, "open");
+    expect(open).toHaveLength(13);
+    expect(hist.from).toBe("2026-06-22");
+    expect(open[0]?.day).toBe("2026-06-22");
+    expect(countAt(hist, "open", "2026-09-07")).toBe(1);
+    expect(countAt(hist, "open", "2026-09-14")).toBe(1);
+    expect(open[open.length - 1]).toEqual({ day: "2026-09-14", count: 1, partial: true });
+  });
+
+  it("a past kpi_to window has no partial bucket; future to clamps to today", () => {
+    const db = setupDb();
+    const past = getKpiHistory(db, "site_a", {
       kind: "idea",
       granularity: "day",
-      from: "2026-09-14",
-      to: "2026-09-20",
-      now,
+      from: "2026-09-01",
+      to: "2026-09-10",
+      now: NOW,
     });
-    expect(hist.to).toBe("2026-09-15");
-    expect(hist.granularity).toBe("day");
-    const openSeries = hist.series.find((s) => s.kind === "idea" && s.status === "open");
-    expect(openSeries?.points.every((p) => p.count === 1)).toBe(true);
-    expect(openSeries?.points.some((p) => p.day === "2026-09-16")).toBe(false);
-  });
+    expect(points(past, "open")).toHaveLength(10);
+    expect(points(past, "open").some((p) => p.partial)).toBe(false);
 
-  it("prunes days older than retention", () => {
-    const db = setupDb();
-    const now = Date.parse("2026-09-16T15:00:00.000Z");
-    const old = addUtcDays(utcDayString(now), -120);
-    db.prepare(
-      `INSERT INTO proposal_kpi_daily (site, day, kind, status, count) VALUES (?, ?, ?, ?, ?)`,
-    ).run("site_a", old, "idea", "open", 1);
-    ensureKpiCatchUp(db, "site_a", { now, from: yesterdayUtc(now), to: yesterdayUtc(now) });
-    const left = db
-      .prepare(`SELECT day FROM proposal_kpi_daily WHERE site=? AND day=?`)
-      .get("site_a", old);
-    expect(left).toBeUndefined();
-  });
-
-  it("week is last 7 completed days as day keys (not ISO week)", () => {
-    const db = setupDb();
-    const now = Date.parse("2026-09-16T15:00:00.000Z");
-    db.prepare(
-      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("p1", "site_a", "idea", "open", Date.parse("2026-09-01T00:00:00.000Z"), 0, null);
-
-    const hist = getKpiHistory(db, "site_a", {
+    const future = getKpiHistory(db, "site_a", {
       kind: "idea",
-      granularity: "week",
-      now,
+      granularity: "day",
+      from: "2026-09-10",
+      to: "2026-12-01",
+      now: NOW,
     });
-    expect(hist.granularity).toBe("week");
-    expect(hist.to).toBe("2026-09-15");
-    expect(hist.from).toBe("2026-09-09");
-    const openSeries = hist.series.find((s) => s.kind === "idea" && s.status === "open");
-    expect(openSeries?.points).toHaveLength(7);
-    expect(openSeries?.points.map((p) => p.day)).toEqual([
-      "2026-09-09",
-      "2026-09-10",
-      "2026-09-11",
-      "2026-09-12",
-      "2026-09-13",
-      "2026-09-14",
-      "2026-09-15",
-    ]);
-    expect(openSeries?.points.every((p) => !p.day.includes("W"))).toBe(true);
+    expect(future.to).toBe("2026-09-16");
   });
 
-  it("today returns hourly points through now and caches for 15m", () => {
+  it("reflects a late close without any backfill once the cache is cleared", () => {
     const db = setupDb();
-    const now = Date.parse("2026-09-16T15:30:00.000Z");
-    db.prepare(
-      `INSERT INTO content_proposals (id, site, kind, status, created_at, updated_at, closed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      "p1",
-      "site_a",
-      "idea",
-      "open",
-      Date.parse("2026-09-16T10:00:00.000Z"),
-      Date.parse("2026-09-16T10:00:00.000Z"),
-      null,
+    insert(db, { status: "open", created: "2026-09-10T08:00:00.000Z" });
+    const before = getKpiHistory(db, "site_a", { kind: "idea", granularity: "day", now: NOW });
+    expect(countAt(before, "finished", "2026-09-16")).toBe(0);
+
+    db.prepare(`UPDATE content_proposals SET status = 'finished', closed_at = ?, updated_at = ?`).run(
+      Date.parse("2026-09-16T12:00:00.000Z"),
+      Date.parse("2026-09-16T12:00:00.000Z"),
     );
+    invalidateKpiCache("site_a");
+    const after = getKpiHistory(db, "site_a", { kind: "idea", granularity: "day", now: NOW + 1 });
+    expect(countAt(after, "finished", "2026-09-16")).toBe(1);
+    expect(countAt(after, "open", "2026-09-10")).toBe(1);
+  });
 
-    const first = getKpiHistory(db, "site_a", {
-      kind: "idea",
-      granularity: "today",
-      now,
-    });
-    expect(first.granularity).toBe("today");
-    expect(first.from).toBe("2026-09-16");
-    expect(first.computed_at).toBe(now);
-    const openSeries = first.series.find((s) => s.kind === "idea" && s.status === "open");
-    // hours 0..14 + now at 15 → 16 points
-    expect(openSeries?.points.length).toBe(16);
-    expect(openSeries?.points[openSeries.points.length - 1]?.day).toBe(utcHourKey(now));
-    expect(openSeries?.points[openSeries.points.length - 1]?.count).toBe(1);
-    // before create hour, open is 0
-    expect(openSeries?.points[0]?.count).toBe(0);
+  it("caches for 15m, honors fresh, and clears on invalidate", () => {
+    const db = setupDb();
+    insert(db, { status: "open", created: "2026-09-16T10:00:00.000Z" });
 
-    const later = now + 60_000;
-    const cached = getKpiHistory(db, "site_a", {
-      kind: "idea",
-      granularity: "today",
-      now: later,
-    });
-    expect(cached.computed_at).toBe(now);
+    const first = getKpiHistory(db, "site_a", { kind: "idea", granularity: "today", now: NOW });
+    expect(first.computed_at).toBe(NOW);
+
+    const later = NOW + 60_000;
+    const cached = getKpiHistory(db, "site_a", { kind: "idea", granularity: "today", now: later });
+    expect(cached.computed_at).toBe(NOW);
 
     const forced = getKpiHistory(db, "site_a", {
       kind: "idea",
@@ -353,29 +260,19 @@ describe("ensureKpiCatchUp / getKpiHistory", () => {
     });
     expect(forced.computed_at).toBe(later);
 
-    invalidateTodayKpiCache("site_a");
-    const afterBust = getKpiHistory(db, "site_a", {
-      kind: "idea",
-      granularity: "today",
-      now: later + 1,
-    });
+    invalidateKpiCache("site_a");
+    const afterBust = getKpiHistory(db, "site_a", { kind: "idea", granularity: "today", now: later + 1 });
     expect(afterBust.computed_at).toBe(later + 1);
   });
-});
 
-describe("stockAsOf", () => {
-  it("matches stockForDay at end of day", () => {
-    const day = "2026-09-10";
-    const midDay = Date.parse("2026-09-10T12:00:00.000Z");
-    const rows = [
-      row({
-        kind: "idea",
-        status: "finished",
-        created_at: Date.parse("2026-09-09T12:00:00.000Z"),
-        closed_at: midDay,
-        updated_at: midDay,
-      }),
-    ];
-    expect(stockAsOf(rows, Date.parse("2026-09-10T23:59:59.999Z"))).toEqual(stockForDay(rows, day));
+  it("returns every kind when unfiltered", () => {
+    const db = setupDb();
+    insert(db, { kind: "notes", status: "open", created: "2026-09-15T08:00:00.000Z" });
+    const hist = getKpiHistory(db, "site_a", { granularity: "day", now: NOW });
+    expect(hist.series).toHaveLength(9);
+    expect(
+      hist.series.find((s) => s.kind === "notes" && s.status === "open")?.points.find((p) => p.day === "2026-09-15")
+        ?.count,
+    ).toBe(1);
   });
 });

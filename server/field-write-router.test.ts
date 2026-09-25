@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import yaml from "js-yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetRegistry } from "./content-types";
 import {
@@ -78,14 +79,91 @@ afterEach(() => {
 });
 
 describe("classifyFieldPath", () => {
-  it("routes funnel, seo, common meta, and locale", () => {
+  it("routes funnel, seo, page-level fields, and locale", () => {
     expect(classifyFieldPath("funnel.products")).toBe("funnel");
     expect(classifyFieldPath("funnel.stage")).toBe("funnel");
     expect(classifyFieldPath("seo.main_keyword")).toBe("seo");
-    expect(classifyFieldPath("meta.robots")).toBe("meta_common");
+    expect(classifyFieldPath("meta.robots")).toBe("common");
+    expect(classifyFieldPath("authors")).toBe("common");
+    expect(classifyFieldPath("published_at")).toBe("common");
     expect(classifyFieldPath("meta.page_title")).toBe("locale");
-    expect(classifyFieldPath("meta.custom", "common")).toBe("meta_common");
+    expect(classifyFieldPath("meta.custom")).toBe("locale");
     expect(classifyFieldPath("title")).toBe("locale");
+  });
+
+  it("keeps URL params locale-scoped", () => {
+    expect(classifyFieldPath("authors", { urlParams: ["authors"] })).toBe("locale");
+  });
+});
+
+describe("applyFieldUpdates draft_only", () => {
+  beforeEach(() => {
+    fs.writeFileSync(
+      path.join(contentRoot, "blog", "post-a", "draft.en.yml"),
+      `slug: post-a
+title: Draft title
+meta:
+  robots: index
+sections: []
+_draft:
+  based_on:
+    locale: abc
+    common: def
+    at: "2026-01-01T00:00:00.000Z"
+`,
+      "utf-8",
+    );
+  });
+
+  it("keeps page-level fields and removals inside the draft", async () => {
+    const commonBefore = fs.readFileSync(path.join(contentRoot, "blog", "post-a", "_common.yml"), "utf-8");
+    const result = await applyFieldUpdates({
+      contentType: "blog",
+      slug: "post-a",
+      locale: "en",
+      variant: "draft",
+      mode: "draft_only",
+      updates: [
+        { field_path: "funnel.stage", value: "decision" },
+        { field_path: "meta.robots", op: "remove" },
+        { field_path: "authors", value: ["ana"] },
+      ],
+      author: "tester",
+      contentRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.warnings.map((w) => w.code)).toContain("common_fields_all_languages");
+    expect(result.warnings.map((w) => w.code)).toContain("common_field_removal_staged");
+
+    expect(fs.readFileSync(path.join(contentRoot, "blog", "post-a", "_common.yml"), "utf-8")).toBe(commonBefore);
+    const draftRaw = fs.readFileSync(path.join(contentRoot, "blog", "post-a", "draft.en.yml"), "utf-8");
+    const draft = yaml.load(draftRaw) as Record<string, any>;
+    expect(draft.funnel.stage).toBe("decision");
+    expect(draft.meta.robots).toBeNull();
+    expect(draft.authors).toEqual(["ana"]);
+    expect(draft._draft.based_on.locale).toBe("abc");
+  });
+
+  it("rejects variants with traffic", async () => {
+    fs.writeFileSync(
+      path.join(contentRoot, "blog", "post-a", "versioning.yml"),
+      "en:\n  variants:\n    - slug: draft\n      allocation: 50\n",
+      "utf-8",
+    );
+    const result = await applyFieldUpdates({
+      contentType: "blog",
+      slug: "post-a",
+      locale: "en",
+      variant: "draft",
+      mode: "draft_only",
+      updates: [{ field_path: "authors", value: ["ana"] }],
+      author: "tester",
+      contentRoot,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("variant_has_traffic");
   });
 });
 

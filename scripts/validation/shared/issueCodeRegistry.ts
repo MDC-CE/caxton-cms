@@ -46,6 +46,7 @@ import { UNKNOWN_KEYS_ISSUE_CODES, UNKNOWN_KEYS_VALIDATOR_NAME } from "../valida
 import { UPDATED_AT_ISSUE_CODES, UPDATED_AT_VALIDATOR_NAME } from "../validators/updated-at.issueCodes";
 import { URL_PARAM_LOCALE_ISSUE_CODES, URL_PARAM_LOCALE_VALIDATOR_NAME } from "../validators/url-param-locale.issueCodes";
 import { NONLOCALIZED_COMMON_LOCALE_ISSUE_CODES, NONLOCALIZED_COMMON_LOCALE_VALIDATOR_NAME } from "../validators/nonlocalized-common-locale.issueCodes";
+import { DRAFT_INTEGRITY_ISSUE_CODES, DRAFT_INTEGRITY_VALIDATOR_NAME } from "../validators/draft-integrity.issueCodes";
 
 /** Explicit map: add new `*.issueCodes.ts` modules here as catalogs grow. */
 export const ISSUE_CODE_CATALOGS: Record<string, Record<string, IssueCodeDefinition>> = {
@@ -92,6 +93,7 @@ export const ISSUE_CODE_CATALOGS: Record<string, Record<string, IssueCodeDefinit
   [UPDATED_AT_VALIDATOR_NAME]: UPDATED_AT_ISSUE_CODES,
   [URL_PARAM_LOCALE_VALIDATOR_NAME]: URL_PARAM_LOCALE_ISSUE_CODES,
   [NONLOCALIZED_COMMON_LOCALE_VALIDATOR_NAME]: NONLOCALIZED_COMMON_LOCALE_ISSUE_CODES,
+  [DRAFT_INTEGRITY_VALIDATOR_NAME]: DRAFT_INTEGRITY_ISSUE_CODES,
 };
 
 export function getIssueCodeDefinition(

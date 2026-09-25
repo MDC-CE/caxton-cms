@@ -343,6 +343,42 @@ describe("buildProposalDiscoveryPath", () => {
 
   it("edits discovery tools are all catalog members", () => {
     expect(assertCatalogToolNames(proposalDiscoveryToolNames(), catalog)).toEqual({ ok: true });
+    expect(proposalDiscoveryToolNames()).toEqual(expect.arrayContaining(["list_entries", "get_component_schema"]));
+  });
+
+  it("layout tools appear only when layout_structure / template_blast_radius is active", () => {
+    const toolIds = (reviewContext?: Parameters<typeof buildProposalDiscoveryPath>[0]["reviewContext"]) =>
+      buildProposalDiscoveryPath({ proposal: baseEdits, allowedTools: catalog, reviewContext })
+        .discovery_path!.items.filter((i) => i.kind === "tool")
+        .map((t) => (t.kind === "tool" ? t.id : ""));
+
+    expect(toolIds({ damage_class: "existing_content" })).not.toContain("layout_siblings");
+    expect(toolIds({ damage_class: "existing_content" })).not.toContain("component_schema");
+
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: baseEdits,
+      allowedTools: catalog,
+      reviewContext: {
+        damage_class: "new_public_content",
+        active_checklists: ["layout_structure"],
+        entries: [{ existence: "missing", layout_owner: "entry" }],
+      },
+    });
+    const tools = discovery_path!.items.filter((i) => i.kind === "tool");
+    const siblings = tools.find((t) => t.kind === "tool" && t.id === "layout_siblings");
+    expect(siblings?.kind === "tool" && siblings.tool).toBe("list_entries");
+    if (siblings?.kind === "tool") expect(siblings.args_hint).toMatchObject({ contentType: "landing", limit: 10 });
+    expect(tools.some((t) => t.kind === "tool" && t.id === "component_schema")).toBe(true);
+    const preview = tools.find((t) => t.kind === "tool" && t.id === "preview_content");
+    if (preview?.kind === "tool") {
+      expect(preview.look_for[0]).toMatch(/^layout: components fit this page type/);
+      expect(preview.look_for.some((l) => /no live copy to compare/.test(l))).toBe(true);
+      expect(preview.look_for.some((l) => /proposed fields vs live copy/.test(l))).toBe(false);
+    }
+
+    expect(toolIds({ active_checklists: ["template_blast_radius"], entries: [{ is_shared_template: true }] })).toEqual(
+      expect.arrayContaining(["layout_siblings", "component_schema"]),
+    );
   });
 
   it("caps traffic tools: existing_content gets organic + site GA, not funnel analytics", () => {

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
+import { AlertTriangle, Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
 import { IconChess, IconChevronDown, IconChevronRight, IconExternalLink } from "@tabler/icons-react";
 import { queryClient } from "@/lib/queryClient";
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
@@ -103,6 +103,16 @@ import {
 import { LinkedDatabaseExplainDialog } from "@/components/editing/LinkedDatabaseExplainDialog";
 import { ItemEditModal } from "@/components/databases/ItemEditModal";
 import { EditorTypeDialog, type EditorHint } from "@/components/editing/EditorTypeDialog";
+import {
+  DeprecateFieldForm,
+  DeprecatedFieldState,
+  type DeprecateFieldChoice,
+} from "@/components/editing/DeprecateFieldPanel";
+import {
+  listReplacementReferrers,
+  parseDeprecated,
+  type DeprecatedFieldConfig,
+} from "@shared/deprecatedField";
 import { isValidFillIntent } from "@shared/fillIntent";
 import { isValidContentTypeStrategy } from "@shared/contentTypeStrategy";
 import { WebhookUrlPopover } from "@/components/WebhookUrlPopover";
@@ -1070,6 +1080,12 @@ function RequiredFieldConfirmDialog({
   fieldName,
   currentRequired,
   allowAttachedMode,
+  contentType,
+  isDbBacked,
+  deprecated,
+  replacementOptions,
+  replacementReferrers,
+  onDeprecate,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -1078,16 +1094,63 @@ function RequiredFieldConfirmDialog({
   currentRequired: RequiredMode;
   /** Show "Required when attached" only for shared-layout content types. */
   allowAttachedMode: boolean;
+  contentType: string;
+  isDbBacked: boolean;
+  deprecated: DeprecatedFieldConfig | null;
+  replacementOptions: string[];
+  /** Deprecated fields whose replacement is this field (blocks retiring it). */
+  replacementReferrers: string[];
+  /** null = restore (remove deprecation). */
+  onDeprecate: (choice: DeprecateFieldChoice | null) => void;
 }) {
   const [neverAskAgain, setNeverAskAgain] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [retireStep, setRetireStep] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setNeverAskAgain(false);
       setShowAdvanced(false);
+      setRetireStep(false);
     }
   }, [open]);
+
+  if (fieldName && (retireStep || deprecated)) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-[520px]" data-testid="dialog-required-field-confirm">
+          <DialogHeader>
+            <DialogTitle>{deprecated && !retireStep ? "Retired field" : "Retire field"}</DialogTitle>
+            <DialogDescription>
+              Field <code className="font-mono text-foreground text-xs">{fieldName}</code>
+              {deprecated && !retireStep
+                ? " — no longer used by new entries"
+                : " — pick what staff and agents should use instead"}
+            </DialogDescription>
+          </DialogHeader>
+          {deprecated && !retireStep ? (
+            <DeprecatedFieldState
+              config={deprecated}
+              onChange={() => setRetireStep(true)}
+              onRestore={() => onDeprecate(null)}
+            />
+          ) : (
+            <DeprecateFieldForm
+              contentType={contentType}
+              fieldName={fieldName}
+              replacementOptions={replacementOptions}
+              initial={deprecated}
+              requiredWillTurnOff={currentRequired !== false}
+              isDbBacked={isDbBacked}
+              blockedByReferrers={replacementReferrers}
+              onBack={() => setRetireStep(false)}
+              onConfirm={(choice) => onDeprecate(choice)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1235,6 +1298,20 @@ function RequiredFieldConfirmDialog({
               </span>
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => setRetireStep(true)}
+            data-testid="button-required-mode-retire"
+            className="flex w-full items-start gap-2 rounded-md border border-dashed border-border px-2.5 py-2 text-left text-muted-foreground transition-colors hover-elevate"
+          >
+            <Archive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden />
+            <span className="flex flex-col gap-0.5">
+              <span className="text-xs font-medium text-destructive">Retire this field…</span>
+              <span className="text-[10px] leading-snug text-muted-foreground/80">
+                Stop new entries from using it and point to a replacement. Old entries keep their value.
+              </span>
+            </span>
+          </button>
           <label
             className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none pt-1"
             data-testid="label-never-ask-required-confirm"
@@ -1244,7 +1321,7 @@ function RequiredFieldConfirmDialog({
               onCheckedChange={(checked) => setNeverAskAgain(checked === true)}
               data-testid="checkbox-never-ask-required-confirm"
             />
-            Never ask this again — click the asterisk to cycle modes
+            Never ask this again — click the asterisk to cycle modes (Shift+click reopens this dialog)
           </label>
         </DialogFooter>
       </DialogContent>
@@ -4070,9 +4147,42 @@ function FieldMappingDialog({
     [config?.strategy, editorHints, onRequestStrategy, toast],
   );
 
+  const applyDeprecation = useCallback(
+    (field: string, choice: DeprecateFieldChoice | null) => {
+      setEditorHints((prev) => {
+        const cur = prev[field] || {};
+        if (choice === null) {
+          const { deprecated: _d, ...rest } = cur;
+          if (Object.keys(rest).length === 0) {
+            const clone = { ...prev };
+            delete clone[field];
+            return clone;
+          }
+          return { ...prev, [field]: rest };
+        }
+        const { required: _r, ...rest } = cur;
+        return {
+          ...prev,
+          [field]: {
+            ...rest,
+            deprecated: {
+              replaced_by: choice.replaced_by,
+              ...(choice.reason ? { reason: choice.reason } : {}),
+            },
+          },
+        };
+      });
+      toast({
+        title: choice === null ? `"${field}" restored` : `"${field}" retired`,
+        description: "Save fields to apply.",
+      });
+    },
+    [toast],
+  );
+
   const handleRequiredFieldClick = useCallback(
-    (field: string) => {
-      if (!readSkipRequiredConfirm()) {
+    (field: string, opts?: { shiftKey?: boolean }) => {
+      if (!readSkipRequiredConfirm() || opts?.shiftKey || parseDeprecated(editorHints[field])) {
         setPendingRequiredField(field);
         return;
       }
@@ -4785,10 +4895,16 @@ function FieldMappingDialog({
                     const showComputeEditor = isFn || isRemap;
                     const vResult = isFn ? null : validation[key];
                     const currentSrc = mappings[key] || "";
+                    const deprecatedCfg = parseDeprecated(editorHints[key]);
                     return (
                       <div key={key}>
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-mono w-28 flex-shrink-0 text-right text-muted-foreground truncate" title={key}>
+                          <span
+                            className={`text-xs font-mono w-28 flex-shrink-0 text-right truncate ${
+                              deprecatedCfg ? "text-muted-foreground/60 line-through" : "text-muted-foreground"
+                            }`}
+                            title={deprecatedCfg ? `${key} (retired)` : key}
+                          >
                             {key}
                           </span>
                           <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
@@ -4844,10 +4960,12 @@ function FieldMappingDialog({
                                       ? "text-primary"
                                       : ""
                                   }`}
-                                  onClick={() => handleRequiredFieldClick(key)}
+                                  onClick={(e) => handleRequiredFieldClick(key, { shiftKey: e.shiftKey })}
                                   data-testid={`button-required-field-${key}`}
                                 >
-                                  {editorHints[key]?.required === true ? (
+                                  {deprecatedCfg ? (
+                                    <Archive className="h-3.5 w-3.5 text-muted-foreground" />
+                                  ) : editorHints[key]?.required === true ? (
                                     <span
                                       className="inline-flex items-center"
                                       aria-hidden
@@ -4865,15 +4983,17 @@ function FieldMappingDialog({
                                 className="text-xs"
                                 data-testid={`tooltip-required-field-${key}`}
                               >
-                                {editorHints[key]?.required === true
-                                  ? "** Always required"
-                                  : editorHints[key]?.required === "attached"
-                                    ? "* When attached"
-                                    : readSkipRequiredConfirm()
-                                      ? "Click to cycle required mode"
-                                      : allowAttachedRequiredMode
-                                        ? "** Always · * Attached"
-                                        : "Click to set required"}
+                                {deprecatedCfg
+                                  ? "Retired — click to change or restore"
+                                  : editorHints[key]?.required === true
+                                    ? "** Always required"
+                                    : editorHints[key]?.required === "attached"
+                                      ? "* When attached"
+                                      : readSkipRequiredConfirm()
+                                        ? "Click to cycle required mode · Shift+click for options (retire)"
+                                        : allowAttachedRequiredMode
+                                          ? "** Always · * Attached"
+                                          : "Click to set required"}
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
@@ -4892,12 +5012,40 @@ function FieldMappingDialog({
                             size="icon"
                             className="flex-shrink-0"
                             title="Remove field"
-                            onClick={() => setPendingDeleteKey(key)}
+                            onClick={() => {
+                              const referrers = listReplacementReferrers(editorHints, key);
+                              if (referrers.length > 0) {
+                                toast({
+                                  title: `Can't remove "${key}"`,
+                                  description: `It is the replacement for retired field(s): ${referrers.join(", ")}. Change their replacement first.`,
+                                  variant: "destructive",
+                                });
+                                return;
+                              }
+                              setPendingDeleteKey(key);
+                            }}
                             data-testid={`button-delete-mapping-${key}`}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
+                        {deprecatedCfg ? (
+                          <p
+                            className="ml-[7.5rem] mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground"
+                            data-testid={`text-deprecated-field-${key}`}
+                          >
+                            <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+                              {deprecatedCfg.replaced_by ? (
+                                <>
+                                  Deprecated → use <code className="ml-1 font-mono">{deprecatedCfg.replaced_by}</code>
+                                </>
+                              ) : (
+                                "Deprecated — no replacement"
+                              )}
+                            </Badge>
+                            <span>Old entries keep their value; new entries can&apos;t set it.</span>
+                          </p>
+                        ) : null}
                         {!showComputeEditor && (
                           <p className="text-[10px] text-muted-foreground ml-[7.5rem] mt-0.5 flex items-center gap-1">
                             <span>
@@ -5212,6 +5360,7 @@ function FieldMappingDialog({
           if (prevHint.required === true || prevHint.required === "attached") {
             merged.required = prevHint.required;
           }
+          if (prevHint.deprecated) merged.deprecated = prevHint.deprecated;
           return { ...prev, [field]: merged };
         });
         setHintDialogField(null);
@@ -5226,6 +5375,25 @@ function FieldMappingDialog({
           : false
       }
       allowAttachedMode={allowAttachedRequiredMode}
+      contentType={contentType}
+      isDbBacked={isDbBacked}
+      deprecated={pendingRequiredField ? parseDeprecated(editorHints[pendingRequiredField]) : null}
+      replacementOptions={
+        pendingRequiredField
+          ? regularKeys.filter(
+              (k) => k !== pendingRequiredField && !parseDeprecated(editorHints[k]),
+            )
+          : []
+      }
+      replacementReferrers={
+        pendingRequiredField ? listReplacementReferrers(editorHints, pendingRequiredField) : []
+      }
+      onDeprecate={(choice) => {
+        const field = pendingRequiredField;
+        if (!field) return;
+        applyDeprecation(field, choice);
+        setPendingRequiredField(null);
+      }}
       onOpenChange={(next) => {
         if (!next) setPendingRequiredField(null);
       }}

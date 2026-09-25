@@ -3,7 +3,11 @@
  * Compute on read (and at create for snapshot). Same inputs → same output.
  */
 
-import type { ProposalCategory, ProposalKind, ProposalRecord, ReviewMode } from "./service";
+import type { ProposalCategory, ProposalEntryRow, ProposalKind, ProposalRecord, ReviewMode } from "./service";
+import type { LayoutOwner } from "../layout-owner";
+import { isTemplateVersioningSlug } from "@shared/sharedLayoutPaths";
+import { isSectionFieldPath } from "./attached-entry-gate";
+import { isStructuralSectionsChange } from "./sections-summary";
 import {
   DAMAGE_CLASS_META,
   THINK_TEMPLATES,
@@ -65,6 +69,10 @@ export type ReviewEntryContext = {
   damage_class: DamageClass;
   /** True when live is gone and no draft — blocks apply. */
   target_missing?: boolean;
+  /** Who owns this entry's layout today (see agent-conventions layout_owner table). */
+  layout_owner?: LayoutOwner;
+  detached?: true;
+  is_shared_template?: true;
 };
 
 export type RelatedOpenProposal = {
@@ -74,8 +82,18 @@ export type RelatedOpenProposal = {
   shared_issue_ids: string[];
 };
 
+export type UndoCostReason =
+  | "locale_fields"
+  | "seo_or_url"
+  | "page_level_fields"
+  | "sections"
+  | "first_publish"
+  | "shared_template";
+
 export type ReviewContext = {
   undo_cost: UndoCost;
+  /** v1.0: which draft change set the undo cost (from author_diff). */
+  undo_cost_reason?: UndoCostReason;
   damage_class: DamageClass;
   review_mode_operative: boolean;
   active_checklists: ChecklistId[];
@@ -128,6 +146,12 @@ export type EntryExistenceLookup = {
   existence: ExistenceState;
   /** Draft file exists when variant was requested. */
   draftExists?: boolean;
+  /** Who owns the entry's layout today. Absent → unknown (no owner-aware copy). */
+  layout_owner?: LayoutOwner;
+  detached?: true;
+  is_shared_template?: true;
+  /** Owner recorded when the entry was filed / revised (v1.0). Absent on older rows. */
+  layout_owner_at_filing?: LayoutOwner;
 };
 
 export type ClassifyProposalReviewOpts = {
@@ -146,8 +170,10 @@ export type ClassifyProposalReviewOpts = {
     | "promote_on_apply"
     | "review_situations"
   > & {
+    system_version?: ProposalRecord["system_version"];
     accepted_entry?: ProposalRecord["accepted_entry"];
     idea_funnel?: ProposalRecord["idea_funnel"];
+    affected_entries?: ProposalRecord["affected_entries"];
   };
   /** Per entry / related target existence. */
   lookups: EntryExistenceLookup[];
@@ -293,6 +319,43 @@ export function undoCostFor(kind: ProposalKind, reviewMode: ReviewMode): UndoCos
   return "medium"; // soft
 }
 
+const UNDO_RANK: Record<UndoCost, number> = { none: 0, low: 1, medium: 2, high: 3 };
+
+function isSeoOrUrlField(fieldPath: string): boolean {
+  const head = fieldPath.split(/[.[]/)[0] ?? "";
+  return head === "seo" || head === "meta" || head === "slug" || /(^|\.)slug$/.test(fieldPath);
+}
+
+/**
+ * v1.0 undo cost from what the draft actually changes (author_diff), not review_mode.
+ * low: locale text/image · medium: seo / meta / slug · high: page-level (common) fields,
+ * sections, first publish of a locale, or any shared template.
+ */
+export function undoCostFromDiff(
+  entries: Array<Pick<ProposalEntryRow, "slug" | "author_diff"> & { liveMissing?: boolean }>,
+): { cost: UndoCost; reason?: UndoCostReason } {
+  let cost: UndoCost = "none";
+  let reason: UndoCostReason | undefined;
+  const bump = (next: UndoCost, why: UndoCostReason) => {
+    if (UNDO_RANK[next] > UNDO_RANK[cost]) {
+      cost = next;
+      reason = why;
+    }
+  };
+  for (const e of entries) {
+    if (isTemplateVersioningSlug(e.slug)) bump("high", "shared_template");
+    if (e.liveMissing) bump("high", "first_publish");
+    for (const c of e.author_diff ?? []) {
+      if (c.scope === "common") bump("high", "page_level_fields");
+      else if (c.field_path === "sections" || c.field_path.startsWith("sections.") || c.field_path.startsWith("sections["))
+        bump("high", "sections");
+      else if (isSeoOrUrlField(c.field_path)) bump("medium", "seo_or_url");
+      else bump("low", "locale_fields");
+    }
+  }
+  return reason ? { cost, reason } : { cost };
+}
+
 function lookupKey(contentType: string, slug: string, locale: string, variant?: string | null) {
   return `${contentType}\0${slug}\0${locale}\0${variant?.trim() || ""}`;
 }
@@ -339,7 +402,19 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   let figuresActive = false;
 
   const review_mode_operative = proposal.kind === "edits";
-  const undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
+  let undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
+  let undo_cost_reason: UndoCostReason | undefined;
+  if (proposal.kind === "edits" && proposal.system_version) {
+    const fromDiff = undoCostFromDiff(
+      proposal.entries.map((e) => ({
+        slug: e.slug,
+        author_diff: e.author_diff,
+        liveMissing: findLookup(lookups, e.contentType, e.slug, e.locale, e.variant)?.existence === "missing",
+      })),
+    );
+    undo_cost = fromDiff.cost === "none" ? "low" : fromDiff.cost;
+    undo_cost_reason = fromDiff.reason;
+  }
 
   if (proposal.kind === "notes") {
     checklists.add("notes_close");
@@ -352,12 +427,20 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let damage_class: DamageClass = "none";
   let createsAttached = false;
+  /** New page / language (or legacy create) whose layout the entry owns. */
+  let createsPage = false;
+  let layoutStructural = false;
+  let layoutOwnerEntryStructural = false;
+  let layoutSwitched = false;
+  let allFieldsOnly = false;
+  const templateLocales = new Set<string>();
 
   if (proposal.kind === "edits") {
     const workEntries = proposal.entries.filter(
       (e) => !e.status || e.status === "pending" || e.status === "failed",
     );
     const toClassify = workEntries.length ? workEntries : proposal.entries;
+    allFieldsOnly = toClassify.length > 0;
 
     for (const e of toClassify) {
       const lu = findLookup(lookups, e.contentType, e.slug, e.locale, e.variant);
@@ -368,6 +451,30 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         e.baseline_context?.creates_entry === true && !e.variant?.trim();
       if (createsEntry && liveMissing) createsAttached = true;
       const target_missing = liveMissing && !draftExists && !createsEntry;
+      const owner = lu?.layout_owner;
+      const isTemplate = Boolean(lu?.is_shared_template) || isTemplateVersioningSlug(e.slug);
+      if (owner !== "shared_template" || isTemplate) allFieldsOnly = false;
+      if (isTemplate) {
+        templateLocales.add(e.locale);
+        checklists.add("template_blast_radius");
+      }
+      const createdLayout = liveMissing && (draftExists || createsEntry) && (owner === "entry" || isTemplate);
+      if (createdLayout || isStructuralSectionsChange(e.sections_summary)) {
+        layoutStructural = true;
+        if (owner === "entry" && !isTemplate) layoutOwnerEntryStructural = true;
+      }
+      if (
+        lu?.layout_owner_at_filing === "entry" &&
+        owner === "shared_template" &&
+        !isTemplate &&
+        (e.author_diff ?? []).some((c) => isSectionFieldPath(c.field_path))
+      ) {
+        layoutSwitched = true;
+        warnings.push({
+          code: "layout_owner_changed",
+          message: `${e.contentType}/${e.slug} (${e.locale}) now uses the shared template (reattached); the draft's sections would be ignored. Author: revise to fields only or withdraw. Apply refuses with context_stale (reason layout_owner_changed).`,
+        });
+      }
 
       let dc = damageClassForTarget({
         contentType: e.contentType,
@@ -376,7 +483,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         draftExists,
         createsEntry: createsEntry && liveMissing,
       });
-      if (createsEntry && liveMissing) {
+      if (liveMissing && (draftExists || createsEntry) && owner === "entry" && !isTemplate) {
+        createsPage = true;
+        warnings.push({
+          code: "creates_page_entry",
+          message: `Applying publishes ${e.contentType}/${e.slug} (${e.locale}) from its draft, including its full layout (layout_owner: entry).`,
+        });
+      } else if (createsEntry && liveMissing) {
         warnings.push({
           code: "creates_attached_entry",
           message: `Applying creates ${e.contentType}/${e.slug} (${e.locale}). No draft. The shared template does not change.`,
@@ -412,9 +525,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         existence,
         damage_class: dc,
         ...(target_missing ? { target_missing: true } : {}),
+        ...(owner ? { layout_owner: owner } : {}),
+        ...(lu?.detached ? { detached: true as const } : {}),
+        ...(isTemplate ? { is_shared_template: true as const } : {}),
       });
       damage_class = worseDamageClass(damage_class, dc);
     }
+    if (layoutStructural) checklists.add("layout_structure");
 
     const figures = resolveOutcomeFiguresAttachment({
       entries: toClassify,
@@ -601,12 +718,16 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         });
         // Missing → new_public_content (any type)
         const resolved = existence === "missing" ? "new_public_content" : dc;
+        const rlu = findLookup(lookups, r.contentType, r.slug, r.locale);
         entryContexts.push({
           contentType: r.contentType,
           slug: r.slug,
           locale: r.locale,
           existence,
           damage_class: resolved,
+          ...(rlu?.layout_owner ? { layout_owner: rlu.layout_owner } : {}),
+          ...(rlu?.detached ? { detached: true as const } : {}),
+          ...(rlu?.is_shared_template ? { is_shared_template: true as const } : {}),
         });
         damage_class = worseDamageClass(damage_class === "none" ? resolved : damage_class, resolved);
         if (existence === "unknown") {
@@ -720,10 +841,18 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
   }
 
+  const templateCount = proposal.affected_entries?.count;
+  const templateStaff = templateLocales.size
+    ? `This changes the shared layout for ${templateCount ?? "every attached"} page${templateCount === 1 ? "" : "s"} in ${[...templateLocales].sort().join(", ")}. Pages with their own layout (detached) are not affected.`
+    : null;
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
+    : createsPage
+      ? "Applying publishes this new page from its draft, including its full layout. Judge angle, facts, and funnel — not only whether apply is easy."
     : createsAttached
       ? "Applying creates this post. The slug was reserved by the accepted idea. The shared template does not change."
+      : templateStaff
+        ? templateStaff
       : proposal.kind === "idea"
         ? liveSituations.includes("broken_url")
           ? BROKEN_URL_STAFF_NOTE
@@ -747,12 +876,19 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   if (hasLocaleTranslationChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${LOCALE_TRANSLATION_STAFF_NOTE}`;
   }
+  if (layoutSwitched && !block_apply) {
+    staffSituation = `${staffSituation} This page now uses the shared layout, so the proposed layout would be ignored. The author needs to update the proposal.`;
+  }
+  if (templateStaff && !block_apply && staffSituation !== templateStaff && !staffSituation.includes(templateStaff)) {
+    staffSituation = `${staffSituation} ${templateStaff}`;
+  }
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
   }
 
   return {
     undo_cost,
+    ...(undo_cost_reason ? { undo_cost_reason } : {}),
     damage_class,
     review_mode_operative,
     active_checklists: orderedIds.map((t) => t.id),
@@ -784,6 +920,16 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         why: t.why,
         look_for: (() => {
           const base = [...t.look_for];
+          if (t.id === "layout_structure") {
+            if (layoutOwnerEntryStructural) {
+              base.unshift("layout_owner: entry — this draft is the whole page; review the layout, not only the fields");
+            } else if (templateLocales.size) {
+              base.unshift("is_shared_template — this draft is the shared layout for every attached entry in that language");
+            }
+          }
+          if (t.id === "verify_copy" && allFieldsOnly) {
+            base.push("layout_owner: shared_template — the template is unaffected; review fields only");
+          }
           if (
             countsAsLeadForm &&
             (t.id === "selling_page_figures" || t.id === "disposition" || t.id === "verify_copy")
@@ -865,6 +1011,7 @@ export function snapshotFromReviewContext(ctx: ReviewContext): Record<string, un
   return {
     damage_class: ctx.damage_class,
     undo_cost: ctx.undo_cost,
+    ...(ctx.undo_cost_reason ? { undo_cost_reason: ctx.undo_cost_reason } : {}),
     badge_label: ctx.staff_summary.badge_label,
     situation_description: ctx.staff_summary.situation_description,
     active_checklists: ctx.active_checklists,

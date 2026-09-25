@@ -16,6 +16,7 @@ import { applyRedirectTraceCookie } from "./redirect-trace-cookie";
 import type { RedirectTraceMatchType } from "@shared/redirect-trace";
 import { localePrefixFromPath } from "@shared/runtime-issues";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
+import { resolveLocaleHomeAliasTarget } from "./locale-home-alias";
 const log = child({ module: "redirects" });
 
 // ============================================================================
@@ -229,6 +230,22 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
   }
 
   const siteCi = (res.locals.site as any)?.contentIndex as typeof contentIndex | undefined;
+  const ci = siteCi || contentIndex;
+  const contentRoot =
+    ((res.locals.site as any)?.contentRoot as string | undefined) || ci.contentRoot;
+  const homeAliasTarget = resolveLocaleHomeAliasTarget(req.path, ci, contentRoot);
+  if (homeAliasTarget) {
+    sendRedirect(req, res, {
+      from: req.path,
+      to: homeAliasTarget + getQueryString(req),
+      status: 301,
+      matchType: "exact",
+      source: "locale-home-alias",
+      logLabel: "(locale-home-alias)",
+    });
+    return;
+  }
+
   const siteMaps = siteCi ? _getSiteRedirectMaps(siteCi) : null;
   const map = siteMaps ? siteMaps.map : getRedirectMap();
   const regexBefore = siteMaps ? siteMaps.regexBefore : (regexRedirectsBefore || []);

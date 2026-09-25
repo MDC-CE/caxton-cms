@@ -6,6 +6,11 @@ import {
   assertEditorRequiredHasStrategy,
   parseContentTypeStrategy,
 } from "../../shared/contentTypeStrategy.js";
+import {
+  assertNotReplacementTarget,
+  parseDeprecated,
+  validateDeprecations,
+} from "../../shared/deprecatedField.js";
 import { validateEditorHintsHaveJsonSchemas } from "../../server/json-field-validate.js";
 import { validateEditorHintsHaveRelationSources } from "../../server/relation-field-validate.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
@@ -183,6 +188,28 @@ export function prepareFieldPatch(
   const collisionEditor = validateRelationCollisionsForEditor(applied.nextEditor, ctx);
   if (!collisionEditor.ok) return collisionEditor;
 
+  const fieldKey = input.field_key.trim();
+  if (input.action === "remove" || parseDeprecated(applied.nextEditor?.[fieldKey])) {
+    const target = assertNotReplacementTarget(applied.nextEditor, fieldKey);
+    if (!target.ok) {
+      return {
+        ok: false,
+        code: target.code,
+        message: target.error,
+        details: { field: fieldKey, referrers: target.referrers },
+      };
+    }
+  }
+  const depCheck = validateDeprecations(applied.nextEditor, applied.nextFieldMapping);
+  if (!depCheck.ok) {
+    return {
+      ok: false,
+      code: depCheck.code,
+      message: depCheck.error,
+      details: { field: depCheck.field },
+    };
+  }
+
   const editorCheck = validateMergedEditor(applied.nextEditor, config.strategy);
   if (!editorCheck.ok) return editorCheck;
 
@@ -193,6 +220,7 @@ export function buildFieldPatchWarnings(
   input: FieldPatchInput,
   config: ContentTypeConfigSlice,
   isNewField?: boolean,
+  opts?: { templateRefCount?: number },
 ): Array<{ code: string; message: string }> {
   const warnings: Array<{ code: string; message: string }> = [
     {
@@ -255,6 +283,26 @@ export function buildFieldPatchWarnings(
       code: "relation_pointer_only",
       message: "Relation fields store slug pointer(s) only, not embedded related objects.",
     });
+  }
+
+  const deprecatedCfg = input.action === "remove" ? null : parseDeprecated(hint);
+  if (deprecatedCfg) {
+    warnings.push({
+      code: "deprecated_existing_values_stay",
+      message:
+        "Deprecation only changes the type config. Entries whose live files already store a value keep it and may edit it; " +
+        "new entries and entries without a value are rejected (deprecated_field). Nothing is copied to " +
+        (deprecatedCfg.replaced_by ? `"${deprecatedCfg.replaced_by}".` : "a replacement (none set).") +
+        " field_mapping defaults still render. DB-backed types: DB column values still appear; only overrides are blocked.",
+    });
+    if (typeof opts?.templateRefCount === "number" && opts.templateRefCount > 0) {
+      warnings.push({
+        code: "deprecated_template_refs",
+        message:
+          `${opts.templateRefCount} file(s) reference {{ entry.${input.field_key.trim()} }} / {{ single.${input.field_key.trim()} }}; ` +
+          "new entries render empty/default there until templates switch to the replacement.",
+      });
+    }
   }
 
   const strategy = parseContentTypeStrategy(config.strategy);

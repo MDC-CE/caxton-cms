@@ -108,7 +108,8 @@ type State = {
 
 /**
  * Per-section boundary so one throw does not blank the whole preview.
- * Staff can open Edit YAML from the fallback card when `onEditYaml` is provided.
+ * Staff can open the section YAML editor from the fallback when `onEditYaml` is provided.
+ * Parent remounts via `key` after a successful save to retry render.
  */
 export class SectionRenderErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
