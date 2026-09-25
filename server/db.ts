@@ -118,11 +118,21 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS error_log_level_idx ON error_log (level);
 `);
 
+try {
+  const cols = sqlite.prepare("PRAGMA table_info(error_log)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "context")) {
+    sqlite.exec("ALTER TABLE error_log ADD COLUMN context TEXT");
+    log.info("[DB] Migrated error_log: added context column");
+  }
+} catch (err) {
+  log.warn({ err }, "[DB] error_log context column migration failed (non-fatal)");
+}
+
 log.info(`[DB] SQLite database: ${dbPath}`);
 
 // Prepared statement for inserting error log entries
 const _insertErrorLog = sqlite.prepare(
-  "INSERT INTO error_log (ts, level, module, message, err_name, err_stack) VALUES (?, ?, ?, ?, ?, ?)"
+  "INSERT INTO error_log (ts, level, module, message, err_name, err_stack, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
 );
 
 // Pruning: remove entries older than 48h
@@ -145,16 +155,19 @@ setInterval(pruneOldErrorLogs, 60 * 60 * 1000).unref();
 
 // Register log sink so logger.ts can insert warn/error entries into SQLite.
 // Errors always insert; warnings are rate-limited per fingerprint (module+normalized message).
-registerLogSink((ts, level, module, message, errName, errStack) => {
-  try {
-    if (level === "warn" && !shouldInsertWarn(module, message, ts)) {
-      return;
+// Vitest runs share data/app.db, so tests must not write into the staff Error Log.
+if (!process.env.VITEST) {
+  registerLogSink((ts, level, module, message, errName, errStack, context) => {
+    try {
+      if (level === "warn" && !shouldInsertWarn(module, message, ts)) {
+        return;
+      }
+      _insertErrorLog.run(ts, level, module, message, errName, errStack, context);
+    } catch {
+      // never throw from a log sink
     }
-    _insertErrorLog.run(ts, level, module, message, errName, errStack);
-  } catch {
-    // never throw from a log sink
-  }
-});
+  });
+}
 
 export const db = drizzle(sqlite);
 

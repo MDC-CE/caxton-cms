@@ -4164,11 +4164,14 @@ export function registerAdminRoutes(app: Express): void {
          FROM error_log WHERE ts >= ?`
       ).get(cutoff) as { totalErrors: number; totalWarnings: number };
 
+      // Newest first: the first row seen per fingerprint is the latest occurrence.
       const issueRows = sqlite.prepare(
-        `SELECT level, module, message, err_name, ts
+        `SELECT id, level, module, message, err_name, ts
          FROM error_log
-         WHERE ts >= ?${levelFilter}`
+         WHERE ts >= ?${levelFilter}
+         ORDER BY ts DESC, id DESC`
       ).all(...args) as Array<{
+        id: number;
         level: string;
         module: string;
         message: string;
@@ -4177,14 +4180,18 @@ export function registerAdminRoutes(app: Express): void {
       }>;
 
       type UniqueIssue = {
+        fingerprint: string;
         module: string;
         level: "error" | "warn";
         message: string;
         err_name: string | null;
         count: number;
         lastTs: number;
+        lastId: number;
+        sampleTs: number[];
       };
 
+      const ERROR_LOG_SAMPLE_TS_MAX = 3;
       const byFingerprint = new Map<string, UniqueIssue>();
       for (const row of issueRows) {
         const level: "error" | "warn" = row.level === "error" ? "error" : "warn";
@@ -4192,19 +4199,20 @@ export function registerAdminRoutes(app: Express): void {
         const existing = byFingerprint.get(fp);
         if (existing) {
           existing.count += 1;
-          if (row.ts > existing.lastTs) {
-            existing.lastTs = row.ts;
-            existing.message = row.message;
-            existing.err_name = row.err_name;
+          if (existing.sampleTs.length < ERROR_LOG_SAMPLE_TS_MAX) {
+            existing.sampleTs.push(row.ts);
           }
         } else {
           byFingerprint.set(fp, {
+            fingerprint: fp,
             module: row.module,
             level,
             message: row.message,
             err_name: row.err_name,
             count: 1,
             lastTs: row.ts,
+            lastId: row.id,
+            sampleTs: [row.ts],
           });
         }
       }
@@ -4251,6 +4259,64 @@ export function registerAdminRoutes(app: Express): void {
     } catch (err) {
       log.error({ err }, "Failed to query error_log:");
       res.status(500).json({ error: "Failed to query error log" });
+    }
+  });
+
+  // Single error_log row with stack + sanitized context (Error Log expanded row)
+  api.get(app, "/api/admin/error-log/:id", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: "id must be a positive integer" });
+      return;
+    }
+
+    try {
+      const row = sqlite.prepare(
+        `SELECT id, ts, level, module, message, err_name, err_stack, context
+         FROM error_log WHERE id = ?`
+      ).get(id) as
+        | {
+            id: number;
+            ts: number;
+            level: string;
+            module: string;
+            message: string;
+            err_name: string | null;
+            err_stack: string | null;
+            context: string | null;
+          }
+        | undefined;
+
+      if (!row) {
+        res.status(404).json({ error: "Error log entry not found (it may have been pruned after 48 hours)" });
+        return;
+      }
+
+      let context: Record<string, unknown> | null = null;
+      if (row.context) {
+        try {
+          context = JSON.parse(row.context) as Record<string, unknown>;
+        } catch {
+          context = { raw: row.context };
+        }
+      }
+
+      res.json({
+        id: row.id,
+        ts: row.ts,
+        level: row.level === "error" ? "error" : "warn",
+        module: row.module,
+        message: row.message,
+        err_name: row.err_name,
+        err_stack: row.err_stack,
+        context,
+      });
+    } catch (err) {
+      log.error({ err, id }, "Failed to query error_log entry");
+      res.status(500).json({ error: "Failed to query error log entry" });
     }
   });
 
