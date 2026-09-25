@@ -29,6 +29,8 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import { api } from "../rate-limit/api";
+import { handleUpstreamSyncWebhook } from "../upstream-sync-webhook";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager } from "../database";
@@ -618,6 +620,30 @@ export function registerGithubRoutes(app: Express): void {
       failRedirect(
         error instanceof Error ? error.message : "OAuth callback failed",
       );
+    }
+  });
+
+  // Push webhook for breatheco-de/caxton-cms. Starts the sync workflow in this repo.
+  api.post(app, "/api/github/upstream-sync", {
+    rate: "exempt",
+    reason: "GitHub upstream push webhook; authenticated by HMAC",
+  }, async (req, res) => {
+    const rawBody = (req as { rawBody?: Buffer }).rawBody;
+    const payload = rawBody ? rawBody.toString("utf-8") : JSON.stringify(req.body ?? {});
+    let body: unknown = req.body;
+    try {
+      if (rawBody) body = JSON.parse(payload);
+    } catch {
+      body = req.body;
+    }
+    const event = headerString(req, "x-github-event") || "";
+    const signature = headerString(req, "x-hub-signature-256");
+    try {
+      const result = await handleUpstreamSyncWebhook({ event, signature, payload, body });
+      res.status(result.status).json(result.body);
+    } catch (error) {
+      log.error({ err: error }, "Upstream sync webhook failed");
+      res.status(502).json({ error: "Could not start upstream sync" });
     }
   });
 
