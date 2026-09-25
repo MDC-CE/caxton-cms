@@ -165,12 +165,16 @@ function renderMetaBlock(meta: DraftMeta): string {
   return yaml.dump({ [DRAFT_META_KEY]: meta }, { lineWidth: 200, noRefs: true, sortKeys: false });
 }
 
+/** Bodies that parse to an empty document; a block `_draft:` key cannot follow a flow `{}`. */
+const EMPTY_DOCUMENT_RE = /^(\{\s*\}|null|~)?$/;
+
 /** Append `_draft` (or nothing) to content that no longer carries one. */
 export function withDraftMeta(contentWithoutMeta: string, meta: DraftMeta | null): string {
   const base = stripDraftMetaFromRaw(contentWithoutMeta);
-  if (!meta) return base;
+  if (!meta) return base.trim() || !contentWithoutMeta.trim() ? base : "{}\n";
   const trimmed = base.replace(/\s+$/, "");
-  return `${trimmed ? `${trimmed}\n` : ""}${renderMetaBlock(meta)}`;
+  const body = EMPTY_DOCUMENT_RE.test(trimmed.trim()) ? "" : trimmed;
+  return `${body ? `${body}\n` : ""}${renderMetaBlock(meta)}`;
 }
 
 function atomicWrite(filePath: string, content: string): void {

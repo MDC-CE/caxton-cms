@@ -1,10 +1,11 @@
 /**
  * Generated MCP system_hints for content-type editor fields.
- * Relation-only in v1. Never concatenate into staff-editable description.
+ * Relation + deprecation hints. Never concatenate into staff-editable description.
  */
 
 import type { RelationEditorHint } from "./relation-field";
 import { isRelationEditorHint } from "./relation-field";
+import { deprecatedSystemHint, parseDeprecated } from "./deprecatedField";
 
 /**
  * Build type-generic system_hints for a relation editor field.
@@ -34,8 +35,11 @@ export function buildRelationSystemHints(
  */
 export function buildEditorSystemHints(
   field: string,
-  hint: { type?: string } & RelationEditorHint | undefined | null,
+  hint: { type?: string; deprecated?: unknown } & RelationEditorHint | undefined | null,
 ): string[] | undefined {
-  if (!hint || !isRelationEditorHint(hint)) return undefined;
-  return buildRelationSystemHints(field, hint);
+  if (!hint) return undefined;
+  const deprecated = parseDeprecated(hint);
+  const relation = isRelationEditorHint(hint) ? buildRelationSystemHints(field, hint) : [];
+  const hints = deprecated ? [deprecatedSystemHint(field, deprecated), ...relation] : relation;
+  return hints.length > 0 ? hints : undefined;
 }

@@ -42,6 +42,18 @@ List rows may include a **`review_context_snapshot`** (filed-at-create or last s
 | `disposition` | Baseline edits — apply / reject / blocker / adjacent notes park; leave-live on SERP → revise_entries then apply |
 | `existence_unknown` | Lookup could not confirm existence |
 | `target_missing` | Open edits whose live target no longer exists — **apply is blocked** |
+| `layout_structure` | Structural `sections` change (a section added / removed / moved per `sections_summary`, whoever edited the draft) or a created layout (new page / language / template language) on a `layout_owner: entry` or template entry. First line names the owner. Registry checks shape only — images, links, ecommerce scope are yours; wrong structure → `add_blocker`. A text edit inside one section does not fire it |
+| `template_blast_radius` | Any pending entry is a template (`is_shared_template: true`) — open 2–3 `affected_entries.sample`, new `{{ entry.* }}` placeholders filled, all template languages covered, detached entries unchanged, apply needs `confirm_affected_entries`. Stacks with `layout_structure` |
+
+## Layout fields on entries
+
+| Field | Meaning |
+|---|---|
+| `layout_owner` | `shared_template` = the draft holds fields only (layout comes from `template.{locale}.yml`); `entry` = the draft is the whole page (including detached entries). Per entry; wins over `body_model`. Table: conventions §2d |
+| `detached: true` | Why a shared-layout type's entry reports `entry` |
+| `is_shared_template: true` | The entry is slug `template` — the draft is the shared layout itself (reaches `affected_entries`) |
+| `layout_owner_at_filing` | Owner stored when the proposal was filed / revised (review lookups). Absent on older rows |
+| `sections_summary` | Per-section change rows (`added` / `removed` / `changed` + `changed_keys` / `moved` + `from_index`); max 30 rows, 8 keys, `truncated` |
 
 ## Soft mix nudge
 
@@ -53,10 +65,13 @@ When title/description ops are mixed with other field updates, warning `mixed_se
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `entry_not_found` | Edits target missing, and this is not a reserved file-based attached slug | For a new attached post: accept an idea, then field edits with `implements_proposal_id` and no variant. A detached page still needs its draft first. |
+| `entry_not_found` | Edits target missing and no accepted idea reserved it — or (with `implements_proposal_id`) the type cannot be created from a proposal | No idea: file one, get it accepted with this slug, then edits with `implements_proposal_id` and no variant (section-built types also need full `sections`). With an idea: a human must create the page (CMS / `create_entry`), then resubmit with the same `implements_proposal_id`. |
+| `sections_required` | New `layout_owner: entry` page (downloadable, landing, program page, …) with no full `sections` update — including `sections[0].title`-style paths or `[]`. With `details.new_locale: true`: a new language of an entry page, of a detached entry (file-based or database-backed), or a new template language (`is_shared_template`) — also on `revise_entries`. `details.layout_owner` / `detached` name the case | Send one `{ field_path: "sections", value: [ …section objects ] }` (non-empty; translated for a new language — start from `get_entry_content` on the source locale). Read shapes with `get_component_schema`. A named draft that already has sections is not refused. |
+| `invalid_sections` | A full `sections` array fails the component registry (unknown type/version, missing required prop, undeclared variant). Checked on every full `sections` update, new pages and new languages alike | Fix the section at `property_path` (`issues` lists up to 10). Nothing was saved — no draft, no folder. |
+| `page_create_no_draft` | New section-built page and the packet sets `variant` or `promote_on_apply` | Resubmit with no variant. The proposal creates the page folder and its draft. |
 | `attached_no_draft` | Attached post, no live file, and the packet sets `variant` or `promote_on_apply` | Resubmit with no variant. Apply creates the files. |
 | `database_entry_required` | Database type with no row | This workflow cannot create the row. The accepted idea can stay. Overrides work once the row exists. |
-| `required_fields_missing` | New attached post ops omit a required live field | Add the named fields. The idea still holds the slug. |
+| `required_fields_missing` | New attached post or new section-built page ops omit a required live field | Add the named fields. The idea still holds the slug. |
 | `attached_sections_refused` | New attached post includes `sections[...]` | Field updates only. The shared template stays unchanged. |
 | `mixed_risk_bundle` | Edits entries **or** idea `related_entries` resolve to more than one risk bucket (selling / new-public / other) | Split into separate proposals |
 | `competing_entry_edits` | Another open/partial **edits** proposal already targets the same type + slug + locale | Join that proposal, or reject the weaker one |
@@ -64,7 +79,19 @@ When title/description ops are mixed with other field updates, warning `mixed_se
 | `idea_already_in_progress` | Another open/partial edits already implements that idea | Join that edits proposal |
 | `implements_entry_mismatch` | `implements_proposal_id` set but entries do not match the idea’s locked page | Target the locked contentType/slug/locale |
 
-**Allowed:** live missing but the named draft **exists** — new-page-via-draft; classifies `new_public_content`. Also allowed: a file-based attached slug reserved by an accepted idea, with field updates and **no** variant (`creates_entry`). Apply creates that one locale and leaves the shared template alone.
+**Allowed:** live missing but the named draft **exists** — new-page-via-draft; classifies `new_public_content`. Also allowed: a file-based slug reserved by an accepted idea, with **no** variant (`creates_entry`) — attached posts send field updates only (apply leaves the shared template alone); section-built pages must also send full `sections`. Apply publishes that one locale.
+
+**Reservations are per page folder + locale.** A new language on a page whose folder already exists is a normal edit — no idea, no `implements_proposal_id`. Full `sections` in that edit are still registry-checked (`invalid_sections`).
+
+**Accept warning `accepted_entry_not_creatable`:** accepting an idea for a database-backed type whose page does not exist succeeds, but edits cannot create it (`database_entry_required`). The slug stays reserved; a human must create the page first. `list_proposals` rows show `accepted_entry_create_mode: "manual"` (vs `attached` / `page` when the follow-up edit creates the page) and `accepted_entry_layout_owner`.
+
+**Accept warning `accepted_entry_needs_layout`:** the reserved page will be `layout_owner: entry` (create mode `page`). Accept succeeds; the follow-up edits must send the whole layout as one full `sections` update (registry-checked). The `idea_accept` checklist asks whether the brief describes the page structure.
+
+**Create / revise warning `template_locales_incomplete`:** a template proposal skips some live template languages (`details.changed_locales` / `template_locales` / `missing_locales`). Still created; the skipped languages keep the old layout.
+
+## Publish refuse: `empty_page`
+
+Apply (publish) of a section-built page whose locale has no `sections` and no content fails with `empty_page` (message starts with `EMPTY_PAGE`). Draft saves and micro edits are not blocked. Revise the proposal with a non-empty `sections` update, then apply again.
 
 Notes + edits on the same issue stay allowed. Shared issue alone does **not** refuse create.
 
@@ -101,6 +128,12 @@ If live classify reports `target_missing` (page deleted after a normal edits fil
 - `target_missing` — apply blocked
 - `mixed_serp_and_body` — title/description mixed with other field updates; prefer split next time
 - `recent_entry_writes` — gate-filtered recent writes on one or more pending entries (lists each page + count); call `get_entry_activity` before apply
+- `creates_page_entry` — applying publishes a new `layout_owner: entry` page (or language) from its draft, including its full layout (`creates_attached_entry` stays for `shared_template`)
+- `layout_owner_changed` — the entry owned its layout at filing and now uses the shared template (reattached), and the draft changes `sections` (they would be ignored). Apply returns `context_stale` with `details.reason: "layout_owner_changed"` → attention `needs_author`; author revises to fields only or withdraws. Detach and older rows without an owner at filing are not flagged
+
+## Apply warnings
+
+- `template_placeholders_unfilled` — apply `dry_run` and apply of a template proposal: `details { contentType, locale, placeholders: [{ name, missing, total, sample (≤3 slugs) }] }` for new `{{ entry.* }}` placeholders some attached entries cannot fill (those pages render an empty spot). Never blocks; omitted when none are new or all are filled
 
 ## Recent activity (priority on review)
 

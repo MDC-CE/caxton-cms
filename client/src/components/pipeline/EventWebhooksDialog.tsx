@@ -1,12 +1,10 @@
-import { useMemo, useState, type ComponentType } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  IconBulb,
   IconCheck,
   IconChevronDown,
   IconFilter,
   IconLoader2,
-  IconNote,
   IconPencil,
   IconPlus,
   IconRefresh,
@@ -54,6 +52,11 @@ import JsonViewer from "@/components/editing/JsonViewer";
 import { TagInput } from "@/components/editing/TagInput";
 import { SearchableMultiCombobox } from "@/components/ui/searchable-multi-combobox";
 import { EventWebhookLogsPanel } from "@/components/pipeline/EventWebhookLogsPanel";
+import {
+  HookFilterBadges,
+  KIND_CHIP_META,
+  KIND_OPTIONS,
+} from "@/components/pipeline/HookFilterBadges";
 import type { StaffDirectoryEntry } from "@/components/editing";
 import { getDebugToken } from "@/hooks/useDebugAuth";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
@@ -253,42 +256,6 @@ function patchFilter(
   }
   return { ...hook, filter: next };
 }
-
-const KIND_OPTIONS = ["idea", "edits", "notes"] as const;
-
-/** Icons match ProposalKindBadge; chart tones keep kinds visually distinct. */
-const KIND_CHIP_META: Record<
-  (typeof KIND_OPTIONS)[number],
-  {
-    label: string;
-    icon: ComponentType<{ className?: string }>;
-    idle: string;
-    selected: string;
-    iconClass: string;
-  }
-> = {
-  idea: {
-    label: "idea",
-    icon: IconBulb,
-    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
-    selected: "border-chart-5/40 bg-chart-5/15 text-foreground",
-    iconClass: "text-chart-5",
-  },
-  edits: {
-    label: "edits",
-    icon: IconPencil,
-    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
-    selected: "border-chart-1/40 bg-chart-1/15 text-foreground",
-    iconClass: "text-chart-1",
-  },
-  notes: {
-    label: "notes",
-    icon: IconNote,
-    idle: "border-border bg-background text-muted-foreground hover:text-foreground",
-    selected: "border-chart-3/40 bg-chart-3/15 text-foreground",
-    iconClass: "text-chart-3",
-  },
-};
 
 const ACTOR_TYPE_OPTIONS = ["ui", "mcp", "system"] as const;
 
@@ -1051,6 +1018,10 @@ export function EventWebhooksPanel({ tab }: { tab: "hooks" | "logs" }) {
                                     <span>Never triggered</span>
                                   )}
                                 </p>
+                                <HookFilterBadges
+                                  hook={hook}
+                                  testIdSuffix={`${eventType}-${hook.id}`}
+                                />
                               </div>
                                   <div className="flex items-center gap-1 shrink-0">
                                     <Button

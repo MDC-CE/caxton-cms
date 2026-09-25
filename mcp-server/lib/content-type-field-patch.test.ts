@@ -7,7 +7,7 @@ import {
   isForbiddenFieldKey,
   type ContentTypeConfigSlice,
 } from "./content-type-field-patch.js";
-import { prepareFieldPatch } from "./content-type-field-validate.js";
+import { buildFieldPatchWarnings, prepareFieldPatch } from "./content-type-field-validate.js";
 
 const baseConfig: ContentTypeConfigSlice = {
   field_mapping: {
@@ -177,5 +177,73 @@ describe("prepareFieldPatch", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.code).toBe("missing_fill_intent");
+  });
+
+  describe("deprecation", () => {
+    const depConfig: ContentTypeConfigSlice = {
+      ...baseConfig,
+      indexes: [],
+      editor: { title: { type: "text" }, body: { deprecated: { replaced_by: "title" } } },
+    };
+
+    it("deprecates a field with a replacement and warns that values stay", () => {
+      const input = {
+        action: "update" as const,
+        field_key: "title",
+        isDbBacked: false,
+        editor: { deprecated: { replaced_by: null } } as never,
+      };
+      const cfg: ContentTypeConfigSlice = { ...baseConfig, indexes: [] };
+      const result = prepareFieldPatch(cfg, input, ctx);
+      expect(result.ok).toBe(true);
+      const warnings = buildFieldPatchWarnings(input, cfg, false, { templateRefCount: 2 });
+      const codes = warnings.map((w) => w.code);
+      expect(codes).toContain("deprecated_existing_values_stay");
+      expect(codes).toContain("deprecated_template_refs");
+    });
+
+    it("rejects deprecated + required", () => {
+      const result = prepareFieldPatch(
+        { ...baseConfig, indexes: [] },
+        {
+          action: "update",
+          field_key: "title",
+          isDbBacked: false,
+          editor: {
+            required: true,
+            fill_intent: { goal: "g", purpose: "p" },
+            deprecated: { replaced_by: "body" },
+          } as never,
+        },
+        ctx,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe("deprecated_config_invalid");
+    });
+
+    it("blocks removing a field that is another field's replacement", () => {
+      const result = prepareFieldPatch(
+        depConfig,
+        { action: "remove", field_key: "title", isDbBacked: false },
+        ctx,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.code).toBe("deprecated_replacement_target");
+      expect(result.details?.referrers).toEqual(["body"]);
+    });
+
+    it("deprecated: null restores the field", () => {
+      const result = applyFieldPatch(depConfig, {
+        action: "update",
+        field_key: "body",
+        isDbBacked: false,
+        editor: { deprecated: null } as never,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.nextEditor?.body && "deprecated" in result.nextEditor.body).toBe(false);
+    });
   });
 });

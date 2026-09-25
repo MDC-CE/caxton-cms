@@ -61,6 +61,18 @@ import {
   parseContentTypeStrategy,
 } from "../../shared/contentTypeStrategy.js";
 import { runContentTypeFieldPatch } from "../lib/content-type-field-mcp.js";
+import {
+  deprecatedFieldFail,
+  deprecatedFieldsPresent,
+  deprecatedTemplateRefWarnings,
+  isDeprecatedFieldInfo,
+} from "../lib/deprecated-field-mcp.js";
+import {
+  DEPRECATED_FIELD_CODE,
+  deprecatedSystemHint,
+  listDeprecatedFields,
+  isNonEmptyFieldValue,
+} from "../../shared/deprecatedField.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
 import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
 import {
@@ -448,6 +460,16 @@ async function callEditSectionsApi(
           ),
         };
       }
+      if (data.code === DEPRECATED_FIELD_CODE && isDeprecatedFieldInfo(data.deprecated)) {
+        return {
+          error: deprecatedFieldFail(errMsg, data.deprecated, {
+            slug: params.slug,
+            contentType: params.contentType,
+            locale: params.locale,
+            variant: params.variant,
+          }),
+        };
+      }
       if (/Section index \d+ does not exist/.test(errMsg)) {
         return {
           error: fail(errMsg, {
@@ -595,6 +617,12 @@ async function callEditCommonApi(
           },
           [],
         );
+      }
+      if (data.code === DEPRECATED_FIELD_CODE && isDeprecatedFieldInfo(data.deprecated)) {
+        return deprecatedFieldFail(errMsg, data.deprecated, {
+          slug: params.slug,
+          contentType: params.contentType,
+        });
       }
       const { editApiErrorResult } = await import("../lib/live-required-fields.js");
       return editApiErrorResult(errMsg, data, {
@@ -1704,6 +1732,9 @@ export function registerPageTools(
         {
           message: `list_entries entries for ${contentType} (${resolved.count} of ${resolved.total})`,
           mode: "entries",
+          layout_owner: isSharedLayoutConfig(configs[contentType]) ? "shared_template" : "entry",
+          layout_owner_note:
+            "Type default only. Detached rows of shared_template types own their sections (entry) — confirm per entry with get_entry_content.",
           count: resolved.count,
           total: resolved.total,
           page: resolved.page,
@@ -1850,6 +1881,8 @@ export function registerPageTools(
     "completed_issues (soft-completed for audit; use update_issue). " +
     "validation_pending (true when an on-save revalidation is still debouncing after a recent write — open lists may lag). " +
     "validation_issues, claimed_issues, and completed_issues are always present (empty arrays if none). " +
+    "deprecated_fields_present lists retired fields that still hold a value here ({ field, replaced_by }; [] if none) — keep them, but write new values to replaced_by. " +
+    "layout_owner: shared_template (sections come from template.{locale}.yml; edit fields only) or entry (this entry owns its sections); detached: true / is_shared_template: true explain why. " +
     "Merges _common.yml with the locale file. contentType is optional — omit it and the server will auto-detect it from the slug. " +
     "Use get_entry_seo to fetch only the SEO/meta fields. Requires content_view. " +
     "Supply 'variant' to read a draft variant file ({variantSlug}.{locale}.yml) instead of the live locale file.",
@@ -1887,7 +1920,10 @@ export function registerPageTools(
         const { meta: _meta, ...dataWithoutMeta } = result.data;
         const merged = { ...dataWithoutMeta } as Record<string, unknown>;
         applyPurchasableToRecord(merged, resolved.contentType, slug);
-        return { content: [{ type: "text", text: JSON.stringify({ contentType: resolved.contentType, slug, locale, variant, ...merged, validation_issues: [], claimed_issues: [], completed_issues: [], validation_pending: false }, null, 2) }] };
+        const deprecated_fields_present = deprecatedFieldsPresent(resolved.config, merged);
+        const { layoutInfoForEntry } = await import("../../server/layout-owner.js");
+        const layout = layoutInfoForEntry(resolved.contentType, slug, contentPath);
+        return { content: [{ type: "text", text: JSON.stringify({ contentType: resolved.contentType, slug, locale, variant, ...layout, ...merged, deprecated_fields_present, validation_issues: [], claimed_issues: [], completed_issues: [], validation_pending: false }, null, 2) }] };
       }
 
       const payload = resolvePagePayload(slug, locale, contentType, contentPath);
@@ -1911,7 +1947,11 @@ export function registerPageTools(
           )
         : { open: [], claimed: [], completed: [], validation_pending: false };
 
-      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...merged, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending }, null, 2) }] };
+      const liveConfig = loadContentTypes(contentPath)[payload.contentType];
+      const deprecated_fields_present = deprecatedFieldsPresent(liveConfig, merged);
+      const { layoutInfoForEntry } = await import("../../server/layout-owner.js");
+      const layout = layoutInfoForEntry(payload.contentType, payload.slug, contentPath);
+      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending }, null, 2) }] };
     }
   );
 
@@ -4041,6 +4081,7 @@ export function registerPageTools(
         if ("error" in apiResult) return apiResult.error;
         boundUpdates = apiResult.data.boundUpdates;
         appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
+        warnings.push(...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs));
         results.push(`${localeEntries.length} field(s) → ${pathInfo.relativeHint}`);
       }
 
@@ -4779,8 +4820,17 @@ export function registerPageTools(
           path?: string;
           isVariantLayer?: boolean;
           code?: string;
+          deprecated?: unknown;
         };
         if (!res.ok) {
+          if (data.code === DEPRECATED_FIELD_CODE && isDeprecatedFieldInfo(data.deprecated)) {
+            return deprecatedFieldFail(data.error || `Field "${field}" is deprecated`, data.deprecated, {
+              slug,
+              contentType: ct,
+              locale,
+              variant,
+            });
+          }
           return fail(data.error || `Server error: ${res.status}`, {
             ...(data.code ? { code: data.code } : {}),
             warnings:
@@ -5102,6 +5152,15 @@ export function registerPageTools(
               field,
               system_hints: buildEditorSystemHints(field, hint as Parameters<typeof buildEditorSystemHints>[1]) ?? [],
             }));
+          const deprecatedRequested = Object.entries(
+            listDeprecatedFields(ed as Record<string, { deprecated?: unknown }> | undefined),
+          ).filter(([field]) => requestedSet.has(field));
+          const deprecatedWarnings: McpWarning[] = deprecatedRequested.map(([field, cfg]) => ({
+            code: "deprecated_field",
+            message:
+              deprecatedSystemHint(field, cfg) +
+              " Row deprecated_locked=true means this entry has no stored value and writes are rejected; clearing is allowed.",
+          }));
           return ok(
             {
               message: `Fields for ${resolved.contentType}/${slug} (${locale}${variant ? `, variant=${variant}` : ""})`,
@@ -5115,7 +5174,7 @@ export function registerPageTools(
                 siteResult.contentPath,
               ),
             },
-            { warnings: [], next_actions: [] },
+            { warnings: deprecatedWarnings, next_actions: [] },
           );
         } catch {
           const filtered = filterFieldsByRequest(
@@ -6498,6 +6557,43 @@ const next_actions: NextAction[] = entryDeleted
         );
       }
 
+      {
+        const deprecatedFields = listDeprecatedFields(config.editor as Record<string, { deprecated?: unknown }> | undefined);
+        const onlyLocale = localeKeys[0];
+        const sources: Array<[string, Record<string, unknown>]> = [
+          ["common", (common ?? {}) as Record<string, unknown>],
+          [`locales.${onlyLocale}`, (locales[onlyLocale] ?? {}) as Record<string, unknown>],
+        ];
+        for (const [prefix, bag] of sources) {
+          for (const [field, cfg] of Object.entries(deprecatedFields)) {
+            if (!isNonEmptyFieldValue(bag[field])) continue;
+            return deprecatedFieldFail(
+              cfg.replaced_by
+                ? `Field "${field}" is deprecated — new entries cannot set it. Put the value in "${cfg.replaced_by}" instead.`
+                : `Field "${field}" is deprecated with no replacement — new entries cannot set it. Remove it from the payload.`,
+              { field, replaced_by: cfg.replaced_by, reason: cfg.reason ?? null, field_path: `${prefix}.${field}` },
+              { slug, contentType, locale: onlyLocale, variant: "draft" },
+              [
+                {
+                  tool: "create_entry",
+                  priority: "required",
+                  reason: cfg.replaced_by
+                    ? `Retry without "${field}"; move its value to "${cfg.replaced_by}".`
+                    : `Retry without "${field}".`,
+                  args_hint: {
+                    contentType,
+                    slug,
+                    remove_key: `${prefix}.${field}`,
+                    ...(cfg.replaced_by ? { set_key: `${prefix}.${cfg.replaced_by}` } : {}),
+                    ...(site ? { site } : {}),
+                  },
+                },
+              ],
+            );
+          }
+        }
+      }
+
       // Normalize locale payloads: sections default [], strip known keys for field merge
       const normalizedLocales: Record<string, {
         meta?: Record<string, unknown>;
@@ -7055,6 +7151,7 @@ const ghWarning = githubCommitWarning(commitResult);
         ADD_SECTION_NO_BINDING_FANOUT,
         ...variantWarningsIfNeeded(variant),
         ...schemaOrgPageOverrideWarnings(sectionToAdd),
+        ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7702,6 +7799,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         REPLACE_NO_BINDING_FANOUT,
         UPDATED_AT_STAMP_WARNING,
         ...variantWarningsIfNeeded(variant),
+        ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -9189,7 +9287,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
   mcp.tool(
     "get_content_type_info",
     "Describe a content type from content-types.yml: db_backed vs single_template, field_mapping, editor, " +
-    "url_pattern, strategy, extra URL params, observed peer values for those params, create_via, body_model, " +
+    "url_pattern, strategy, extra URL params, observed peer values for those params, create_via, layout_owner (type default), body_model, " +
     "and schema_org_requirements with coverage { present, missing_slugs } when declared. " +
     "For editor.type json fields, read editor.<field>.schema (JSON Schema) before writing values via " +
     "update_fields — schema is required and returned again on validation failure. " +
@@ -9406,6 +9504,19 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
               "(Description is no longer edited in Field Settings and is cleared on Apply; legacy keys may remain until then). " +
               "Content type must also have strategy.purpose (see strategy / update_content_type).",
             relation_fields,
+            deprecated_fields: Object.entries(
+              listDeprecatedFields(editor as Record<string, { deprecated?: unknown }> | undefined),
+            ).map(([field, cfg]) => ({
+              field,
+              replaced_by: cfg.replaced_by,
+              reason: cfg.reason ?? null,
+              since: cfg.since ?? null,
+            })),
+            deprecated_fields_note:
+              "Do not write deprecated fields on new entries — use replaced_by (null = no replacement; leave empty). " +
+              "Entries whose live _common.yml / {locale}.yml already store a value keep it and may edit it; others fail with code deprecated_field. " +
+              "Clearing is always allowed. field_mapping defaults still render; DB-backed column values are never blocked (only field_overrides). " +
+              "Avoid new {{ entry.<field> }} / {{ single.<field> }} refs (warning deprecated_template_ref).",
             protected_slugs: (config as { protected_slugs?: string[] }).protected_slugs ?? [],
             indexes: config.indexes ?? [],
             observed_values: observed,
@@ -9416,6 +9527,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
             create_via_note:
               createVia && isSharedLayoutConfig(config) && !isDbBacked(config)
                 ? "Specialist agents: propose_change kind idea, then field edits with implements_proposal_id and no variant (the proposal creates the draft). create_entry creates an unpublished draft (one locale) and is not on specialist connectors."
+                : createVia && !isSharedLayoutConfig(config)
+                  ? "layout_owner entry — specialists: idea → accept → propose_change with implements_proposal_id, no variant, and one full sections update (new page or new language; registry-checked). Use create_entry (YAML) only when not on a specialist connector."
                 : createVia
                   ? "Use create_entry (YAML). Shared-layout: one locale, sections []."
                   : "Database-backed — create_entry cannot create rows; use DB/admin path.",
@@ -9430,6 +9543,11 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
                   ],
                 }
               : {}),
+            layout_owner: isSharedLayoutConfig(config) ? "shared_template" : "entry",
+            layout_owner_note:
+              "Type default. Per entry: detached entries of shared_template types report entry (get_entry_content). Wins over body_model. " +
+              "shared_template = drafts carry fields only (layout in template.{locale}.yml; slug template edits it for every attached entry). " +
+              "entry = the entry owns its sections (a new page or language needs one full sections update). Database-backed is creatability, not layout.",
             body_model: bodyModelForConfig(config),
             template_vars_note: templateVarsNoteForBodyModel(bodyModelForConfig(config)),
             ecommerce: ecommerceManager.contentTypeHasEcommerce(contentType)
@@ -9490,6 +9608,20 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     value: z.string().optional(),
     label: z.string().optional(),
     multiple: z.boolean().optional(),
+    deprecated: z
+      .union([
+        z.object({
+          replaced_by: z.string().nullable().optional(),
+          reason: z.string().optional(),
+          since: z.string().optional(),
+        }),
+        z.null(),
+      ])
+      .optional()
+      .describe(
+        "Retire this field: { replaced_by: '<field>'|null, reason? }. null on update removes deprecation. " +
+          "Cannot combine with required. Old entries keep their value; new entries cannot set it.",
+      ),
   });
 
   const fieldMappingEntrySchema = z.union([
@@ -9517,6 +9649,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     "Relation editor requires source (content type or database slug); CT/DB name collisions rejected.\n" +
     "required true|attached needs fill_intent + valid type strategy (separate strategy call first).\n" +
     "remove blocked while field_key is in indexes or unique_fields — clear in Content Type manage first.\n" +
+    "Deprecate: field_action update + editor.deprecated { replaced_by|null, reason? } (required must be off); " +
+    "editor.deprecated null restores. Remove/deprecate blocked while another deprecated field names field_key as replaced_by.\n" +
     "Does not edit entry YAML (except when from_entry bootstraps template.*.yml), run backfill, or schema_org ensure. " +
     "Requires content_types_manage. Call get_content_type_info first. " +
     MULTI_SITE_TOOL_BLURB,

@@ -13,6 +13,7 @@ import {
   type ContentTypeEditorHint,
 } from "../../server/content-types.js";
 import { ecommerceManager, PURCHASABLE_FIELD } from "../../server/ecommerce/ecommerce-manager.js";
+import { parseDeprecated } from "../../shared/deprecatedField.js";
 import { SEO_YAML_KEY } from "../../server/seo-field-defs.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
 import { type ContentTypeConfig } from "./content.js";
@@ -25,6 +26,8 @@ export type AvailableFieldRow = {
   group?: "seo" | "system";
   type?: string;
   pick_hint?: string;
+  deprecated?: true;
+  replaced_by?: string | null;
 };
 
 const LARGE_EDITOR_TYPES = new Set(["markdown", "json", "textarea"]);
@@ -80,8 +83,17 @@ export function buildAvailableFieldsCatalog(opts: {
     const type = typeof hint?.type === "string" ? hint.type : undefined;
     const row: AvailableFieldRow = { field };
     if (type) row.type = type;
-    const pick = pickHintForEditorType(type);
-    if (pick) row.pick_hint = pick;
+    const deprecated = parseDeprecated(hint);
+    if (deprecated) {
+      row.deprecated = true;
+      row.replaced_by = deprecated.replaced_by;
+      row.pick_hint = deprecated.replaced_by
+        ? `Deprecated; use ${deprecated.replaced_by}`
+        : "Deprecated; no replacement";
+    } else {
+      const pick = pickHintForEditorType(type);
+      if (pick) row.pick_hint = pick;
+    }
     rows.push(row);
   }
 

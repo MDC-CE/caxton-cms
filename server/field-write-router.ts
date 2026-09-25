@@ -36,6 +36,11 @@ import {
   writeVariantData,
 } from "./versioning/draft-meta";
 import { variantHasTraffic } from "./versioning/variant-traffic";
+import {
+  checkDeprecatedWrites,
+  deprecatedErrorInfo,
+  deprecatedTemplateRefWarning,
+} from "./deprecated-field-guard";
 
 export type FieldWriteScope = "funnel" | "seo" | "common" | "locale";
 
@@ -392,6 +397,7 @@ export async function applyFieldUpdates(opts: {
         code: commonResult.errorCode,
         warnings,
         wrote,
+        ...(commonResult.deprecated ? { details: { deprecated: commonResult.deprecated } } : {}),
       };
     }
     wrote.push("_common.yml");
@@ -424,7 +430,11 @@ export async function applyFieldUpdates(opts: {
         code: localeResult.errorCode,
         warnings,
         wrote,
+        ...(localeResult.deprecated ? { details: { deprecated: localeResult.deprecated } } : {}),
       };
+    }
+    for (const ref of localeResult.deprecatedTemplateRefs ?? []) {
+      warnings.push(deprecatedTemplateRefWarning(ref));
     }
     wrote.push(`locale:${locale}${variant ? `@${variant}` : ""}`);
   }
@@ -510,6 +520,26 @@ async function applyDraftOnly(ctx: {
       code: "draft_missing",
       warnings,
       wrote,
+    };
+  }
+
+  const deprecatedGate = checkDeprecatedWrites({
+    contentType,
+    slug,
+    contentRoot,
+    updates: [...ctx.commonUpdates, ...ctx.localeUpdates].map((u) => ({
+      path: u.field_path,
+      value: isRemoveUpdate(u) ? null : u.value,
+    })),
+  });
+  if (!deprecatedGate.ok) {
+    return {
+      ok: false,
+      error: deprecatedGate.error,
+      code: deprecatedGate.code,
+      warnings,
+      wrote,
+      details: { deprecated: deprecatedErrorInfo(deprecatedGate) },
     };
   }
 

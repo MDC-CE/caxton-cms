@@ -4,7 +4,10 @@
  */
 
 import type { ProposalCategory, ProposalEntryRow, ProposalKind, ProposalRecord, ReviewMode } from "./service";
+import type { LayoutOwner } from "../layout-owner";
 import { isTemplateVersioningSlug } from "@shared/sharedLayoutPaths";
+import { isSectionFieldPath } from "./attached-entry-gate";
+import { isStructuralSectionsChange } from "./sections-summary";
 import {
   DAMAGE_CLASS_META,
   THINK_TEMPLATES,
@@ -66,6 +69,10 @@ export type ReviewEntryContext = {
   damage_class: DamageClass;
   /** True when live is gone and no draft — blocks apply. */
   target_missing?: boolean;
+  /** Who owns this entry's layout today (see agent-conventions layout_owner table). */
+  layout_owner?: LayoutOwner;
+  detached?: true;
+  is_shared_template?: true;
 };
 
 export type RelatedOpenProposal = {
@@ -139,6 +146,12 @@ export type EntryExistenceLookup = {
   existence: ExistenceState;
   /** Draft file exists when variant was requested. */
   draftExists?: boolean;
+  /** Who owns the entry's layout today. Absent → unknown (no owner-aware copy). */
+  layout_owner?: LayoutOwner;
+  detached?: true;
+  is_shared_template?: true;
+  /** Owner recorded when the entry was filed / revised (v1.0). Absent on older rows. */
+  layout_owner_at_filing?: LayoutOwner;
 };
 
 export type ClassifyProposalReviewOpts = {
@@ -160,6 +173,7 @@ export type ClassifyProposalReviewOpts = {
     system_version?: ProposalRecord["system_version"];
     accepted_entry?: ProposalRecord["accepted_entry"];
     idea_funnel?: ProposalRecord["idea_funnel"];
+    affected_entries?: ProposalRecord["affected_entries"];
   };
   /** Per entry / related target existence. */
   lookups: EntryExistenceLookup[];
@@ -413,12 +427,20 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   let damage_class: DamageClass = "none";
   let createsAttached = false;
+  /** New page / language (or legacy create) whose layout the entry owns. */
+  let createsPage = false;
+  let layoutStructural = false;
+  let layoutOwnerEntryStructural = false;
+  let layoutSwitched = false;
+  let allFieldsOnly = false;
+  const templateLocales = new Set<string>();
 
   if (proposal.kind === "edits") {
     const workEntries = proposal.entries.filter(
       (e) => !e.status || e.status === "pending" || e.status === "failed",
     );
     const toClassify = workEntries.length ? workEntries : proposal.entries;
+    allFieldsOnly = toClassify.length > 0;
 
     for (const e of toClassify) {
       const lu = findLookup(lookups, e.contentType, e.slug, e.locale, e.variant);
@@ -429,6 +451,30 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         e.baseline_context?.creates_entry === true && !e.variant?.trim();
       if (createsEntry && liveMissing) createsAttached = true;
       const target_missing = liveMissing && !draftExists && !createsEntry;
+      const owner = lu?.layout_owner;
+      const isTemplate = Boolean(lu?.is_shared_template) || isTemplateVersioningSlug(e.slug);
+      if (owner !== "shared_template" || isTemplate) allFieldsOnly = false;
+      if (isTemplate) {
+        templateLocales.add(e.locale);
+        checklists.add("template_blast_radius");
+      }
+      const createdLayout = liveMissing && (draftExists || createsEntry) && (owner === "entry" || isTemplate);
+      if (createdLayout || isStructuralSectionsChange(e.sections_summary)) {
+        layoutStructural = true;
+        if (owner === "entry" && !isTemplate) layoutOwnerEntryStructural = true;
+      }
+      if (
+        lu?.layout_owner_at_filing === "entry" &&
+        owner === "shared_template" &&
+        !isTemplate &&
+        (e.author_diff ?? []).some((c) => isSectionFieldPath(c.field_path))
+      ) {
+        layoutSwitched = true;
+        warnings.push({
+          code: "layout_owner_changed",
+          message: `${e.contentType}/${e.slug} (${e.locale}) now uses the shared template (reattached); the draft's sections would be ignored. Author: revise to fields only or withdraw. Apply refuses with context_stale (reason layout_owner_changed).`,
+        });
+      }
 
       let dc = damageClassForTarget({
         contentType: e.contentType,
@@ -437,7 +483,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         draftExists,
         createsEntry: createsEntry && liveMissing,
       });
-      if (createsEntry && liveMissing) {
+      if (liveMissing && (draftExists || createsEntry) && owner === "entry" && !isTemplate) {
+        createsPage = true;
+        warnings.push({
+          code: "creates_page_entry",
+          message: `Applying publishes ${e.contentType}/${e.slug} (${e.locale}) from its draft, including its full layout (layout_owner: entry).`,
+        });
+      } else if (createsEntry && liveMissing) {
         warnings.push({
           code: "creates_attached_entry",
           message: `Applying creates ${e.contentType}/${e.slug} (${e.locale}). No draft. The shared template does not change.`,
@@ -473,9 +525,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         existence,
         damage_class: dc,
         ...(target_missing ? { target_missing: true } : {}),
+        ...(owner ? { layout_owner: owner } : {}),
+        ...(lu?.detached ? { detached: true as const } : {}),
+        ...(isTemplate ? { is_shared_template: true as const } : {}),
       });
       damage_class = worseDamageClass(damage_class, dc);
     }
+    if (layoutStructural) checklists.add("layout_structure");
 
     const figures = resolveOutcomeFiguresAttachment({
       entries: toClassify,
@@ -662,12 +718,16 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         });
         // Missing → new_public_content (any type)
         const resolved = existence === "missing" ? "new_public_content" : dc;
+        const rlu = findLookup(lookups, r.contentType, r.slug, r.locale);
         entryContexts.push({
           contentType: r.contentType,
           slug: r.slug,
           locale: r.locale,
           existence,
           damage_class: resolved,
+          ...(rlu?.layout_owner ? { layout_owner: rlu.layout_owner } : {}),
+          ...(rlu?.detached ? { detached: true as const } : {}),
+          ...(rlu?.is_shared_template ? { is_shared_template: true as const } : {}),
         });
         damage_class = worseDamageClass(damage_class === "none" ? resolved : damage_class, resolved);
         if (existence === "unknown") {
@@ -781,10 +841,18 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
   }
 
+  const templateCount = proposal.affected_entries?.count;
+  const templateStaff = templateLocales.size
+    ? `This changes the shared layout for ${templateCount ?? "every attached"} page${templateCount === 1 ? "" : "s"} in ${[...templateLocales].sort().join(", ")}. Pages with their own layout (detached) are not affected.`
+    : null;
   let staffSituation = block_apply
     ? "The page this proposal edits no longer exists — apply is blocked; reject or withdraw, or restore the page and file fresh."
+    : createsPage
+      ? "Applying publishes this new page from its draft, including its full layout. Judge angle, facts, and funnel — not only whether apply is easy."
     : createsAttached
       ? "Applying creates this post. The slug was reserved by the accepted idea. The shared template does not change."
+      : templateStaff
+        ? templateStaff
       : proposal.kind === "idea"
         ? liveSituations.includes("broken_url")
           ? BROKEN_URL_STAFF_NOTE
@@ -807,6 +875,12 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
   if (hasLocaleTranslationChecklist && !block_apply) {
     staffSituation = `${staffSituation} ${LOCALE_TRANSLATION_STAFF_NOTE}`;
+  }
+  if (layoutSwitched && !block_apply) {
+    staffSituation = `${staffSituation} This page now uses the shared layout, so the proposed layout would be ignored. The author needs to update the proposal.`;
+  }
+  if (templateStaff && !block_apply && staffSituation !== templateStaff && !staffSituation.includes(templateStaff)) {
+    staffSituation = `${staffSituation} ${templateStaff}`;
   }
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
@@ -846,6 +920,16 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         why: t.why,
         look_for: (() => {
           const base = [...t.look_for];
+          if (t.id === "layout_structure") {
+            if (layoutOwnerEntryStructural) {
+              base.unshift("layout_owner: entry — this draft is the whole page; review the layout, not only the fields");
+            } else if (templateLocales.size) {
+              base.unshift("is_shared_template — this draft is the shared layout for every attached entry in that language");
+            }
+          }
+          if (t.id === "verify_copy" && allFieldsOnly) {
+            base.push("layout_owner: shared_template — the template is unaffected; review fields only");
+          }
           if (
             countsAsLeadForm &&
             (t.id === "selling_page_figures" || t.id === "disposition" || t.id === "verify_copy")

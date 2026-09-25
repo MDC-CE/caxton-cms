@@ -303,6 +303,8 @@ export type EditorHint = {
     items_path?: string;
   };
   on_error?: string;
+  /** Retired field (see shared/deprecatedField.ts). Set from the Required-for-publish dialog. */
+  deprecated?: { replaced_by?: string | null; reason?: string; since?: string } | true;
 };
 
 export type EditorTypeDialogProps = {

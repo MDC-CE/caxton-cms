@@ -183,12 +183,12 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     id: "new_public_content",
     label: "New public content",
     when_to_use:
-      "New public page — a draft promote, or an attached post whose files do not exist yet. Judge angle, facts, and funnel, not only whether apply is easy.",
+      "New public page or language — a draft promote, a new post that uses the shared template (layout_owner shared_template: fields only), or a new page / language that owns its layout (layout_owner entry: one full sections update). Judge angle, facts, and funnel, not only whether apply is easy.",
     explain_topic: "proposals",
     explain_subtopic: "situations",
     checklist_ids: ["new_content_brand"],
     staff_note:
-      "New public content — clear the brand gate (angle, facts, real program CTA). Body must not explain our SEO topology to readers. For an attached post with no file yet, applying creates that post and does not change the shared template.",
+      "New public content — clear the brand gate (angle, facts, real program CTA). Body must not explain our SEO topology to readers. A post that uses the shared template gets fields only and the template does not change; a page that owns its layout is published from its draft, including its full layout.",
     discovery_content_look_for: [
       "defensible technical or educational angle",
       "facts checked against the product",
@@ -197,7 +197,8 @@ export const REVIEW_SITUATION_CATALOG: Record<ReviewSituationId, ReviewSituation
     ],
     author_summary_hints: [
       "New public page or draft promote path. Angle, facts, and funnel CTA must be defensible.",
-      "Attached post with no file: field updates only, no variant. Apply creates the post and leaves the shared template alone.",
+      "layout_owner shared_template (attached post with no file): field updates only, no variant. Apply creates the post and leaves the shared template alone.",
+      "layout_owner entry (landing, downloadable, detached entry): one full sections update for a new page or language, no variant. Apply publishes the whole page from the draft.",
     ],
   },
   promote_draft: {

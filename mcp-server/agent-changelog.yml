@@ -5,6 +5,67 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-25"
+    summary: "layout_owner (shared_template | entry) tells you what a draft contains; section-built drafts get layout review help"
+    agent_impact:
+      - "layout_owner per entry on get_entry_content (+ detached: true / is_shared_template: true), proposal entries, review_context.entries[], accepted ideas (accepted_entry_layout_owner) and section errors (sections_required, invalid_sections, attached_sections_refused, attached_draft_structure). get_content_type_info / list_entries carry the type default only (detached rows may be entry). shared_template → fields only; entry → the draft is the whole page (full sections); is_shared_template → the draft is the shared layout (reaches affected_entries). Conventions §2d decision table + creatability table."
+      - "New refusals/warnings: sections_required with details.new_locale (new language of an entry page, detached entry, or new template language needs one full translated sections update; next_actions get_entry_content on the source locale + get_component_schema); accepted_entry_needs_layout on accept of a page idea; creates_page_entry (review); template_locales_incomplete (template proposal skips live template languages); template_placeholders_unfilled (apply dry_run + apply: new {{ entry.* }} placeholders some attached entries cannot fill; never blocks); layout_owner_changed (entry reattached while a sections draft is open — review warning, and apply → context_stale reason layout_owner_changed → needs_author)."
+      - "Reviewers: entries carry sections_summary (added/removed/changed/moved per section; max 30 rows, 8 keys). New checklists layout_structure (structural change or created layout; registry checks shape only) and template_blast_radius; discovery_path adds optional list_entries (siblings) + get_component_schema. CONVENTIONS_VERSION 35 — re-bootstrap_agent for skill.content."
+    tools_changed: false
+    paths:
+      - server/layout-owner.ts
+      - server/content-proposals/service.ts
+      - server/content-proposals/sections-summary.ts
+      - server/content-proposals/template-placeholder-scan.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/explain/shared-layout.md
+
+  - date: "2026-09-25"
+    summary: "Content-type fields can be deprecated (retired) with an optional replacement field"
+    agent_impact:
+      - "editor.<field>.deprecated { replaced_by|null, reason? }: new entries and entries without a stored value cannot set the field → code deprecated_field with deprecated { field, replaced_by, reason, field_path }; next_actions → update_entry_field on replaced_by (empty when null). Old entries (live _common.yml / {locale}.yml already has a value) keep and may edit it. Clearing always allowed; nothing is copied to the replacement."
+      - "Covered: update_entry_field, update_fields (locale + _common), create_entry (fails before write), duplicate (strips + stripped_deprecated_fields warning), raw file PUT, promote/publish of drafts. Not blocked: field_mapping defaults, DB column values."
+      - "New read fields: get_content_type_info.deprecated_fields + deprecated_fields_note; get_entry_fields catalog rows deprecated / replaced_by / pick_hint and value rows deprecated / deprecated_locked (+ system hint, warning deprecated_field); get_entry_content.deprecated_fields_present (always an array)."
+      - "update_fields / add_section / replace_entry_sections warn deprecated_template_ref when a write adds a new {{ entry.X }} / {{ single.X }} ref to a deprecated field (write still saved)."
+      - "update_content_type editor accepts deprecated (null restores). Preview warnings deprecated_existing_values_stay + deprecated_template_refs. Rejects deprecated_config_invalid (with required, bad/self/deprecated replacement) and deprecated_replacement_target (remove/deprecate a field another deprecated field points at)."
+    tools_changed: true
+    paths:
+      - shared/deprecatedField.ts
+      - server/deprecated-field-guard.ts
+      - mcp-server/lib/deprecated-field-mcp.ts
+      - mcp-server/lib/get-entry-fields-catalog.ts
+      - mcp-server/lib/content-type-field-validate.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/content_system.md
+
+  - date: "2026-09-25"
+    summary: "Accepted ideas can create section-built pages (downloadable, landing, …), not only blog posts"
+    agent_impact:
+      - "propose_change with implements_proposal_id on a missing section-built page now creates the page folder + draft, provided entries[].updates has one full { field_path: \"sections\", value: [...] } (non-empty). Otherwise sections_required (sections[0].x paths do not count); variant / promote_on_apply → page_create_no_draft; required editor fields → required_fields_missing."
+      - "Every full sections array (new pages, new languages, rewrites) is checked against the component registry: invalid_sections with property_path + issues (max 10); nothing is saved. next_actions point at get_component_schema."
+      - "entry_not_found with implements_proposal_id means the type cannot be created from a proposal — a human must create the page, then resubmit. Without an idea it asks for idea → accept → edits with full sections."
+      - "Accepting an idea for a missing database-backed page succeeds with warning accepted_entry_not_creatable; list_proposals rows carry accepted_entry_create_mode attached | page | manual (manual = human creates the page). attached_create_entry stays null for manual."
+      - "Publishing a section-built page with no sections and no content fails with empty_page (EMPTY_PAGE…). Draft saves / micro edits are not blocked."
+      - "Reservations are per folder + locale: a new language on an existing page folder never needs an idea."
+      - "CONVENTIONS_VERSION 34 (§2b new section-built page + database accept). Re-bootstrap_agent for skill.content."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/content-proposals/attached-entry-gate.ts
+      - server/content-proposals/section-proposal-check.ts
+      - server/live-entry-seo-gate.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/agent-conventions.md
+
   - date: "2026-09-24"
     summary: "Staff can bulk-delete proposals (staff UI only); deleted ids return code proposal_deleted"
     agent_impact:

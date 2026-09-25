@@ -97,15 +97,18 @@ Proposals are a shared work item, not a chat. Prefer one open proposal per draft
 - Only the **active claimant** (human+role) may `resolve_blocker`. Do not resolve to overturn a disagreement — escalate or leave open; reviewers `reopen_blocker`.
 - Open blockers block **apply** and idea **accept** (reject/withdraw/close still OK). Cleared blockers ≠ ship — re-preview, then four-eyes `apply` / `accept`. For `promote_on_apply`, confirm ending experiments when asked (`confirm_end_experiment`).
 - **Idea follow-through:** after accept, file edits with `implements_proposal_id` (required when that idea reserved the page). At most one open implements child. Pickup stalled work via `list_proposals({ stalled: true })` or `proposal_stats.stalled_ideas`. Refuse codes: `explain_site` `topic: "proposals"` (subtopics `overview` / `reading`).
-- **New attached post (blog and other file-based shared layouts):** the slug is required; the folder need not exist. Do **not** call `create_entry` (not on specialist connectors) and do **not** pass a `variant` — the proposal creates the folder and its draft.
+- **New pages and new languages:** what the edits must contain depends on `layout_owner` — see §2d (decision table + "can a proposal create it?"). The slug is required; the folder need not exist. Do **not** call `create_entry` (not on specialist connectors) and do **not** pass a `variant` — the proposal creates the folder and its draft.
 
-**Worked example (new attached post):**
+**Worked example (new attached post, `layout_owner: shared_template`):**
 
 1. Idea: `propose_change` with `kind: "idea"` and `related_entries: [{ contentType: "blog", slug: "what-is-grok", locale: "en" }]`.
 2. Accept (a different role): `update_proposal` `action: "accept"` with that same `accepted_entry` and `next_step`. No YAML yet.
 3. Edits: `propose_change` with `implements_proposal_id`, `review_situations: ["new_public_content"]`, and `entries[]` of field `updates[]` only — **no** `variant`. Required live fields must be in the ops (blog: title, description, body/`content`, category).
    The proposal writes `{slug}/_common.yml` and the unpublished draft now (visitors do not see it).
 4. Apply (a different role): `update_proposal` `action: "apply"`. A new URL-param value (for example category) also needs `confirm_new_values: true` after principal approval. Apply publishes `{locale}.yml` with `sections: []` and does not touch `template.{locale}.yml`.
+
+- **Worked example (new page, `layout_owner: entry`):** same idea → accept (warning `accepted_entry_needs_layout`) → edits flow, with the whole layout as one update. Example `entries[0]`: `{ contentType: "downloadable", slug: "ai-engineering-interview-kit", locale: "en", updates: [{ field_path: "meta.page_title", value: "…" }, { field_path: "sections", value: [{ type: "hero", version: "1.0", … }] }] }`.
+- A new **language** on an existing page folder never needs an idea (§2d says what it must contain).
 - **Escalated hold:** when `escalated: true`, a Platform Steward paused agent work (staff UI only). Do **not** call `update_proposal` — every action fails with `code: escalated` until they release. Read `escalated_note`. Overlapping create may warn `escalated_sibling` but still succeeds. After release the note may remain as history (mutations allowed again).
 - Optional `supersedes_proposal_id` on `propose_change` when replacing a rejected/withdrawn proposal (never required). Withdraw needs a short note; site Rules may require matching proposer username, allow any create author, or disable MCP withdraw (`withdraw_disabled` — ask staff). Staff UI follows a separate staff setting.
 - Four-eyes = different **username+role** (or staff UI), not merely a different model under the same role.
@@ -122,6 +125,29 @@ Proposals are a shared work item, not a chat. Prefer one open proposal per draft
 - Reviewer scores fidelity to source locale (facts/slug/shell), not punchier-than-live English. Playbook: `explain_site` `topic: "proposals"` `subtopic: "translations"`.
 
 **Worked example:** Translator runs `translate_entry` → `draft.es.yml`, fixes wording with `update_fields` on `variant: draft`, then proposes promote with `locale_translation`; Proposal Reviewer applies.
+
+### 2d. Layout owner: what a draft contains
+
+Every entry has one `layout_owner` (on `get_entry_content`, proposal entries, `review_context.entries[]`, and section errors). `get_content_type_info` / `list_entries` show only the **type default** — a detached entry of a shared-layout type reports `entry`. `layout_owner` wins over `body_model`. Database-backed is **not** a layout concept (see the creatability table).
+
+| Row | Examples | Draft contains | Section ops | New language | Apply writes | Reviewers check |
+|---|---|---|---|---|---|---|
+| `layout_owner: shared_template` | attached blog post, attached database-backed entry | fields only | none — `attached_sections_refused` (layout lives in `template.{locale}.yml`) | field edits only | `{locale}.yml` fields with `sections: []` (file entries) or field overrides (database-backed); template untouched | fields and claims |
+| `layout_owner: entry` | downloadable, landing, program page, any detached entry | fields + the full layout | one full `{ field_path: "sections", value: [...] }`, or `sections[i].x` on an existing locale | must send full translated `sections` (else `sections_required`, `details.new_locale`) | the whole page | layout, components, siblings, CTAs (`layout_structure`); section edits on existing pages go stale if live changes (`merge_preview.status: has_sections` → `context_stale`) |
+| `is_shared_template: true` | slug `template` of a shared-layout type | the shared layout itself | full `sections` or `sections[i].x` | must send full `sections` | `template.{locale}.yml` → every attached entry in that language (`affected_entries`; apply needs `confirm_affected_entries: N`); detached entries unaffected | blast radius (`template_blast_radius`): sample entries, new `entry.*` template placeholders filled (`template_placeholders_unfilled`), all languages covered (`template_locales_incomplete`) |
+
+Every full `sections` array is registry-checked for shape only (`invalid_sections` + `property_path`; read `get_component_schema` first). Images, links, and ecommerce scope are still the reviewer's job. Publishing an empty `entry` page fails with `empty_page`. If an entry is reattached (`entry` → `shared_template`) while a proposal with sections is open: review warning `layout_owner_changed`, and apply returns `context_stale` (`details.reason: "layout_owner_changed"`) → needs_author.
+
+**Can a proposal create a new entry?** (independent of `layout_owner`)
+
+| Type | Create via proposal |
+|---|---|
+| file-based `shared_template` type | yes — idea → accept → field edits, no variant |
+| file-based `entry` type | yes — idea → accept (`accepted_entry_needs_layout`) → edits with one full `sections` update |
+| database-backed type | no — accept warns `accepted_entry_not_creatable`; a human creates the row first |
+| detached entry | n/a — it already exists |
+
+**Change the layout of every entry of a type:** target slug `template`, one entry per language, `all_or_nothing: true`; apply with `confirm_affected_entries` (the count). Detached entries need their own edits (or a reattach). A type without a shared layout has no template — edit each entry separately.
 
 ### 3. Cluster SEO only on live (or draft-before-live)
 

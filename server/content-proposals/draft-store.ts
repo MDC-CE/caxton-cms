@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import { fieldScope, splitByFieldScope } from "@shared/field-scope";
 import { getAtPath } from "@shared/object-path";
+import { LIVE_SHELL_BASENAME_RE } from "@shared/sharedLayoutPaths";
 import type { SiteContext } from "../site-manager";
 import { applyFieldUpdates } from "../field-write-router";
 import { urlParamsForContentType } from "../field-scope-config";
@@ -125,6 +126,10 @@ export type ProposalDraftStore = {
   listLinkedDrafts(): Array<{ ref: ProposalDraftRef; link: DraftProposalLink }>;
   /** Attached entries published in `locale` (what a template proposal reaches). */
   listAttachedEntries?(contentType: string, locale: string): string[];
+  /** Locales with a live shared template (`template.{locale}.yml`) for this type. */
+  listTemplateLocales?(contentType: string): string[];
+  /** Value of a field in the draft file; undefined when the draft or field is missing. */
+  draftValue?(ref: ProposalDraftRef, fieldPath: string): unknown;
 };
 
 const VARIANT_FILE_RE = /^([a-z0-9][a-z0-9_-]*)\.([a-z]{2}(?:-[a-z]{2})?)\.ya?ml$/i;
@@ -159,6 +164,26 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
   const store: ProposalDraftStore = {
     listAttachedEntries(contentType, locale) {
       return listAttachedEntries(contentType, locale, contentRoot);
+    },
+    listTemplateLocales(contentType) {
+      const root = path.isAbsolute(contentRoot) ? contentRoot : path.join(process.cwd(), contentRoot);
+      let typeDir: string;
+      try {
+        typeDir = path.join(root, getFolder(contentType, contentRoot));
+      } catch {
+        return [];
+      }
+      if (!fs.existsSync(typeDir)) return [];
+      const locales = new Set<string>();
+      for (const name of fs.readdirSync(typeDir)) {
+        const m = LIVE_SHELL_BASENAME_RE.exec(name);
+        if (m?.[1]) locales.add(m[1]);
+      }
+      return [...locales].sort();
+    },
+    draftValue(ref, fieldPath) {
+      const data = readVariantData(draftPathOf(withRoot(ref)));
+      return data ? getAtPath(data, fieldPath) : undefined;
     },
     listLinkedDrafts() {
       const out: Array<{ ref: ProposalDraftRef; link: DraftProposalLink }> = [];

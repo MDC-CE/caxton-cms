@@ -268,6 +268,12 @@ export function applyFieldPatch(
     delete currentEditor[fieldKey];
   }
 
+  const patchedHint = currentEditor[fieldKey] as (ContentTypeEditorHint & { deprecated?: unknown }) | undefined;
+  if (patchedHint && patchedHint.deprecated === null) {
+    const { deprecated: _cleared, ...rest } = patchedHint;
+    currentEditor[fieldKey] = rest;
+  }
+
   const nextEditor =
     Object.keys(currentEditor).length > 0 ? currentEditor : null;
 

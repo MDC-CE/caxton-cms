@@ -26,6 +26,15 @@ function writeTypes() {
   url_pattern:
     en: /en/blog/:slug
     es: /es/blog/:slug
+downloadable:
+  directory: downloadable
+  field_mapping:
+    title: title
+    _slug: slug
+    _locale: locale
+  url_pattern:
+    en: /en/downloadable/:slug
+    es: /es/descargable/:slug
 `,
     "utf-8",
   );
@@ -205,5 +214,50 @@ describe("assertNotEmptyDetachedLocale", () => {
       contentRoot,
     });
     expect(err).toBeNull();
+  });
+
+  it("blocks an empty section-built page (not shared layout) and allows sections or body", () => {
+    const entryDir = path.join(contentRoot, "downloadable", "kit");
+    fs.mkdirSync(entryDir, { recursive: true });
+    fs.writeFileSync(path.join(entryDir, "_common.yml"), "slug: kit\n", "utf-8");
+
+    const empty = assertNotEmptyDetachedLocale({
+      contentType: "downloadable",
+      slug: "kit",
+      locale: "en",
+      pageData: { title: "Kit" },
+      contentRoot,
+    });
+    expect(empty).toMatch(/^EMPTY_PAGE: downloadable\/kit \(en\)/);
+
+    const withSections = assertNotEmptyDetachedLocale({
+      contentType: "downloadable",
+      slug: "kit",
+      locale: "en",
+      pageData: { title: "Kit", sections: [{ type: "hero" }] },
+      contentRoot,
+    });
+    expect(withSections).toBeNull();
+
+    const withBody = assertNotEmptyDetachedLocale({
+      contentType: "downloadable",
+      slug: "kit",
+      locale: "en",
+      pageData: { content: "Body" },
+      contentRoot,
+    });
+    expect(withBody).toBeNull();
+  });
+
+  it("ignores unknown content types", () => {
+    expect(
+      assertNotEmptyDetachedLocale({
+        contentType: "nope",
+        slug: "x",
+        locale: "en",
+        pageData: {},
+        contentRoot,
+      }),
+    ).toBeNull();
   });
 });

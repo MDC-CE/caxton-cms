@@ -2069,6 +2069,33 @@ export function registerContentRoutes(app: Express): void {
           return;
         }
       }
+      if (body.editor !== undefined || body.field_mapping !== undefined) {
+        const { validateDeprecations, assertNotReplacementTarget } = await import(
+          "../../shared/deprecatedField.js"
+        );
+        const nextEditor = (body.editor !== undefined ? body.editor : config.editor) as
+          | Record<string, import("../content-types").ContentTypeEditorHint>
+          | null
+          | undefined;
+        const nextMapping = (body.field_mapping !== undefined ? body.field_mapping : config.field_mapping) as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        const prevMappingKeys = Object.keys(config.field_mapping || {});
+        const removedKeys = prevMappingKeys.filter((k) => !nextMapping || !(k in nextMapping));
+        for (const removed of removedKeys) {
+          const target = assertNotReplacementTarget(nextEditor, removed);
+          if (!target.ok) {
+            res.status(400).json({ error: target.error, code: target.code, field: removed, referrers: target.referrers });
+            return;
+          }
+        }
+        const depCheck = validateDeprecations(nextEditor, nextMapping);
+        if (!depCheck.ok) {
+          res.status(400).json({ error: depCheck.error, code: depCheck.code, field: depCheck.field });
+          return;
+        }
+      }
       if (body.strategy !== undefined) {
         if (body.strategy === null) {
           update.strategy = null;
@@ -5160,6 +5187,33 @@ export function registerContentRoutes(app: Express): void {
     }
   });
 
+  api.get(
+    app,
+    "/api/content-types/:type/fields/:field/usages",
+    { rate: "staffWrite" },
+    async (req, res) => {
+      try {
+        const { type, field } = req.params;
+        if (!getContentTypeConfig(type, ctRoot(res))) {
+          res.status(404).json({ error: `Content type "${type}" not found` });
+          return;
+        }
+        const { findFieldUsages } = await import("../deprecated-field-guard");
+        const ci = getCI(res);
+        res.json(
+          findFieldUsages({
+            contentType: type,
+            field,
+            contentRoot: ctRoot(res),
+            getVariableUsage: (name) => ci.getVariableUsage(name),
+          }),
+        );
+      } catch (err) {
+        res.status(500).json({ error: String(err) });
+      }
+    },
+  );
+
   app.put("/api/content-types/:type/field-overrides/:slug", async (req, res) => {
     try {
       const { type, slug } = req.params;
@@ -5215,6 +5269,7 @@ export function registerContentRoutes(app: Express): void {
           storage: result.storage,
           path: result.relativePath,
           isVariantLayer: result.isVariantLayer,
+          ...(result.deprecated ? { deprecated: result.deprecated } : {}),
         });
         return;
       }

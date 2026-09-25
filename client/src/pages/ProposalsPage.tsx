@@ -189,6 +189,43 @@ type EntryRow = Omit<DraftEntryV1, "ops"> & {
   created_draft?: boolean;
 };
 
+const ACCEPTED_ENTRY_NOT_CREATABLE_COPY =
+  "This page type can't be created from an idea. Someone must create the page in the CMS before edits can follow.";
+
+const ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY =
+  "This page builds its own layout, so the follow-up proposal must include the whole page layout (every section), not only text fields.";
+
+type ProposalWarning = {
+  code?: string;
+  message: string;
+  details?: { placeholders?: Array<{ name: string; missing: number; total: number }> };
+};
+
+/** "12 of 80 pages have no value for hero_image — those pages will show an empty spot." */
+function plainPlaceholderGaps(w: ProposalWarning): string[] {
+  return (w.details?.placeholders ?? []).map(
+    (g) =>
+      `${g.missing} of ${g.total} page${g.total === 1 ? "" : "s"} have no value for ${g.name} — those pages will show an empty spot.`,
+  );
+}
+
+function plainWarningTitle(warnings: ProposalWarning[]): string {
+  const byCode = (code: string) => warnings.find((w) => w.code === code);
+  if (byCode("accepted_entry_not_creatable")) return ACCEPTED_ENTRY_NOT_CREATABLE_COPY;
+  if (byCode("accepted_entry_needs_layout")) return ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY;
+  const gaps = byCode("template_placeholders_unfilled");
+  if (gaps) return plainPlaceholderGaps(gaps).join(" ") || gaps.message;
+  return warnings[0]!.message;
+}
+
+/** "sections[2].image.src: …" → "Section 3: …" for staff toasts. */
+function plainSectionIssue(details?: { property_path?: string; message?: string }): string {
+  const match = /^sections\[(\d+)\]/.exec(details?.property_path ?? "");
+  const where = match ? `Section ${Number(match[1]) + 1}` : "A section";
+  const what = details?.message ? `: ${details.message}` : " is not valid";
+  return `${where}${what}. Fix it in the proposal and resubmit — nothing was saved.`;
+}
+
 type BlockerRow = {
   id: number;
   body: string;
@@ -245,6 +282,8 @@ type Proposal = {
     sample: Array<{ contentType: string; slug: string; locale: string; variant: string | null }>;
   } | null;
   accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  accepted_entry_create_mode?: "attached" | "page" | "manual" | null;
+  accepted_entry_layout_owner?: "shared_template" | "entry" | null;
   idea_funnel?: {
     stage: string;
     products: "all" | Array<{ product: string; persona?: string }>;
@@ -296,6 +335,38 @@ type Proposal = {
 
 function headers(): Record<string, string> {
   return { "Content-Type": "application/json", ...getSessionHeaders() };
+}
+
+/** Template apply dialog: dry-run placeholder scan (non-blocking). */
+function TemplatePlaceholderNotice({ proposalId }: { proposalId: string }) {
+  const { data } = useQuery({
+    queryKey: ["/api/admin/proposals", proposalId, "apply-dry-run"],
+    queryFn: async () => {
+      const res = await apiFetch(`/api/admin/proposals/${proposalId}/apply`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ dry_run: true }),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as { warnings?: ProposalWarning[] };
+    },
+    staleTime: 30_000,
+  });
+  const lines = (data?.warnings ?? [])
+    .filter((w) => w.code === "template_placeholders_unfilled")
+    .flatMap(plainPlaceholderGaps);
+  if (!lines.length) return null;
+  return (
+    <div
+      className="space-y-1 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground"
+      data-testid="apply-template-placeholders-notice"
+    >
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+      <p className="text-xs text-muted-foreground">You can still publish; fill those fields later.</p>
+    </div>
+  );
 }
 
 function reviewModeBadge(p: Proposal): { label: string; variant: "default" | "secondary" | "outline" } {
@@ -1170,16 +1241,25 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       toast({ title: "Updated" });
       if (json.warnings?.length) {
         toast({
-          title: json.warnings[0].message,
+          title: plainWarningTitle(json.warnings as ProposalWarning[]),
           variant: "default",
         });
       }
     },
-    onError: (e: Error & { data?: { code?: string; traffic_siblings?: unknown } }) => {
+    onError: (
+      e: Error & {
+        data?: { code?: string; traffic_siblings?: unknown; details?: { property_path?: string; message?: string } };
+      },
+    ) => {
       const code = e.data?.code;
       const plainByCode: Record<string, string> = {
         entry_not_found:
           "That page (or draft) does not exist yet — create the page/draft first, or file an idea instead of edits.",
+        sections_required:
+          "This new page or language has no sections yet. The proposal must include the whole page layout (translated, for a new language).",
+        invalid_sections: plainSectionIssue(e.data?.details),
+        empty_page:
+          "This page would publish empty — it has no sections. Add sections before publishing.",
         mixed_risk_bundle:
           "This proposal mixes different risk levels (for example selling pages with other edits). Split into separate proposals.",
         competing_entry_edits:
@@ -1209,8 +1289,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         confirm_affected_entries:
           "The number of pages this template change reaches has changed. Reload and confirm again.",
       };
+      const emptyPage = e.message.includes("EMPTY_PAGE") ? plainByCode.empty_page : undefined;
       toast({
-        title: (code && plainByCode[code]) || e.message,
+        title: (code && plainByCode[code]) || emptyPage || e.message,
         variant: "destructive",
       });
       if (e.data?.code === "confirm_end_experiment") {
@@ -1749,6 +1830,21 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       {p.accepted_entry.contentType}/{p.accepted_entry.slug}
                       <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
                     </Badge>
+                    {p.accepted_entry_create_mode === "manual" ? (
+                      <p
+                        className="basis-full text-xs text-muted-foreground"
+                        data-testid="text-idea-entry-not-creatable"
+                      >
+                        {ACCEPTED_ENTRY_NOT_CREATABLE_COPY}
+                      </p>
+                    ) : p.accepted_entry_create_mode === "page" ? (
+                      <p
+                        className="basis-full text-xs text-muted-foreground"
+                        data-testid="text-idea-entry-needs-layout"
+                      >
+                        {ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {p.kind === "idea" ? (
@@ -2695,6 +2791,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         </span>
                       </label>
                     ) : null}
+                    {p.affected_entries && applyOpen ? <TemplatePlaceholderNotice proposalId={p.id} /> : null}
                     {needsActivityAck ? (
                       <div
                         className="space-y-2 rounded-md border border-card-border bg-muted/40 p-3"

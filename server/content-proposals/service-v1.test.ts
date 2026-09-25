@@ -150,6 +150,7 @@ function fakeDraftStore(live: Record<string, Record<string, unknown>> = {}) {
 function makeService(opts: {
   store: ProposalDraftStore;
   promote?: (entry: ProposalEntryRow, o: PromoteEntryOpts) => PromoteEntryResult;
+  extraDeps?: Partial<Parameters<typeof createProposalService>[0]>;
 }) {
   const applyUpdates = vi.fn(async () => ({ ok: true }));
   const promoteCalls: Array<{ entry: ProposalEntryRow; opts: PromoteEntryOpts }> = [];
@@ -159,6 +160,7 @@ function makeService(opts: {
     captureBaseline: () => ({ values: {} }),
     applyUpdates,
     draftStore: opts.store,
+    ...opts.extraDeps,
     promoteEntry: async (entry, _author, o) => {
       promoteCalls.push({ entry, opts: o });
       return (
@@ -305,6 +307,405 @@ describe("proposals v1.0 (draft-first)", () => {
     );
     expect(res.ok).toBe(false);
     expect(fake.drafts.size).toBe(0);
+  });
+
+  describe("new section-built page from an accepted idea", () => {
+    const kit = { contentType: "downloadable", slug: "ai-engineering-interview-kit", locale: "en" };
+    const sections = [{ type: "hero", version: "1.0", title: "AI Engineering Interview Kit" }];
+    const liveKeys = new Set<string>(["downloadable/kit-live/en"]);
+    const pageDeps = (validateSections?: () => Array<{ property_path: string; message: string }>) => ({
+      resolveExistence: (e: { contentType: string; slug: string; locale: string }) => ({
+        live: liveKeys.has(`${e.contentType}/${e.slug}/${e.locale}`) ? ("exists" as const) : ("missing" as const),
+        draftExists: false,
+      }),
+      inspectMissingTarget: () => ({ shape: "page_file" as const, requiredFields: [] }),
+      ...(validateSections ? { validateSections } : {}),
+    });
+
+    async function acceptKitIdea(svc: ReturnType<typeof makeService>["svc"]) {
+      const idea = await svc.create(
+        {
+          kind: "idea",
+          title: "AI Engineering Interview Kit",
+          summary: SUMMARY,
+          related_entries: [kit],
+          idea_funnel: { stage: "awareness", products: "all" },
+        },
+        { username: "alice" },
+      );
+      if (!idea.ok) throw new Error(idea.error);
+      const accepted = await svc.update(idea.proposal.id, "accept", {
+        username: "bob",
+        next_step: "File the page with full sections.",
+        accepted_entry: kit,
+      });
+      if (!accepted.ok) throw new Error(accepted.error);
+      return idea.proposal.id;
+    }
+
+    it("creates the page folder and a draft holding the proposed sections", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: pageDeps() });
+      const ideaId = await acceptKitIdea(svc);
+      const res = await svc.create(
+        {
+          title: "Kit page",
+          summary: SUMMARY,
+          implements_proposal_id: ideaId,
+          review_situations: ["new_public_content"],
+          entries: [entry({ ...kit, updates: [{ field_path: "sections", value: sections }] })],
+        },
+        { username: "alice" },
+      );
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(fake.entries.has("downloadable/ai-engineering-interview-kit")).toBe(true);
+      const variant = res.proposal.entries[0]!.variant!;
+      const d = fake.drafts.get(`downloadable/ai-engineering-interview-kit/en/${variant}`)!;
+      expect(d.data.sections).toEqual(sections);
+    });
+
+    it("rejects registry-invalid sections before any draft or folder is created", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({
+        store: fake.store,
+        extraDeps: pageDeps(() => [{ property_path: "sections[0].type", message: "Unknown component" }]),
+      });
+      const ideaId = await acceptKitIdea(svc);
+      const res = await svc.create(
+        {
+          title: "Kit page",
+          summary: SUMMARY,
+          implements_proposal_id: ideaId,
+          entries: [entry({ ...kit, updates: [{ field_path: "sections", value: sections }] })],
+        },
+        { username: "alice" },
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe("invalid_sections");
+      expect(fake.drafts.size).toBe(0);
+      expect(fake.entries.has("downloadable/ai-engineering-interview-kit")).toBe(false);
+    });
+
+    it("a new language on an existing page needs no idea", async () => {
+      const fake = fakeDraftStore();
+      fake.entries.add("downloadable/kit-live");
+      const { svc } = makeService({ store: fake.store, extraDeps: pageDeps() });
+      const res = await svc.create(
+        {
+          title: "Spanish kit",
+          summary: SUMMARY,
+          review_situations: ["locale_translation"],
+          entries: [
+            entry({
+              contentType: "downloadable",
+              slug: "kit-live",
+              locale: "es",
+              updates: [{ field_path: "sections", value: sections }],
+            }),
+          ],
+        },
+        { username: "alice" },
+      );
+      expect(res.ok).toBe(true);
+    });
+  });
+
+  describe("layout_owner: new languages, accept, templates, reattach", () => {
+    const sections = [{ type: "hero", version: "1.0", title: "Hola" }];
+    type Info = { layout_owner: "shared_template" | "entry"; detached?: true; is_shared_template?: true };
+    let owners: Record<string, Info>;
+
+    function layoutDeps(fake: ReturnType<typeof fakeDraftStore>, live: Record<string, unknown> = {}) {
+      fake.store.draftValue = (r, p) => fake.drafts.get(keyOf(r))?.data[p];
+      return {
+        resolveExistence: (e: { contentType: string; slug: string; locale: string; variant?: string | null }) => ({
+          live: live[`${e.contentType}/${e.slug}/${e.locale}`] ? ("exists" as const) : ("missing" as const),
+          draftExists: Boolean(e.variant && fake.drafts.has(keyOf({ ...e, variant: e.variant }))),
+        }),
+        resolveLayoutOwner: ({ contentType, slug }: { contentType: string; slug: string }) =>
+          owners[`${contentType}/${slug}`] ??
+          (slug === "template"
+            ? { layout_owner: "shared_template" as const, is_shared_template: true as const }
+            : { layout_owner: "shared_template" as const }),
+      };
+    }
+
+    beforeEach(() => {
+      owners = {
+        "landing/ai-bootcamp": { layout_owner: "entry" },
+        "blog/custom": { layout_owner: "entry", detached: true },
+        "course/custom": { layout_owner: "entry", detached: true },
+      };
+    });
+
+    const newLocaleCases = [
+      { name: "a type without a shared layout", contentType: "landing", slug: "ai-bootcamp", detached: undefined },
+      { name: "a detached file-based entry", contentType: "blog", slug: "custom", detached: true },
+      { name: "a detached database-backed entry", contentType: "course", slug: "custom", detached: true },
+    ];
+
+    for (const c of newLocaleCases) {
+      it(`refuses a new language of ${c.name} without full sections (create)`, async () => {
+        const fake = fakeDraftStore();
+        fake.entries.add(`${c.contentType}/${c.slug}`);
+        const { svc } = makeService({ store: fake.store, extraDeps: layoutDeps(fake) });
+        const res = await svc.create(
+          { title: "Spanish", summary: SUMMARY, entries: [entry({ contentType: c.contentType, slug: c.slug })] },
+          { username: "alice" },
+        );
+        expect(res.ok).toBe(false);
+        if (res.ok) return;
+        expect(res.code).toBe("sections_required");
+        expect((res as { details?: Record<string, unknown> }).details).toMatchObject({
+          layout_owner: "entry",
+          new_locale: true,
+          ...(c.detached ? { detached: true } : {}),
+        });
+        expect(fake.drafts.size).toBe(0);
+      });
+    }
+
+    it("accepts a new language with one full sections update", async () => {
+      const fake = fakeDraftStore();
+      fake.entries.add("landing/ai-bootcamp");
+      const { svc } = makeService({ store: fake.store, extraDeps: layoutDeps(fake) });
+      const res = await svc.create(
+        {
+          title: "Spanish",
+          summary: SUMMARY,
+          entries: [entry({ contentType: "landing", slug: "ai-bootcamp", updates: [{ field_path: "sections", value: sections }] })],
+        },
+        { username: "alice" },
+      );
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.proposal.entries[0]!.baseline_context.layout_owner).toBe("entry");
+      expect(res.proposal.entries[0]!.layout_owner).toBe("entry");
+    });
+
+    it("accepts a named draft that already has sections", async () => {
+      const fake = fakeDraftStore();
+      fake.entries.add("landing/ai-bootcamp");
+      fake.store.create({ contentType: "landing", slug: "ai-bootcamp", locale: "es", variant: "translation" }, { author: "t" });
+      fake.drafts.get("landing/ai-bootcamp/es/translation")!.data.sections = sections;
+      const { svc } = makeService({ store: fake.store, extraDeps: layoutDeps(fake) });
+      const res = await svc.create(
+        {
+          title: "Spanish",
+          summary: SUMMARY,
+          entries: [entry({ contentType: "landing", slug: "ai-bootcamp", variant: "translation" })],
+        },
+        { username: "alice" },
+      );
+      expect(res.ok).toBe(true);
+    });
+
+    it("leaves attached (shared_template) new languages alone", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: layoutDeps(fake) });
+      const res = await svc.create({ title: "Spanish", summary: SUMMARY, entries: [entry()] }, { username: "alice" });
+      expect(res.ok).toBe(true);
+    });
+
+    it("refuses revise_entries that drops full sections from a new language", async () => {
+      const fake = fakeDraftStore();
+      fake.entries.add("landing/ai-bootcamp");
+      const { svc } = makeService({ store: fake.store, extraDeps: layoutDeps(fake) });
+      const target = { contentType: "landing", slug: "ai-bootcamp" };
+      const created = await svc.create(
+        {
+          title: "Spanish",
+          summary: SUMMARY,
+          entries: [entry({ ...target, updates: [{ field_path: "sections", value: sections }] })],
+        },
+        { username: "alice" },
+      );
+      if (!created.ok) throw new Error(created.error);
+      const res = await svc.update(created.proposal.id, "revise_entries", {
+        username: "alice",
+        entries: [entry({ ...target })],
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("sections_required");
+        expect((res as { details?: Record<string, unknown> }).details).toMatchObject({ new_locale: true });
+      }
+    });
+
+    it("accept on a page idea warns accepted_entry_needs_layout", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({
+        store: fake.store,
+        extraDeps: {
+          ...layoutDeps(fake),
+          inspectMissingTarget: () => ({ shape: "page_file" as const, requiredFields: [] }),
+        },
+      });
+      const target = { contentType: "landing", slug: "new-landing", locale: "en" };
+      owners["landing/new-landing"] = { layout_owner: "entry" };
+      const idea = await svc.create(
+        {
+          kind: "idea",
+          title: "New landing",
+          summary: SUMMARY,
+          related_entries: [target],
+          idea_funnel: { stage: "awareness", products: "all" },
+        },
+        { username: "alice" },
+      );
+      if (!idea.ok) throw new Error(idea.error);
+      const accepted = await svc.update(idea.proposal.id, "accept", {
+        username: "bob",
+        next_step: "File the page with full sections.",
+        accepted_entry: target,
+      });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      const warnings = (accepted as { warnings?: Array<{ code: string; details?: Record<string, unknown> }> }).warnings;
+      expect(warnings?.map((w) => w.code)).toContain("accepted_entry_needs_layout");
+      expect(warnings?.find((w) => w.code === "accepted_entry_needs_layout")?.details).toMatchObject({
+        layout_owner: "entry",
+      });
+      expect(svc.get(idea.proposal.id)!.accepted_entry_layout_owner).toBe("entry");
+    });
+
+    describe("templates", () => {
+      function templateService(opts: {
+        live: Record<string, Record<string, unknown>>;
+        templateLocales: string[];
+        scan?: Parameters<typeof createProposalService>[0]["scanTemplatePlaceholders"];
+      }) {
+        const fake = fakeDraftStore(opts.live);
+        fake.entries.add("blog/template");
+        fake.store.listTemplateLocales = () => opts.templateLocales;
+        fake.store.listAttachedEntries = (ct, locale) => (ct === "blog" ? [`a-${locale}`, `b-${locale}`, `c-${locale}`] : []);
+        const deps = { ...layoutDeps(fake, opts.live), ...(opts.scan ? { scanTemplatePlaceholders: opts.scan } : {}) };
+        return { fake, ...makeService({ store: fake.store, extraDeps: deps }) };
+      }
+      const tplEntry = (locale: string, value: unknown = sections) =>
+        entry({ slug: "template", locale, updates: [{ field_path: "sections", value }] });
+
+      it("a full-sections template proposal succeeds and warns when languages are missing", async () => {
+        const { svc } = templateService({
+          live: { "blog/template/en": { sections: [] }, "blog/template/es": { sections: [] } },
+          templateLocales: ["en", "es"],
+        });
+        const partial = await svc.create(
+          { title: "Template", summary: SUMMARY, entries: [tplEntry("en")] },
+          { username: "alice" },
+        );
+        expect(partial.ok).toBe(true);
+        if (!partial.ok) return;
+        const w = (partial as { warnings?: Array<{ code: string; details?: Record<string, unknown> }> }).warnings ?? [];
+        expect(w.find((x) => x.code === "template_locales_incomplete")?.details).toMatchObject({
+          changed_locales: ["en"],
+          missing_locales: ["es"],
+        });
+        expect(partial.proposal.entries[0]!.is_shared_template).toBe(true);
+
+        const both = await svc.create(
+          { title: "Template both", summary: SUMMARY, all_or_nothing: true, entries: [tplEntry("en"), tplEntry("es")] },
+          { username: "carol" },
+        );
+        // en already belongs to the first proposal; only the warning shape matters here.
+        const codes = ((both as { warnings?: Array<{ code: string }> }).warnings ?? []).map((x) => x.code);
+        expect(codes).not.toContain("template_locales_incomplete");
+      });
+
+      it("refuses a new template language without full sections", async () => {
+        const { svc } = templateService({ live: { "blog/template/en": { sections } }, templateLocales: ["en"] });
+        const res = await svc.create(
+          { title: "Template fr", summary: SUMMARY, entries: [entry({ slug: "template", locale: "fr" })] },
+          { username: "alice" },
+        );
+        expect(res.ok).toBe(false);
+        if (res.ok) return;
+        expect(res.code).toBe("sections_required");
+        expect((res as { details?: Record<string, unknown> }).details).toMatchObject({
+          is_shared_template: true,
+          new_locale: true,
+        });
+      });
+
+      it("dry run and apply warn template_placeholders_unfilled; nothing new → no warning", async () => {
+        const { newEntryPlaceholders, summarizeUnfilledPlaceholders } = await import("./template-placeholder-scan");
+        const bags: Record<string, Record<string, unknown>> = { "a-es": { hero_image: "a.png" }, "b-es": {}, "c-es": {} };
+        const scan = vi.fn(
+          (o: { liveSections: unknown; draftSections: unknown; attachedSlugs: string[] }) =>
+            summarizeUnfilledPlaceholders(
+              newEntryPlaceholders(o.liveSections, o.draftSections),
+              o.attachedSlugs.map((slug) => ({ slug, bag: bags[slug] ?? {} })),
+            ),
+        );
+        const liveSections = [{ type: "hero", title: "{{ entry.title }}" }];
+        const { svc } = templateService({
+          live: { "blog/template/es": { sections: liveSections } },
+          templateLocales: ["es"],
+          scan,
+        });
+        const created = await svc.create(
+          {
+            title: "Template image",
+            summary: SUMMARY,
+            entries: [tplEntry("es", [{ type: "hero", title: "{{ entry.title }}", image: "{{ entry.hero_image }}" }])],
+          },
+          { username: "alice" },
+        );
+        if (!created.ok) throw new Error(created.error);
+        const dry = await svc.update(created.proposal.id, "apply", { username: "bob", dry_run: true });
+        expect(dry.ok).toBe(true);
+        const dryGap = ((dry as { warnings?: Array<{ code: string; details?: Record<string, unknown> }> }).warnings ?? []).find(
+          (w) => w.code === "template_placeholders_unfilled",
+        );
+        expect(dryGap?.details).toMatchObject({
+          locale: "es",
+          placeholders: [{ name: "hero_image", missing: 2, total: 3, sample: ["b-es", "c-es"] }],
+        });
+        const applied = await svc.update(created.proposal.id, "apply", { username: "bob", confirm_affected_entries: 3 });
+        expect(applied.ok).toBe(true);
+        const codes = ((applied as { warnings?: Array<{ code: string }> }).warnings ?? []).map((w) => w.code);
+        expect(codes).toContain("template_placeholders_unfilled");
+
+        const same = templateService({
+          live: { "blog/template/es": { sections: liveSections } },
+          templateLocales: ["es"],
+          scan,
+        });
+        const plain = await same.svc.create(
+          { title: "Template copy", summary: SUMMARY, entries: [tplEntry("es", [{ type: "hero", title: "{{ entry.title }}!" }])] },
+          { username: "dave" },
+        );
+        if (!plain.ok) throw new Error(plain.error);
+        const dryPlain = await same.svc.update(plain.proposal.id, "apply", { username: "bob", dry_run: true });
+        const plainCodes = ((dryPlain as { warnings?: Array<{ code: string }> }).warnings ?? []).map((w) => w.code);
+        expect(plainCodes).not.toContain("template_placeholders_unfilled");
+      });
+    });
+
+    it("apply after a reattach returns context_stale (layout_owner_changed) and needs_author", async () => {
+      const live = { "landing/ai-bootcamp/es": { title: "Old", sections: [{ type: "hero", version: "1.0", title: "Old" }] } };
+      const fake = fakeDraftStore(live);
+      fake.entries.add("landing/ai-bootcamp");
+      const { svc, promoteCalls } = makeService({ store: fake.store, extraDeps: layoutDeps(fake, live) });
+      const created = await svc.create(
+        {
+          title: "Layout",
+          summary: SUMMARY,
+          entries: [entry({ contentType: "landing", slug: "ai-bootcamp", updates: [{ field_path: "sections", value: sections }] })],
+        },
+        { username: "alice" },
+      );
+      if (!created.ok) throw new Error(created.error);
+      owners["landing/ai-bootcamp"] = { layout_owner: "shared_template" };
+      const res = await svc.update(created.proposal.id, "apply", { username: "bob" });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.pending?.[0]).toMatchObject({ code: "context_stale", details: { reason: "layout_owner_changed" } });
+      expect(promoteCalls).toHaveLength(0);
+      expect(res.proposal.stale_since).toBeTruthy();
+      expect(toProposalSummary(res.proposal).attention).toBe("needs_author");
+    });
   });
 
   it("apply only promotes the draft and stores what was published", async () => {

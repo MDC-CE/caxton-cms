@@ -262,10 +262,41 @@ const SEO_RESEARCH_IDEAS_TOOL = {
   ],
 } as const;
 
+const LAYOUT_SIBLINGS_TOOL = {
+  id: "layout_siblings",
+  tool: "list_entries",
+  why: "Optional: sibling pages of the same type to compare layouts (or, for a template, the attached pages it reaches).",
+  look_for: [
+    "open one or two siblings with get_entry_content and compare section order / components",
+    "template: open 2–3 affected entries and picture them with the template draft",
+  ],
+} as const;
+
+const COMPONENT_SCHEMA_TOOL = {
+  id: "component_schema",
+  tool: "get_component_schema",
+  why: "Optional: component props for the sections the draft adds or changes.",
+  look_for: [
+    "required props filled with real content (the registry check covers shape only)",
+    "variant fits the page purpose",
+  ],
+} as const;
+
+const LAYOUT_CONTENT_LOOK_FOR = [
+  "layout: components fit this page type; order makes sense (hero-type opener, CTA present)",
+  "sections_summary on the entry lists added / removed / moved / changed sections",
+];
+const LAYOUT_CREATED_LOOK_FOR =
+  "new page or language: read the draft (pass variant) — there is no live copy to compare against";
+const TEMPLATE_CONTENT_LOOK_FOR =
+  "slug template: this draft is the shared layout; affected_entries lists the attached pages it reaches (detached pages are unaffected)";
+
 /** All tool names that may appear on a proposal discovery_path (for catalog checks). */
 export function proposalDiscoveryToolNames(): string[] {
   return [
     ...CORE_EDITS_TOOLS.map((t) => t.tool),
+    LAYOUT_SIBLINGS_TOOL.tool,
+    COMPONENT_SCHEMA_TOOL.tool,
     ORGANIC_TOOL.tool,
     FUNNEL_ANALYTICS_TOOL.tool,
     LIST_PRODUCTS_TOOL.tool,
@@ -335,6 +366,12 @@ export type ReviewContextForDiscovery = {
   block_apply?: boolean;
   situation_changed_since_filed?: boolean;
   review_situations?: string[];
+  active_checklists?: string[];
+  entries?: Array<{
+    existence?: string;
+    layout_owner?: string;
+    is_shared_template?: boolean;
+  }>;
   agent_preview?: {
     think_items?: AgentPreviewThink[];
     warnings?: DiscoveryWarning[];
@@ -462,7 +499,7 @@ function toToolItem(
     id: string;
     tool: string;
     why: string;
-    look_for: string[];
+    look_for: readonly string[];
   },
   allowed: Set<string> | null,
   args_hint?: Record<string, unknown>,
@@ -503,6 +540,12 @@ export function buildEditsDiscoveryToolItems(opts: {
   includeSeoResearchTools?: boolean;
   /** locale_translation — playbook + list_variants. */
   includeTranslationTools?: boolean;
+  /** layout_structure / template_blast_radius active — layout look_for + list_entries / get_component_schema. */
+  includeLayoutTools?: boolean;
+  /** A page / language / template language is being created (no live copy to compare). */
+  layoutCreated?: boolean;
+  /** A pending entry is the shared template itself. */
+  templateEntry?: boolean;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -540,10 +583,13 @@ export function buildEditsDiscoveryToolItems(opts: {
       return toToolItem({ ...t, look_for }, allowed, activityHint);
     }
     if (t.id === "preview_content") {
-      const look_for =
-        opts.contentLookFor?.length
-          ? [...opts.contentLookFor, ...t.look_for]
-          : [...t.look_for];
+      const baseLookFor = opts.layoutCreated
+        ? [LAYOUT_CREATED_LOOK_FOR, ...t.look_for.slice(1)]
+        : [...t.look_for];
+      const layoutLookFor = opts.includeLayoutTools
+        ? [...(opts.templateEntry ? [TEMPLATE_CONTENT_LOOK_FOR] : []), ...LAYOUT_CONTENT_LOOK_FOR]
+        : [];
+      const look_for = [...layoutLookFor, ...(opts.contentLookFor ?? []), ...baseLookFor];
       return toToolItem({ ...t, look_for }, allowed, contentHint);
     }
     return toToolItem(t, allowed, contentHint);
@@ -574,6 +620,19 @@ export function buildEditsDiscoveryToolItems(opts: {
         }),
       );
     }
+  }
+
+  if (opts.includeLayoutTools) {
+    items.push(
+      toToolItem(
+        LAYOUT_SIBLINGS_TOOL,
+        allowed,
+        entry?.contentType
+          ? { contentType: entry.contentType, ...(entry.locale ? { locale: entry.locale } : {}), limit: 10 }
+          : undefined,
+      ),
+    );
+    items.push(toToolItem(COMPONENT_SCHEMA_TOOL, allowed));
   }
 
   if (includeProductAudienceTools) {
@@ -878,6 +937,14 @@ export function buildProposalDiscoveryPath(
 
     const hottest = pickHottestPendingEntry(proposal, recentActivity);
     const first = pending[0] ?? proposal.entries?.[0] ?? null;
+    const checklists = reviewContext?.active_checklists ?? [];
+    const includeLayoutTools =
+      checklists.includes("layout_structure") || checklists.includes("template_blast_radius");
+    const ctxEntries = reviewContext?.entries ?? [];
+    const layoutCreated = ctxEntries.some(
+      (e) => e.existence === "missing" && (e.layout_owner === "entry" || e.is_shared_template),
+    );
+    const templateEntry = checklists.includes("template_blast_radius");
 
     const activityWarn = buildRecentEntryWritesWarning(proposal, recentActivity);
     if (activityWarn) warnings.push(activityWarn);
@@ -895,6 +962,9 @@ export function buildProposalDiscoveryPath(
       includeProductAudienceTools: funnelClassification,
       includeSeoResearchTools,
       includeTranslationTools: localeTranslation,
+      includeLayoutTools,
+      layoutCreated: includeLayoutTools && layoutCreated,
+      templateEntry,
     });
     tools = built.items;
     if (built.anyCapped) {

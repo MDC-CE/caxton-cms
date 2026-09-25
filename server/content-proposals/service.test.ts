@@ -2422,9 +2422,10 @@ describe("attached entry from an accepted idea", () => {
   function makeAttached(opts?: {
     live?: "missing" | "exists";
     draftExists?: boolean;
-    shape?: "attached_file" | "database" | "other";
+    shape?: "attached_file" | "database" | "other" | "page_file";
     applyOk?: boolean;
     prepareCode?: string;
+    validateSections?: (sections: unknown) => Array<{ property_path: string; message: string }>;
   }) {
     let live: "missing" | "exists" = opts?.live ?? "missing";
     const prepared: string[] = [];
@@ -2445,7 +2446,10 @@ describe("attached entry from an accepted idea", () => {
           ? { shape: "database" }
           : opts?.shape === "other"
             ? { shape: "other" }
-            : { shape: "attached_file", requiredFields: [...ATTACHED_FIELDS] },
+            : opts?.shape === "page_file"
+              ? { shape: "page_file", requiredFields: ["meta.page_title"] }
+              : { shape: "attached_file", requiredFields: [...ATTACHED_FIELDS] },
+      ...(opts?.validateSections ? { validateSections: opts.validateSections } : {}),
       prepareCreatesEntry: async (entry) => {
         prepared.push(entry.slug);
         if (opts?.prepareCode) {
@@ -2641,6 +2645,189 @@ describe("attached entry from an accepted idea", () => {
     expect(updated.ok).toBe(true);
     if (!updated.ok) return;
     expect(updated.proposal.entries[0]?.baseline_context.creates_entry).toBeUndefined();
+  });
+
+  it("accepting a database-backed idea with no page succeeds with accepted_entry_not_creatable", async () => {
+    const { svc } = makeAttached({ shape: "database" });
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New cohort page",
+        summary,
+        related_entries: [{ contentType: "program", slug: "cohort-9", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+      },
+      alice,
+    );
+    if (!idea.ok) throw new Error("idea");
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Create the cohort row in the CMS, then file edits.",
+      accepted_entry: { contentType: "program", slug: "cohort-9", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect((accepted as { warnings?: Array<{ code: string }> }).warnings?.map((w) => w.code)).toEqual([
+      "accepted_entry_not_creatable",
+    ]);
+    const got = svc.get(idea.proposal.id)!;
+    expect(got.accepted_entry_create_mode).toBe("manual");
+    expect(got.attached_create_entry).toBeNull();
+  });
+
+  it("accepting a blog idea stays warning-free (attached mode)", async () => {
+    const { svc } = makeAttached();
+    const ideaId = await acceptIdea(svc);
+    const got = svc.get(ideaId)!;
+    expect(got.accepted_entry_create_mode).toBe("attached");
+    expect(got.attached_create_entry).toEqual({ contentType: "blog", slug: "what-is-grok", locale: "en" });
+  });
+
+  describe("new section-built page (page_file)", () => {
+    const heroSections = [{ type: "hero", version: "1.0", title: "AI Engineering Interview Kit" }];
+    const pageUpdates = (sections: unknown = heroSections) => [
+      { field_path: "meta.page_title", value: "AI Engineering Interview Kit" },
+      { field_path: "sections", value: sections },
+    ];
+    const kitEntry = (overrides: Partial<ProposalEntryInput> = {}) =>
+      sampleEntry({
+        contentType: "downloadable",
+        slug: "ai-engineering-interview-kit",
+        locale: "en",
+        updates: pageUpdates(),
+        ...overrides,
+      });
+
+    it("creates edits for a reserved downloadable when a full sections array is sent", async () => {
+      const { svc } = makeAttached({ shape: "page_file" });
+      const ideaId = await acceptIdea(svc, "ai-engineering-interview-kit", "downloadable");
+      const accepted = svc.get(ideaId)!;
+      expect(accepted.accepted_entry_create_mode).toBe("page");
+      expect(accepted.attached_create_entry).toEqual({
+        contentType: "downloadable",
+        slug: "ai-engineering-interview-kit",
+        locale: "en",
+      });
+
+      const without = await svc.create(
+        { title: "Kit page", summary, review_situations: ["new_public_content"], entries: [kitEntry()] },
+        alice,
+      );
+      expect(without.ok).toBe(false);
+      if (!without.ok) expect(without.code).toBe("implements_required");
+
+      const edits = await svc.create(
+        {
+          title: "Kit page",
+          summary,
+          implements_proposal_id: ideaId,
+          review_situations: ["new_public_content"],
+          entries: [kitEntry()],
+        },
+        alice,
+      );
+      expect(edits.ok).toBe(true);
+      if (!edits.ok) return;
+      expect(edits.proposal.entries[0]?.baseline_context.creates_entry).toBe(true);
+    });
+
+    it("refuses missing or partial sections, a variant, and missing required fields", async () => {
+      const { svc } = makeAttached({ shape: "page_file" });
+      const ideaId = await acceptIdea(svc, "ai-engineering-interview-kit", "downloadable");
+      const attempt = (e: ProposalEntryInput, extra: Record<string, unknown> = {}) =>
+        svc.create(
+          { title: "Kit page", summary, implements_proposal_id: ideaId, entries: [e], ...extra },
+          alice,
+        );
+
+      const noSections = await attempt(
+        kitEntry({ updates: [{ field_path: "meta.page_title", value: "Kit" }] }),
+      );
+      expect(noSections.ok).toBe(false);
+      if (!noSections.ok) expect(noSections.code).toBe("sections_required");
+
+      const partial = await attempt(
+        kitEntry({
+          updates: [
+            { field_path: "meta.page_title", value: "Kit" },
+            { field_path: "sections[0].title", value: "Hero" },
+          ],
+        }),
+      );
+      expect(partial.ok).toBe(false);
+      if (!partial.ok) expect(partial.code).toBe("sections_required");
+
+      const empty = await attempt(kitEntry({ updates: pageUpdates([]) }));
+      expect(empty.ok).toBe(false);
+      if (!empty.ok) expect(empty.code).toBe("sections_required");
+
+      const variant = await attempt(kitEntry({ variant: "draft" }));
+      expect(variant.ok).toBe(false);
+      if (!variant.ok) expect(variant.code).toBe("page_create_no_draft");
+
+      const missing = await attempt(
+        kitEntry({ updates: [{ field_path: "sections", value: heroSections }] }),
+      );
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) {
+        expect(missing.code).toBe("required_fields_missing");
+        expect(missing.error).toContain("meta.page_title");
+      }
+      expect(svc.get(ideaId)?.close_reason).toBe("accepted");
+    });
+
+    it("without any accepted idea, returns entry_not_found that asks for an idea and full sections", async () => {
+      const { svc } = makeAttached({ shape: "page_file" });
+      const res = await svc.create({ title: "Kit page", summary, entries: [kitEntry()] }, alice);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("entry_not_found");
+        expect(res.error).toContain("sections");
+      }
+    });
+
+    it("refuses sections that fail the component registry and saves nothing", async () => {
+      const { svc } = makeAttached({
+        shape: "page_file",
+        validateSections: () => [
+          { property_path: "sections[0].type", message: "Unknown component 'heroo'" },
+          { property_path: "sections[1].title", message: "Required" },
+        ],
+      });
+      const ideaId = await acceptIdea(svc, "ai-engineering-interview-kit", "downloadable");
+      const res = await svc.create(
+        { title: "Kit page", summary, implements_proposal_id: ideaId, entries: [kitEntry()] },
+        alice,
+      );
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.code).toBe("invalid_sections");
+      expect(res.error).toContain("sections[0].type");
+      expect(res.error).toContain("+1 more");
+      const details = (res as { details?: { property_path?: string; issues?: unknown[] } }).details;
+      expect(details?.property_path).toBe("sections[0].type");
+      expect(details?.issues).toHaveLength(2);
+      expect(svc.list({ kind: "edits" }).total).toBe(0);
+    });
+
+    it("an idea on a type that cannot be created points at a human for the page", async () => {
+      const { svc } = makeAttached({ shape: "other" });
+      const ideaId = await acceptIdea(svc, "custom-shell", "landing");
+      const res = await svc.create(
+        {
+          title: "Shell page",
+          summary,
+          implements_proposal_id: ideaId,
+          entries: [kitEntry({ contentType: "landing", slug: "custom-shell" })],
+        },
+        alice,
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("entry_not_found");
+        expect(res.error).toContain("cannot be created from a proposal");
+      }
+    });
   });
 
   it("still allows a detached draft, a template variant, and a second-locale promote", async () => {

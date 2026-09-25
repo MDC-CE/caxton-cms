@@ -131,7 +131,9 @@ function draftFirstFailure(
             message:
               code === "draft_missing"
                 ? "The proposal's draft file is gone. Nothing was published. The proposal moved to attention needs_author."
-                : "Live (or the translation source) changed after the draft was made and could not be merged automatically. Nothing was published. The proposal moved to attention needs_author (out of the reviewer queue).",
+                : details.reason === "layout_owner_changed"
+                  ? "layout_owner_changed: the entry was reattached to the shared template (layout_owner entry → shared_template) after filing, so the draft's sections would be ignored. Nothing was published. The proposal moved to attention needs_author — revise to fields only, or withdraw."
+                  : "Live (or the translation source) changed after the draft was made and could not be merged automatically. Nothing was published. The proposal moved to attention needs_author (out of the reviewer queue).",
           },
         ],
         next_actions: [
@@ -295,8 +297,14 @@ function draftFirstFailure(
   }
 }
 
-function attachedIdeaEditsAction(
-  proposal: { id?: string; attached_create_entry?: AttachedCreateHint | null },
+type AcceptedEntryCreateMode = "attached" | "page" | "manual";
+
+export function attachedIdeaEditsAction(
+  proposal: {
+    id?: string;
+    attached_create_entry?: AttachedCreateHint | null;
+    accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+  },
   site?: string,
 ): {
   tool: string;
@@ -306,6 +314,27 @@ function attachedIdeaEditsAction(
 } | null {
   const ae = proposal.attached_create_entry;
   if (!ae?.contentType || !ae.slug || !ae.locale || !proposal.id) return null;
+  if (proposal.accepted_entry_create_mode === "page") {
+    return {
+      tool: "propose_change",
+      reason:
+        "This accepted idea reserved a new section-built page (no shared template) and there is no file yet. File edits with implements_proposal_id, review_situations [\"new_public_content\"], no variant, and field updates that include the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty; each section checked against the component registry) plus required fields. The proposal creates the entry folder, _common.yml, and an unpublished draft; a different role’s apply publishes it. Do not call create_entry. Publishing a page with no sections is refused (empty_page).",
+      priority: "required",
+      args_hint: {
+        implements_proposal_id: proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [
+          {
+            contentType: ae.contentType,
+            slug: ae.slug,
+            locale: ae.locale,
+            updates: [{ field_path: "sections", value: ["<section objects>"] }],
+          },
+        ],
+        ...(site ? { site } : {}),
+      },
+    };
+  }
   return {
     tool: "propose_change",
     reason:
@@ -458,6 +487,8 @@ export function registerProposalTools(
       "Pass entries[] (or promote_on_apply) → kind edits. " +
       "Edits (1.0): updates are written into a 0%-traffic draft now (named variant, or `draft` / `draft-p{id6}` created from today's live); apply only promotes that draft. Live is unchanged until apply. " +
       "Page-level (common) fields — funnel.*, meta.robots/priority/change_frequency, published_at, detached, authors — publish to {slug}/_common.yml for every locale (warning common_fields_all_languages). Remove a field with {field_path, op:\"remove\"}. " +
+      "Check layout_owner (get_content_type_info / get_entry_content): entry → a new page or new language needs one full sections update (registry-checked); shared_template → fields only. " +
+      "To change the layout of every attached entry, target slug template (one entry per locale, all_or_nothing: true); apply needs confirm_affected_entries. " +
       "Optional all_or_nothing (publish every entry or none) and per-entry translated_from_locale. " +
       "Pass kind:\"idea\" for a pre-work brief (new page, update, or config pitch) — no YAML until a later edits proposal. " +
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
@@ -472,7 +503,7 @@ export function registerProposalTools(
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] (subtopic serp-title-description). " +
       "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] (subtopic funnel-classification; persona → product → stage). " +
       "Locale translation go-live → prefer review_situations:[\"locale_translation\"] with variant + promote_on_apply (subtopic translations). Soft-only polish without promote is not this pack. " +
-      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale), competing_shared_fields (another open proposal stages page-level fields), draft_in_proposal, variant_has_traffic, implements_required / idea_already_in_progress. " +
+      "Edits refuse entry_not_found (missing live+draft), mixed_risk_bundle (mixed selling/new-public/other), competing_entry_edits (second open edits on same type+slug+locale), competing_shared_fields (another open proposal stages page-level fields), draft_in_proposal, variant_has_traffic, implements_required / idea_already_in_progress, sections_required (new page/language of a layout_owner entry or template without a full sections update), page_create_no_draft, invalid_sections (registry shape). " +
       "Live-missing + named draft exists is allowed (new_public_content). Ideas refuse mixed_risk_bundle on related_entries classes. " +
       "Mutating MCP requires a role connector, agent_session start with exact model (provider/model), and agent_session_id on mutates. " +
       "Four-eyes apply/reject/accept compare human+role (not username alone). Apply/reject need proposals_review (Proposal Reviewer or Publisher).",
@@ -764,14 +795,127 @@ export function registerProposalTools(
               ],
             });
           }
+          if (data.code === "sections_required" && (data.details as { new_locale?: boolean } | undefined)?.new_locale) {
+            const details = data.details as {
+              layout_owner?: string;
+              detached?: boolean;
+              is_shared_template?: boolean;
+              entry?: { contentType?: string; slug?: string; locale?: string };
+            };
+            const target = details.entry ?? {};
+            const siteHint = args.site ? { site: args.site } : {};
+            return fail(String(data.error ?? data.code), {
+              code: "sections_required",
+              details,
+              next_actions: [
+                {
+                  tool: "get_entry_content",
+                  reason:
+                    "Read the source-locale page (e.g. en) as the starting point: copy its full sections array and translate every section. Nothing was written.",
+                  priority: "required",
+                  args_hint: {
+                    contentType: target.contentType,
+                    slug: target.slug,
+                    locale: "en",
+                    ...siteHint,
+                  },
+                },
+                {
+                  tool: "propose_change",
+                  reason: details.is_shared_template
+                    ? "New template language: resubmit with ONE full { field_path: \"sections\", value: [...] } update (the whole translated shared layout). It applies to every attached entry in that language."
+                    : `New language of a layout_owner entry${details.detached ? " (detached)" : ""} page: resubmit with ONE full { field_path: "sections", value: [...] } update (the whole translated layout) plus the translated fields.`,
+                  priority: "required",
+                },
+                {
+                  tool: "get_component_schema",
+                  reason: "Check component contracts (variants, required props) for the translated sections.",
+                  priority: "recommended",
+                  args_hint: { componentType: "hero", ...siteHint },
+                },
+              ],
+            });
+          }
+          if (data.code === "sections_required" || data.code === "page_create_no_draft") {
+            return fail(String(data.error ?? data.code), {
+              code: String(data.code),
+              next_actions: [
+                {
+                  tool: "propose_change",
+                  reason:
+                    "New section-built page: resubmit with implements_proposal_id, no variant, no promote_on_apply, and the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty) plus required fields. The proposal creates the folder and draft — do not call create_entry.",
+                  priority: "required",
+                  args_hint: {
+                    implements_proposal_id: args.implements_proposal_id,
+                    review_situations: ["new_public_content"],
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+                {
+                  tool: "get_component_schema",
+                  reason: "Pick components and variants for the sections array (shared + site registry).",
+                  priority: "recommended",
+                  args_hint: { componentType: "hero", ...(args.site ? { site: args.site } : {}) },
+                },
+              ],
+            });
+          }
+          if (data.code === "invalid_sections") {
+            const details = (data.details ?? {}) as {
+              property_path?: string;
+              issues?: Array<{ property_path: string; message: string }>;
+            };
+            const failingIdx = /^sections\[(\d+)\]/.exec(details.property_path ?? "")?.[1];
+            const firstEntry = args.entries?.[0] as { updates?: Array<{ field_path: string; value?: unknown }> } | undefined;
+            const sectionsValue = firstEntry?.updates?.find((u) => u.field_path === "sections")?.value;
+            const failingType =
+              failingIdx != null && Array.isArray(sectionsValue)
+                ? (sectionsValue[Number(failingIdx)] as { type?: unknown } | undefined)?.type
+                : undefined;
+            return fail(String(data.error ?? "invalid sections"), {
+              code: "invalid_sections",
+              property_path: details.property_path,
+              issues: details.issues ?? [],
+              next_actions: [
+                {
+                  tool: "get_component_schema",
+                  reason: `Check the component contract for the failing section (${details.property_path ?? "sections"}): valid variants and required props.`,
+                  priority: "required",
+                  args_hint: {
+                    ...(typeof failingType === "string" ? { componentType: failingType } : {}),
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+                {
+                  tool: "propose_change",
+                  reason: "Fix every listed issue in the sections array and resubmit. Nothing was written.",
+                  priority: "required",
+                },
+              ],
+            });
+          }
           if (data.code === "entry_not_found") {
+            if (args.implements_proposal_id) {
+              return fail(String(data.error ?? "entry not found"), {
+                code: "entry_not_found",
+                next_actions: [
+                  {
+                    tool: "list_proposals",
+                    reason:
+                      "This page type cannot be created from a proposal. Tell the human a person must create the page in the CMS first; then resubmit with the same implements_proposal_id.",
+                    priority: "required",
+                    args_hint: { proposal_id: args.implements_proposal_id },
+                  },
+                ],
+              });
+            }
             return fail(String(data.error ?? "entry not found"), {
               code: "entry_not_found",
               next_actions: [
                 {
                   tool: "propose_change",
                   reason:
-                    "For a new page, accept an idea that locks the slug, then resubmit field edits with implements_proposal_id and no variant — the proposal creates the entry folder and draft. Do not call create_entry.",
+                    "For a new page, accept an idea that locks the slug, then resubmit edits with implements_proposal_id and no variant — the proposal creates the entry folder and draft. Section-built types (downloadable, landing, …) also need a full { field_path: \"sections\", value: [...] } update. Do not call create_entry.",
                   priority: "required",
                   args_hint: {
                     kind: "idea",
@@ -1270,13 +1414,26 @@ export function registerProposalTools(
         }
 
         const proposals = data.proposals ?? [];
-        const attachedNext = (proposals as Array<{
+        const ideaRows = proposals as Array<{
           id?: string;
+          accepted_entry?: AttachedCreateHint | null;
           attached_create_entry?: AttachedCreateHint | null;
-        }>)
+          accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+        }>;
+        const attachedNext = ideaRows
           .map((p) => attachedIdeaEditsAction(p, args.site))
           .filter((action): action is NonNullable<typeof action> => action != null)
           .slice(0, 3);
+        for (const p of ideaRows) {
+          if (p.accepted_entry_create_mode !== "manual" || !p.accepted_entry) continue;
+          const ae = p.accepted_entry;
+          warnings.push({
+            code: "accepted_entry_not_creatable",
+            message:
+              `Accepted idea ${p.id} reserved ${ae.contentType}/${ae.slug} (${ae.locale}), which does not exist and cannot be created by a proposal (database row). ` +
+              "A human must create the page in the CMS first; then file edits with implements_proposal_id. Do not retry propose_change until it exists.",
+          });
+        }
         const total = typeof data.total === "number" ? data.total : proposals.length;
         const next_offset = proposalNextOffset(offset, limit, total, proposals.length);
         const proposals_view =
@@ -1945,11 +2102,41 @@ export function registerProposalTools(
           if (
             data.code === "required_fields_missing" ||
             data.code === "attached_sections_refused" ||
-            data.code === "database_entry_required"
+            data.code === "database_entry_required" ||
+            data.code === "sections_required" ||
+            data.code === "invalid_sections"
           ) {
+            const sectionDetails = (data.details ?? {}) as {
+              property_path?: string;
+              issues?: Array<{ property_path: string; message: string }>;
+              new_locale?: boolean;
+              is_shared_template?: boolean;
+              entry?: { contentType?: string; slug?: string; locale?: string };
+            };
+            const newLocale = data.code === "sections_required" && sectionDetails.new_locale === true;
             return fail(String(data.error ?? data.code), {
               code: String(data.code),
+              ...(data.code === "invalid_sections"
+                ? { property_path: sectionDetails.property_path, issues: sectionDetails.issues ?? [] }
+                : {}),
+              ...(data.details && data.code !== "invalid_sections" ? { details: data.details } : {}),
               next_actions: [
+                ...(newLocale
+                  ? [
+                      {
+                        tool: "get_entry_content",
+                        reason:
+                          "Read the source-locale page (e.g. en): copy its full sections array and translate every section.",
+                        priority: "required" as const,
+                        args_hint: {
+                          contentType: sectionDetails.entry?.contentType,
+                          slug: sectionDetails.entry?.slug,
+                          locale: "en",
+                          site: args.site,
+                        },
+                      },
+                    ]
+                  : []),
                 {
                   tool: "update_proposal",
                   reason:
@@ -1957,7 +2144,15 @@ export function registerProposalTools(
                       ? "This workflow cannot create a database row. The accepted idea can stay. Field updates work once the row exists."
                       : data.code === "attached_sections_refused"
                         ? "Drop sections[] updates and retry revise_entries. The accepted idea still holds the slug."
-                        : "Add the named required fields and retry revise_entries. The accepted idea still holds the slug.",
+                        : newLocale
+                          ? sectionDetails.is_shared_template
+                            ? "New template language: include the whole translated shared layout as ONE update { field_path: \"sections\", value: [...] } and retry revise_entries. It applies to every attached entry in that language."
+                            : "New language of a layout_owner entry page: include the whole translated layout as ONE update { field_path: \"sections\", value: [...] } and retry revise_entries."
+                          : data.code === "sections_required"
+                            ? "Include the whole layout as ONE update { field_path: \"sections\", value: [...] } (non-empty) and retry revise_entries."
+                            : data.code === "invalid_sections"
+                              ? `Fix the listed section issues (${sectionDetails.property_path ?? "sections"}) — see get_component_schema — and retry revise_entries. Nothing was written.`
+                              : "Add the named required fields and retry revise_entries. The accepted idea still holds the slug.",
                   priority: "required",
                   args_hint: {
                     proposal_id: args.proposal_id,
@@ -1965,6 +2160,16 @@ export function registerProposalTools(
                     site: args.site,
                   },
                 },
+                ...(newLocale
+                  ? [
+                      {
+                        tool: "get_component_schema",
+                        reason: "Check component contracts (variants, required props) for the translated sections.",
+                        priority: "recommended" as const,
+                        args_hint: { componentType: "hero", site: args.site },
+                      },
+                    ]
+                  : []),
               ],
             });
           }
@@ -2051,6 +2256,16 @@ export function registerProposalTools(
             reason: "Review the revert proposal (it goes through normal four-eyes approval).",
             priority: "recommended",
             args_hint: { proposal_id: created?.id },
+          });
+        }
+
+        if (args.action === "accept" && warnings.some((w) => w.code === "accepted_entry_needs_layout")) {
+          next.push({
+            tool: "get_component_schema",
+            reason:
+              "Optional: the follow-up edits for this layout_owner entry page must send the whole layout as ONE full sections update — pick components and variants from the registry.",
+            priority: "optional",
+            args_hint: { componentType: "hero", site: args.site },
           });
         }
 

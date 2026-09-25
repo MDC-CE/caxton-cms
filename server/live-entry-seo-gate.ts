@@ -72,6 +72,7 @@ export type LiveSeoGateFailure = {
   code:
     | LiveRequiredFieldsCode
     | "empty_detached_locale"
+    | "empty_page"
     | "schema_org_companion";
   /** Field paths that must be set together (meta.* and/or editor.required keys). */
   missing_fields?: string[];
@@ -242,7 +243,10 @@ export function evaluateLiveEntrySeoAndRequiredFields(
       })
     : null;
   if (emptyLocaleErr) {
-    return { message: emptyLocaleErr, code: "empty_detached_locale" };
+    return {
+      message: emptyLocaleErr,
+      code: emptyLocaleErr.startsWith("EMPTY_PAGE") ? "empty_page" : "empty_detached_locale",
+    };
   }
 
   const companionErr = flags.runSchemaOrgCompanion
@@ -294,8 +298,15 @@ export function assertLiveEntrySeoAndRequiredFields(
   return evaluateLiveEntrySeoAndRequiredFields(opts)?.message ?? null;
 }
 
+/** File type whose entries own their sections (no shared template, not database-backed). */
+export function isSectionBuiltFileType(contentType: string, contentRoot?: string): boolean {
+  if (!getContentTypeConfig(contentType, contentRoot)) return false;
+  return !isSharedLayoutType(contentType, contentRoot);
+}
+
 /**
- * Block publishing / live writes of empty detached locales.
+ * Block publishing / live writes of empty locales on pages that own their sections:
+ * detached shared-layout entries and section-built file types (downloadable, landing, …).
  */
 export function assertNotEmptyDetachedLocale(opts: {
   contentType: string;
@@ -305,7 +316,8 @@ export function assertNotEmptyDetachedLocale(opts: {
   contentRoot?: string;
 }): string | null {
   const contentRoot = opts.contentRoot ?? getDefaultContentRoot();
-  if (!isEntryDetached(opts.contentType, opts.slug, contentRoot)) return null;
+  const detached = isEntryDetached(opts.contentType, opts.slug, contentRoot);
+  if (!detached && !isSectionBuiltFileType(opts.contentType, contentRoot)) return null;
 
   let merged = opts.pageData;
   if (!merged) {
@@ -325,6 +337,13 @@ export function assertNotEmptyDetachedLocale(opts: {
   const abs = path.join(contentRoot, filePath);
   const exists = fs.existsSync(abs);
 
+  if (!detached) {
+    return (
+      `EMPTY_PAGE: ${opts.contentType}/${opts.slug} (${opts.locale}) has no sections and no content` +
+      (exists ? ` (${filePath}).` : ".") +
+      " This page type owns its layout: add a non-empty sections list before publishing."
+    );
+  }
   return (
     `EMPTY_LOCALE: detached locale "${opts.locale}" has no sections and no content` +
     (exists ? ` (${filePath}).` : ".") +

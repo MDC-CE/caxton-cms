@@ -11,6 +11,7 @@ import {
   undoCostFromDiff,
 } from "./review-context";
 import type { ProposalRecord } from "./service";
+import * as sectionsHelpers from "./sections-summary";
 
 function baseProposal(
   overrides: Partial<ProposalRecord> & Pick<ProposalRecord, "kind">,
@@ -1187,5 +1188,205 @@ describe("classifyProposalReview", () => {
       ],
     });
     expect(withFunnel.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(false);
+  });
+});
+
+describe("layout_owner review signals", () => {
+  type Entry = ProposalRecord["entries"][number];
+  const hero = { type: "hero", title: "Old" };
+  const cta = { type: "cta_banner", title: "Go" };
+
+  function sectionsEntry(
+    overrides: Partial<Entry> & { before?: unknown[]; after?: unknown[] } = {},
+  ): Entry {
+    const { before = [hero], after = [hero], ...rest } = overrides;
+    const { summarizeSectionsChange } = sectionsHelpers;
+    return {
+      id: 1,
+      proposal_id: "p1",
+      entry_key: "landing/ai",
+      locale: "en",
+      variant: "draft",
+      variant_fingerprint: null,
+      status: "pending",
+      ops: [{ field_path: "sections", value: after }],
+      baseline_context: { values: { sections: before } },
+      author_diff: [{ field_path: "sections", before, after, scope: "locale" }],
+      sections_summary: summarizeSectionsChange(before, after),
+      last_error: null,
+      applied_at: null,
+      applied_by: null,
+      contentType: "landing",
+      slug: "ai",
+      ...rest,
+    };
+  }
+
+  const liveLookup = (extra: Record<string, unknown> = {}) => ({
+    contentType: "landing",
+    slug: "ai",
+    locale: "en",
+    existence: "exists" as const,
+    draftExists: true,
+    layout_owner: "entry" as const,
+    ...extra,
+  });
+
+  it("new entry-owned page: creates_page_entry + page copy + owner line first", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [sectionsEntry({ before: [], after: [hero, cta] })] }),
+      lookups: [liveLookup({ existence: "missing" })],
+    });
+    expect(ctx.agent_preview.warnings.map((w) => w.code)).toContain("creates_page_entry");
+    expect(ctx.agent_preview.warnings.map((w) => w.code)).not.toContain("creates_attached_entry");
+    expect(ctx.staff_summary.situation_description).toContain("including its full layout");
+    expect(ctx.active_checklists).toContain("layout_structure");
+    const item = ctx.agent_preview.think_items.find((t) => t.id === "layout_structure")!;
+    expect(item.look_for[0]).toMatch(/^layout_owner: entry/);
+    expect(ctx.entries[0]).toMatchObject({ layout_owner: "entry" });
+  });
+
+  it("attached (shared_template) create keeps the attached copy", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            ...sectionsEntry(),
+            entry_key: "blog/what-is-grok",
+            contentType: "blog",
+            slug: "what-is-grok",
+            variant: null,
+            ops: [{ field_path: "title", value: "What is Grok" }],
+            author_diff: undefined,
+            sections_summary: undefined,
+            baseline_context: { values: {}, creates_entry: true },
+          },
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "what-is-grok",
+          locale: "en",
+          existence: "missing",
+          draftExists: false,
+          layout_owner: "shared_template",
+        },
+      ],
+    });
+    expect(ctx.agent_preview.warnings.map((w) => w.code)).toContain("creates_attached_entry");
+    expect(ctx.agent_preview.warnings.map((w) => w.code)).not.toContain("creates_page_entry");
+    expect(ctx.staff_summary.situation_description).toContain("Applying creates this post");
+    expect(ctx.active_checklists).not.toContain("layout_structure");
+  });
+
+  it("layout_structure fires on structural changes (co-author reorder too), not on a text edit in one section", () => {
+    const added = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [sectionsEntry({ before: [hero], after: [hero, cta] })] }),
+      lookups: [liveLookup()],
+    });
+    expect(added.active_checklists).toContain("layout_structure");
+
+    const reordered = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          sectionsEntry({
+            before: [hero, cta],
+            after: [cta, hero],
+            requested_ops: [{ field_path: "sections[0].title", value: "New" }],
+          }),
+        ],
+      }),
+      lookups: [liveLookup()],
+    });
+    expect(reordered.active_checklists).toContain("layout_structure");
+
+    const tweak = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [sectionsEntry({ before: [hero, cta], after: [{ ...hero, title: "New" }, cta] })],
+      }),
+      lookups: [liveLookup()],
+    });
+    expect(tweak.active_checklists).not.toContain("layout_structure");
+  });
+
+  it("fields-only edits on shared_template entries add the template-unaffected line", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        entries: [
+          {
+            ...sectionsEntry(),
+            entry_key: "blog/hello",
+            contentType: "blog",
+            slug: "hello",
+            ops: [{ field_path: "content", value: "Body text" }],
+            author_diff: [{ field_path: "content", before: "Old", after: "Body text", scope: "locale" }],
+            sections_summary: undefined,
+          },
+        ],
+      }),
+      lookups: [{ contentType: "blog", slug: "hello", locale: "en", existence: "exists", layout_owner: "shared_template" }],
+    });
+    const verify = ctx.agent_preview.think_items.find((t) => t.id === "verify_copy");
+    expect(verify?.look_for.at(-1)).toMatch(/^layout_owner: shared_template/);
+  });
+
+  it("template entries: template_blast_radius stacks with layout_structure and staff copy names the count", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "edits",
+        affected_entries: { count: 12, sample: [] },
+        entries: [
+          sectionsEntry({
+            entry_key: "blog/template",
+            contentType: "blog",
+            slug: "template",
+            locale: "es",
+            before: [hero],
+            after: [hero, cta],
+          }),
+        ],
+      }),
+      lookups: [
+        {
+          contentType: "blog",
+          slug: "template",
+          locale: "es",
+          existence: "exists",
+          draftExists: true,
+          layout_owner: "shared_template",
+          is_shared_template: true,
+        },
+      ],
+    });
+    expect(ctx.active_checklists).toEqual(expect.arrayContaining(["template_blast_radius", "layout_structure"]));
+    expect(ctx.staff_summary.situation_description).toContain("This changes the shared layout for 12 pages in es");
+    expect(ctx.staff_summary.situation_description).toContain("(detached) are not affected");
+    expect(ctx.entries[0]).toMatchObject({ is_shared_template: true });
+  });
+
+  it("layout_owner_changed only for entry → shared_template with a sections draft", () => {
+    const reattached = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [sectionsEntry({ before: [hero], after: [hero, cta] })] }),
+      lookups: [liveLookup({ layout_owner: "shared_template", layout_owner_at_filing: "entry" })],
+    });
+    expect(reattached.agent_preview.warnings.map((w) => w.code)).toContain("layout_owner_changed");
+    expect(reattached.staff_summary.situation_description).toContain("now uses the shared layout");
+
+    const detached = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [sectionsEntry({ before: [hero], after: [hero, cta] })] }),
+      lookups: [liveLookup({ layout_owner: "entry", layout_owner_at_filing: "shared_template" })],
+    });
+    expect(detached.agent_preview.warnings.map((w) => w.code)).not.toContain("layout_owner_changed");
+
+    const legacy = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [sectionsEntry({ before: [hero], after: [hero, cta] })] }),
+      lookups: [liveLookup({ layout_owner: "shared_template" })],
+    });
+    expect(legacy.agent_preview.warnings.map((w) => w.code)).not.toContain("layout_owner_changed");
   });
 });

@@ -133,6 +133,7 @@ import {
   getDirectory,
 } from "../content-types";
 import { attachedOverlayStructureError, isEntryDetached, isSharedLayoutType } from "../shared-layout-entry";
+import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
 import {
   resolveCommonTemplatePath,
   resolveTemplateLocalePath,
@@ -1236,6 +1237,38 @@ export function registerComponentsRoutes(app: Express): void {
       if (!fs.existsSync(fullPath)) {
         res.status(404).json({ error: "File not found" });
         return;
+      }
+
+      {
+        const entryParts = normalizedPath.replace(/\\/g, "/").split("/");
+        if (entryParts.length === 4 && /\.ya?ml$/i.test(entryParts[3])) {
+          const root = getContentRoot(res);
+          const entryType = getType(entryParts[1], root);
+          const ci = getCI(res);
+          const asObject = (v: unknown) =>
+            v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+          let before: Record<string, unknown> | null = null;
+          try {
+            before = asObject(ci.safeYamlLoad(fs.readFileSync(fullPath, "utf-8")));
+          } catch {
+            before = null;
+          }
+          const deprecatedGate = checkDeprecatedFileWrite({
+            contentType: entryType,
+            slug: entryParts[2],
+            contentRoot: root,
+            before,
+            after: asObject(ci.safeYamlLoad(content)),
+          });
+          if (!deprecatedGate.ok) {
+            res.status(400).json({
+              code: deprecatedGate.code,
+              error: deprecatedGate.error,
+              deprecated: deprecatedErrorInfo(deprecatedGate),
+            });
+            return;
+          }
+        }
       }
 
       const isVariantFile =

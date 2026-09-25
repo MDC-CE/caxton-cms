@@ -132,4 +132,23 @@ describe("fieldMappingsValidator", () => {
     expect(result.warnings).toEqual([]);
     expect(result.status).toBe("passed");
   });
+
+  it("errors when a deprecated field is also required", async () => {
+    getAllConfigs.mockReturnValue({
+      scholarship: {
+        field_mapping: { old_name: "old_name", name: "name" },
+        editor: { old_name: { required: true, deprecated: { replaced_by: "name" } } },
+      },
+    });
+    validateFieldMapping.mockReturnValue({ allValid: true, results: {} });
+
+    const result = await fieldMappingsValidator.run({
+      contentFiles: [],
+      redirectMap: new Map(),
+      availableSchemas: new Set(),
+      sitemapEntries: [],
+    });
+
+    expect(result.errors.map((e) => e.code)).toContain("DEPRECATED_CONFIG_INVALID");
+  });
 });

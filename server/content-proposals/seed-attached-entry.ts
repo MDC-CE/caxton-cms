@@ -24,7 +24,7 @@ export function seedAttachedLocaleFiles(opts: {
   contentRoot: string;
   author?: string;
   /** Optional funnel block written onto new _common.yml (idea seed). */
-  funnel?: { stage: string; products: unknown } | null;
+  funnel?: { stage?: string | null; products?: unknown } | null;
 }): { commonPath: string; localePath: string } {
   const dir = attachedEntryDir(opts.contentType, opts.slug, opts.contentRoot);
   fs.mkdirSync(dir, { recursive: true });

@@ -55,6 +55,7 @@ import { assertFunnelAudienceGates } from "../product/funnel-audience-gates";
 import { stripFunnelFromAllLocaleYamls } from "../funnel-fields";
 import { urlParamsForContentType } from "../field-scope-config";
 import type { ValidationCacheService } from "../services/validationCacheService";
+import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
 
 export { hashVariantFileContents };
 
@@ -291,6 +292,24 @@ export async function promoteVariantWithOptionalTeardown(
         : `Variant file ${variantSlug}.${locale}.yml not found`,
       status: 404,
     };
+  }
+
+  if (!templateMode) {
+    const deprecatedGate = checkDeprecatedFileWrite({
+      contentType,
+      slug,
+      contentRoot,
+      before: null,
+      after: safeLoadYaml(fs.readFileSync(variantFilePath, "utf-8")),
+    });
+    if (!deprecatedGate.ok) {
+      return {
+        ok: false,
+        code: deprecatedGate.code,
+        error: `${deprecatedGate.error} Remove it from the draft (${variantSlug}.${locale}.yml) before publishing.`,
+        details: { deprecated: deprecatedErrorInfo(deprecatedGate) },
+      };
+    }
   }
 
   const ref: DraftRef = { contentType, slug, locale, variant: variantSlug, contentRoot };

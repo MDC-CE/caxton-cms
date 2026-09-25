@@ -30,7 +30,44 @@ export type DraftEntryV1 = {
     conflicting_fields?: Array<{ field_path: string }>;
   };
   source_changed?: { source_locale: string; fields?: string[] };
+  sections_summary?: SectionsSummaryView;
 };
+
+export type SectionsSummaryView = {
+  before_count: number;
+  after_count: number;
+  rows: Array<{
+    index: number;
+    type: string;
+    status: "added" | "removed" | "changed" | "moved";
+    changed_keys?: string[];
+    from_index?: number;
+  }>;
+  truncated?: boolean;
+};
+
+/** "Section 3 (hero): title, image changed" / "Section 5 added (cta_banner)". */
+export function plainSectionsSummary(summary: SectionsSummaryView): string[] {
+  if (summary.before_count === 0 && summary.after_count > 0) {
+    return [`New layout with ${summary.after_count} section${summary.after_count === 1 ? "" : "s"}.`];
+  }
+  const lines = summary.rows.map((r) => {
+    const n = r.index + 1;
+    const keys = r.changed_keys?.length ? `: ${r.changed_keys.join(", ")} changed` : "";
+    switch (r.status) {
+      case "added":
+        return `Section ${n} added (${r.type})`;
+      case "removed":
+        return `Section ${n} removed (${r.type})`;
+      case "moved":
+        return `Section ${n} (${r.type}) moved from position ${(r.from_index ?? r.index) + 1}${keys}`;
+      default:
+        return `Section ${n} (${r.type})${keys}`;
+    }
+  });
+  if (summary.truncated) lines.push("…and more sections.");
+  return lines;
+}
 
 /** v1.0 entry body: field diff from the draft, whole-page / removal markers, and draft state notes. */
 export function ProposalDraftEntryDetails({ entry }: { entry: DraftEntryV1 }) {
@@ -103,6 +140,16 @@ export function ProposalDraftEntryDetails({ entry }: { entry: DraftEntryV1 }) {
         <p className="text-xs text-muted-foreground">
           Fields marked "Whole page" change this page in every language when published.
         </p>
+      ) : null}
+      {entry.sections_summary && plainSectionsSummary(entry.sections_summary).length ? (
+        <ul
+          className="space-y-0.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-foreground"
+          data-testid={`proposal-entry-sections-summary-${entry.id}`}
+        >
+          {plainSectionsSummary(entry.sections_summary).map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
       ) : null}
       {sectionsChanged ? (
         <p className="text-xs text-muted-foreground">The page structure changed — use Preview draft to see it.</p>

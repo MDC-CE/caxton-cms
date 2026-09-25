@@ -25,10 +25,16 @@ import {
   type ProposalDraftStore,
 } from "./draft-store";
 import {
+  hasFullSectionsOp,
   isSectionFieldPath,
   missingRequiredFromOps,
   type MissingTargetShape,
+  type SectionIssue,
 } from "./attached-entry-gate";
+import { validateSectionsForProposal } from "./section-proposal-check";
+import { summarizeSectionsChange, type SectionsSummary } from "./sections-summary";
+import { scanTemplatePlaceholdersOnSite, type TemplatePlaceholderGap } from "./template-placeholder-scan";
+import { layoutInfoForEntry, type EntryLayoutInfo, type LayoutOwner } from "../layout-owner";
 import {
   getFolder,
   getContentTypeConfig,
@@ -124,6 +130,8 @@ export const MIN_BLOCKER_BODY = 80;
 export const MIN_CLOSE_NOTE = 20;
 export const MIN_ACCEPT_NEXT_STEP = 20;
 export const MIN_REJECT_NOTE = 80;
+export const ACCEPTED_ENTRY_NOT_CREATABLE = "accepted_entry_not_creatable";
+export const ACCEPTED_ENTRY_NEEDS_LAYOUT = "accepted_entry_needs_layout";
 
 export type ProposalStatus = "open" | "partial" | "finished" | "rejected" | "withdrawn";
 export type ProposalKind = "edits" | "notes" | "idea";
@@ -201,6 +209,8 @@ export function parseAcceptedEntry(raw: unknown): AcceptedEntry | null {
   return { contentType, slug, locale };
 }
 
+export type AcceptedEntryCreateMode = "attached" | "page" | "manual";
+
 export function acceptedEntryKey(entry: AcceptedEntry): string {
   return `${entry.contentType}/${entry.slug}/${entry.locale}`;
 }
@@ -266,7 +276,13 @@ export type ProposalEntryRow = {
   variant_fingerprint: string | null;
   status: EntryRowStatus;
   ops: FieldUpdate[];
-  baseline_context: { values: Record<string, unknown>; note?: string; creates_entry?: boolean };
+  baseline_context: {
+    values: Record<string, unknown>;
+    note?: string;
+    creates_entry?: boolean;
+    /** v1.0: who owned the layout when the entry was filed / revised (layout-switch check). */
+    layout_owner?: LayoutOwner;
+  };
   last_error: string | null;
   applied_at: number | null;
   applied_by: string | null;
@@ -307,6 +323,14 @@ export type ProposalEntryRow = {
   };
   /** v1.0: translation source locale changed after translating. */
   source_changed?: { source_locale: string; fields?: string[] };
+  /** Read-time: who owns this entry's layout today (shared template vs the entry itself). */
+  layout_owner?: LayoutOwner;
+  /** Read-time: entry of a shared-layout type that owns its sections because it is detached. */
+  detached?: true;
+  /** Read-time: this draft is the shared template itself (slug `template`). */
+  is_shared_template?: true;
+  /** v1.0: per-section view of a `sections` change (author_diff keeps `sections` atomic). */
+  sections_summary?: SectionsSummary;
 };
 
 export type ProposalBlocker = {
@@ -393,8 +417,16 @@ export type ProposalRecord = {
   idea_funnel: IdeaFunnel | null;
   /** Edits that implement an accepted idea (optional unless slug is reserved). */
   implements_proposal_id: string | null;
-  /** Computed on read — accepted idea whose locked slug is a missing file-based attached post. */
+  /** Computed on read — accepted idea whose locked page is missing and a proposal can create it. */
   attached_create_entry?: AcceptedEntry | null;
+  /**
+   * Computed on read for accepted ideas whose locked page is missing:
+   * attached = blog-style post (field updates only); page = section-built page (full sections);
+   * manual = cannot be created by a proposal (database row) — a human creates it first.
+   */
+  accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+  /** Computed on read next to `accepted_entry_create_mode`: who will own the reserved page's layout. */
+  accepted_entry_layout_owner?: LayoutOwner | null;
   /** Last author rewrite or author-marked blocker fix. */
   author_content_at: number | null;
   /** Last reviewer add/reopen/non-author resolve. */
@@ -493,10 +525,12 @@ export type ProposalSummary = {
   idea_funnel: IdeaFunnel | null;
   implements_proposal_id: string | null;
   /**
-   * Accepted idea whose locked slug is a missing file-based attached post.
+   * Accepted idea whose locked page is missing and a proposal can create it.
    * Computed on read — not stored. Author follow-up is edits with no variant.
    */
   attached_create_entry?: AcceptedEntry | null;
+  accepted_entry_create_mode?: AcceptedEntryCreateMode | null;
+  accepted_entry_layout_owner?: LayoutOwner | null;
   outcome_review: ProposalOutcomeVerdict | null;
   outcome_review_note: string | null;
   outcome_review_expected: string | null;
@@ -584,6 +618,8 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     idea_funnel: record.idea_funnel,
     implements_proposal_id: record.implements_proposal_id,
     attached_create_entry: record.attached_create_entry ?? null,
+    accepted_entry_create_mode: record.accepted_entry_create_mode ?? null,
+    accepted_entry_layout_owner: record.accepted_entry_layout_owner ?? null,
     outcome_review: record.outcome_review,
     outcome_review_note: record.outcome_review_note,
     outcome_review_expected: record.outcome_review_expected,
@@ -1027,12 +1063,22 @@ function withCachedView(entry: ProposalEntryRow): ProposalEntryRow {
     approximate: boolean;
   } | null>(cached.json, null);
   if (!view) return entry;
+  const derived = entryViewFromDiff(entry.ops, view.changes, view.approximate);
   const next = {
     ...entry,
-    ...entryViewFromDiff(entry.ops, view.changes, view.approximate),
+    ...derived,
+    baseline_context: withFilingOwner(derived.baseline_context, entry.baseline_context),
   };
   derivedViewCache.set(next, cached);
   return next;
+}
+
+/** The derived view replaces `baseline_context`; keep the owner stored at filing. */
+function withFilingOwner(
+  derived: ProposalEntryRow["baseline_context"],
+  stored: ProposalEntryRow["baseline_context"] | undefined,
+): ProposalEntryRow["baseline_context"] {
+  return stored?.layout_owner ? { ...derived, layout_owner: stored.layout_owner } : derived;
 }
 
 /** v1.0: `ops` / `baseline_context` are a read-only view of the draft (author diff). */
@@ -1048,6 +1094,7 @@ export function entryViewFromDiff(
   | "author_diff_approximate"
   | "requested_ops"
   | "ops_match_request"
+  | "sections_summary"
 > {
   const ops: FieldUpdate[] = changes.map((c) =>
     c.removed
@@ -1060,6 +1107,7 @@ export function entryViewFromDiff(
     Object.freeze(ops);
     Object.freeze(values);
   }
+  const sectionsChange = changes.find((c) => c.field_path === "sections");
   return {
     ops,
     baseline_context: { values },
@@ -1067,6 +1115,7 @@ export function entryViewFromDiff(
     author_diff_approximate: approximate,
     requested_ops: requested,
     ops_match_request: requestedMatchesView(requested, changes),
+    ...(sectionsChange ? { sections_summary: summarizeSectionsChange(sectionsChange.before, sectionsChange.after) } : {}),
   };
 }
 
@@ -1485,6 +1534,27 @@ export type ProposalServiceDeps = {
    * Default (tests): other — missing live stays entry_not_found.
    */
   inspectMissingTarget?: (entry: { contentType: string; slug: string }) => MissingTargetShape;
+  /**
+   * Who owns the entry's layout today (`layoutInfoForEntry`). Absent (tests) → unknown:
+   * no layout_owner on reads, no new-language sections gate, no layout-switch check.
+   */
+  resolveLayoutOwner?: (entry: { contentType: string; slug: string }) => EntryLayoutInfo;
+  /**
+   * Template proposals: find new `{{ entry.* }}` placeholders attached entries cannot fill.
+   * Absent (tests) → not scanned.
+   */
+  scanTemplatePlaceholders?: (entry: {
+    contentType: string;
+    locale: string;
+    liveSections: unknown;
+    draftSections: unknown;
+    attachedSlugs: string[];
+  }) => TemplatePlaceholderGap[];
+  /**
+   * Registry check for a full `sections` array in an edits update. Empty = valid.
+   * Absent (tests) → not checked.
+   */
+  validateSections?: (sections: unknown) => SectionIssue[];
   /** Validate and seed a new attached locale before field ops. seeded means this apply created the folder. */
   prepareCreatesEntry?: (
     entry: ProposalEntryRow,
@@ -2113,7 +2183,93 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return deps.inspectMissingTarget({ contentType, slug });
   }
 
-  function attachedCreateHintFor(proposal: ProposalRecord): AcceptedEntry | null {
+  function layoutOwnerAtFiling(ref: { contentType: string; slug: string }): { layout_owner?: LayoutOwner } {
+    const info = layoutInfo(ref.contentType, ref.slug);
+    return info ? { layout_owner: info.layout_owner } : {};
+  }
+
+  function layoutInfo(contentType: string, slug: string): EntryLayoutInfo | null {
+    if (!deps.resolveLayoutOwner) return null;
+    try {
+      return deps.resolveLayoutOwner({ contentType, slug });
+    } catch (err) {
+      log.warn({ err, contentType, slug }, "resolve layout owner failed");
+      return null;
+    }
+  }
+
+  /**
+   * A new language (live locale missing) on an existing entry that owns its layout, or a new
+   * shared-template language, must send one full `sections` update — the draft starts empty.
+   */
+  function gateNewLocaleSections(opts: {
+    entry: ProposalEntryInput;
+    /** Existing draft that will keep its body (named by the caller, or owned and not reset). */
+    keptDraft: ProposalDraftRef | null;
+  }): { ok: true } | { ok: false; code: string; error: string; details: Record<string, unknown> } {
+    const e = opts.entry;
+    const info = layoutInfo(e.contentType, e.slug);
+    if (!info) return { ok: true };
+    if (info.layout_owner !== "entry" && !info.is_shared_template) return { ok: true };
+    if (hasFullSectionsOp(e.updates ?? [])) return { ok: true };
+    if (opts.keptDraft && store?.draftValue) {
+      const existing = store.draftValue(opts.keptDraft, "sections");
+      if (Array.isArray(existing) && existing.length > 0) return { ok: true };
+    }
+    const where = `${e.contentType}/${e.slug} (${e.locale})`;
+    const why = info.is_shared_template
+      ? `${where} is a new shared template language. It must contain the full layout; it will apply to every attached entry in that language.`
+      : info.detached
+        ? `${where} is a new language of an entry that has its own layout (detached).`
+        : `${where} is a new language of a page type that owns its layout.`;
+    return {
+      ok: false,
+      code: "sections_required",
+      error:
+        `${why} The draft starts empty, so send the whole translated layout as one update: ` +
+        '{ field_path: "sections", value: [ ...section objects ] } (non-empty). Start from get_entry_content on the source locale.',
+      details: {
+        layout_owner: info.layout_owner,
+        ...(info.detached ? { detached: true } : {}),
+        ...(info.is_shared_template ? { is_shared_template: true } : {}),
+        new_locale: true,
+        entry: { contentType: e.contentType, slug: e.slug, locale: e.locale },
+      },
+    };
+  }
+
+  /** Template entries that skip some of the type's live template languages. */
+  function templateLocalesWarnings(
+    entries: ProposalEntryInput[],
+  ): Array<{ code: string; message: string; details?: Record<string, unknown> }> {
+    if (!store?.listTemplateLocales) return [];
+    const byType = new Map<string, Set<string>>();
+    for (const e of entries) {
+      if (!isTemplateVersioningSlug(e.slug)) continue;
+      const set = byType.get(e.contentType) ?? new Set<string>();
+      set.add(e.locale);
+      byType.set(e.contentType, set);
+    }
+    const out: Array<{ code: string; message: string; details?: Record<string, unknown> }> = [];
+    for (const [contentType, covered] of byType) {
+      const all = store.listTemplateLocales(contentType);
+      const missing = all.filter((l) => !covered.has(l));
+      if (!missing.length) continue;
+      const changed = [...covered].sort();
+      out.push({
+        code: "template_locales_incomplete",
+        message:
+          `Only ${changed.join(", ")} of ${all.join(", ")} changed for the ${contentType} template — the other languages keep the old layout and will differ in structure. ` +
+          "Add those locales or confirm this is intentional.",
+        details: { contentType, changed_locales: changed, template_locales: all, missing_locales: missing },
+      });
+    }
+    return out;
+  }
+
+  function attachedCreateHintFor(
+    proposal: ProposalRecord,
+  ): { entry: AcceptedEntry; mode: AcceptedEntryCreateMode } | null {
     if (proposal.kind !== "idea" || proposal.close_reason !== "accepted" || !proposal.accepted_entry) {
       return null;
     }
@@ -2121,14 +2277,24 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const ex = resolveExistence({ contentType: ae.contentType, slug: ae.slug, locale: ae.locale });
     if (ex.live === "exists") return null;
     const shape = inspectTarget(ae.contentType, ae.slug);
-    if (shape.shape !== "attached_file") return null;
-    return ae;
+    if (shape.shape === "attached_file") return { entry: ae, mode: "attached" };
+    if (shape.shape === "page_file") return { entry: ae, mode: "page" };
+    if (shape.shape === "database" && ex.live === "missing") return { entry: ae, mode: "manual" };
+    return null;
   }
 
   function withAttachedCreate(proposal: ProposalRecord): ProposalRecord {
     const hint = attachedCreateHintFor(proposal);
     if (!hint) return proposal;
-    return { ...proposal, attached_create_entry: hint };
+    const owner =
+      layoutInfo(hint.entry.contentType, hint.entry.slug)?.layout_owner ??
+      (hint.mode === "page" ? "entry" : "shared_template");
+    return {
+      ...proposal,
+      attached_create_entry: hint.mode === "manual" ? null : hint.entry,
+      accepted_entry_create_mode: hint.mode,
+      accepted_entry_layout_owner: owner,
+    };
   }
 
   function resolveImplementsForEdits(
@@ -2225,7 +2391,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
     db: Database.Database;
   }):
     | { ok: true; createsEntry: boolean }
-    | { ok: false; code: string; error: string; existing_proposal?: ProposalRecord; duplicate_of?: string } {
+    | {
+        ok: false;
+        code: string;
+        error: string;
+        existing_proposal?: ProposalRecord;
+        duplicate_of?: string;
+        details?: Record<string, unknown>;
+      } {
     const e = opts.entry;
     const shape = inspectTarget(e.contentType, e.slug);
     const where = `${e.contentType}/${e.slug} (${e.locale})`;
@@ -2247,12 +2420,16 @@ export function createProposalService(deps: ProposalServiceDeps) {
           "Resubmit with implements_proposal_id, review_situations [\"new_public_content\"], and field updates only. Apply creates the files.",
       };
     }
+    if (shape.shape === "page_file") return gateMissingPageFile({ ...opts, shape, where });
     if (shape.shape !== "attached_file") {
       if (!opts.hasVariant) {
         return {
           ok: false,
           code: "entry_not_found",
-          error: `Page ${where} does not exist yet. File an idea brief, or create the draft first, then propose edits on that target.`,
+          error: opts.implementsIdea
+            ? `Page ${where} does not exist yet, and this page type cannot be created from a proposal. ` +
+              "Someone must create the page first (CMS or create_entry); then resubmit these edits with the same implements_proposal_id."
+            : `Page ${where} does not exist yet. File an idea brief, or create the draft first, then propose edits on that target.`,
         };
       }
       return {
@@ -2285,6 +2462,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         ok: false,
         code: "attached_sections_refused",
         error: `Attached posts do not take section writes (${sectionPaths.join(", ")}). Send field updates only. The shared template stays unchanged.`,
+        details: { layout_owner: "shared_template", field_paths: sectionPaths },
       };
     }
     const missing = missingRequiredFromOps(shape.requiredFields, updates);
@@ -2298,6 +2476,113 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: true, createsEntry: true };
   }
 
+  /** New section-built page (downloadable, landing, …): needs an accepted idea and a full sections array. */
+  function gateMissingPageFile(opts: {
+    entry: ProposalEntryInput;
+    promoteOnApply: boolean;
+    hasVariant: boolean;
+    implementsIdea: ProposalRecord | null;
+    db: Database.Database;
+    shape: { shape: "page_file"; requiredFields: string[] };
+    where: string;
+  }):
+    | { ok: true; createsEntry: boolean }
+    | {
+        ok: false;
+        code: string;
+        error: string;
+        existing_proposal?: ProposalRecord;
+        duplicate_of?: string;
+        details?: Record<string, unknown>;
+      } {
+    const { entry: e, where } = opts;
+    if (!opts.implementsIdea) {
+      const owner = findAcceptedIdeaOwningEntry(opts.db, site, e.contentType, e.slug, e.locale);
+      if (owner) {
+        return {
+          ok: false,
+          code: "implements_required",
+          error: `An accepted idea (${owner.id}) already reserved ${where}. Pass implements_proposal_id: "${owner.id}".`,
+          duplicate_of: owner.id,
+          existing_proposal: owner,
+        };
+      }
+      return {
+        ok: false,
+        code: "entry_not_found",
+        error:
+          `Page ${where} does not exist yet. File an idea brief and get it accepted with this slug, ` +
+          'then propose edits with implements_proposal_id including a full { field_path: "sections", value: [...] } update.',
+      };
+    }
+    if (opts.hasVariant || opts.promoteOnApply) {
+      return {
+        ok: false,
+        code: "page_create_no_draft",
+        error:
+          `${where} is a new page. Do not name a variant or set promote_on_apply. ` +
+          "Resubmit with implements_proposal_id and field updates (including full sections); the proposal creates the page folder and its draft.",
+      };
+    }
+    const updates = e.updates ?? [];
+    if (!hasFullSectionsOp(updates)) {
+      return {
+        ok: false,
+        code: "sections_required",
+        error:
+          `${where} is a new page of a type that owns its sections. Send the whole layout as one update: ` +
+          '{ field_path: "sections", value: [ ...section objects ] } (non-empty). Paths like sections[0].title do not work on a page that does not exist yet.',
+        details: {
+          layout_owner: "entry",
+          new_page: true,
+          entry: { contentType: e.contentType, slug: e.slug, locale: e.locale },
+        },
+      };
+    }
+    const missing = missingRequiredFromOps(opts.shape.requiredFields, updates);
+    if (missing.length) {
+      return {
+        ok: false,
+        code: "required_fields_missing",
+        error: `This new page is missing required fields: ${missing.join(", ")}. The accepted idea still holds the slug. Add those field updates and retry.`,
+      };
+    }
+    return { ok: true, createsEntry: true };
+  }
+
+  /** Registry check for every full `sections` update (new pages, new languages, full rewrites). */
+  function checkSectionUpdates(entries: ProposalEntryInput[]):
+    | { ok: true }
+    | { ok: false; code: string; error: string; details: Record<string, unknown> } {
+    if (!deps.validateSections) return { ok: true };
+    for (const e of entries) {
+      for (const u of e.updates ?? []) {
+        if (u.field_path !== "sections" || u.reset || u.op === "remove" || u.value == null) continue;
+        const issues = deps.validateSections(u.value);
+        if (!issues.length) continue;
+        const where = `${e.contentType}/${e.slug} (${e.locale})`;
+        const first = issues[0]!;
+        return {
+          ok: false,
+          code: "invalid_sections",
+          error: `${where}: ${first.property_path}: ${first.message}` +
+            (issues.length > 1 ? ` (+${issues.length - 1} more)` : ""),
+          details: {
+            property_path: first.property_path,
+            message: first.message,
+            issues,
+            entry: { contentType: e.contentType, slug: e.slug, locale: e.locale },
+            ...(() => {
+              const info = layoutInfo(e.contentType, e.slug);
+              return info ? { ...info } : {};
+            })(),
+          },
+        };
+      }
+    }
+    return { ok: true };
+  }
+
   function buildLookupsForProposal(proposal: ProposalRecord): EntryExistenceLookup[] {
     const lookups: EntryExistenceLookup[] = [];
     if (proposal.kind === "edits") {
@@ -2308,6 +2593,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
           locale: e.locale,
           variant: e.variant,
         });
+        const info = e.layout_owner
+          ? {
+              layout_owner: e.layout_owner,
+              ...(e.detached ? { detached: true as const } : {}),
+              ...(e.is_shared_template ? { is_shared_template: true as const } : {}),
+            }
+          : layoutInfo(e.contentType, e.slug);
         lookups.push({
           contentType: e.contentType,
           slug: e.slug,
@@ -2315,6 +2607,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
           variant: e.variant,
           existence: ex.live,
           draftExists: ex.draftExists,
+          ...(info ? info : {}),
+          ...(e.baseline_context?.layout_owner
+            ? { layout_owner_at_filing: e.baseline_context.layout_owner }
+            : {}),
         });
       }
     } else if (proposal.kind === "idea") {
@@ -2325,12 +2621,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           slug: r.slug,
           locale,
         });
+        const info = layoutInfo(r.contentType, r.slug);
         lookups.push({
           contentType: r.contentType,
           slug: r.slug,
           locale,
           existence: ex.live,
           draftExists: false,
+          ...(info ? info : {}),
         });
       }
     }
@@ -2645,7 +2943,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return record;
     const affected = affectedEntriesFor(record);
     const db = dbFor(site);
-    const entries = record.entries.map((e): ProposalEntryRow => {
+    const withLayout = (e: ProposalEntryRow): ProposalEntryRow => {
+      if (e.status === "done") return e;
+      const info = layoutInfo(e.contentType, e.slug);
+      return info ? { ...e, ...info } : e;
+    };
+    const hydrateEntry = (e: ProposalEntryRow): ProposalEntryRow => {
       if (!e.variant || e.status === "done") return e;
       const ref = refOf(e);
       const requested = e.requested_ops ?? e.ops;
@@ -2678,9 +2981,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
           /* cache is best-effort */
         }
       }
+      const derived = entryViewFromDiff(requested, view.changes, view.approximate);
       const next: ProposalEntryRow = {
         ...e,
-        ...entryViewFromDiff(requested, view.changes, view.approximate),
+        ...derived,
+        baseline_context: withFilingOwner(derived.baseline_context, e.baseline_context),
       };
       const base = store.checkBase(ref);
       next.base_status = base.status;
@@ -2714,7 +3019,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       derivedViewCache.set(next, { key, json: JSON.stringify(view) });
       return next;
-    });
+    };
+    const entries = record.entries.map((e) => withLayout(hydrateEntry(e)));
     return { ...record, entries, ...(affected ? { affected_entries: affected } : {}) };
   }
 
@@ -2944,6 +3250,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
               ok: false,
               code: "attached_draft_structure",
               error: `${where}: ${structure} Drafts of posts that use the shared template may only change fields.`,
+              details: { layout_owner: "shared_template" },
             });
           }
           if (rebaseAfterWrite) s.recordBase(ref, opts.author);
@@ -3043,6 +3350,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { code: code ?? "promote_failed", details };
   }
 
+  /** Owned its layout at filing, uses the shared template now, and the draft changes sections. */
+  function layoutSwitchedToTemplate(entry: ProposalEntryRow): boolean {
+    if (entry.baseline_context?.layout_owner !== "entry" || !entry.variant) return false;
+    const now = entry.layout_owner ?? layoutInfo(entry.contentType, entry.slug)?.layout_owner;
+    if (now !== "shared_template") return false;
+    const diff = entry.author_diff ?? store?.authorDiff(refOf(entry))?.changes ?? [];
+    return diff.some((c) => isSectionFieldPath(c.field_path));
+  }
+
   /** Every check promote would run, without writing (rebuild preview included). */
   async function checkV1Entry(entry: ProposalEntryRow, caller: ProposalUpdateCaller): Promise<ApplyEntryPreview> {
     const out: ApplyEntryPreview = { entry_key: entry.entry_key, locale: entry.locale, variant: entry.variant, ok: false };
@@ -3058,6 +3374,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
         code: "context_stale",
         error: "The draft changed outside the proposal flow (for example a content sync) after the last review.",
         details: { reason: "draft_changed" },
+      };
+    }
+    if (layoutSwitchedToTemplate(entry)) {
+      return {
+        ...out,
+        code: "context_stale",
+        error:
+          "This entry now uses the shared template (reattached) since the proposal was filed, so the draft's sections would be ignored. The author must revise to fields only or withdraw.",
+        details: { reason: "layout_owner_changed", layout_owner_at_filing: "entry", layout_owner: "shared_template" },
       };
     }
     const alloc = store!.allocation(ref) ?? 0;
@@ -3088,6 +3413,41 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }
 
   const STALE_CODES = new Set(["context_stale", "draft_missing"]);
+
+  /**
+   * Template entries: new `{{ entry.* }}` placeholders that some attached entries leave empty.
+   * Never blocks; a failed scan is logged and skipped.
+   */
+  function templatePlaceholderWarnings(
+    work: ProposalEntryRow[],
+  ): Array<{ code: string; message: string; details: Record<string, unknown> }> {
+    if (!deps.scanTemplatePlaceholders || !store?.listAttachedEntries || !store.draftValue) return [];
+    const out: Array<{ code: string; message: string; details: Record<string, unknown> }> = [];
+    for (const e of work) {
+      if (!e.variant || !isTemplateVersioningSlug(e.slug)) continue;
+      try {
+        const placeholders = deps.scanTemplatePlaceholders({
+          contentType: e.contentType,
+          locale: e.locale,
+          liveSections: store.liveValue(e, "sections"),
+          draftSections: store.draftValue(refOf(e), "sections"),
+          attachedSlugs: store.listAttachedEntries(e.contentType, e.locale),
+        });
+        if (!placeholders.length) continue;
+        const parts = placeholders.map(
+          (p) => `${p.missing} of ${p.total} pages have no value for ${p.name} (e.g. ${p.sample.join(", ")})`,
+        );
+        out.push({
+          code: "template_placeholders_unfilled",
+          message: `${e.contentType} template (${e.locale}): ${parts.join("; ")} — those pages will show an empty spot. Not blocking.`,
+          details: { contentType: e.contentType, locale: e.locale, placeholders },
+        });
+      } catch (err) {
+        log.warn({ err, entry: e.entry_key, locale: e.locale }, "template placeholder scan failed");
+      }
+    }
+    return out;
+  }
 
   /** v1.0 apply: only promotes drafts. Checks every entry first (all_or_nothing / dry_run). */
   async function applyV1(
@@ -3132,15 +3492,18 @@ export function createProposalService(deps: ProposalServiceDeps) {
         details: { entries: unknownBase.map((c) => ({ entry_key: c.entry_key, locale: c.locale, variant: c.variant })) },
       };
     }
+    const placeholderGaps = affected ? templatePlaceholderWarnings(work) : [];
     if (caller.dry_run) {
+      const dryWarnings = [
+        ...failed.map((c) => ({ code: c.code ?? "apply_check_failed", message: `${c.entry_key} (${c.locale}): ${c.error}` })),
+        ...placeholderGaps,
+      ];
       return {
         ok: true as const,
         proposal,
         dry_run: true,
         merge_preview: checks,
-        ...(failed.length
-          ? { warnings: failed.map((c) => ({ code: c.code ?? "apply_check_failed", message: `${c.entry_key} (${c.locale}): ${c.error}` })) }
-          : {}),
+        ...(dryWarnings.length ? { warnings: dryWarnings } : {}),
       };
     }
 
@@ -3170,7 +3533,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       };
     }
 
-    const warnings: Array<{ code: string; message: string }> = [];
+    const warnings: Array<{ code: string; message: string; details?: Record<string, unknown> }> = [...placeholderGaps];
     for (let i = 0; i < work.length; i++) {
       const entry = work[i]!;
       const check = checks[i]!;
@@ -3763,6 +4126,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         existence: ExistenceState;
         draftExists?: boolean;
         createsEntry?: boolean;
+        outcomeFigures?: boolean;
       }> = [];
       for (const e of entriesIn) {
         const hasVariant = Boolean(e.variant?.trim());
@@ -3795,6 +4159,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
                 attachedCreateKey(e.contentType, e.slug, e.locale),
               );
             }
+          } else if (liveMissing) {
+            const gate = gateNewLocaleSections({
+              entry: e,
+              keptDraft: draftOk
+                ? { contentType: e.contentType, slug: e.slug, locale: e.locale, variant: e.variant!.trim() }
+                : null,
+            });
+            if (!gate.ok) return gate;
           }
         } else if (liveMissing && !draftOk) {
           const gate = gateMissingAttachedEntry({
@@ -3853,6 +4225,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
             "This proposal mixes different risk levels (for example outcome figures and a blog metadata fix). Split into separate proposals — one risk class each.",
         };
       }
+      const sectionsCheck = checkSectionUpdates(entriesIn);
+      if (!sectionsCheck.ok) return sectionsCheck;
     }
 
     if (kind === "idea" && relatedEntries.length > 0) {
@@ -4129,7 +4503,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       });
       if (!prepared.ok) return prepared;
       draftPlans = prepared.plans;
-      draftWarnings.push(...prepared.warnings);
+      draftWarnings.push(...prepared.warnings, ...templateLocalesWarnings(entriesIn));
     }
 
     db.prepare(
@@ -4213,6 +4587,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         JSON.stringify({
           values: {},
           ...(input.situation_note ? { note: input.situation_note } : {}),
+          ...layoutOwnerAtFiling(plan.ref),
         }),
         plan.fingerprint,
         plan.created ? 1 : 0,
@@ -4292,6 +4667,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         duplicate_of?: string;
         details?: unknown;
         pending?: ApplyEntryPreview[];
+        review_context?: ReviewContext;
       }
   > {
     const db = dbFor(site);
@@ -4806,7 +5182,30 @@ export function createProposalService(deps: ProposalServiceDeps) {
         close_note: nextStep,
         accepted_entry: acceptedEntry,
       }, caller.actor);
-      return { ok: true, proposal: get(id)! };
+      const acceptWarnings: Array<{ code: string; message: string; details?: Record<string, unknown> }> = [];
+      const acceptShape =
+        acceptEx.live === "missing" ? inspectTarget(acceptedEntry.contentType, acceptedEntry.slug).shape : null;
+      if (acceptShape === "database") {
+        acceptWarnings.push({
+          code: ACCEPTED_ENTRY_NOT_CREATABLE,
+          message:
+            `${acceptedEntryKey(acceptedEntry)} does not exist yet and this page type cannot be created from a proposal. ` +
+            "The slug stays reserved; someone must create the page in the CMS before edits can follow.",
+        });
+      } else if (acceptShape === "page_file") {
+        acceptWarnings.push({
+          code: ACCEPTED_ENTRY_NEEDS_LAYOUT,
+          message:
+            `layout_owner: entry — ${acceptedEntryKey(acceptedEntry)} owns its layout. The follow-up edits must send the whole layout ` +
+            'as one full { field_path: "sections", value: [...] } update (checked against the component registry), not only fields.',
+          details: { layout_owner: "entry", accepted_entry: acceptedEntry },
+        });
+      }
+      return {
+        ok: true,
+        proposal: get(id)!,
+        ...(acceptWarnings.length ? { warnings: acceptWarnings } : {}),
+      };
     }
 
     if (action === "close" || action === "acknowledge") {
@@ -5179,6 +5578,28 @@ export function createProposalService(deps: ProposalServiceDeps) {
                 attachedCreateKey(e.contentType, e.slug, e.locale),
               );
             }
+          } else if (liveMissing) {
+            const owned = proposal.entries.find(
+              (pe) =>
+                pe.contentType === e.contentType &&
+                pe.slug === e.slug &&
+                pe.locale === e.locale &&
+                pe.variant &&
+                (pe.status === "pending" || pe.status === "failed") &&
+                store.exists(refOf(pe)),
+            );
+            const namesOwned = owned && (!hasVariant || e.variant!.trim() === owned.variant);
+            // Revise resets drafts this proposal created (no co-authors) to live, which is empty here.
+            const willReset = namesOwned && owned!.created_draft && proposal.co_authors.length === 0;
+            const keptDraft: ProposalDraftRef | null = willReset
+              ? null
+              : draftOk
+                ? { contentType: e.contentType, slug: e.slug, locale: e.locale, variant: e.variant!.trim() }
+                : namesOwned
+                  ? refOf(owned!)
+                  : null;
+            const gate = gateNewLocaleSections({ entry: e, keptDraft });
+            if (!gate.ok) return gate;
           }
         } else if (liveMissing && !draftOk) {
           const gate = gateMissingAttachedEntry({
@@ -5234,6 +5655,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
             "This revise mixes different risk levels. Keep one risk class per proposal.",
         };
       }
+      const sectionsCheck = checkSectionUpdates(entriesIn);
+      if (!sectionsCheck.ok) return sectionsCheck;
 
       for (const e of entriesIn) {
         if (e.variant?.trim()) {
@@ -5408,7 +5831,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         });
         if (!prepared.ok) return prepared;
         revisePlans = prepared.plans;
-        reviseWarnings.push(...prepared.warnings);
+        reviseWarnings.push(...prepared.warnings, ...templateLocalesWarnings(entriesIn));
         const kept = new Set(
           revisePlans.map(
             (p) =>
@@ -5441,7 +5864,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           plan.ref.variant,
           "pending",
           JSON.stringify(plan.input.updates),
-          JSON.stringify({ values: {} }),
+          JSON.stringify({ values: {}, ...layoutOwnerAtFiling(plan.ref) }),
           plan.fingerprint,
           plan.created ? 1 : 0,
         );
@@ -7055,8 +7478,13 @@ export function inspectMissingTargetFromSite(
   const config = getContentTypeConfig(entry.contentType, ctx.contentRoot);
   if (!config) return { shape: "other" };
   if (config.database?.slug) return { shape: "database" };
-  if (!config.single_template) return { shape: "other" };
   if (isTemplateVersioningSlug(entry.slug)) return { shape: "other" };
+  if (!config.single_template) {
+    return {
+      shape: "page_file",
+      requiredFields: listRequiredEditorFields(config.editor, { isSharedLayout: false, isDetached: false }),
+    };
+  }
   if (isEntryDetached(entry.contentType, entry.slug, ctx.contentRoot)) return { shape: "other" };
   const requiredFields = listRequiredEditorFields(config.editor, {
     isSharedLayout: true,
@@ -7165,6 +7593,9 @@ export function proposalServiceForSite(ctx: SiteContext) {
     indexSearch: (p) => indexProposalSearch(site, p),
     resolveExistence: (entry) => resolveExistenceFromSite(ctx, entry),
     inspectMissingTarget: (entry) => inspectMissingTargetFromSite(ctx, entry),
+    resolveLayoutOwner: (entry) => layoutInfoForEntry(entry.contentType, entry.slug, ctx.contentRoot),
+    scanTemplatePlaceholders: (entry) => scanTemplatePlaceholdersOnSite({ ...entry, contentRoot: ctx.contentRoot }),
+    validateSections: (sections) => validateSectionsForProposal(sections, ctx.contentRootName),
     prepareCreatesEntry: (entry, opts) => prepareCreatesEntryOnSite(ctx, entry, opts),
     discardSeededEntry: (entry) => discardSeededEntryOnSite(ctx, entry),
     stampPublishedAt: (entry, author) => stampPublishedAtOnSite(ctx, entry, author),
