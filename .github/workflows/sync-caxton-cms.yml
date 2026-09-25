@@ -6,8 +6,8 @@ name: Sync caxton-cms
 
 on:
   schedule:
-    # Weekdays 14:00 UTC (morning US Eastern).
-    - cron: "0 14 * * 1-5"
+    # Weekdays 06:00 UTC-5 = 11:00 UTC.
+    - cron: "0 11 * * 1-5"
   workflow_dispatch:
 
 permissions:
