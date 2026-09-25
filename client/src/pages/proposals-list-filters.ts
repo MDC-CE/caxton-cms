@@ -176,6 +176,29 @@ function parseAttention(raw: string | null): ProposalListAttention {
     : DEFAULT_PROPOSAL_LIST_FILTERS.attention;
 }
 
+/** List layout (not a filter): cards (default) or a selectable table for bulk actions. */
+export type ProposalListPerspective = "cards" | "table";
+
+export const PROPOSAL_LIST_PERSPECTIVE_KEY = "perspective";
+
+export function parseProposalListPerspective(search: string): ProposalListPerspective {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  return params.get(PROPOSAL_LIST_PERSPECTIVE_KEY) === "table" ? "table" : "cards";
+}
+
+/** Sets or clears `perspective` on `existingSearch`; other params are kept. */
+export function withProposalListPerspective(
+  existingSearch: string,
+  perspective: ProposalListPerspective,
+): string {
+  const params = new URLSearchParams(
+    existingSearch.startsWith("?") ? existingSearch.slice(1) : existingSearch,
+  );
+  if (perspective === "cards") params.delete(PROPOSAL_LIST_PERSPECTIVE_KEY);
+  else params.set(PROPOSAL_LIST_PERSPECTIVE_KEY, perspective);
+  return params.toString();
+}
+
 export function parseProposalListSearch(search: string): ProposalListViewState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return {

@@ -1823,6 +1823,18 @@ export function registerProposalTools(
               ],
             );
           }
+          if (data.code === "proposal_deleted") {
+            return fail(String(data.error ?? "Proposal was deleted by staff"), {
+              code: "proposal_deleted",
+              proposal_id: args.proposal_id,
+              deleted_by: data.deleted_by,
+              deleted_at: data.deleted_at,
+              warnings: [
+                "Staff permanently deleted this proposal (staff UI bulk delete). Do not re-file the same change unless staff ask.",
+              ],
+              next_actions: [],
+            });
+          }
           if (data.code === "proposal_blocked") {
             return fail(String(data.error ?? "proposal blocked"), {
               code: "proposal_blocked",

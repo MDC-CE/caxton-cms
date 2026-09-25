@@ -6,6 +6,18 @@ window_days: 6
 
 entries:
   - date: "2026-09-24"
+    summary: "Staff can bulk-delete proposals (staff UI only); deleted ids return code proposal_deleted"
+    agent_impact:
+      - "update_proposal (and GET by id) on a staff-deleted proposal fails with code proposal_deleted (HTTP 410) + deleted_by / deleted_at instead of not_found. Stop working on it; do not re-file the same change unless staff ask."
+      - "No MCP tool deletes proposals — bulk delete is a staff UI action (new capability proposals_delete, Platform Steward); MCP requests to it are rejected with staff_ui_only."
+      - "Deleting removes drafts the proposal created (co-authored drafts are kept, only unlinked); drafts linked to another environment are untouched. Other proposals may still reference a deleted id (implements/supersedes/reverts)."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+      - mcp-server/tools/proposals.ts
+
+  - date: "2026-09-24"
     summary: "Proposals 1.0: the draft is the source of truth (propose writes the draft, apply only promotes)"
     agent_impact:
       - "propose_change / revise_entries write updates[] into a 0% draft now (named variant, or `draft` / `draft-p{id6}` from today's live); side_effects.drafts_written lists them. Live is unchanged until apply; apply only promotes (fingerprint-checked). attached_no_draft / creates_attached_entry paths are gone — accepted-idea edits create the folder + draft."

@@ -693,4 +693,172 @@ describe("proposals v1.0 (draft-first)", () => {
       expect(fake.drafts.get("blog/hello/es/draft")!.data).toEqual({ title: "Old", description: "Changed later" });
     });
   });
+
+  describe("staff bulk delete", () => {
+    const prevEnv = process.env.PIPELINE_ENV;
+    afterEach(() => {
+      if (prevEnv === undefined) delete process.env.PIPELINE_ENV;
+      else process.env.PIPELINE_ENV = prevEnv;
+    });
+
+    const staff = { username: "steward" };
+    const countRows = (id: string) => {
+      const db = getSiteSqlite(SITE);
+      const one = (sql: string) => (db.prepare(sql).get(id) as { n: number }).n;
+      return {
+        proposals: one(`SELECT COUNT(*) AS n FROM content_proposals WHERE id = ?`),
+        entries: one(`SELECT COUNT(*) AS n FROM content_proposal_entries WHERE proposal_id = ?`),
+        blockers: one(`SELECT COUNT(*) AS n FROM content_proposal_blockers WHERE proposal_id = ?`),
+      };
+    };
+
+    async function createOne(fake: ReturnType<typeof fakeDraftStore>, e = entry()) {
+      const { svc } = makeService({ store: fake.store });
+      const created = await svc.create({ title: "Title fix", summary: SUMMARY, entries: [e] }, { username: "alice" });
+      if (!created.ok) throw new Error(created.error);
+      return { svc, id: created.proposal.id };
+    }
+
+    it("deletes rows in all three tables and removes the draft the proposal created", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc, id } = await createOne(fake);
+      getSiteSqlite(SITE)
+        .prepare(
+          `INSERT INTO content_proposal_blockers (proposal_id, body, author, created_at) VALUES (?, 'stuck', 'bob', ?)`,
+        )
+        .run(id, Date.now());
+      expect(countRows(id).blockers).toBe(1);
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]).toMatchObject({ id, status: "deleted" });
+      expect(results[0]!.drafts_removed).toHaveLength(1);
+      expect(countRows(id)).toEqual({ proposals: 0, entries: 0, blockers: 0 });
+      expect(fake.drafts.has("blog/hello/es/draft")).toBe(false);
+      expect(fake.removed).toEqual(["blog/hello/es/draft"]);
+    });
+
+    it("keeps and unlinks a pre-existing linked draft", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      fake.store.create({ contentType: "blog", slug: "hello", locale: "es", variant: "translation" }, { author: "t" });
+      const { svc, id } = await createOne(fake, entry({ variant: "translation" }));
+      expect(fake.drafts.get("blog/hello/es/translation")!.link?.id).toBe(id);
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]!.status).toBe("deleted");
+      expect(results[0]!.drafts_unlinked).toHaveLength(1);
+      expect(fake.drafts.has("blog/hello/es/translation")).toBe(true);
+      expect(fake.drafts.get("blog/hello/es/translation")!.link).toBeNull();
+    });
+
+    it("does not rewrite an older draft that has no link", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      fake.store.create({ contentType: "blog", slug: "hello", locale: "es", variant: "translation" }, { author: "t" });
+      const { svc, id } = await createOne(fake, entry({ variant: "translation" }));
+      fake.drafts.get("blog/hello/es/translation")!.link = null;
+      const linkSpy = vi.spyOn(fake.store, "link");
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]!.status).toBe("deleted");
+      expect(linkSpy).not.toHaveBeenCalled();
+      expect(fake.drafts.has("blog/hello/es/translation")).toBe(true);
+    });
+
+    it("keeps (unlinks) a created draft when the proposal has co-authors", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc, id } = await createOne(fake);
+      getSiteSqlite(SITE)
+        .prepare(`UPDATE content_proposals SET co_authors_json = ? WHERE id = ?`)
+        .run(JSON.stringify([{ username: "staffer", at: Date.now() }]), id);
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]!.status).toBe("deleted");
+      expect(results[0]!.drafts_kept).toHaveLength(1);
+      expect(fake.drafts.has("blog/hello/es/draft")).toBe(true);
+      expect(fake.drafts.get("blog/hello/es/draft")!.link).toBeNull();
+    });
+
+    it("leaves drafts linked to another environment untouched", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc, id } = await createOne(fake);
+      fake.drafts.get("blog/hello/es/draft")!.link!.env = "production";
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]!.status).toBe("deleted");
+      expect(fake.drafts.has("blog/hello/es/draft")).toBe(true);
+      expect(fake.drafts.get("blog/hello/es/draft")!.link?.env).toBe("production");
+    });
+
+    it("removes a created draft with no link only in production", async () => {
+      const local = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const a = await createOne(local);
+      local.drafts.get("blog/hello/es/draft")!.link = null;
+      await a.svc.deleteProposals([a.id], staff);
+      expect(local.drafts.has("blog/hello/es/draft")).toBe(true);
+
+      const prod = fakeDraftStore({ "blog/other/es": { title: "O" } });
+      const b = await createOne(prod, entry({ slug: "other" }));
+      prod.drafts.get("blog/other/es/draft")!.link = null;
+      process.env.PIPELINE_ENV = "production";
+      const { results } = await b.svc.deleteProposals([b.id], staff);
+      expect(results[0]!.drafts_removed).toHaveLength(1);
+      expect(prod.drafts.has("blog/other/es/draft")).toBe(false);
+    });
+
+    it("blocks an idea with an open implementing proposal unless both are selected", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" }, "blog/other/es": { title: "O" } });
+      const { svc, id: ideaId } = await createOne(fake);
+      const { id: implId } = await createOne(fake, entry({ slug: "other" }));
+      const db = getSiteSqlite(SITE);
+      db.prepare(`UPDATE content_proposals SET kind = 'idea' WHERE id = ?`).run(ideaId);
+      db.prepare(`UPDATE content_proposals SET implements_proposal_id = ? WHERE id = ?`).run(ideaId, implId);
+
+      const blocked = await svc.deleteProposals([ideaId], staff);
+      expect(blocked.results[0]).toMatchObject({ id: ideaId, status: "blocked_dependents" });
+      expect(blocked.results[0]!.dependents).toEqual([{ id: implId, title: "Title fix" }]);
+      expect(countRows(ideaId).proposals).toBe(1);
+
+      const both = await svc.deleteProposals([ideaId, implId], staff);
+      expect(both.results.map((r) => r.status)).toEqual(["deleted", "deleted"]);
+      expect(countRows(ideaId).proposals + countRows(implId).proposals).toBe(0);
+    });
+
+    it("stores the full snapshot on the proposal_deleted event and reports proposal_deleted afterwards", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc, id } = await createOne(fake);
+      await svc.deleteProposals([id], staff);
+      const row = getSiteSqlite(SITE)
+        .prepare(`SELECT payload_json FROM events WHERE type = 'proposal_deleted' ORDER BY id DESC LIMIT 1`)
+        .get() as { payload_json: string };
+      const payload = JSON.parse(row.payload_json) as {
+        proposal_id: string;
+        snapshot: { id: string; title: string; entries: Array<{ ops: unknown }> };
+      };
+      expect(payload.proposal_id).toBe(id);
+      expect(payload.snapshot.id).toBe(id);
+      expect(payload.snapshot.title).toBe("Title fix");
+      expect(payload.snapshot.entries[0]!.ops).toEqual([{ field_path: "title", value: "New" }]);
+
+      expect(svc.deletion(id)).toMatchObject({ deleted_by: "steward" });
+      const res = await svc.update(id, "withdraw", { username: "alice", close_note: "no longer needed" });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe("proposal_deleted");
+    });
+
+    it("records an error and keeps the row when a draft removal throws", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc, id } = await createOne(fake);
+      fake.store.remove = async () => {
+        throw new Error("disk full");
+      };
+      const { results } = await svc.deleteProposals([id], staff);
+      expect(results[0]!.status).toBe("error");
+      expect(results[0]!.reason).toContain("disk full");
+      expect(countRows(id).proposals).toBe(1);
+      expect(svc.deletion(id)).toBeNull();
+    });
+
+    it("returns not_found for an unknown id", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store });
+      const { results } = await svc.deleteProposals(["nope"], staff);
+      expect(results).toEqual([
+        { id: "nope", status: "not_found", reason: "Proposal not found", drafts_removed: [], drafts_unlinked: [], drafts_kept: [] },
+      ]);
+    });
+  });
 });

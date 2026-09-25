@@ -86,7 +86,16 @@ function shortDate(iso: string): string {
 }
 
 /** List card + detail header badges for proposals v1.0 (draft is the source of truth). */
-export function ProposalV1Badges({ p, stopLinkNavigation = false }: { p: ProposalV1BadgeData; stopLinkNavigation?: boolean }) {
+export function ProposalV1Badges({
+  p,
+  stopLinkNavigation = false,
+  revertsDeleted = false,
+}: {
+  p: ProposalV1BadgeData;
+  stopLinkNavigation?: boolean;
+  /** The proposal being reverted no longer exists (staff deleted it). */
+  revertsDeleted?: boolean;
+}) {
   const suffix = `-${p.id}`;
   const open = p.status === "open" || p.status === "partial";
   const badges: ReactNode[] = [];
@@ -156,7 +165,9 @@ export function ProposalV1Badges({ p, stopLinkNavigation = false }: { p: Proposa
         key="revert"
         label="Revert"
         title="Undoes an earlier proposal"
-        body={`Approving puts back the values that were live before proposal ${p.reverts_proposal_id.slice(0, 8)} was applied. Fields changed again since then were left out.`}
+        body={`Approving puts back the values that were live before proposal ${
+          revertsDeleted ? "(Deleted proposal)" : p.reverts_proposal_id.slice(0, 8)
+        } was applied. Fields changed again since then were left out.`}
         testId={`badge-proposal-revert${suffix}`}
         stopLinkNavigation={stopLinkNavigation}
       />,

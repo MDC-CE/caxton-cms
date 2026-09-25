@@ -14,12 +14,14 @@ import {
   IconFilter,
   IconInbox,
   IconInfoCircle,
+  IconLayoutList,
   IconLink,
   IconLoader2,
   IconLock,
   IconLockOpen,
   IconMessage,
   IconSearch,
+  IconTable,
   IconX,
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
@@ -143,15 +145,27 @@ import {
   PROPOSAL_STATUS_OPTIONS,
   clearProposalListFilters,
   countActiveProposalFilters,
+  parseProposalListPerspective,
   parseProposalListSearch,
   proposalListApiSearchParams,
   proposalSortFromPreset,
   proposalSortPresetValue,
   serializeProposalListSearch,
   toProposalListApiQuery,
+  withProposalListPerspective,
   type ProposalListFilters,
+  type ProposalListPerspective,
   type ProposalListStats,
 } from "@/pages/proposals-list-filters";
+import {
+  ProposalBulkActionsBar,
+  ProposalBulkDeleteDialog,
+  ProposalListTable,
+} from "@/components/agents/ProposalListTable";
+import {
+  summarizeProposalBulkDelete,
+  type ProposalBulkDeleteResult,
+} from "@/lib/proposalBulkDelete";
 
 export const AGENTS_PROPOSALS_BASE = "/private/agents/proposals";
 
@@ -539,12 +553,22 @@ export function ProposalListPanel() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pullProductionOpen, setPullProductionOpen] = useState(false);
   const [pullingProduction, setPullingProduction] = useState(false);
+  const perspective = useMemo(() => parseProposalListPerspective(searchString), [searchString]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const { hasCapability } = useDebugAuth();
+  const canDeleteProposals = hasCapability("proposals_delete");
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
   useEffect(() => {
     setQInput(view.q);
   }, [view.q]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [searchString]);
 
   useEffect(() => {
     const trimmed = qInput.trim();
@@ -563,6 +587,12 @@ export function ProposalListPanel() {
 
   const writeView = (next: { filters: ProposalListFilters; q: string }) => {
     const qs = serializeProposalListSearch(next, searchString);
+    const pathOnly = pathname.split("?")[0];
+    setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
+  };
+
+  const writePerspective = (next: ProposalListPerspective) => {
+    const qs = withProposalListPerspective(searchString, next);
     const pathOnly = pathname.split("?")[0];
     setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
   };
@@ -641,6 +671,38 @@ export function ProposalListPanel() {
 
   const proposals = data?.proposals ?? [];
   const resultCount = data?.total ?? proposals.length;
+  const selectionActive = perspective === "table" && selectedIds.size > 0;
+  const proposalHref = (id: string) =>
+    listSearch ? `${AGENTS_PROPOSALS_BASE}/${id}?${listSearch}` : `${AGENTS_PROPOSALS_BASE}/${id}`;
+
+  const runBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    const titles = new Map(proposals.map((p) => [p.id, p.title]));
+    setBulkDeleting(true);
+    try {
+      const res = await apiRequestWithAuth("POST", "/api/admin/proposals/bulk-delete", { ids });
+      const body = (await res.json()) as { results?: ProposalBulkDeleteResult[] };
+      const summary = summarizeProposalBulkDelete(body.results ?? [], (id) => titles.get(id));
+      setBulkDeleteOpen(false);
+      setSelectedIds(new Set());
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/proposals/kpis"] });
+      toast({
+        title: summary.headline,
+        description: summary.details.length ? summary.details.join(" ") : undefined,
+        variant: summary.deleted === 0 && (summary.blocked || summary.failed) ? "destructive" : undefined,
+      });
+    } catch (err) {
+      toast({
+        title: "Could not delete proposals",
+        description: err instanceof Error ? err.message : "Delete failed.",
+        variant: "destructive",
+      });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
 
   const pullProduction = async () => {
     if (!import.meta.env.DEV) return;
@@ -729,6 +791,15 @@ export function ProposalListPanel() {
           <EventWebhooksKpiButton onClick={() => setLocation("/private/webhooks/hooks")} />
         }
       />
+      {selectionActive ? (
+        <ProposalBulkActionsBar
+          count={selectedIds.size}
+          canDelete={canDeleteProposals}
+          deleting={bulkDeleting}
+          onClear={() => setSelectedIds(new Set())}
+          onDelete={() => setBulkDeleteOpen(true)}
+        />
+      ) : (
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <IconSearch
@@ -798,6 +869,45 @@ export function ProposalListPanel() {
             })}
           </DropdownMenuContent>
         </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              className="shrink-0 gap-1.5"
+              title="List perspective"
+              data-testid="button-list-perspective"
+            >
+              {perspective === "table" ? (
+                <IconTable className="h-4 w-4" />
+              ) : (
+                <IconLayoutList className="h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">{perspective === "table" ? "Table" : "Cards"}</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {(
+              [
+                { value: "cards", label: "Cards", Icon: IconLayoutList },
+                { value: "table", label: "Table", Icon: IconTable },
+              ] as const
+            ).map(({ value, label, Icon }) => (
+              <DropdownMenuItem
+                key={value}
+                className="gap-2"
+                onClick={() => writePerspective(value)}
+                data-testid={`menu-perspective-${value}`}
+              >
+                <IconCheck
+                  className={cn("h-3.5 w-3.5", perspective === value ? "opacity-100" : "opacity-0")}
+                />
+                <Icon className="h-4 w-4" />
+                {label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
         {import.meta.env.DEV ? (
           <Button
             type="button"
@@ -815,6 +925,16 @@ export function ProposalListPanel() {
           </Button>
         ) : null}
       </div>
+      )}
+      <ProposalBulkDeleteDialog
+        open={bulkDeleteOpen}
+        onOpenChange={(open) => {
+          if (!bulkDeleting) setBulkDeleteOpen(open);
+        }}
+        count={selectedIds.size}
+        deleting={bulkDeleting}
+        onConfirm={() => void runBulkDelete()}
+      />
       <ProposalListFiltersDialog
         open={filtersOpen}
         onOpenChange={setFiltersOpen}
@@ -867,19 +987,32 @@ export function ProposalListPanel() {
               {listSummary ? ` · ${listSummary}` : ""}
             </p>
           ) : null}
-          <div className="space-y-2.5">
-            {proposals.map((p) => (
-              <ProposalListCard
-                key={p.id}
-                proposal={p}
-                href={
-                  listSearch
-                    ? `${AGENTS_PROPOSALS_BASE}/${p.id}?${listSearch}`
-                    : `${AGENTS_PROPOSALS_BASE}/${p.id}`
+          {perspective === "table" ? (
+            proposals.length > 0 ? (
+              <ProposalListTable
+                proposals={proposals}
+                selected={selectedIds}
+                hrefFor={proposalHref}
+                onToggle={(id, checked) =>
+                  setSelectedIds((prev) => {
+                    const next = new Set(prev);
+                    if (checked) next.add(id);
+                    else next.delete(id);
+                    return next;
+                  })
+                }
+                onToggleAll={(checked) =>
+                  setSelectedIds(checked ? new Set(proposals.map((p) => p.id)) : new Set())
                 }
               />
-            ))}
-          </div>
+            ) : null
+          ) : (
+            <div className="space-y-2.5">
+              {proposals.map((p) => (
+                <ProposalListCard key={p.id} proposal={p} href={proposalHref(p.id)} />
+              ))}
+            </div>
+          )}
           {proposals.length === 0 && (
             <div
               className="flex flex-col items-center gap-3 rounded-card border border-dashed border-card-border px-6 py-12 text-center"
@@ -995,14 +1128,30 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     }, 350);
   };
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error: detailError } = useQuery({
     queryKey: ["/api/admin/proposals", id],
     queryFn: async () => {
       const res = await apiFetch(`/api/admin/proposals/${id}`, { headers: headers() });
+      if (res.status === 410) {
+        const body = (await res.json().catch(() => ({}))) as {
+          deleted_by?: string;
+          deleted_at?: string;
+        };
+        throw Object.assign(new Error("Proposal was deleted"), {
+          deleted: { by: body.deleted_by ?? "staff", at: body.deleted_at ?? null },
+        });
+      }
       if (!res.ok) throw new Error("Not found");
-      return res.json() as Promise<{ proposal: Proposal; review_context?: ReviewContextPayload | null }>;
+      return res.json() as Promise<{
+        proposal: Proposal;
+        review_context?: ReviewContextPayload | null;
+        deleted_refs?: string[];
+      }>;
     },
   });
+  const deletedInfo = (detailError as { deleted?: { by: string; at: string | null } } | null)
+    ?.deleted;
+  const deletedRefs = new Set(data?.deleted_refs ?? []);
 
   const mut = useMutation({
     mutationFn: async (payload: { action: string; body?: Record<string, unknown> }) => {
@@ -1302,6 +1451,24 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           <Skeleton className="h-3 w-1/2" />
         </Card>
       )}
+      {deletedInfo ? (
+        <div
+          className="flex flex-col items-center gap-3 rounded-card border border-dashed border-card-border px-6 py-12 text-center"
+          data-testid="proposal-deleted-state"
+        >
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <IconBan className="h-5 w-5" aria-hidden />
+          </span>
+          <div className="space-y-1">
+            <p className="text-sm font-medium">Deleted proposal</p>
+            <p className="text-xs text-muted-foreground">
+              Deleted by {deletedInfo.by}
+              {deletedInfo.at ? ` on ${new Date(deletedInfo.at).toLocaleString()}` : ""}. It can&apos;t
+              be opened anymore.
+            </p>
+          </div>
+        </div>
+      ) : null}
       {p && mode && attribution && ui && (
         <>
           <Card className={cn("border-l-2", ui.accentClassName)}>
@@ -1343,7 +1510,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}
-                  <ProposalV1Badges p={p} />
+                  <ProposalV1Badges
+                    p={p}
+                    revertsDeleted={Boolean(
+                      p.reverts_proposal_id && deletedRefs.has(p.reverts_proposal_id),
+                    )}
+                  />
                 </div>
                 <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
                 {p.escalated ? (
@@ -1697,13 +1869,24 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     data-testid="proposal-implements-idea"
                   >
                     <span className="text-xs text-muted-foreground">Implements idea</span>
-                    <Badge
-                      variant="outline"
-                      className="font-mono font-normal"
-                      data-testid="badge-implements-proposal"
-                    >
-                      {p.implements_proposal_id.slice(0, 8)}…
-                    </Badge>
+                    {deletedRefs.has(p.implements_proposal_id) ? (
+                      <Badge
+                        variant="outline"
+                        className="font-normal text-muted-foreground"
+                        title={p.implements_proposal_id}
+                        data-testid="badge-implements-proposal-deleted"
+                      >
+                        Deleted proposal
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className="font-mono font-normal"
+                        data-testid="badge-implements-proposal"
+                      >
+                        {p.implements_proposal_id.slice(0, 8)}…
+                      </Badge>
+                    )}
                   </div>
                 ) : null}
                 <ProposalMetaRow items={detailMeta} className="text-xs" />
@@ -1990,7 +2173,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   {p.closed_by ? ` by ${p.closed_by}` : ""}
                   {p.close_note ? `: ${p.close_note}` : ""}
                 </p>
-                {p.replaced_by_proposal_id ? (
+                {p.replaced_by_proposal_id && deletedRefs.has(p.replaced_by_proposal_id) ? (
+                  <p
+                    className="text-muted-foreground"
+                    title={p.replaced_by_proposal_id}
+                    data-testid="text-replaced-by-proposal-deleted"
+                  >
+                    Replacement: Deleted proposal
+                  </p>
+                ) : p.replaced_by_proposal_id ? (
                   <p>
                     <Link
                       href={`${AGENTS_PROPOSALS_BASE}/${p.replaced_by_proposal_id}`}

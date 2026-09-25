@@ -1149,6 +1149,81 @@ function loadProposal(db: Database.Database, id: string): ProposalRecord | null 
   return mapProposal(row, loadEntries(db, id), loadBlockers(db, id));
 }
 
+export type ProposalDeletion = { deleted_by: string; deleted_at: number };
+
+export type ProposalDeleteResult = {
+  id: string;
+  status: "deleted" | "not_found" | "blocked_dependents" | "error";
+  reason?: string;
+  dependents?: Array<{ id: string; title: string }>;
+  drafts_removed: string[];
+  drafts_unlinked: string[];
+  drafts_kept: string[];
+};
+
+/** Staff bulk-delete tombstone (from the `proposal_deleted` event) for an id with no row. */
+function findProposalDeletion(
+  db: Database.Database,
+  site: string,
+  id: string,
+): ProposalDeletion | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT created_at, attribution_json FROM events
+         WHERE site = ? AND type = 'proposal_deleted'
+           AND json_extract(payload_json, '$.proposal_id') = ?
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(site, id) as { created_at: number; attribution_json: string } | undefined;
+    if (!row) return null;
+    const attribution = parseJson<Array<{ author?: string }>>(row.attribution_json, []);
+    return { deleted_by: attribution[0]?.author || "staff", deleted_at: row.created_at };
+  } catch {
+    return null;
+  }
+}
+
+export function proposalDeletedError(deletion: ProposalDeletion): {
+  ok: false;
+  code: "proposal_deleted";
+  error: string;
+  deleted_by: string;
+  deleted_at: string;
+} {
+  const at = new Date(deletion.deleted_at).toISOString();
+  return {
+    ok: false,
+    code: "proposal_deleted",
+    error: `Proposal was deleted by staff (${deletion.deleted_by} at ${at}). Do not re-file unless staff ask.`,
+    deleted_by: deletion.deleted_by,
+    deleted_at: at,
+  };
+}
+
+/** One proposal in export shape (entries + blockers + v1.0 pre-apply snapshots). */
+function exportProposalRow(db: Database.Database, row: ProposalRow): ProposalRecord {
+  const record = mapProposal(row, loadEntries(db, row.id), loadBlockers(db, row.id));
+  if (!row.system_version) return record;
+  const snapshots = new Map(
+    (
+      db
+        .prepare(
+          `SELECT id, pre_apply_snapshot_json FROM content_proposal_entries
+           WHERE proposal_id = ? AND pre_apply_snapshot_json IS NOT NULL`,
+        )
+        .all(row.id) as Array<{ id: number; pre_apply_snapshot_json: string }>
+    ).map((r) => [r.id, r.pre_apply_snapshot_json]),
+  );
+  return {
+    ...record,
+    entries: record.entries.map((e) => {
+      const raw = snapshots.get(e.id);
+      return raw ? { ...e, pre_apply_snapshot: parseJson(raw, null) } : e;
+    }),
+  };
+}
+
 function callerIsProposer(proposal: ProposalRecord, caller: ProposalUpdateCaller): boolean {
   return sameAgentIdentity(
     proposal.proposer_username,
@@ -1286,7 +1361,8 @@ function emitProposalEvent(
     | "proposal_migrated_v1"
     | "draft_rebuilt"
     | "draft_orphan_cleaned"
-    | "proposal_co_author_edit",
+    | "proposal_co_author_edit"
+    | "proposal_deleted",
   proposalId: string,
   author: string,
   payload: Record<string, unknown> = {},
@@ -1299,7 +1375,8 @@ function emitProposalEvent(
     type === "proposal_rejected" ||
     type === "proposal_withdrawn" ||
     type === "proposal_closed_abandoned_stale" ||
-    type === "proposal_applied_progress"
+    type === "proposal_applied_progress" ||
+    type === "proposal_deleted"
   ) {
     invalidateKpiCache(site);
   }
@@ -2884,37 +2961,71 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return { ok: true, plans, warnings };
   }
 
-  /** Reject / withdraw / drop from revise: delete drafts this proposal created, unlink the rest. */
+  /**
+   * Reject / withdraw / drop from revise: delete drafts this proposal created, unlink the rest.
+   * `forDelete` (staff bulk delete): only drafts linked to this environment (or unlinked drafts
+   * in production) are touched, empty links are never rewritten, co-authored drafts are kept,
+   * and a failed removal throws so the caller can keep the proposal row.
+   */
   async function releaseV1Drafts(
     proposalId: string,
     entries: ProposalEntryRow[],
     author: string,
-  ): Promise<Array<{ code: string; message: string }>> {
+    opts?: { forDelete?: { keepCreated: boolean } },
+  ): Promise<Array<{ code: string; message: string; path?: string }>> {
     if (!store) return [];
-    const out: Array<{ code: string; message: string }> = [];
+    const forDelete = opts?.forDelete;
+    const out: Array<{ code: string; message: string; path?: string }> = [];
     for (const e of entries) {
       if (!e.variant || e.status === "done") continue;
       const ref = refOf(e);
       if (!store.exists(ref)) continue;
       const link = store.readLink(ref);
       if (link && link.id !== proposalId) continue;
+      const where = `${e.variant} of ${e.contentType}/${e.slug} (${e.locale})`;
+      const relPath = forDelete ? path.relative(process.cwd(), store.pathOf(ref)) : undefined;
+      if (forDelete) {
+        const env = pipelineEnv();
+        const owned = link ? link.env === env : env === "production";
+        if (!owned) {
+          out.push({
+            code: "draft_other_env",
+            message: `Left draft ${where} untouched (it belongs to ${link?.env ?? "an unknown"} environment).`,
+            path: relPath,
+          });
+          continue;
+        }
+      }
       try {
-        if (e.created_draft) {
+        const remove = forDelete ? e.created_draft && !forDelete.keepCreated : e.created_draft;
+        if (remove) {
           const { entryDeleted } = await store.remove(ref, author);
           out.push({
             code: "draft_deleted",
             message: entryDeleted
-              ? `Deleted draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) and the unpublished page it created.`
-              : `Deleted draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) (created by this proposal).`,
+              ? `Deleted draft ${where} and the unpublished page it created.`
+              : `Deleted draft ${where} (created by this proposal).`,
+            path: relPath,
           });
+        } else if (forDelete && e.created_draft) {
+          if (link) store.link(ref, null, author);
+          out.push({
+            code: "draft_kept_co_authors",
+            message: `Kept draft ${where} because co-authors edited it; unlinked.`,
+            path: relPath,
+          });
+        } else if (forDelete && !link) {
+          continue;
         } else {
           store.link(ref, null, author);
           out.push({
             code: "draft_kept",
-            message: `Kept draft ${e.variant} of ${e.contentType}/${e.slug} (${e.locale}) (it existed before this proposal); unlinked.`,
+            message: `Kept draft ${where} (it existed before this proposal); unlinked.`,
+            path: relPath,
           });
         }
       } catch (err) {
+        if (forDelete) throw err;
         log.warn({ err, proposalId }, "release proposal draft failed");
       }
     }
@@ -4185,7 +4296,11 @@ export function createProposalService(deps: ProposalServiceDeps) {
   > {
     const db = dbFor(site);
     const proposal = getRaw(id);
-    if (!proposal) return { ok: false, code: "not_found", error: "Proposal not found" };
+    if (!proposal) {
+      const deleted = findProposalDeletion(db, site, id);
+      if (deleted) return proposalDeletedError(deleted);
+      return { ok: false, code: "not_found", error: "Proposal not found" };
+    }
 
     if (
       store &&
@@ -6351,8 +6466,136 @@ export function createProposalService(deps: ProposalServiceDeps) {
     return report;
   }
 
+  function deletion(id: string): ProposalDeletion | null {
+    return findProposalDeletion(dbFor(site), site, id);
+  }
+
+  /** Referenced proposal ids (implements / supersedes / replaced_by / reverts) that no longer exist. */
+  function missingReferencedIds(p: ProposalRecord): string[] {
+    const refs = Array.from(
+      new Set(
+        [
+          p.implements_proposal_id,
+          p.supersedes_proposal_id,
+          p.replaced_by_proposal_id,
+          p.reverts_proposal_id,
+        ].filter((v): v is string => typeof v === "string" && v.length > 0),
+      ),
+    );
+    if (!refs.length) return [];
+    const db = dbFor(site);
+    const found = new Set(
+      (
+        db
+          .prepare(
+            `SELECT id FROM content_proposals WHERE site = ? AND id IN (${refs.map(() => "?").join(",")})`,
+          )
+          .all(site, ...refs) as Array<{ id: string }>
+      ).map((r) => r.id),
+    );
+    return refs.filter((id) => !found.has(id));
+  }
+
+  async function deleteProposals(
+    ids: string[],
+    caller: { username: string; actor?: EventActor },
+  ): Promise<{ results: ProposalDeleteResult[] }> {
+    const db = dbFor(site);
+    const selected = new Set(ids);
+    const results: ProposalDeleteResult[] = [];
+    for (const id of Array.from(selected)) {
+      const empty = { drafts_removed: [], drafts_unlinked: [], drafts_kept: [] };
+      const row = db
+        .prepare(`SELECT * FROM content_proposals WHERE id = ? AND site = ?`)
+        .get(id, site) as ProposalRow | undefined;
+      if (!row) {
+        results.push({ id, status: "not_found", reason: "Proposal not found", ...empty });
+        continue;
+      }
+      if (row.kind === "idea") {
+        const dependents = (
+          db
+            .prepare(
+              `SELECT id, title FROM content_proposals
+               WHERE site = ? AND implements_proposal_id = ? AND status IN ('open', 'partial')`,
+            )
+            .all(site, id) as Array<{ id: string; title: string }>
+        ).filter((d) => !selected.has(d.id));
+        if (dependents.length) {
+          results.push({
+            id,
+            status: "blocked_dependents",
+            reason: `${dependents.length} open proposal(s) implement this idea. Select them too to delete the idea.`,
+            dependents,
+            ...empty,
+          });
+          continue;
+        }
+      }
+
+      const snapshot = exportProposalRow(db, row);
+      const removed: string[] = [];
+      const unlinked: string[] = [];
+      const kept: string[] = [];
+      try {
+        const released = await releaseV1Drafts(id, snapshot.entries, caller.username, {
+          forDelete: { keepCreated: snapshot.co_authors.length > 0 },
+        });
+        for (const r of released) {
+          if (!r.path) continue;
+          if (r.code === "draft_deleted") removed.push(r.path);
+          else if (r.code === "draft_kept") unlinked.push(r.path);
+          else if (r.code === "draft_kept_co_authors") kept.push(r.path);
+        }
+      } catch (err) {
+        results.push({
+          id,
+          status: "error",
+          reason: `Could not remove a draft: ${err instanceof Error ? err.message : String(err)}`,
+          drafts_removed: removed,
+          drafts_unlinked: unlinked,
+          drafts_kept: kept,
+        });
+        continue;
+      }
+
+      db.transaction(() => {
+        db.prepare(`DELETE FROM content_proposal_blockers WHERE proposal_id = ?`).run(id);
+        db.prepare(`DELETE FROM content_proposal_entries WHERE proposal_id = ?`).run(id);
+        db.prepare(`DELETE FROM content_proposals WHERE id = ?`).run(id);
+      })();
+      emitProposalEvent(
+        site,
+        "proposal_deleted",
+        id,
+        caller.username,
+        {
+          title: snapshot.title,
+          kind: snapshot.kind,
+          status: snapshot.status,
+          drafts_removed: removed,
+          drafts_unlinked: unlinked,
+          drafts_kept: kept,
+          snapshot,
+        },
+        caller.actor,
+      );
+      results.push({
+        id,
+        status: "deleted",
+        drafts_removed: removed,
+        drafts_unlinked: unlinked,
+        drafts_kept: kept,
+      });
+    }
+    return { results };
+  }
+
   return {
     get,
+    deletion,
+    deleteProposals,
+    missingReferencedIds,
     migrateLegacy,
     staleSweep,
     verifyDraftLinks,
@@ -6417,28 +6660,7 @@ export function exportAllProposals(site: string): ProposalRecord[] {
   const rows = db
     .prepare(`SELECT * FROM content_proposals WHERE site = ? ORDER BY updated_at DESC, id ASC`)
     .all(site) as ProposalRow[];
-  const snapshots = new Map(
-    (
-      db
-        .prepare(
-          `SELECT e.id, e.pre_apply_snapshot_json FROM content_proposal_entries e
-           JOIN content_proposals p ON p.id = e.proposal_id
-           WHERE p.site = ? AND e.pre_apply_snapshot_json IS NOT NULL`,
-        )
-        .all(site) as Array<{ id: number; pre_apply_snapshot_json: string }>
-    ).map((r) => [r.id, r.pre_apply_snapshot_json]),
-  );
-  return rows.map((r) => {
-    const record = mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id));
-    if (!r.system_version) return record;
-    return {
-      ...record,
-      entries: record.entries.map((e) => {
-        const raw = snapshots.get(e.id);
-        return raw ? { ...e, pre_apply_snapshot: parseJson(raw, null) } : e;
-      }),
-    };
-  });
+  return rows.map((r) => exportProposalRow(db, r));
 }
 
 function syncAutoincrement(db: Database.Database, table: string): void {

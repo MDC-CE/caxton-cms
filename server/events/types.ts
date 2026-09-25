@@ -49,6 +49,7 @@ export const EVENT_TYPES = [
   "draft_unlinked",
   "draft_orphan_cleaned",
   "proposal_co_author_edit",
+  "proposal_deleted",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -114,6 +115,7 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
   draft_unlinked: { outbox: "audit", affectsWriteGeneration: false },
   draft_orphan_cleaned: { outbox: "audit", affectsWriteGeneration: false },
   proposal_co_author_edit: { outbox: "audit", affectsWriteGeneration: false },
+  proposal_deleted: { outbox: "audit", affectsWriteGeneration: false },
 };
 
 export function isOutboxDispatchable(type: EventType): boolean {

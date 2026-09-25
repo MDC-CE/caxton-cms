@@ -4,11 +4,13 @@ import {
   DEFAULT_PROPOSAL_LIST_VIEW,
   clearProposalListFilters,
   countActiveProposalFilters,
+  parseProposalListPerspective,
   parseProposalListSearch,
   proposalKpiCardsForKindFilter,
   proposalListApiSearchParams,
   serializeProposalListSearch,
   toProposalListApiQuery,
+  withProposalListPerspective,
 } from "./proposals-list-filters";
 
 describe("parseProposalListSearch", () => {
@@ -347,5 +349,30 @@ describe("proposalKpiCardsForKindFilter", () => {
     const cards = proposalKpiCardsForKindFilter("idea");
     expect(cards).toHaveLength(1);
     expect(cards[0]).toEqual({ kind: "idea", label: "Ideas" });
+  });
+});
+
+describe("proposal list perspective", () => {
+  it("defaults to cards and ignores unknown values", () => {
+    expect(parseProposalListPerspective("")).toBe("cards");
+    expect(parseProposalListPerspective("perspective=grid")).toBe("cards");
+    expect(parseProposalListPerspective("?perspective=table&status=all")).toBe("table");
+  });
+
+  it("omits the default and keeps other params", () => {
+    expect(withProposalListPerspective("status=all&perspective=table", "cards")).toBe("status=all");
+    const next = withProposalListPerspective("?status=all", "table");
+    expect(parseProposalListPerspective(next)).toBe("table");
+    expect(new URLSearchParams(next).get("status")).toBe("all");
+  });
+
+  it("survives filter serialization", () => {
+    const search = withProposalListPerspective("", "table");
+    const view = parseProposalListSearch(search);
+    const next = serializeProposalListSearch(
+      { ...view, filters: { ...view.filters, status: "all" } },
+      search,
+    );
+    expect(parseProposalListPerspective(next)).toBe("table");
   });
 });

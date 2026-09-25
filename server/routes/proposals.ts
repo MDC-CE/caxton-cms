@@ -2,7 +2,12 @@ import type { Express, Request, Response } from "express";
 import { api } from "../rate-limit/api";
 import * as userStore from "../user-store";
 import { requireAnyCapability } from "./_helpers";
-import { proposalServiceForSite, exportAllProposals, toProposalSummary } from "../content-proposals";
+import {
+  proposalServiceForSite,
+  exportAllProposals,
+  toProposalSummary,
+  proposalDeletedError,
+} from "../content-proposals";
 import type { SiteContext } from "../site-manager";
 import {
   parseProposalSort,
@@ -16,6 +21,7 @@ import {
   parseProposalAttention,
   parseAttentionPerspective,
 } from "../content-proposals/attention";
+import { checkBulkDeleteRequest } from "../content-proposals/bulk-delete-gate";
 import { child } from "../logger";
 import { resolveEventActor } from "./_helpers";
 import { getProposalSettings } from "../settings";
@@ -381,12 +387,45 @@ export function registerProposalRoutes(app: Express): void {
     if (!svc) return;
     const proposal = svc.get(req.params.id);
     if (!proposal) {
+      const deleted = svc.deletion(req.params.id);
+      if (deleted) {
+        res.status(410).json(proposalDeletedError(deleted));
+        return;
+      }
       res.status(404).json({ error: "Proposal not found" });
       return;
     }
     const review_context = await svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
     const fresh = svc.get(req.params.id) ?? proposal;
-    res.json({ proposal: fresh, review_context });
+    res.json({ proposal: fresh, review_context, deleted_refs: svc.missingReferencedIds(fresh) });
+  });
+
+  api.post(app, "/api/admin/proposals/bulk-delete", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireProposalRead(req, res);
+    if (!auth) return;
+    const gate = checkBulkDeleteRequest({
+      actorType: resolveEventActor(req)?.type ?? null,
+      username: auth.username,
+      hasDeleteCapability: Boolean(
+        auth.username && userStore.hasCapability(auth.username, "proposals_delete"),
+      ),
+      ids: req.body?.ids,
+    });
+    if (!gate.ok) {
+      res.status(gate.status).json({ ok: false, code: gate.code, error: gate.error });
+      return;
+    }
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const { results } = await svc.deleteProposals(gate.ids, {
+      username: auth.username!,
+      actor: resolveEventActor(req),
+    });
+    res.json({
+      ok: true,
+      results,
+      deleted: results.filter((r) => r.status === "deleted").length,
+    });
   });
 
   api.post(app, "/api/admin/proposals", { rate: "staffWrite" }, async (req, res) => {
@@ -652,6 +691,8 @@ export function registerProposalRoutes(app: Express): void {
       const status =
         result.code === "not_found"
           ? 404
+          : result.code === "proposal_deleted"
+            ? 410
           : result.code === "four_eyes" ||
               result.code === "not_claimant" ||
               result.code === "not_proposer" ||

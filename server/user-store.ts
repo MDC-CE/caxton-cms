@@ -190,7 +190,7 @@ const BUILT_IN_USER_ADMIN_ROLE: RoleDefinition = {
 const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
   label: "Platform Steward",
   description:
-    "Site health: diagnostics, runtime issues, redirects, SEO settings, content-type schema, private database definitions, and full proposal create/review. Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
+    "Site health: diagnostics, runtime issues, redirects, SEO settings, content-type schema, private database definitions, and full proposal create/review (bulk proposal delete is staff UI only, never via MCP). Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
   capabilities: [
     { name: "metrics_view" },
     { name: "content_view", contentTypes: "*" },
@@ -204,6 +204,7 @@ const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
     { name: "databases_manage" },
     { name: "proposals_create" },
     { name: "proposals_review" },
+    { name: "proposals_delete" },
   ],
 };
 
