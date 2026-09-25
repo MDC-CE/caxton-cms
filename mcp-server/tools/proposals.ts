@@ -1128,7 +1128,12 @@ export function registerProposalTools(
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
-      query: z.string().optional(),
+      query: z
+        .string()
+        .optional()
+        .describe(
+          "Whitespace-separated terms (max 8), ALL must match; each term is a case-insensitive substring of title/summary/rationale/tags/issue ids/entry paths, proposal id (full or prefix), or proposer_username",
+        ),
       status: z.enum(["open", "partial", "finished", "rejected", "withdrawn"]).optional(),
       kind: z.enum(["edits", "notes", "idea"]).optional(),
       issue_id: z.string().optional(),

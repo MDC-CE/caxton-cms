@@ -147,7 +147,7 @@ export function suggestionForMissingField(opts: {
 
   if (source === "schema_org") {
     if (field === "url" || field === "@id") {
-      return `Add ${field === "@id" ? "@id" : "url"} under the schema_org section properties (Person hubs also get url from page URL when omitted)`;
+      return `Add ${field === "@id" ? "@id" : "url"} under the schema_org section properties (Person and page types like WebPage get url/@id from the page address when omitted)`;
     }
     return `Add ${field} under the schema_org section properties for ${type}`;
   }

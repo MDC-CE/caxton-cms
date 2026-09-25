@@ -880,7 +880,7 @@ export function ProposalListPanel() {
           />
           <Input
             className="pl-9"
-            placeholder="Search proposals"
+            placeholder="Search by title, author, or ID"
             value={qInput}
             onChange={(e) => setQInput(e.target.value)}
             data-testid="input-proposal-search"

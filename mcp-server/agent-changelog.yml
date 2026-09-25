@@ -6,6 +6,33 @@ window_days: 6
 
 entries:
   - date: "2026-09-25"
+    summary: "schema_org page url/@id: auto-filled from the page address; a typed url for another page blocks publish/promote"
+    agent_impact:
+      - "Page-type schema_org sections (WebPage, AboutPage, ContactPage, CollectionPage, ProfilePage, ItemPage) now get url/@id from the page address when blank, like Person (per-site domain). Omit url — never rebuild it from a /{locale}/{type}/{slug} pattern (landings have no locale prefix). Need the address? urls.{locale} from get_entry_content."
+      - "Publish / promote / proposal apply (incl. dry_run) hard-fail with code schema_org_page_url_mismatch when a typed same-site url/@id is not the page's own address or meta.canonical_url (www/http/case/trailing slash ignored; redirects fail). details.schema_org_page_url_mismatches lists section_id, key_path, value, expected. Fix: update_fields reset on sections.N.properties.url."
+      - "Draft saves and live micro-saves are not blocked; live gaps show as Diagnostics SCHEMA_ORG_PAGE_URL_MISMATCH. Organization / LocalBusiness / Course urls are not checked. Reviewers: an add-schema-org proposal with a typed WebPage url must match urls.{locale}."
+    tools_changed: false
+    paths:
+      - shared/schema-org-page-url.ts
+      - server/schema-components/schema_org.ts
+      - server/schema-org-page-url-gate.ts
+      - server/live-entry-seo-gate.ts
+      - server/versioning/promote-with-teardown.ts
+      - scripts/validation/validators/schema-completeness.ts
+      - mcp-server/lib/live-required-fields.ts
+      - mcp-server/explain/content_system.md
+
+  - date: "2026-09-25"
+    summary: "list_proposals query is multi-term and also matches proposal id and proposer_username"
+    agent_impact:
+      - "query splits on whitespace (max 8 terms, deduped); ALL terms must match, each anywhere in: search text (title/summary/rationale/tags/issue ids/entry paths), proposal id (full UUID or prefix like the 8-char short id), or proposer_username. Term order does not matter; % and _ are literal. Previously the whole string was one phrase over search text only."
+      - "Still a scope filter (summary rows). Use proposal_id for an exact single-proposal full-detail fetch; use proposer_username for an exact author match."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+
+  - date: "2026-09-25"
     summary: "Agent conventions (skill.content) rewritten: how to read responses, who may confirm gates, and how proposals work between roles"
     agent_impact:
       - "Read structured fields first: action_required (gate) → hard fail (change inputs, never resend) → next_actions by priority → warnings (non-effects to relay) → side_effects → optional discovery_path. The payload wins when it disagrees with the skill. Confirm a gate only when the human already asked for exactly that (e.g. confirm_live_edit); always ask first for new taxonomy values, overwriting newer work, deletes, multi-page/template changes, ending experiments, reject, research budget."

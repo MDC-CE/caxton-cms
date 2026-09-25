@@ -116,6 +116,57 @@ export function liveRequiredFieldsActionRequired(opts: {
   );
 }
 
+export function isSchemaOrgPageUrlMismatchError(errMsg: string, code?: unknown): boolean {
+  return code === "schema_org_page_url_mismatch" || /SCHEMA_ORG_PAGE_URL_MISMATCH/.test(errMsg);
+}
+
+/** Publish/promote blocked: a page-type schema_org url / @id names another page. */
+export function schemaOrgPageUrlMismatchResult(
+  errMsg: string,
+  ctx?: { slug?: string; locale?: string; contentType?: string; variant?: string },
+): McpTextResult {
+  const property_paths = [...errMsg.matchAll(/\((sections\[\d+\]\.properties\.[^)\s]+)\)/g)].map((m) => m[1]);
+  return fail(errMsg, {
+    code: "schema_org_page_url_mismatch",
+    property_paths,
+    warnings: [
+      {
+        code: "schema_org_page_url_mismatch",
+        message:
+          "Page-type schema_org sections (WebPage, AboutPage, ContactPage, CollectionPage, ProfilePage, ItemPage) must not carry a url/@id for a different page on this site. " +
+          "Passes: the page's own current address or meta.canonical_url (www/http/case/trailing slash ignored). Old redirecting addresses fail. " +
+          "Remedy: remove the url/@id — SSR fills both from the page address. Never rebuild it from a /{locale}/{type}/{slug} pattern. " +
+          "Checked on publish/promote/full replace only; draft saves and live micro-saves are not blocked (Diagnostics code SCHEMA_ORG_PAGE_URL_MISMATCH).",
+      },
+    ],
+    side_effects: [],
+    next_actions: [
+      {
+        tool: "get_entry_content",
+        priority: "recommended" as const,
+        reason: "Read urls.{locale} (the real address) and the flagged schema_org section before editing.",
+        args_hint: { slug: ctx?.slug, locale: ctx?.locale ?? "en", contentType: ctx?.contentType, variant: ctx?.variant },
+      },
+      {
+        tool: "update_fields",
+        priority: "required" as const,
+        reason:
+          "Clear the flagged url/@id on the draft (reset:true, or value \"\") so the page address is filled in automatically, then retry publish/promote.",
+        args_hint: {
+          slug: ctx?.slug,
+          locale: ctx?.locale ?? "en",
+          contentType: ctx?.contentType,
+          variant: ctx?.variant,
+          updates: property_paths.map((p) => ({
+            field_path: p.replace(/^sections\[(\d+)\]/, "sections.$1"),
+            reset: true,
+          })),
+        },
+      },
+    ],
+  });
+}
+
 /** Prefer structured actionRequired; fall back to fail for unrelated errors. */
 export function editApiErrorResult(
   errMsg: string,
@@ -131,6 +182,9 @@ export function editApiErrorResult(
       locale: ctx?.locale,
       contentType: ctx?.contentType,
     });
+  }
+  if (isSchemaOrgPageUrlMismatchError(errMsg, data.code)) {
+    return schemaOrgPageUrlMismatchResult(errMsg, ctx);
   }
   if (data.code === "seo_keyword_taken" || data.code === "seo_index_unavailable") {
     return fail(errMsg, {

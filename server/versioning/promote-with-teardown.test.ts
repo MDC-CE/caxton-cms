@@ -4,7 +4,11 @@ import path from "path";
 import yaml from "js-yaml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../live-entry-seo-gate", () => ({ assertLiveEntrySeoAndRequiredFields: () => null }));
+const seoGateMock = vi.hoisted(() => ({ result: null as null | Record<string, unknown> }));
+vi.mock("../live-entry-seo-gate", () => ({
+  assertLiveEntrySeoAndRequiredFields: () => null,
+  evaluateLiveEntrySeoAndRequiredFields: () => seoGateMock.result,
+}));
 vi.mock("../locale-url-slug", () => ({ assertLocaleUrlAvailable: () => ({ ok: true }) }));
 vi.mock("../services/onSaveValidation", () => ({ scheduleOnSaveValidation: () => {} }));
 vi.mock("../routes/_helpers", () => ({ invalidateContentCaches: () => {} }));
@@ -158,6 +162,29 @@ describe("promoteVariantWithOptionalTeardown", () => {
       expect.arrayContaining(["funnel", "meta.robots", "seo.main_keyword", "title"]),
     );
     expect(res.preApplySnapshot.live).toContain("Live title");
+  });
+
+  it("returns schema_org_page_url_mismatch (not seo_gate) with details and leaves live untouched", async () => {
+    write("draft.en.yml", "slug: post-a\ntitle: Draft title\nsections: []\n");
+    recordDraftBase({ contentType: "blog", slug: "post-a", locale: "en", variant: "draft", contentRoot });
+    const mismatch = { section_id: "schema_org-1", field: "url", value: "https://4geeks.com/en/x" };
+    seoGateMock.result = {
+      code: "schema_org_page_url_mismatch",
+      message: "SCHEMA_ORG_PAGE_URL_MISMATCH: …",
+      schema_org_page_url_mismatches: [mismatch],
+    };
+    try {
+      const res = await promote({ viaProposalApply: true });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("schema_org_page_url_mismatch");
+        expect(res.error).toContain("SCHEMA_ORG_PAGE_URL_MISMATCH");
+        expect(res.details).toEqual({ schema_org_page_url_mismatches: [mismatch] });
+      }
+      expect(load("en.yml").title).toBe("Live title");
+    } finally {
+      seoGateMock.result = null;
+    }
   });
 
   it("keeps live seo when the draft has none", async () => {

@@ -2092,6 +2092,19 @@ export function listOpenProposalsForEntry(
   });
 }
 
+const MAX_PROPOSAL_QUERY_TERMS = 8;
+
+/** Whitespace-split, lowercased, de-duplicated; every term must match (AND). */
+export function proposalQueryTerms(query: string | undefined): string[] {
+  if (!query) return [];
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return [...new Set(terms)].slice(0, MAX_PROPOSAL_QUERY_TERMS);
+}
+
+function escapeLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 function proposalTargetKeys(proposal: {
   entries?: Array<{ contentType: string; slug: string; locale: string }>;
   related_entries?: RelatedEntryRef[];
@@ -3838,9 +3851,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
       where += ` AND ${col("related_issue_ids_json")} LIKE ?`;
       params.push(`%${opts.issue_id}%`);
     }
-    if (opts.query?.trim()) {
-      where += ` AND ${col("search_text")} LIKE ?`;
-      params.push(`%${opts.query.trim().toLowerCase()}%`);
+    for (const term of proposalQueryTerms(opts.query)) {
+      const needle = `%${escapeLikeTerm(term)}%`;
+      where += ` AND (${col("search_text")} LIKE ? ESCAPE '\\' OR LOWER(${col("id")}) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(${col("proposer_username")}, '')) LIKE ? ESCAPE '\\')`;
+      params.push(needle, needle, needle);
     }
     const proposerUsername = opts.proposer_username?.trim();
     if (proposerUsername) {

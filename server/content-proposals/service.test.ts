@@ -13,6 +13,7 @@ import {
   listOpenProposalsForVariant,
   parseProposerActorType,
   PROPOSAL_CLAIM_TTL_MS,
+  proposalQueryTerms,
   toProposalSummary,
   type ProposalEntryInput,
 } from "./service";
@@ -476,6 +477,45 @@ describe("content proposals", () => {
     expect(asc.proposals[1]!.created_at).toBeLessThanOrEqual(asc.proposals[2]!.created_at);
     const desc = svc.list({ kind: "edits", sort: "updated_at", sortDir: "desc", limit: 10 });
     expect(desc.proposals[0]!.updated_at).toBeGreaterThanOrEqual(desc.proposals[1]!.updated_at);
+  });
+
+  it("list query matches proposal id and proposer username", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const byAlice = await svc.create(
+      { title: "Alpha", summary, entries: [sampleEntry({ slug: "q-alpha" })] },
+      { username: "alice" },
+    );
+    const byBob = await svc.create(
+      { title: "Beta", summary, entries: [sampleEntry({ slug: "q-beta" })] },
+      { username: "Bob.Builder" },
+    );
+    expect(byAlice.ok && byBob.ok).toBe(true);
+    if (!byAlice.ok || !byBob.ok) return;
+    const aliceId = byAlice.proposal.id;
+
+    const full = svc.list({ query: aliceId, limit: 10 });
+    expect(full.proposals.map((p) => p.id)).toEqual([aliceId]);
+    const prefix = svc.list({ query: aliceId.slice(0, 8).toUpperCase(), limit: 10 });
+    expect(prefix.proposals.map((p) => p.id)).toContain(aliceId);
+
+    const author = svc.list({ query: "builder", limit: 10 });
+    expect(author.proposals.map((p) => p.id)).toEqual([byBob.proposal.id]);
+
+    const acrossFields = svc.list({ query: "  beta   BOB ", limit: 10 });
+    expect(acrossFields.proposals.map((p) => p.id)).toEqual([byBob.proposal.id]);
+    const reordered = svc.list({ query: `${aliceId.slice(0, 6)} alpha`, limit: 10 });
+    expect(reordered.proposals.map((p) => p.id)).toEqual([aliceId]);
+    expect(svc.list({ query: "alpha bob", limit: 10 }).total).toBe(0);
+    expect(svc.list({ query: "q_alpha", limit: 10 }).total).toBe(0);
+  });
+
+  it("proposalQueryTerms splits, dedupes, and caps terms", () => {
+    expect(proposalQueryTerms(undefined)).toEqual([]);
+    expect(proposalQueryTerms("   ")).toEqual([]);
+    expect(proposalQueryTerms("Alice  CTA alice")).toEqual(["alice", "cta"]);
+    expect(proposalQueryTerms("a b c d e f g h i j")).toHaveLength(8);
   });
 
   it("list attention sort, filter, status bias, and summary fields", async () => {

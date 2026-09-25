@@ -454,8 +454,8 @@ export async function promoteVariantWithOptionalTeardown(
     const parsedVariant = (ci.safeYamlLoad(variantContent) as Record<string, unknown>) || {};
     const commonForGate = ci.loadCommonData(contentType, slug) || {};
     const mergedForGate = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
-    const { assertLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
-    const seoGateErr = assertLiveEntrySeoAndRequiredFields({
+    const { evaluateLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
+    const seoGate = evaluateLiveEntrySeoAndRequiredFields({
       contentType,
       slug,
       locale,
@@ -465,8 +465,16 @@ export async function promoteVariantWithOptionalTeardown(
       intent: "publish",
       isDraftWrite: false,
     });
-    if (seoGateErr) {
-      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGateErr}` };
+    if (seoGate) {
+      if (seoGate.code === "schema_org_page_url_mismatch") {
+        return {
+          ok: false,
+          code: seoGate.code,
+          error: `Cannot promote: ${seoGate.message}`,
+          details: { schema_org_page_url_mismatches: seoGate.schema_org_page_url_mismatches ?? [] },
+        };
+      }
+      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGate.message}` };
     }
     if (!templateMode) {
       const urlCheck = assertLocaleUrlAvailable({

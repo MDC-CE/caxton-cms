@@ -173,7 +173,7 @@ import {
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
 import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
-import { getBaseUrl } from "../hreflang";
+import { getSiteBaseUrl } from "../site-urls";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
 import type { CapabilityName } from "../user-store";
@@ -1379,7 +1379,7 @@ export function registerSeoRoutes(app: Express): void {
           const collected = collectSectionSchemasDetailed(withDynamic, {
             locale,
             contentRoot: getContentRoot(res),
-            baseUrl: getBaseUrl(),
+            baseUrl: getSiteBaseUrl(getContentRoot(res)),
             contentType,
             pageUrl: typeof resolvedMeta.canonical_url === "string" ? resolvedMeta.canonical_url : undefined,
             title: typeof resolvedMeta.page_title === "string" ? resolvedMeta.page_title : undefined,
@@ -1519,14 +1519,17 @@ export function registerSeoRoutes(app: Express): void {
         const collected = collectSectionSchemasDetailed(withDynamic, {
           locale,
           contentRoot,
-          baseUrl: getBaseUrl(),
+          baseUrl: getSiteBaseUrl(contentRoot),
           contentType,
           locationSlug: getType(contentType) === "location" ? slug : undefined,
           programSlug: getType(contentType) === "program" ? slug : undefined,
           pageUrl:
             typeof displayMeta.canonical_url === "string"
               ? displayMeta.canonical_url
-              : undefined,
+              : (() => {
+                  const path = ci.getLocaleUrls(slug, contentType)[locale];
+                  return path ? `${getSiteBaseUrl(contentRoot)}${path}` : undefined;
+                })(),
           title:
             typeof displayMeta.page_title === "string"
               ? displayMeta.page_title
