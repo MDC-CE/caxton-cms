@@ -1,8 +1,8 @@
-name: Sync website-v3
+name: Sync caxton-cms
 
-# Reads breatheco-de/website-v3 and opens a pull request in THIS repo.
-# It never pushes to website-v3 or to breatheco-de/caxton-cms.
-# Merging the PR into main is still manual, so a sync does not deploy by itself.
+# Reads breatheco-de/caxton-cms and opens a pull request in THIS repo.
+# It never pushes to that repository. Merging the PR into main is still manual,
+# so a sync does not deploy by itself.
 
 on:
   schedule:
@@ -15,7 +15,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: sync-website-v3
+  group: sync-caxton-cms
   cancel-in-progress: false
 
 jobs:
@@ -29,10 +29,10 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Fetch website-v3 main
+      - name: Fetch caxton-cms main
         run: |
-          git remote add website-v3 https://github.com/breatheco-de/website-v3.git
-          git fetch website-v3 main
+          git remote add caxton-cms https://github.com/breatheco-de/caxton-cms.git
+          git fetch caxton-cms main
 
       - name: Open or update sync pull request
         env:
@@ -41,13 +41,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          UPSTREAM="$(git rev-parse website-v3/main)"
+          UPSTREAM="$(git rev-parse caxton-cms/main)"
           BASE="$(git rev-parse origin/main)"
-          BRANCH="sync/website-v3"
-          MARKER="website-v3@${UPSTREAM}"
+          BRANCH="sync/caxton-cms"
+          MARKER="caxton-cms@${UPSTREAM}"
 
           if git merge-base --is-ancestor "$UPSTREAM" "$BASE"; then
-            echo "main already contains website-v3 ${UPSTREAM}"
+            echo "main already contains caxton-cms ${UPSTREAM}"
             exit 0
           fi
 
@@ -58,7 +58,7 @@ jobs:
           MERGE_TREE="$(printf '%s\n' "$MERGE_OUT" | head -n 1)"
           OURS_TREE="$(git rev-parse "${BASE}^{tree}")"
           if [ "$MERGE_EC" -eq 0 ] && [ "$MERGE_TREE" = "$OURS_TREE" ]; then
-            echo "website-v3 changes are already in the main tree (${UPSTREAM})"
+            echo "caxton-cms changes are already in the main tree (${UPSTREAM})"
             exit 0
           fi
 
@@ -70,16 +70,16 @@ jobs:
           elif git merge-base --is-ancestor "$REMOTE_SHA" "$UPSTREAM"; then
             git push origin "${UPSTREAM}:refs/heads/${BRANCH}"
           elif git merge-base --is-ancestor "$UPSTREAM" "$REMOTE_SHA"; then
-            echo "Sync branch already includes website-v3 ${UPSTREAM}; leaving local commits in place"
+            echo "Sync branch already includes caxton-cms ${UPSTREAM}; leaving local commits in place"
           else
-            echo "Sync branch diverged from website-v3; not overwriting"
+            echo "Sync branch diverged from caxton-cms; not overwriting"
             PR_NUM="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
             if [ -n "$PR_NUM" ]; then
               if ! gh pr view "$PR_NUM" --repo "$REPO" --comments | grep -q "$MARKER"; then
                 gh pr comment "$PR_NUM" --repo "$REPO" --body "$(cat <<EOF
 ${MARKER}
 
-\`website-v3\` moved to \`${UPSTREAM}\`, and \`${BRANCH}\` already has its own commits, so this run left the branch as-is. Update the branch yourself if you still want those newer commits.
+\`breatheco-de/caxton-cms\` moved to \`${UPSTREAM}\`, and \`${BRANCH}\` already has its own commits, so this run left the branch as-is. Update the branch yourself if you still want those newer commits.
 EOF
 )"
               fi
@@ -94,11 +94,11 @@ EOF
           fi
 
           SHORTLOG="$(git log --oneline "${BASE}..${UPSTREAM}")"
-          gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "Sync breatheco-de/website-v3 into main" --body "$(cat <<EOF
+          gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "Sync breatheco-de/caxton-cms into main" --body "$(cat <<EOF
 ## Summary
-Brings [\`breatheco-de/website-v3\`](https://github.com/breatheco-de/website-v3) \`main\` (\`${UPSTREAM}\`) into this fork.
+Brings [\`breatheco-de/caxton-cms\`](https://github.com/breatheco-de/caxton-cms) \`main\` (\`${UPSTREAM}\`) into this fork.
 
-This workflow only **reads** that repository. It does not push to \`website-v3\` or to \`breatheco-de/caxton-cms\`.
+This workflow only **reads** that repository. It does not push to it.
 
 ## How to merge
 - Use **Create a merge commit**. A squash makes the next run think these commits are still missing.
