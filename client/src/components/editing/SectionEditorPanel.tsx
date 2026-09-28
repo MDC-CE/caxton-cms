@@ -4436,6 +4436,7 @@ export function SectionEditorPanel({
                 "color-picker",
                 "image-picker",
                 "link-picker",
+                "plain-text",
                 "rich-text-editor",
                 "variant-picker",
               ]);
@@ -4466,7 +4467,6 @@ export function SectionEditorPanel({
                     : [];
                 };
                 const arrData = getArrayDataForGroup();
-                if (arrData.length === 0) return null;
 
                 const arrayLabel = arrPath.split(".").pop() || arrPath;
 
@@ -4492,6 +4492,7 @@ export function SectionEditorPanel({
                   linkedin_url: "LinkedIn URL",
                   link_text: "Texto del enlace",
                   link_url: "URL del enlace",
+                  url: "URL",
                   logo_height: "Altura del logo (px)",
                   "media.url": "Video / Media URL",
                 };
@@ -4897,6 +4898,33 @@ export function SectionEditorPanel({
                                       );
                                     }
 
+                                    if (
+                                      configuredField.editorType ===
+                                      "plain-text"
+                                    ) {
+                                      return (
+                                        <div
+                                          key={fieldKey}
+                                          className="space-y-1"
+                                        >
+                                          <Label className="text-xs text-muted-foreground">
+                                            {label}
+                                          </Label>
+                                          <Input
+                                            value={currentValue}
+                                            onChange={(e) =>
+                                              updateNestedField(
+                                                index,
+                                                fieldKey,
+                                                e.target.value,
+                                              )
+                                            }
+                                            className="h-8 text-sm"
+                                            data-testid={`props-grouped-text-${fieldKey}-${index}`}
+                                          />
+                                        </div>
+                                      );
+                                    }
                                     if (
                                       configuredField.editorType ===
                                       "link-picker"
@@ -5534,6 +5562,7 @@ export function SectionEditorPanel({
                     "image-picker",
                     "video-picker",
                     "link-picker",
+                    "plain-text",
                     "rich-text-editor",
                     "variant-picker",
                   ]);
