@@ -18,6 +18,7 @@
  * - "image-picker" - Image picker
  * - "video-picker" - Video picker (browse media gallery, upload, or paste URL)
  * - "link-picker" - Link picker
+ * - "plain-text" - Single-line text. Optional hint after the colon is shown under the field.
  */
 
 export type EditorType = string;

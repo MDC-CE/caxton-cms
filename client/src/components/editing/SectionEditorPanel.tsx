@@ -3997,6 +3997,12 @@ export function SectionEditorPanel({
                 const currentAutoplay = getVideoSiblingValue("autoplay");
                 const currentLoop = getVideoSiblingValue("loop");
                 const currentPreviewImage = (getVideoSiblingValue("preview_image_url") as string) || "";
+                const currentBorderRadius = (getVideoSiblingValue("border_radius") as string) || "";
+                const cornerRadiusPath = parentPrefix + "border_radius";
+                const showCornerRadius =
+                  Boolean(configuredFields[cornerRadiusPath]) ||
+                  ((parsedSection as { variant?: string } | null)?.variant === "autoVideoRight" &&
+                    fieldPath === "video.url");
                 const currentOpenModalOnClick = getVideoSiblingValue("open_modal_on_click");
                 const openModalChecked = currentOpenModalOnClick !== false;
                 const currentOverlayOnMuted = getVideoSiblingValue("overlay_on_muted");
@@ -4166,6 +4172,26 @@ export function SectionEditorPanel({
                             </SelectContent>
                           </Select>
                         </div>
+
+                        {showCornerRadius ? (
+                          <div className="space-y-1">
+                            <Label className="text-xs text-muted-foreground">
+                              Corner radius
+                            </Label>
+                            <Input
+                              value={currentBorderRadius}
+                              onChange={(e) =>
+                                updateProperty(cornerRadiusPath, e.target.value)
+                              }
+                              placeholder="0"
+                              className="h-8 text-sm"
+                              data-testid={`props-video-${fieldLabel}-border-radius`}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              0 keeps the corners square. A value like 20px rounds every corner on phone, tablet, and desktop.
+                            </p>
+                          </div>
+                        ) : null}
 
                         <div className="space-y-2">
                           <Label className="text-xs text-muted-foreground">
@@ -6161,6 +6187,44 @@ export function SectionEditorPanel({
                 }
 
                 // Handle simple field paths with boolean toggle (e.g., "layout_reversed")
+                if (isSimpleField && editorType === "plain-text") {
+                  const parentPath = fieldPath.includes(".")
+                    ? fieldPath.slice(0, fieldPath.lastIndexOf("."))
+                    : "";
+                  if (
+                    parentPath &&
+                    String(configuredFields[`${parentPath}.url`] || "").startsWith("video-picker")
+                  ) {
+                    return null;
+                  }
+                  const getSimpleStringValue = () => {
+                    if (!parsedSection) return "";
+                    const pathParts = fieldPath.split(".");
+                    let current: unknown = parsedSection;
+                    for (const part of pathParts) {
+                      if (!current || typeof current !== "object") return "";
+                      current = (current as Record<string, unknown>)[part];
+                    }
+                    return typeof current === "string" ? current : "";
+                  };
+                  const currentValue = getSimpleStringValue();
+                  const fieldLabel = getFieldLabel(fieldPath);
+                  return (
+                    <div key={fieldPath} className="space-y-2">
+                      <Label className="text-sm font-medium">{fieldLabel}</Label>
+                      <Input
+                        value={currentValue}
+                        onChange={(e) => updateProperty(fieldPath, e.target.value)}
+                        placeholder="0"
+                        data-testid={`props-plain-text-${fieldPath.replace(/\./g, "-")}`}
+                      />
+                      {variant ? (
+                        <p className="text-xs text-muted-foreground">{variant}</p>
+                      ) : null}
+                    </div>
+                  );
+                }
+
                 if (isSimpleField && editorType === "boolean-toggle") {
                   const getSimpleFieldValue = () => {
                     if (!parsedSection) return false;
