@@ -6,6 +6,57 @@ window_days: 6
 
 entries:
   - date: "2026-09-25"
+    summary: "Database entries are delivered like static entries; their drafts follow layout_owner"
+    agent_impact:
+      - "Variants follow layout_owner, not the source. Attached database entry (shared_template): a draft is {slug}/{variant}.{locale}.yml whose field_overrides layer over the item and the live overrides; its sections are ignored (same as attached static). Detached database entry (entry): the variant file is the whole page."
+      - "No fallback to live: a forced preview (?force_variant=) of a variant that does not exist in that language returns 404 for static and database pages alike. Public A/B only assigns variants that exist in the visitor's language."
+      - "A live database page never reads a draft's field_overrides (before, an entry with only draft.{locale}.yml leaked the draft's overrides into the live page and listings)."
+      - "Delivery is one path: SSR and /api/content-pages/{type}/{slug} serve database pages (template → entry layer → variables); /api/database-single/{type}/{slug} is a 307 alias to it. Preview images and SEO preview read the same merge. Missing item or item not in that language → 404, never the empty template."
+      - "Expired copy on a page request: refreshed first; on failure the last good copy is served and automatic refreshes pause for cache.refresh_retry_minutes (default 5). list_database_items refresh: true / admin clear-cache always call the source; success ends the pause. MCP reads still never call the source."
+      - "Delivery never writes files: stale section anchors are pruned after template section edits, not on page views."
+    tools_changed: false
+    paths:
+      - server/entry-delivery.ts
+      - server/entry-layer.ts
+      - server/database.ts
+      - server/database-single-loader.ts
+      - server/field-overrides.ts
+      - server/routes/content.ts
+      - server/routes/databases.ts
+      - server/routes/_helpers.ts
+      - server/initial-data-middleware.ts
+      - mcp-server/explain/shared-layout.md
+      - mcp-server/explain/local_databases.md
+      - mcp-server/agent-conventions.md
+
+  - date: "2026-09-25"
+    summary: "Database entries are just entries for MCP reads, listings and redirects; stale copies and removed items are reported"
+    agent_impact:
+      - "get_entry_content, get_entry_seo, get_entry_fields (incl. seo.include_in_clustering), get_validation_issues slug lookup and seo-research resolve database slugs (e.g. bootstrap-exercises) like static slugs. data = the entry layer: mapped fields with field_overrides applied, plus the entry's own _common.yml/{locale}.yml (field_overrides key itself is not echoed). Same keys for every entry; locales/urls include item languages even when no file exists yet."
+      - "translate_entry on a database entry fails with code translate_source_item_entry (nothing written; draft root keys would be masked by item fields): next_action update_fields on the target locale when that language's item exists, else add_database_item in the source."
+      - "Slug lookup checks one type's stored copy (never a site-wide list). Typos are not found; the not-found text adds empty_databases (never copied — refresh first) / stale_databases (old copy — a new item may not be there yet). A database page exists only in its item's language."
+      - "Pages checked against a copy past its TTL: issue message ends 'Checked against data from {age} ago; the source may already be fixed.' and get_validation_issues / get_entry_content / get_entry_seo add warning stale_source_data; get_validation_issues adds next_action list_database_items {database, refresh: true} before overriding. New DATABASE_CACHE_STALE (database-health): warning, error after stale_error_after_days (database config cache, default 7). DATABASE_PAGES_NOT_CHECKED now fires only when a database never had a copy."
+      - "New SOURCE_ITEM_REMOVED (database-singles, next to ORPHAN_OVERLAY_FOLDER, only after a fresh copy): the item is gone, the page 404s, entry files are kept, nothing is written. Row has redirect_suggestion {from, to, reason: cluster_main_page | listing_page | home_page, locale, inbound[]}; next_action update_redirect add with removed_entry {content_type, slug, locale}. removed_entry moves the old addresses saved on the removed page ({locale}.yml / _common.yml meta.redirects) to the same target and deletes them from the removed page (response moved_inbound / not_moved; side_effect inbound_redirects_moved). Show staff the inbound list before applying."
+      - "Redirects are saved on the destination page whatever its source: one language → that language's {locale}.yml (created when the page exists there but has no file; side_effect file_created); all languages → the page's _common.yml, with warning redirect_languages_skipped listing languages without the page. Destination not a page but a known URL → custom-redirects.yml; unknown → 404. before_from with a page destination → 400 before_from_page_yaml."
+      - "Listings (sitemap, list endpoints, seo/funnel/organic entry lists, link and component scans) show field_overrides the same way the page does. get_entry_fields/update_fields next_actions no longer differ by source; storage (root_key | field_overrides) and override_masks_source ride in the payload/warnings."
+    tools_changed: true
+    paths:
+      - server/entry-layer.ts
+      - server/database.ts
+      - server/redirect-destination.ts
+      - server/removed-item-redirect.ts
+      - server/routes/admin.ts
+      - scripts/validation/validators/database-singles.ts
+      - scripts/validation/shared/databaseHealthChecks.ts
+      - scripts/validation/service.ts
+      - mcp-server/lib/content.ts
+      - mcp-server/lib/entry-source.ts
+      - mcp-server/lib/validation-issues-mcp.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/redirects.ts
+      - mcp-server/tools/validation-issues.ts
+
+  - date: "2026-09-25"
     summary: "schema_org page url/@id: auto-filled from the page address; a typed url for another page blocks publish/promote"
     agent_impact:
       - "Page-type schema_org sections (WebPage, AboutPage, ContactPage, CollectionPage, ProfilePage, ItemPage) now get url/@id from the page address when blank, like Person (per-site domain). Omit url — never rebuild it from a /{locale}/{type}/{slug} pattern (landings have no locale prefix). Need the address? urls.{locale} from get_entry_content."

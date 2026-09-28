@@ -14,6 +14,9 @@ import { mintConnectionToken, readConnectionToken } from "../../cli/src/lib/conn
 import { pullAllSitesContent } from "../content-pull.js";
 import { resolveBudget, SITE_PROBE_P95_MS } from "./budgets.js";
 import { McpStressClient } from "./mcp-client.js";
+import { isDbBacked, loadContentTypes } from "../../mcp-server/lib/content.js";
+import { entrySourceRoot } from "../../mcp-server/lib/entry-source.js";
+import { listTypePages } from "../../server/entry-layer.js";
 import {
   aggregateProbe,
   aggregateSamples,
@@ -276,6 +279,8 @@ async function discoverCtx(
     if (first?.name) databaseId = first.name.trim();
   }
 
+  const dbEntry = discoverDbEntry(site);
+
   let componentName: string | undefined;
   const compCall = await client.callTool("list_components", siteArg);
   if (compCall.ok) {
@@ -352,7 +357,23 @@ async function discoverCtx(
     databaseId,
     componentName,
     seoClusterId,
+    ...(dbEntry ? { dbEntrySlug: dbEntry.slug, dbEntryLocale: dbEntry.locale, dbEntryContentType: dbEntry.contentType } : {}),
   };
+}
+
+/** First page of a database-backed type from its stored copy (local read; no MCP call). */
+function discoverDbEntry(site: SiteEntry): { contentType: string; slug: string; locale: string } | null {
+  try {
+    const contentPath = path.resolve(process.cwd(), site.contentFolder);
+    for (const [contentType, config] of Object.entries(loadContentTypes(contentPath))) {
+      if (!isDbBacked(config)) continue;
+      const first = listTypePages(entrySourceRoot(contentPath), contentType)?.pages[0];
+      if (first) return { contentType, slug: first.slug, locale: first.locale };
+    }
+  } catch {
+    // Scenario skips when no database entry is found.
+  }
+  return null;
 }
 
 async function runScenario(

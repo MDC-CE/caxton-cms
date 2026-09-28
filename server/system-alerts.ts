@@ -6,6 +6,7 @@ import { hasMultipleSites } from "./site-config";
 import {
   evaluateDatabaseHealth,
   isAuthFetchError,
+  lastGoodCacheInputs,
 } from "../scripts/validation/shared/databaseHealthChecks";
 
 export type SystemAlertSeverity = "critical" | "warning";
@@ -228,8 +229,9 @@ function issuesFromCacheOrEvaluate(
     config,
     ctx.contentRoot,
     jobStates[dbName],
-    ctx.database.getCacheInfo(dbName),
+    lastGoodCacheInputs(ctx.database, dbName).cacheInfo,
     ctx.database.countTransformErrors(dbName),
+    lastGoodCacheInputs(ctx.database, dbName).staleAgeMs,
   );
   return errors;
 }
@@ -439,8 +441,9 @@ export async function recheckDatabaseHealth(
       entry.config,
       ctx.contentRoot,
       jobStates[dbName],
-      ctx.database.getCacheInfo(dbName),
+      lastGoodCacheInputs(ctx.database, dbName).cacheInfo,
       ctx.database.countTransformErrors(dbName),
+      lastGoodCacheInputs(ctx.database, dbName).staleAgeMs,
     );
 
     ctx.validationCache.setByDatabase(dbName, {

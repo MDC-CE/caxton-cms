@@ -20,6 +20,7 @@ import {
 import { ENTRY_OR_SINGLE_VAR_PATTERN } from "@shared/entryTemplateVars";
 import { getContentTypeConfig, type ContentTypeEditorHint } from "./content-types";
 import { getEntryContentDir } from "./draft-entry";
+import { mappedFieldsStorageFor, type MappedFieldsStorage } from "./mapped-fields-storage";
 
 const LIVE_LOCALE_FILE_RE = /^[a-z]{2}(-[a-z]{2})?\.ya?ml$/;
 const FIELD_OVERRIDES_KEY = "field_overrides";
@@ -95,9 +96,8 @@ export function entryHasLiveStoredValue(
   field: string,
   contentRoot?: string,
 ): boolean {
-  const config = getContentTypeConfig(contentType, contentRoot);
-  if (!config) return false;
-  const isDb = !!config.database?.slug;
+  if (!getContentTypeConfig(contentType, contentRoot)) return false;
+  const inBag = mappedFieldsStorageFor(contentType, contentRoot) === "field_overrides";
   let dir: string;
   try {
     dir = getEntryContentDir(contentType, slug, contentRoot);
@@ -107,7 +107,7 @@ export function entryHasLiveStoredValue(
   for (const file of liveEntryFiles(dir)) {
     const data = readYamlObject(file);
     if (!data) continue;
-    if (isDb) {
+    if (inBag) {
       const bag = data[FIELD_OVERRIDES_KEY];
       if (bag && typeof bag === "object" && isNonEmptyFieldValue((bag as Record<string, unknown>)[field])) {
         return true;
@@ -197,11 +197,10 @@ export function checkDeprecatedFileWrite(opts: {
 }): { ok: true } | DeprecatedWriteFailure {
   const deprecated = getDeprecatedFieldsForType(opts.contentType, opts.contentRoot);
   if (Object.keys(deprecated).length === 0 || !opts.after) return { ok: true };
-  const config = getContentTypeConfig(opts.contentType, opts.contentRoot);
-  const isDb = !!config?.database?.slug;
+  const inBag = mappedFieldsStorageFor(opts.contentType, opts.contentRoot) === "field_overrides";
   const pick = (obj: Record<string, unknown> | null, field: string): unknown => {
     if (!obj) return undefined;
-    if (isDb) {
+    if (inBag) {
       const bag = obj[FIELD_OVERRIDES_KEY];
       return bag && typeof bag === "object" ? (bag as Record<string, unknown>)[field] : undefined;
     }
@@ -213,7 +212,7 @@ export function checkDeprecatedFileWrite(opts: {
     const prev = pick(opts.before, field);
     if (JSON.stringify(prev) === JSON.stringify(next)) continue;
     if (entryHasLiveStoredValue(opts.contentType, opts.slug, field, opts.contentRoot)) continue;
-    return failure(field, cfg, isDb ? `${FIELD_OVERRIDES_KEY}.${field}` : field);
+    return failure(field, cfg, inBag ? `${FIELD_OVERRIDES_KEY}.${field}` : field);
   }
   return { ok: true };
 }
@@ -359,7 +358,7 @@ export type DeprecatedTypeDirScan = {
 export function scanTypeDirForDeprecatedFields(
   typeDir: string,
   fields: string[],
-  opts?: { isDbBacked?: boolean },
+  opts?: { storage?: MappedFieldsStorage },
 ): DeprecatedTypeDirScan {
   const out: DeprecatedTypeDirScan = { templateRefs: {}, draftOnlyValues: {} };
   if (fields.length === 0 || !fs.existsSync(typeDir)) return out;
@@ -380,7 +379,7 @@ export function scanTypeDirForDeprecatedFields(
   };
   const storedValue = (data: Record<string, unknown> | null, field: string): boolean => {
     if (!data) return false;
-    if (opts?.isDbBacked) {
+    if (opts?.storage === "field_overrides") {
       const bag = data[FIELD_OVERRIDES_KEY];
       return !!bag && typeof bag === "object" && isNonEmptyFieldValue((bag as Record<string, unknown>)[field]);
     }

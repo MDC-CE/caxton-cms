@@ -28,6 +28,7 @@ import { isEmptyDetachedLocaleEntry } from "./empty-locale";
 import { isEntryDetached } from "./shared-layout-entry";
 import { isHiddenViaSentinel } from "./shared-layout-sync";
 import { child } from "./logger";
+import { loadTypeListing } from "./entry-layer";
 import { combinedArticleContentFromSections } from "@shared/reading-time";
 import { escapeTemplateVars, unescapeObjectVars } from "@shared/templateVars";
 
@@ -480,7 +481,7 @@ async function loadFromContentType(
   const ctConfig = getContentTypeConfig(contentType, contentRoot);
 
   if (ctConfig?.database?.slug) {
-    let items = await db.fetchMappedItems(contentType);
+    let items = await loadTypeListing(ci, contentType, db);
     if (locale && filterByLocale) {
       items = filterByContentTypeLocale(items, contentType, locale, contentRoot);
     }

@@ -6,15 +6,15 @@ import * as fs from "fs";
 import * as path from "path";
 import type { PreviewPropResolveContext } from "@shared/entry-preview-props";
 import { PREVIEW_BRAND_SOURCE_OPTIONS } from "@shared/entry-preview-props";
-import { getContentTypeConfig, getFolder, hasDatabaseSingle } from "./content-types";
+import { getContentTypeConfig, getFolder } from "./content-types";
 import { getDefaultContentRoot } from "./site-config";
-import { contentIndex } from "./content-index";
+import { contentIndex, type ContentIndex } from "./content-index";
 import { deepMerge } from "./utils/deepMerge";
 import { resolveAllTemplateVars } from "./resolve-template-vars";
 import { getVariableManager, BRAND_VAR_KEYS } from "./variable-manager";
-import { loadDatabaseSinglePage, loadMergedSinglePage } from "./database-single-loader";
+import { loadMergedSinglePage } from "./entry-delivery";
+import { typeUsesSharedTemplate } from "./layout-owner";
 import type { DatabaseManager } from "./database";
-import { databaseManager } from "./database";
 import { mediaGallery, type MediaGallery } from "./media-gallery";
 
 function stripUnresolvedTokens(meta: Record<string, unknown>): Record<string, unknown> {
@@ -83,24 +83,28 @@ function brandMapFromRoot(
   return map;
 }
 
+async function contentIndexForRoot(contentRoot: string): Promise<ContentIndex> {
+  if (contentIndex.contentRoot === contentRoot) return contentIndex;
+  try {
+    const { getSiteContextMap } = await import("./site-manager");
+    for (const site of getSiteContextMap().values()) {
+      if (site.contentRoot === contentRoot) return site.contentIndex;
+    }
+  } catch {
+    /* no site map (scripts / tests) */
+  }
+  return contentIndex;
+}
+
 async function loadRawSeoMeta(
   contentType: string,
   slug: string,
   locale: string,
   contentRoot: string,
-  db: DatabaseManager,
+  ci?: ContentIndex,
 ): Promise<Record<string, unknown>> {
-  if (hasDatabaseSingle(contentType, contentRoot)) {
-    const page = await loadDatabaseSinglePage(contentType, slug, locale, contentRoot, db);
-    const meta = page?.meta;
-    return meta && typeof meta === "object" && !Array.isArray(meta)
-      ? { ...(meta as Record<string, unknown>) }
-      : {};
-  }
-
-  const config = getContentTypeConfig(contentType, contentRoot);
-  if (config?.single_template) {
-    const page = await loadMergedSinglePage(contentType, slug, locale, contentRoot, db);
+  if (typeUsesSharedTemplate(getContentTypeConfig(contentType, contentRoot))) {
+    const page = await loadMergedSinglePage(ci ?? (await contentIndexForRoot(contentRoot)), contentType, slug, locale);
     const meta = page?.meta;
     return meta && typeof meta === "object" && !Array.isArray(meta)
       ? { ...(meta as Record<string, unknown>) }
@@ -148,12 +152,12 @@ export async function buildPreviewPropResolveContext(opts: {
   entry: Record<string, unknown>;
   contentRoot?: string;
   db?: DatabaseManager;
+  contentIndex?: ContentIndex;
   mediaGallery?: MediaGallery;
   /** Capture / live-preview theme — dark uses brand.logo_dark for brand.logo when set. */
   theme?: "dark" | "light";
 }): Promise<PreviewPropResolveContext> {
   const contentRoot = opts.contentRoot ?? getDefaultContentRoot();
-  const db = opts.db ?? databaseManager;
   const mg = opts.mediaGallery ?? mediaGallery;
   const theme = opts.theme === "light" ? "light" : "dark";
   const rawMeta = await loadRawSeoMeta(
@@ -161,7 +165,7 @@ export async function buildPreviewPropResolveContext(opts: {
     opts.slug,
     opts.locale,
     contentRoot,
-    db,
+    opts.contentIndex,
   );
 
   const resolvedMeta = resolveAllTemplateVars(rawMeta, {

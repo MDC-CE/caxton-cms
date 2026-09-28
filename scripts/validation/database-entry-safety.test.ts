@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContentIndex } from "../../server/content-index";
 import { resetRegistry } from "../../server/content-types";
 import { resetVariableManagerCache } from "../../server/variable-manager";
+import { mockDatabase } from "../../server/test-helpers/mock-database";
 import { ValidationService } from "./service";
 import { ENTRY_LOCAL_VALIDATOR_NAMES } from "./shared/runClass";
 
@@ -76,8 +77,8 @@ describe("entry-local validators on a database page with no entry file yet", () 
   it("check the page without throwing", async () => {
     const ci = new ContentIndex(contentRoot);
     ci.scanFast();
-    vi.spyOn(ci, "getDatabase").mockReturnValue({
-      getMappedItems: (name: string) =>
+    vi.spyOn(ci, "getDatabase").mockReturnValue(
+      mockDatabase((name) =>
         name === "exercises"
           ? [
               {
@@ -88,7 +89,8 @@ describe("entry-local validators on a database page with no entry file yet", () 
               },
             ]
           : null,
-    } as unknown as ReturnType<ContentIndex["getDatabase"]>);
+      ),
+    );
 
     const service = new ValidationService();
     const context = await service.buildContext({ contentRoot, ci });

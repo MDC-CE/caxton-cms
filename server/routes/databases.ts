@@ -178,7 +178,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { isEntryDetached, resolvePreviewBaseSlug } from "../shared-layout-entry";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
@@ -247,133 +246,12 @@ function getValidationCache(res: Response) {
 }
 
 export function registerDatabasesRoutes(app: Express): void {
-  app.get("/api/database-single/:contentType/:slug", async (req, res) => {
-    try {
-      const { contentType, slug: requestSlug } = req.params;
-      const locale = normalizeLocale(req.query.locale as string);
-      const forceVariant = req.query.force_variant as string | undefined;
-
-      if (!hasDatabaseSingle(contentType, getContentRoot(res))) {
-        res
-          .status(400)
-          .json({
-            error: `Content type "${contentType}" is not database-backed`,
-          });
-        return;
-      }
-
-      const root = getContentRoot(res);
-      const slug = resolvePreviewBaseSlug(requestSlug, contentType, getCI(res));
-      const {
-        buildLocaleUnavailablePayload,
-        isEmptyDetachedLocaleEntry,
-        skipEmptyLocaleGateForForceVariant,
-      } = await import("../empty-locale");
-      if (
-        !skipEmptyLocaleGateForForceVariant(forceVariant) &&
-        isEmptyDetachedLocaleEntry({
-          contentType,
-          slug,
-          locale,
-          contentRoot: root,
-          ci: getCI(res),
-        })
-      ) {
-        const availableUrls = getCI(res).getAlternateUrls(slug, contentType);
-        res.status(404).json(
-          buildLocaleUnavailablePayload({
-            contentType,
-            slug,
-            locale,
-            availableUrls,
-          }),
-        );
-        return;
-      }
-
-      const detached = isEntryDetached(contentType, slug, root);
-      let templateVariant: string | undefined;
-      if (!detached) {
-        const { resolveAssignedVariantSlug } = await import("./_helpers");
-        templateVariant =
-          forceVariant ||
-          resolveAssignedVariantSlug(req, res, contentType, slug, locale) ||
-          undefined;
-      } else if (forceVariant) {
-        templateVariant = forceVariant;
-      }
-
-      const page = await loadDatabaseSinglePage(
-        contentType,
-        slug,
-        locale,
-        root,
-        getDB(res),
-        templateVariant,
-      );
-      if (!page) {
-        res
-          .status(404)
-          .json({ error: `Item not found: ${contentType}/${slug}` });
-        return;
-      }
-
-      const dbSingleData = page as unknown as Record<string, unknown>;
-      const dbSingleEntry = (dbSingleData.singleEntry as Record<string, unknown>) || {};
-      if (page.sections && Array.isArray(page.sections)) {
-        page.sections = (await resolveDynamicEntries(page.sections, locale, {
-          db: getDB(res),
-          contentRoot: getContentRoot(res),
-          contentIndex: getCI(res),
-          singleEntry: dbSingleEntry,
-        })) as any;
-      }
-      if (Object.keys(dbSingleEntry).length > 0) {
-        try {
-          const site = res.locals.site as import("../site-manager").SiteContext | undefined;
-          if (site?.entryPreviewManager) {
-            const { applyEntryPreviewOgImage } = await import("../entry-preview-manager");
-            const { getPreviewConfig } = await import("../content-types");
-            await applyEntryPreviewOgImage(site.entryPreviewManager, {
-              contentType,
-              entry: dbSingleEntry,
-              previewConfig: getPreviewConfig(contentType, getContentRoot(res)),
-              pageData: dbSingleData,
-            });
-          }
-        } catch {
-          /* non-fatal */
-        }
-        const resolved = resolveAllTemplateVars(dbSingleData, {
-          singleEntry: dbSingleEntry,
-          contentRoot: getContentRoot(res),
-          context: { locale },
-        }) as Record<string, unknown>;
-        Object.assign(dbSingleData, resolved);
-      } else {
-        const resolved = resolveAllTemplateVars(dbSingleData, {
-          contentRoot: getContentRoot(res),
-          context: { locale },
-        }) as Record<string, unknown>;
-        Object.assign(dbSingleData, resolved);
-      }
-
-      const { enhanceArticleSectionsInPage } = await import("../markdown-enhance");
-      await enhanceArticleSectionsInPage(dbSingleData);
-
-      const dbSingleRaw = getCI(res).loadMergedContent(contentType, slug, locale);
-      const dbSingleLayout = resolveLayout(contentType, dbSingleRaw.data || dbSingleData, getContentRoot(res));
-      injectCanonicalIfMissing(dbSingleData, contentType, locale);
-      const { layout: _dbSingleStripLayout, ...dbSingleRest } = dbSingleData;
-      res.json({
-        ...dbSingleRest,
-        layout: dbSingleLayout,
-        detached,
-      });
-    } catch (error) {
-      log.error({ err: error }, "[DatabaseSingle] Error:");
-      res.status(500).json({ error: "Failed to load database single page" });
-    }
+  /** Legacy alias kept for cached clients: entry pages are served by /api/content-pages. */
+  app.get("/api/database-single/:contentType/:slug", (req, res) => {
+    const { contentType, slug } = req.params;
+    const qIndex = req.originalUrl.indexOf("?");
+    const query = qIndex >= 0 ? req.originalUrl.slice(qIndex) : "";
+    res.redirect(307, `/api/content-pages/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}${query}`);
   });
   app.get("/api/migrations", (_req, res) => {
     try {

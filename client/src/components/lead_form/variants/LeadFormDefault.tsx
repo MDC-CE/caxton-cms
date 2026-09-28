@@ -1869,11 +1869,9 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       }
 
       if (effective.success?.reload_entry_fields && contentType && slug) {
-        const dbKey = ["/api/database-single", contentType, slug, locale] as const;
-        const staticKey = [getApiPath(contentType), slug, locale] as const;
+        const entryKey = [getApiPath(contentType), slug, locale] as const;
         // Non-blocking: refresh entry page data so overrides re-resolve (e.g. registered).
-        void queryClient.invalidateQueries({ queryKey: [...dbKey] });
-        void queryClient.invalidateQueries({ queryKey: [...staticKey] });
+        void queryClient.invalidateQueries({ queryKey: [...entryKey] });
       }
 
       if (effective.success?.url) {

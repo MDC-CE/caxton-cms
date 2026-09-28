@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { AlertTriangle, Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
 import { IconChess, IconChevronDown, IconChevronRight, IconExternalLink } from "@tabler/icons-react";
 import { queryClient } from "@/lib/queryClient";
@@ -1585,8 +1586,8 @@ function PartialOverrideDialog({
                   <li>Template fields using <code className="text-[11px]">{`{{ entry.* }}`}</code> resolve from the DB row at render time</li>
                   <li>Public URLs are resolved from the database index (<code className="text-[11px]">byUrl</code>) when the cache is loaded</li>
                   <li>
-                    <code className="text-[11px]">loadDatabaseSinglePage</code> returns null without a
-                    matching DB row — static YAML alone cannot serve the page on indexed types
+                    Without a matching DB row for that language the page 404s (<code className="text-[11px]">loadEntryForDelivery</code> in{" "}
+                    <code className="text-[11px]">server/entry-delivery.ts</code>) — entry YAML alone does not publish it
                   </li>
                 </ul>
               </div>
@@ -4100,7 +4101,7 @@ function FieldMappingDialog({
     }
   };
 
-  const allowAttachedRequiredMode = !!config?.single_template || !!config?.database?.slug;
+  const allowAttachedRequiredMode = typeUsesSharedTemplate(config);
 
   const applyRequiredMode = useCallback(
     (field: string, nextRequired: RequiredMode): boolean => {

@@ -3,6 +3,7 @@ import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
 import { escapeObjectVars, unescapeYamlDump } from "@shared/templateVars";
+import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { entryBagFieldPathFromVarName, getLegacySingleVarWriteError } from "@shared/entryTemplateVars";
 import { getConsentKeyError } from "@shared/consentLegacyKeys";
 import { deleteAtPath } from "@shared/object-path";
@@ -990,8 +991,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
     // forward ops to template.{locale}.yml.
     const usesSharedTemplate =
       !isEntryDetached(contentType, slug, contentRoot) &&
-      (ci.isDatabaseBacked(contentType) ||
-        !!getContentTypeConfig(contentType, contentRoot)?.single_template);
+      typeUsesSharedTemplate(getContentTypeConfig(contentType, contentRoot));
     let resolvedOperations = operations;
     let forwardedTemplateOps = false;
     /** True when stub scrub removed overlay section leftovers (worth rewriting entry YAML). */
@@ -1893,7 +1893,7 @@ function writeStructuralChangesToTemplate(opts: {
         return m ? m[1] : null;
       })();
     const typeConfig = contentType ? getContentTypeConfig(contentType, contentRoot) : null;
-    const isSharedLayout = !!(typeConfig?.database?.slug || typeConfig?.single_template);
+    const isSharedLayout = typeUsesSharedTemplate(typeConfig);
 
     if (isSharedLayout && contentType && localeFromPath && !opts.skipSharedLayoutFanOut) {
       const templateDir = path.dirname(filePath);
@@ -2363,7 +2363,7 @@ function handleSharedTemplateEdit(opts: {
 
       // Fan out allowlisted layout field updates to sibling singles
       const typeConfig = getContentTypeConfig(contentType, contentRoot);
-      const isSharedLayout = !!(typeConfig?.database?.slug || typeConfig?.single_template);
+      const isSharedLayout = typeUsesSharedTemplate(typeConfig);
       const layoutOps = operations.filter((op) => {
         if (op.action !== "update_field") return false;
         const m = String(op.path).match(/^sections\.\d+\.(.+)$/);

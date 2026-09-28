@@ -62,20 +62,22 @@ export const databaseHealthValidator: Validator = {
       warnings.push({
         type: "warning",
         code: "DATABASE_PAGES_NOT_CHECKED",
-        message: `Database ${name} has no cached items; its pages were not checked. Their existing issues were kept, not cleared.`,
+        message: `Database ${name} has never been copied; its pages were not checked. Their existing issues were kept, not cleared.`,
         file: `${context.contentRoot}/db/${name}/config.yml`,
         suggestion: `Refresh the ${name} database cache, then run validation again.`,
       });
     }
 
     for (const { name, config } of databases) {
+      const lastGood = dbm.getLastGoodItems(name);
       const { errors: dbErrors, warnings: dbWarnings } = evaluateDatabaseHealth(
         name,
         config,
         context.contentRoot,
         jobStates[name],
-        dbm.getCacheInfo(name),
+        lastGood ? { fetched_at: lastGood.fetchedAt, item_count: lastGood.items.length } : null,
         dbm.countTransformErrors(name),
+        lastGood?.stale ? lastGood.ageMs : undefined,
       );
       errors.push(...dbErrors);
       warnings.push(...dbWarnings);

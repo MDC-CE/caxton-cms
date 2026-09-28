@@ -25,6 +25,10 @@ export type DiscoveryCtx = {
   databaseId?: string;
   componentName?: string;
   seoClusterId?: string;
+  /** A page whose entry comes from a database item (stored copy). */
+  dbEntrySlug?: string;
+  dbEntryLocale?: string;
+  dbEntryContentType?: string;
 };
 
 export type ScenarioClass = "normal" | "docs";
@@ -206,6 +210,19 @@ export const SCENARIOS: Scenario[] = [
         locale: ctx.localeLight ?? ctx.locale,
       }),
     skipIf: needLight,
+  },
+  {
+    id: "get_entry_content_db",
+    tool: "get_entry_content",
+    about:
+      "Full body for a page whose entry comes from a database item (stored copy + field_overrides). Same tool and shape as static pages; compare p95 vs get_entry_content.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        slug: ctx.dbEntrySlug!,
+        locale: ctx.dbEntryLocale ?? "en",
+        contentType: ctx.dbEntryContentType,
+      }),
+    skipIf: (ctx) => (ctx.dbEntrySlug ? null : "no database-backed entry with a stored copy"),
   },
   {
     id: "get_entry_seo",

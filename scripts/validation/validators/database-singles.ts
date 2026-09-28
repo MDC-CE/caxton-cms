@@ -15,6 +15,9 @@ import { isSharedLayoutType } from "../../../server/shared-layout-entry";
 import { isTemplateVersioningSlug } from "@shared/sharedLayoutPaths";
 import { getDefaultContentFolder } from "../../../server/site-config";
 import { DATABASE_SINGLES_ISSUE_CODES } from "./database-singles.issueCodes";
+import { contentIndex, type ContentIndex } from "../../../server/content-index";
+import { listInboundRedirects, suggestRemovedItemRedirect } from "../../../server/removed-item-redirect";
+import { readSeoIndexFile } from "../../../server/seo-index";
 
 function extractSingleVarNames(content: string): string[] {
   const names: string[] = [];
@@ -49,6 +52,52 @@ function extractByDotPath(obj: unknown, dotPath: string): unknown {
     current = (current as Record<string, unknown>)[key];
   }
   return current;
+}
+
+/**
+ * One SOURCE_ITEM_REMOVED per language the leftover entry folder has a file for
+ * (`_common.yml` alone counts for every language). Nothing is written.
+ */
+function removedItemIssues(
+  ci: ContentIndex,
+  contentType: string,
+  slug: string,
+  folderAbs: string,
+  locales: string[],
+  folderRel: string,
+): ValidationIssue[] {
+  const hasCommon = fs.existsSync(path.join(folderAbs, "_common.yml"));
+  const seoIndex = readSeoIndexFile(ci.contentRoot);
+  const issues: ValidationIssue[] = [];
+  for (const locale of locales) {
+    const localeFile = path.join(folderAbs, `${locale}.yml`);
+    if (!hasCommon && !fs.existsSync(localeFile)) continue;
+    const from = ci.buildUrl(contentType, locale, slug);
+    const target = suggestRemovedItemRedirect(ci, contentType, slug, locale, { seoIndex });
+    const inbound = listInboundRedirects(ci, contentType, slug, locale);
+    const reasonLabel = target.reason.replace(/_/g, " ");
+    const inboundNote =
+      inbound.length > 0
+        ? ` ${inbound.length} old address(es) pointed to this page. Applying the redirect moves them to ${target.to} too: ${inbound.map((r) => r.from).join(", ")}.`
+        : "";
+    issues.push({
+      type: "warning",
+      code: "SOURCE_ITEM_REMOVED",
+      message: `${from}: this page's source item was removed, so the page is no longer shown. Overrides and drafts in ${folderRel}/ are kept.`,
+      file: fs.existsSync(localeFile) ? `${folderRel}/${locale}.yml` : `${folderRel}/_common.yml`,
+      suggestion: `Suggested redirect: ${from} -> ${target.to} (${reasonLabel}).${inboundNote}`,
+      redirectSuggestion: {
+        content_type: contentType,
+        slug,
+        locale,
+        from,
+        to: target.to,
+        reason: target.reason,
+        inbound,
+      },
+    });
+  }
+  return issues;
 }
 
 export const databaseSinglesValidator: Validator = {
@@ -251,6 +300,10 @@ export const databaseSinglesValidator: Validator = {
         : [];
 
       const allSlugs = new Set(items.map(item => String(item[lookupKey] || "")).filter(Boolean));
+      const copyIsFresh = databaseManager.getLastGoodItems(dbName)?.stale === false;
+      const ci =
+        context.contentIndex ??
+        (path.resolve(contentIndex.contentRoot) === path.resolve(contentRootAbs) ? contentIndex : null);
       for (const diskSlug of diskEntries) {
         if (diskSlug.startsWith("_") || isTemplateVersioningSlug(diskSlug)) continue;
         if (allSlugs.has(diskSlug)) {
@@ -270,6 +323,11 @@ export const databaseSinglesValidator: Validator = {
             suggestion:
               "Not in the database cache. Delete via coding agent / staff content sync if unused, or restore upstream. MCP cannot delete this folder — do not claim.",
           });
+          if (copyIsFresh && ci) {
+            warnings.push(
+              ...removedItemIssues(ci, contentType, diskSlug, path.join(typeDir, diskSlug), locales, `${contentRootRel}/${folder}/${diskSlug}`),
+            );
+          }
         }
       }
 

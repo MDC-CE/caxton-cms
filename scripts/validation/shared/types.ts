@@ -32,6 +32,22 @@ export interface ValidationIssue {
   validator?: string;
   /** When the validation cache / run that produced this issue was built (ISO). */
   validationCacheBuiltAt?: string;
+  /** The page was checked against a database copy this old (ms); the source may already be fixed. */
+  staleSourceAgeMs?: number;
+  /** Database whose old copy the page was checked against. */
+  staleSourceDatabase?: string;
+  /** SOURCE_ITEM_REMOVED: suggested redirect for the removed page plus the old addresses that move with it. */
+  redirectSuggestion?: RemovedPageRedirectSuggestion;
+}
+
+export interface RemovedPageRedirectSuggestion {
+  content_type: string;
+  slug: string;
+  locale: string;
+  from: string;
+  to: string;
+  reason: "cluster_main_page" | "listing_page" | "home_page";
+  inbound: { from: string; status: number; source: string; all_languages: boolean }[];
 }
 
 export interface ValidatorResult {
@@ -114,6 +130,9 @@ export interface StoredValidationIssue {
   category?: ValidatorMetadata["category"];
   lastSeenAt: string;
   lastRunAt: string;
+  staleSourceAgeMs?: number;
+  staleSourceDatabase?: string;
+  redirectSuggestion?: RemovedPageRedirectSuggestion;
 }
 
 /** Soft-complete overlay — keyed by StoredValidationIssue.id; not part of the issue row. */
@@ -297,6 +316,9 @@ export interface ContentFile {
   singleEntry?: Record<string, unknown>;
   /** Key shared by every language version of this page; defaults to `slug`. */
   translationGroup?: string;
+  /** Loaded from a database copy older than its cache TTL (age in ms). */
+  staleSourceAgeMs?: number;
+  staleSourceDatabase?: string;
 }
 
 export interface RedirectEntry {
@@ -330,6 +352,8 @@ export interface ValidationContext {
   skippedDatabases?: string[];
   /** Content types whose pages were not loaded this run (existing issues must be kept). */
   skippedContentTypes?: string[];
+  /** Databases whose pages were checked against a copy older than the cache TTL. */
+  staleDatabases?: Array<{ name: string; fetchedAt: string; ageMs: number; contentTypes: string[] }>;
 }
 
 export interface ValidationRunOptions {

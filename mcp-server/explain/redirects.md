@@ -17,10 +17,16 @@ Do not dump the full catalog. Do not use `update_fields` as the primary redirect
 
 ## Two stores
 
-1. **Page aliases** — `{directory}/{slug}/{locale}.yml` `meta.redirects`. **Dest locale file only.** No `all_languages` / `_common.yml` in v1.
-2. **Custom file** — `site_<name>/custom-redirects.yml`. Regex `from`, external dest, or DB-backed dest without a YAML folder.
+1. **Page aliases** — the destination page's `meta.redirects`, whatever the page's source (static or database). MCP writes the dest-locale `{directory}/{slug}/{locale}.yml`; when the page exists in that language but has no file yet (database pages), the file is created (`side_effects` `file_created`). Staff "all languages" writes the page's `_common.yml`; languages without the page are skipped with warning `redirect_languages_skipped`. MCP does not write `_common.yml`.
+2. **Custom file** — `site_<name>/custom-redirects.yml`. Regex `from`, external dest, or a known URL that is not an entry page (e.g. a listing). Unknown destinations → 404.
 
-A write **does not** update the other store.
+A write **does not** update the other store. `before_from` with a page destination → 400 `before_from_page_yaml`.
+
+## Removed pages (`SOURCE_ITEM_REMOVED`)
+
+When a database item disappears upstream (checked against a fresh copy), its page 404s; entry files are kept and nothing is written. The issue row carries `redirect_suggestion`: target = cluster main page (`pillar_path` when live) → listing page → the language's home page, skipping targets that are not live or are themselves redirect sources. `inbound[]` lists old addresses saved on the removed page (`{locale}.yml` and `_common.yml` `meta.redirects`).
+
+Apply with `update_redirect` `action: add`, `from` = removed page URL, `to` = suggested target, `removed_entry: { content_type, slug, locale }`. `removed_entry` moves every inbound address to the same target (saved on the target page, or custom file when the target is not a page) and deletes it from the removed page; the response lists `moved_inbound` / `not_moved`. Show staff the inbound list before applying.
 
 ## First-match order
 
@@ -34,7 +40,7 @@ Call `test_redirect` first. Live routing only — **`variant` is refused**.
 
 | `action` | Required | Notes |
 |---|---|---|
-| `add` | `from`, `to` | Optional `before_from` (custom file only). Omit `before_from` = append. Infer store as above. |
+| `add` | `from`, `to` | Optional `before_from` (custom file only). Omit `before_from` = append. Infer store as above. Optional `removed_entry` (SOURCE_ITEM_REMOVED) moves the removed page's old addresses too. |
 | `delete` | `from`, `source` | Locale YAML or `site_*/custom-redirects.yml`. |
 | `move` | `from`, `before_from` | **Fails** unless the rule is in `custom-redirects.yml`. Does not convert page aliases into the custom file. |
 

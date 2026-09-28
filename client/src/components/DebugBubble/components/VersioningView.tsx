@@ -1899,7 +1899,12 @@ export function VersioningView({
             <DialogDescription>
               {isTemplateVersioning
                 ? <>A draft copy of <code className="text-xs bg-muted px-1 py-0.5 rounded">template.{createVersionLocale}.yml</code> will be created. Promote it to replace the shared template when ready.</>
-                : <>A new version of <strong>{contentInfo.label || contentInfo.slug}</strong> will be created but your users will not see it unless traffic is assigned to it later.</>
+                : <>
+                    A new version of <strong>{contentInfo.label || contentInfo.slug}</strong> will be created but your users will not see it unless traffic is assigned to it later.{" "}
+                    {isSharedLayout && !isDetached
+                      ? "Drafts change this page's fields only. The layout comes from the shared template. Preview, then publish."
+                      : "Drafts can change fields and sections. Preview, then publish."}
+                  </>
               }
             </DialogDescription>
           </DialogHeader>

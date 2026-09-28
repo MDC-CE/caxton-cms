@@ -1,4 +1,5 @@
 import fs from "fs";
+import { listTypePages } from "./entry-layer";
 import path from "path";
 import yaml from "js-yaml";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
@@ -339,13 +340,9 @@ function listSlugsForContentType(contentType: string, config: Record<string, unk
     contentType as Parameters<typeof contentIndex.listContentSlugs>[0],
   );
 
-  const dbSlug = (config.database as { slug?: string } | undefined)?.slug;
-  if (!dbSlug) return dirSlugs;
-
-  const items = databaseManager.getMappedItems(dbSlug) ?? [];
-  const fromDb = items
-    .map((item) => String(item.slug || "").trim())
-    .filter(Boolean);
+  const listed = listTypePages(contentIndex, contentType);
+  if (!listed) return dirSlugs;
+  const fromDb = listed.pages.map((p) => p.slug);
   return Array.from(new Set([...dirSlugs, ...fromDb]));
 }
 

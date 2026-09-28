@@ -8,6 +8,10 @@ import {
   isDbBacked,
   isSharedLayoutConfig,
   resolveContentType,
+  entryLocales,
+  entryNotFoundNote,
+  staleSourceWarning,
+  translateSourceItemGate,
   loadPage,
   loadVariantPage,
   safeLoad,
@@ -114,6 +118,7 @@ import {
   isWeakKeywordMetricsForResearch,
 } from "../lib/entry-seo-research-hints.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
+import { mappedFieldsStorageFor } from "../../server/mapped-fields-storage.js";
 import {
   buildAvailableFieldsCatalog,
   filterFieldsByRequest,
@@ -1781,6 +1786,8 @@ export function registerPageTools(
     locales: string[];
     urls?: Record<string, string>;
     data: Record<string, unknown>;
+    /** The entry's source item came from a database copy this old (ms). */
+    staleSourceAgeMs?: number;
   };
 
   type PagePayloadError = { content: [{ type: "text"; text: string }]; isError: true };
@@ -1794,44 +1801,16 @@ export function registerPageTools(
       return { content: [{ type: "text", text: (e as Error).message }], isError: true };
     }
     const resolved = resolveContentType(slug, contentType, contentPath);
-    // #region agent log
-    fetch("http://127.0.0.1:7585/ingest/7dd1bcc0-ea77-4f87-be7d-1ea690313598", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "574959" },
-      body: JSON.stringify({
-        sessionId: "574959",
-        hypothesisId: "C",
-        location: "mcp-server/tools/pages.ts:resolvePagePayload",
-        message: "resolvePagePayload YAML folder lookup",
-        data: {
-          slug,
-          locale,
-          contentTypeHint: contentType ?? null,
-          resolved: resolved
-            ? {
-                contentType: resolved.contentType,
-                dbSlug: (resolved.config as { database?: { slug?: string } })?.database?.slug ?? null,
-                directory: (resolved.config as { directory?: string })?.directory ?? null,
-              }
-            : null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (!resolved) {
-      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}` }], isError: true };
+      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}` }], isError: true };
     }
     const result = loadPage(resolved.contentType, slug, locale, contentPath);
     if (!result) {
-      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType})` }], isError: true };
+      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType}).${entryNotFoundNote(resolved.contentType, contentPath)}` }], isError: true };
     }
 
     const pageDir = path.join(contentPath, getDirectory(resolved.contentType, resolved.config), slug);
-    const dirFiles = fs.existsSync(pageDir) ? fs.readdirSync(pageDir) : [];
-    const locales = dirFiles
-      .map((f: string) => f.replace(/\.(yml|yaml)$/, ""))
-      .filter((n: string) => /^[a-z]{2}(-[a-z]{2})?$/.test(n));
+    const locales = entryLocales(resolved.contentType, slug, contentPath);
 
     const urlPattern = resolved.config.url_pattern;
     let urls: Record<string, string> | undefined;
@@ -1854,22 +1833,23 @@ export function registerPageTools(
         }
       }
       const resolvedUrls: Record<string, string> = {};
-      if (urlPattern["default"]) {
-        for (const l of locales) {
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern["default"].replace(":slug", localeSlug);
-        }
-      } else {
-        for (const l of locales) {
-          if (!urlPattern[l]) continue;
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern[l].replace(":slug", localeSlug);
-        }
+      for (const l of locales) {
+        const pattern = urlPattern[l] || urlPattern["default"];
+        if (!pattern) continue;
+        resolvedUrls[l] = pattern.replace(":slug", localeSlugByLocale[l] || slug);
       }
       if (Object.keys(resolvedUrls).length > 0) urls = resolvedUrls;
     }
 
-    return { contentType: resolved.contentType, slug, locale, locales, ...(urls ? { urls } : {}), data: result.data as Record<string, unknown> };
+    return {
+      contentType: resolved.contentType,
+      slug,
+      locale,
+      locales,
+      ...(urls ? { urls } : {}),
+      data: result.data as Record<string, unknown>,
+      ...(result.staleSourceAgeMs !== undefined ? { staleSourceAgeMs: result.staleSourceAgeMs } : {}),
+    };
   }
 
   // get_entry_content
@@ -1952,7 +1932,8 @@ export function registerPageTools(
       const deprecated_fields_present = deprecatedFieldsPresent(liveConfig, merged);
       const { layoutInfoForEntry } = await import("../../server/layout-owner.js");
       const layout = layoutInfoForEntry(payload.contentType, payload.slug, contentPath);
-      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending }, null, 2) }] };
+      const warnings = payload.staleSourceAgeMs !== undefined ? [staleSourceWarning(payload.staleSourceAgeMs)] : [];
+      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending, ...(warnings.length ? { warnings } : {}) }, null, 2) }] };
     }
   );
 
@@ -2192,6 +2173,7 @@ export function registerPageTools(
       };
 
       const kmWarnings: Array<{ code: string; message: string }> = [];
+      if (payload.staleSourceAgeMs !== undefined) kmWarnings.push(staleSourceWarning(payload.staleSourceAgeMs));
       if (keyword_metrics.source === "yaml_fallback") {
         kmWarnings.push({
           code: "keyword_metrics_yaml_fallback",
@@ -4689,7 +4671,7 @@ export function registerPageTools(
       const ct = resolved.contentType;
       const ctDir = getDirectory(ct, resolved.config);
       const dbSlug = resolved.config.database?.slug as string | undefined;
-      const isStatic = !dbSlug;
+      const defaultStorage = mappedFieldsStorageFor(ct, siteResult.contentPath);
       const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const getHint = {
         tool: "get_entry_fields",
@@ -4724,57 +4706,50 @@ export function registerPageTools(
           };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           const writtenPath = data.path || ctPath;
-          const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
-          if (isStatic) {
-            return ok(
-              {
-                message: data.noop
-                  ? `No-op reset for ${ct}/${slug}.${field} (key not on layer; may live only on _common.yml)`
-                  : `Reset static ${ct}/${slug}.${field} on ${writtenPath}`,
-                storage,
-                path: writtenPath,
-                noop: !!data.noop,
-              },
-              {
-                warnings: [
-                  {
-                    code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
-                    message: data.noop
-                      ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
-                      : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
-                  },
-                ],
-                side_effects: data.noop
-                  ? [{ kind: "other", summary: `storage=${storage}; noop` }]
-                  : [
-                      { kind: "wrote_file", summary: `${writtenPath}#${field}` },
-                      { kind: "other", summary: `storage=${storage}` },
-                    ],
-                next_actions: [getHint],
-              },
-            );
-          }
-          return ok(
-            { message: `Reset ${ct}/${slug}.${field} → cleared ${dbPath} + ${writtenPath}#field_overrides` },
-            {
+          const storage = data.storage || defaultStorage;
+          const resetNextActions = [{ ...getHint, reason: "Confirm provenance is original after reset" }];
+          const payload = {
+            message: data.noop
+              ? `No-op reset for ${ct}/${slug}.${field} (key not on this layer)`
+              : `Reset ${ct}/${slug}.${field} on ${writtenPath}`,
+            storage,
+            path: writtenPath,
+            noop: !!data.noop,
+          };
+          if (storage === "root_key") {
+            return ok(payload, {
               warnings: [
                 {
-                  code: "reset_clears_both_layers",
-                  message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+                  code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
+                  message: data.noop
+                    ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
+                    : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
                 },
               ],
-              side_effects: [
-                { kind: "wrote_file", summary: dbPath },
-                { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
-                { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
-                { kind: "other", summary: `storage=${storage}` },
-              ],
-              next_actions: [{
-                ...getHint,
-                reason: "Confirm provenance is original after reset",
-              }],
-            },
-          );
+              side_effects: data.noop
+                ? [{ kind: "other", summary: `storage=${storage}; noop` }]
+                : [
+                    { kind: "wrote_file", summary: `${writtenPath}#${field}` },
+                    { kind: "other", summary: `storage=${storage}` },
+                  ],
+              next_actions: resetNextActions,
+            });
+          }
+          return ok(payload, {
+            warnings: [
+              {
+                code: "reset_clears_both_layers",
+                message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+              },
+            ],
+            side_effects: [
+              { kind: "wrote_file", summary: dbPath },
+              { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
+              { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
+              { kind: "other", summary: `storage=${storage}` },
+            ],
+            next_actions: resetNextActions,
+          });
         }
 
         if (level === "database") {
@@ -4788,7 +4763,11 @@ export function registerPageTools(
           const data = await res.json() as { error?: string };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           return ok(
-            { message: `Database override set for ${ct}/${slug}.${field} → ${relPath}` },
+            {
+              message: `Database override set for ${ct}/${slug}.${field} → ${relPath}`,
+              storage: "db_override",
+              path: relPath,
+            },
             {
               warnings: [
                 {
@@ -4897,7 +4876,7 @@ export function registerPageTools(
                   : [],
           });
         }
-        const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
+        const storage = data.storage || defaultStorage;
         const writtenPath = data.path || relPathFallback;
         const isPublishedAt = field === "published_at";
         return ok(
@@ -7946,7 +7925,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
 
       const resolved = resolveContentType(slug, contentType, contentPath);
       if (!resolved) {
-        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}`);
+        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}`);
       }
 
       if (mcpToken) {
@@ -7954,6 +7933,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           return denyWriteSuggestPropose("content_edit_text", resolved.contentType);
         }
       }
+
+      const itemGate = translateSourceItemGate(resolved.contentType, slug, target_locale, contentPath, site);
+      if (itemGate) return fail(itemGate.message, itemGate.details);
 
       const variantCheck = validateTranslateVariantSlug(
         typeof variantArg === "string" && variantArg.trim()

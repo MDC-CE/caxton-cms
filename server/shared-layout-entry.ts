@@ -9,6 +9,7 @@ import {
   TEMPLATE_VERSIONING_SLUG,
   isTemplateVersioningSlug,
   isReservedTemplateVariantSlug,
+  typeUsesSharedTemplate,
 } from "@shared/sharedLayoutPaths";
 import { getContentTypeConfig, getFolder } from "./content-types";
 import { contentIndex } from "./content-index";
@@ -26,8 +27,7 @@ export function isSharedLayoutType(
 ): boolean {
   const config = getContentTypeConfig(contentType, contentRoot);
   if (!config) return false;
-  // DB always implies shared layout even if single_template flag is missing
-  return !!(config.database?.slug || config.single_template);
+  return typeUsesSharedTemplate(config);
 }
 
 export function getEntryCommonPath(

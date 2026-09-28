@@ -171,7 +171,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { coerceProgramSlug } from "@shared/safe-href";
 import { resolveEffectiveCanonical } from "../resolve-effective-canonical";
 import * as userStore from "../user-store";
@@ -802,6 +801,10 @@ export function resolveAssignedVariantSlug(
   );
 
   if (!assignedVariant) return null;
+  // Only assign variants that exist in this language; otherwise visitors get the live page.
+  if (!versioningManager.getVariantContentResult(contentType, versioningSlug, assignedVariant, locale).ok) {
+    return null;
+  }
 
   const updatedAssignments = [
     ...existingAssignments.filter(

@@ -192,7 +192,7 @@ Your job is to stop harm — invented claims, lost query fit, false scope, unjus
 
 | `layout_owner` | Examples | Draft contains | New language | Apply writes |
 |---|---|---|---|---|
-| `shared_template` | attached blog post, attached database-backed entry | fields only (sections → `attached_sections_refused`) | field edits only | `{locale}.yml` fields with `sections: []` (or field overrides for database-backed); template untouched |
+| `shared_template` | attached blog post, attached database-backed entry | fields only (sections → `attached_sections_refused`) | field edits only | `{locale}.yml` fields with `sections: []` (or field overrides for database-backed — the draft's overrides sit over the item and live overrides, and `{locale}.yml` is created on publish if missing); template untouched |
 | `entry` | landing, downloadable, program page, any detached entry | fields + the full layout: one `{ field_path: "sections", value: [...] }`, or `sections[i].x` on an existing locale | full translated `sections` (else `sections_required`, `details.new_locale`) | the whole page |
 | `is_shared_template: true` | slug `template` of a shared-layout type | the shared layout itself | full `sections` | `template.{locale}.yml` → every attached entry in that language (`confirm_affected_entries: N`); detached entries unaffected |
 

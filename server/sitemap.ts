@@ -4,6 +4,7 @@ import { getSupportedLocales, isIndexingBlocked } from "./settings";
 import { applyTransformIfNeeded } from "./transform";
 import { toSitemapLastmod } from "@shared/normalizeFlexibleDate";
 import { databaseManager, type DatabaseManager } from "./database";
+import { listTypePages } from "./entry-layer";
 import { child } from "./logger";
 import type { SiteContext } from "./site-manager";
 import { getDefaultContentFolder } from "./site-config";
@@ -422,28 +423,17 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
   try {
     const allTypeConfigs = getAllConfigs(cf);
     for (const [typeName, typeConfig] of Object.entries(allTypeConfigs)) {
-      if (!typeConfig.database?.slug) continue;
-      const dbName = typeConfig.database.slug;
-      const items = db.getMappedItems(dbName);
-      if (!items || items.length === 0) {
-        log.warn(`[Sitemap] No cached items for DB-backed type "${typeName}" (db: ${dbName}) — skipping`);
+      if (!typeConfig.database?.slug || !typeConfig.url_pattern) continue;
+      const listed = listTypePages(ci, typeName);
+      if (!listed || listed.pages.length === 0) {
+        log.warn(`[Sitemap] No cached items for DB-backed type "${typeName}" (db: ${typeConfig.database.slug}) — skipping`);
         continue;
       }
-      const localeFieldKey = getLocaleKey(typeName);
-      const localeSource = getLocaleSource(typeName);
       const urlPatterns = typeConfig.url_pattern;
       const fieldMapping = getFullFieldMapping(typeName);
       const typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
-      for (const item of items) {
-        let locale = "en";
-        if (localeFieldKey) {
-          const resolvedLocaleField = (fieldMapping && localeFieldKey in fieldMapping)
-            ? fieldMapping[localeFieldKey]
-            : localeFieldKey;
-          const langVal = String(item[resolvedLocaleField] || item[localeFieldKey] || "en");
-          locale = localeSource ? applyTransformIfNeeded(localeSource, langVal) : langVal;
-        }
-        const urlPattern = urlPatterns[locale] || urlPatterns["en"];
+      for (const { item, locale } of listed.pages) {
+        const urlPattern = urlPatterns[locale] || urlPatterns["default"] || urlPatterns["en"];
         if (!urlPattern) continue;
         const defaults = getFieldMappingDefaults(typeName, cf);
         const { missing } = extractUrlPatternParams(urlPattern, item, fieldMapping, defaults);
@@ -835,27 +825,15 @@ export function resolveDebugSitemapUrl(opts: {
     const typeConfig = allConfigs[typeName];
 
     // DB-backed types
-    if (typeConfig?.database?.slug) {
-      const dbName = typeConfig.database.slug;
-      const items = db.getMappedItems(dbName);
-      if (!items?.length) return null;
-      const localeFieldKey = getLocaleKey(typeName);
-      const localeSource = getLocaleSource(typeName);
+    if (typeConfig?.database?.slug && typeConfig.url_pattern) {
+      const listed = listTypePages(ci, typeName);
+      if (!listed?.pages.length) return null;
       const urlPatterns = typeConfig.url_pattern;
       const fieldMapping = getFullFieldMapping(typeName);
       const typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
       const defaults = getFieldMappingDefaults(typeName, cf);
 
-      for (const item of items) {
-        let itemLocale = "en";
-        if (localeFieldKey) {
-          const resolvedLocaleField =
-            fieldMapping && localeFieldKey in fieldMapping
-              ? fieldMapping[localeFieldKey]
-              : localeFieldKey;
-          const langVal = String(item[resolvedLocaleField] || item[localeFieldKey] || "en");
-          itemLocale = localeSource ? applyTransformIfNeeded(localeSource, langVal) : langVal;
-        }
+      for (const { item, locale: itemLocale } of listed.pages) {
         if (itemLocale !== locale) continue;
         const itemSlug = String(item.slug || item.id || "");
         const hreflangMap = resolveHreflangsFromRecord(item, typeName, cf);
@@ -866,7 +844,7 @@ export function resolveDebugSitemapUrl(opts: {
           String(item.id || "") === dirSlug;
         if (!matches) continue;
 
-        const urlPattern = urlPatterns[locale] || urlPatterns["en"];
+        const urlPattern = urlPatterns[locale] || urlPatterns["default"] || urlPatterns["en"];
         if (!urlPattern) return null;
         const { missing } = extractUrlPatternParams(urlPattern, item, fieldMapping, defaults);
         if (missing.length > 0) return null;
@@ -1147,26 +1125,14 @@ function buildDebugSitemapUrlsUncached(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
     try {
       const allTypeConfigs = getAllConfigs(cf);
       for (const [typeName, typeConfig] of Object.entries(allTypeConfigs)) {
-        if (!typeConfig.database?.slug) continue;
-        const dbName = typeConfig.database.slug;
-        const items = db.getMappedItems(dbName);
-        if (!items || items.length === 0) continue;
-        const localeFieldKey = getLocaleKey(typeName);
-        const localeSource = getLocaleSource(typeName);
+        if (!typeConfig.database?.slug || !typeConfig.url_pattern) continue;
+        const listed = listTypePages(ci, typeName);
+        if (!listed || listed.pages.length === 0) continue;
         const urlPatterns = typeConfig.url_pattern;
         const fieldMapping = getFullFieldMapping(typeName);
         const typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
-        for (const item of items) {
-          let locale = "en";
-          if (localeFieldKey) {
-            const resolvedLocaleField =
-              fieldMapping && localeFieldKey in fieldMapping
-                ? fieldMapping[localeFieldKey]
-                : localeFieldKey;
-            const langVal = String(item[resolvedLocaleField] || item[localeFieldKey] || "en");
-            locale = localeSource ? applyTransformIfNeeded(localeSource, langVal) : langVal;
-          }
-          const urlPattern = urlPatterns[locale] || urlPatterns["en"];
+        for (const { item, locale } of listed.pages) {
+          const urlPattern = urlPatterns[locale] || urlPatterns["default"] || urlPatterns["en"];
           if (!urlPattern) continue;
           const defaults = getFieldMappingDefaults(typeName, cf);
           const { missing } = extractUrlPatternParams(urlPattern, item, fieldMapping, defaults);

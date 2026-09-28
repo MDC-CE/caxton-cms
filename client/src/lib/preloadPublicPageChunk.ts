@@ -46,6 +46,13 @@ export function pageChunkImportFromInitialData(
     if (key0 === "/api/database-single") {
       return import("@/pages/DatabaseSinglePage");
     }
+    if (typeof key0 === "string" && key0.startsWith("/api/content-pages/")) {
+      const type = key0.slice("/api/content-pages/".length);
+      const ct = contentTypesFromInitialData(payload)?.find((t) => t.name === type);
+      if (ct && (ct.has_database || ct.single_template)) {
+        return import("@/pages/DatabaseSinglePage");
+      }
+    }
     if (key0 === "/api/pages" || key0 === "/api/blog/config") {
       return import("@/pages/page");
     }

@@ -3,7 +3,9 @@
  * Database-backed is a separate axis (where data lives / creatability) and never changes this.
  */
 
-import { isTemplateVersioningSlug } from "@shared/sharedLayoutPaths";
+import { isTemplateVersioningSlug, typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
+
+export { typeUsesSharedTemplate };
 import { getContentTypeConfig } from "./content-types";
 import { isEntryDetached } from "./shared-layout-entry";
 
@@ -20,7 +22,7 @@ export type EntryLayoutInfo = {
 export function layoutOwnerForType(
   config: { single_template?: boolean; database?: { slug?: string } | null } | null | undefined,
 ): LayoutOwner {
-  return config?.database?.slug || config?.single_template ? "shared_template" : "entry";
+  return typeUsesSharedTemplate(config) ? "shared_template" : "entry";
 }
 
 export function layoutInfoForEntry(

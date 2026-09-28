@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { entryItemLayer, entryItemLocale, loadTypeListing } from "../entry-layer";
 import express from "express";
 import { getDefaultContentRoot } from "../site-config";
 import { createServer, type Server } from "http";
@@ -63,10 +64,10 @@ async function loadEntriesForPreview(
   const config = getContentTypeConfig(type, ctRoot(res));
   if (!config) return [];
   if (config.database?.slug) {
-    const items = await getDB(res).fetchMappedItems(type);
+    const items = await loadTypeListing(getCI(res), type, getDB(res));
     const localeKey = getLocaleKey(type, ctRoot(res)) || "lang";
     return items.filter(
-      (item) => !localeFilter || String(item[localeKey] || "en") === localeFilter,
+      (item) => !localeFilter || entryItemLocale(item, type, ctRoot(res)) === localeFilter,
     ) as Array<Record<string, unknown>>;
   }
   const { items } = await queryEntries(
@@ -347,7 +348,9 @@ import {
   withTrafficCtr,
   type OrganicEntrySortable,
 } from "../organic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate, attachVariableFieldsToSections, hasStaticSharedLayoutEntryLocale } from "../database-single-loader";
+import { mergeSingleTemplate, attachVariableFieldsToSections } from "../database-single-loader";
+import { loadEntryForDelivery } from "../entry-delivery";
+import { layoutOwnerForEntry, typeUsesSharedTemplate } from "../layout-owner";
 import {
   DEFAULT_PREVIEW_MAX_HEIGHT,
   DEFAULT_PREVIEW_WIDTH,
@@ -993,186 +996,76 @@ export function registerContentRoutes(app: Express): void {
     const templateShell =
       isTemplateVersioningSlug(requestSlug) && isSharedLayoutType(contentType, getContentRoot(res));
 
-    if (hasDatabaseSingle(contentType, getContentRoot(res)) && !templateShell) {
-      const root = getContentRoot(res);
-      const detached = isEntryDetached(contentType, slug, root);
-      let templateVariant: string | undefined;
-      if (!detached) {
-        templateVariant =
-          forceVariant ||
-          resolveAssignedVariantSlug(req, res, contentType, slug, locale) ||
-          undefined;
-      } else if (forceVariant) {
-        templateVariant = forceVariant;
-      }
-      const page = await loadDatabaseSinglePage(
-        contentType,
-        slug,
-        locale,
-        root,
-        getDB(res),
-        templateVariant,
-      );
-      if (page) {
-        const dbPageData = page as unknown as Record<string, unknown>;
-        const dbSingleEntry = (dbPageData.singleEntry as Record<string, unknown>) || {};
-        const param = contentParamBag(req, res, contentType, slug, locale, dbSingleEntry);
-        if (page.sections && Array.isArray(page.sections)) {
-          page.sections = (await resolveDynamicEntries(page.sections, locale, {
-            ...dynamicEntriesOptions(res),
-            singleEntry: dbSingleEntry,
-          })) as any;
-          applyComponentImageSizes(page.sections as unknown[]);
-        }
-        // Fill missing image before resolving {{ single.image | fallback }} into sections.
-        await applyEntryPreviewOgImage(getEntryPreviewManager(res), {
-          contentType,
-          entry: dbSingleEntry,
-          previewConfig: getPreviewConfig(contentType, ctRoot(res)),
-          pageData: dbPageData,
-        });
-        if (Object.keys(dbSingleEntry).length > 0) {
-          const dbResolved = resolveAllTemplateVars(dbPageData, {
-            singleEntry: dbSingleEntry,
-            param,
-            contentRoot: ctRoot(res),
-            context: { locale },
-          }) as Record<string, unknown>;
-          Object.assign(dbPageData, dbResolved);
-        } else {
-          const dbResolved = resolveAllTemplateVars(dbPageData, {
-            param,
-            contentRoot: ctRoot(res),
-            context: { locale },
-          }) as Record<string, unknown>;
-          Object.assign(dbPageData, dbResolved);
-        }
-        const { enhanceArticleSectionsInPage } = await import("../markdown-enhance");
-        await enhanceArticleSectionsInPage(dbPageData);
-        const dbRaw = getCI(res).loadMergedContent(contentType, slug, locale);
-        const dbLayout = resolveLayout(contentType, dbRaw.data || {}, getContentRoot(res));
-        injectCanonicalIfMissing(dbPageData, contentType, locale);
-        const { layout: _dbStripLayout, ...dbRest } = dbPageData;
-        res.json({
-          ...dbRest,
-          param,
-          layout: dbLayout,
-          detached,
-        });
-        return;
-      }
-      // Slug not found in DB — do not fall through to shared template shell
-      res.status(404).json({ error: `Item not found: ${contentType}/${slug}` });
-      return;
-    }
-
-    // Variant resolution for YAML-backed content types
     const root = getContentRoot(res);
-    const sharedAttached =
-      isSharedLayoutType(contentType, root) && !isEntryDetached(contentType, slug, root);
+    if (typeUsesSharedTemplate(getContentTypeConfig(contentType, root))) {
+      const attached = layoutOwnerForEntry(contentType, slug, root) === "shared_template";
+      let templateVariant: string | undefined;
+      let entryVariant: string | undefined;
+      if (attached) {
+        // Entry drafts overlay `{variant}.{locale}.yml` fields on the live template;
+        // otherwise the variant is a template A/B shell.
+        const entryLevel = !!forceVariant && hasEntryLevelVersioning(contentType, slug, root);
+        entryVariant = entryLevel ? forceVariant : undefined;
+        templateVariant = entryLevel
+          ? undefined
+          : forceVariant || resolveAssignedVariantSlug(req, res, contentType, slug, locale) || undefined;
+      } else {
+        if (forceVariant) {
+          const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+          const forcedResult = versioningManager.getVariantContentResult(contentType, slug, forceVariant, locale);
+          if (tryRespondForceVariantYamlParseError(res, forcedResult)) return;
+        }
+        entryVariant = forceVariant || resolveAssignedVariantSlug(req, res, contentType, slug, locale) || undefined;
+      }
 
-    // Attached shared-layout: merge template shell + entry fields.
-    // Require the entry locale file (same gate as loadMergedSinglePage) so a
-    // missing slug cannot return the empty template.*.yml shell.
-    // Entry-level drafts (translate_entry / convert-to-draft) overlay
-    // `{variant}.{locale}.yml` on the live template — not template.{variant}.yml.
-    const entryLevelForceVariant =
-      !!forceVariant && hasEntryLevelVersioning(contentType, slug, root);
-    const hasLiveLocale =
-      templateShell ||
-      hasStaticSharedLayoutEntryLocale(
-        contentType,
-        slug,
-        locale,
-        root,
-      );
-
-    if (sharedAttached) {
-      if (!hasLiveLocale && !forceVariant) {
+      const delivered = await loadEntryForDelivery(getCI(res), contentType, templateShell ? requestSlug : slug, locale, {
+        templateVariant,
+        entryVariant,
+      });
+      if (!delivered) {
         res.status(404).json({ error: `${contentType} entry not found` });
         return;
       }
-      // Entry draft preview, or live locale (+ optional template A/B variant)
-      if (entryLevelForceVariant || hasLiveLocale) {
-        const templateVariant = entryLevelForceVariant
-          ? undefined
-          : forceVariant ||
-            resolveAssignedVariantSlug(req, res, contentType, slug, locale) ||
-            undefined;
-        const entryVariant = entryLevelForceVariant ? forceVariant : undefined;
-        const merged = mergeSingleTemplate(
-          contentType,
-          locale,
-          templateShell ? undefined : slug,
-          undefined,
-          root,
-          templateVariant,
-          entryVariant,
-        );
-        if (merged) {
-          const variantLayout = resolveLayout(contentType, merged, root);
-          let singleEntry = buildSingleEntryFromContent(contentType, merged, {
-            slug,
-            locale,
-            contentRoot: root,
-          });
-          if (singleEntry) {
-            singleEntry = await hydrateEntryForDelivery(contentType, singleEntry, {
-              contentRoot: root,
-              locale,
-              contentIndex: getCI(res),
-              db: getDB(res),
-            });
-          }
-          if (merged.sections && Array.isArray(merged.sections)) {
-            attachVariableFieldsToSections(merged.sections as unknown[]);
-            merged.sections = (await resolveDynamicEntries(
-              merged.sections as unknown[],
-              locale,
-              {
-                ...dynamicEntriesOptions(res),
-                singleEntry: singleEntry || undefined,
-              },
-            )) as any;
-            applyComponentImageSizes(merged.sections as unknown[]);
-          }
-          const param = contentParamBag(req, res, contentType, slug, locale, merged);
-          if (singleEntry) {
-            merged.singleEntry = singleEntry;
-            await applyEntryPreviewOgImage(getEntryPreviewManager(res), {
-              contentType,
-              entry: singleEntry,
-              previewConfig: getPreviewConfig(contentType, root),
-              pageData: merged,
-            });
-            const resolved = resolveAllTemplateVars(merged, {
-              singleEntry,
-              param,
-              contentRoot: root,
-              context: { locale },
-            }) as Record<string, unknown>;
-            Object.assign(merged, resolved);
-          } else {
-            const resolved = resolveAllTemplateVars(merged, {
-              param,
-              contentRoot: root,
-              context: { locale },
-            }) as Record<string, unknown>;
-            Object.assign(merged, resolved);
-          }
-          const { enhanceArticleSectionsInPage: enhanceAttached } = await import("../markdown-enhance");
-          await enhanceAttached(merged);
-          injectCanonicalIfMissing(merged, contentType, locale);
-          const { layout: _strip, ...rest } = merged;
-          res.json({
-            ...rest,
-            param,
-            layout: variantLayout,
-            detached: false,
-          });
-          return;
-        }
+      const pageData = delivered.data;
+      const singleEntry = delivered.singleEntry;
+      const layout = resolveLayout(contentType, pageData, root);
+      const param = contentParamBag(req, res, contentType, slug, locale, { ...pageData, ...(singleEntry || {}) });
+      if (Array.isArray(pageData.sections)) {
+        pageData.sections = (await resolveDynamicEntries(pageData.sections, locale, {
+          ...dynamicEntriesOptions(res),
+          singleEntry: singleEntry || undefined,
+        })) as any;
+        applyComponentImageSizes(pageData.sections as unknown[]);
       }
+      if (singleEntry) {
+        pageData.singleEntry = singleEntry;
+        // Fill missing image before resolving {{ entry.image | fallback }} into sections.
+        await applyEntryPreviewOgImage(getEntryPreviewManager(res), {
+          contentType,
+          entry: singleEntry,
+          previewConfig: getPreviewConfig(contentType, root),
+          pageData,
+        });
+      }
+      const resolvedPage = resolveAllTemplateVars(pageData, {
+        ...(singleEntry && Object.keys(singleEntry).length > 0 ? { singleEntry } : {}),
+        param,
+        contentRoot: root,
+        context: { locale },
+      }) as Record<string, unknown>;
+      Object.assign(pageData, resolvedPage);
+      const { enhanceArticleSectionsInPage } = await import("../markdown-enhance");
+      await enhanceArticleSectionsInPage(pageData);
+      injectCanonicalIfMissing(pageData, contentType, locale);
+      const { layout: _stripLayout, ...pageRest } = pageData;
+      res.json({
+        ...pageRest,
+        param,
+        layout,
+        detached: delivered.detached,
+        ...(delivered.perEntryRemovedSections ? { perEntryRemovedSections: delivered.perEntryRemovedSections } : {}),
+      });
+      return;
     }
 
     let variantPage: Record<string, unknown> | null = null;
@@ -3470,7 +3363,7 @@ export function registerContentRoutes(app: Express): void {
         }
         // Same path as the default DB list: fetchMappedItems refreshes when TTL expired.
         // Do not gate on getCacheInfo() — expired TTL would falsely report cache_missing.
-        const items = await getDB(res).fetchMappedItems(type);
+        const items = await loadTypeListing(getCI(res), type, getDB(res));
         const cacheInfo = getDB(res).getCacheInfo(dbName);
         if (items.length === 0 && !cacheInfo) {
           finishSeoEntries(
@@ -3485,7 +3378,7 @@ export function registerContentRoutes(app: Express): void {
           ? Math.round((Date.now() - new Date(cacheInfo.fetched_at).getTime()) / (60 * 60 * 1000) * 10) / 10
           : null;
 
-        const uniqueLocales = [...new Set(items.map(item => String(item[localeKey] || "en")))];
+        const uniqueLocales = [...new Set(items.map(item => entryItemLocale(item, type, ctRoot(res))))];
         const templates: Record<string, Record<string, unknown> | null> = {};
         for (const locale of uniqueLocales) {
           templates[locale] = mergeSingleTemplate(type, locale, undefined, undefined, getContentRoot(res));
@@ -3501,8 +3394,8 @@ export function registerContentRoutes(app: Express): void {
 
         const entries: Array<Record<string, unknown>> = [];
         for (const item of items) {
-          if (localeFilter && String(item[localeKey] || "en") !== localeFilter) continue;
-          const locale = String(item[localeKey] || "en");
+          if (localeFilter && entryItemLocale(item, type, ctRoot(res)) !== localeFilter) continue;
+          const locale = entryItemLocale(item, type, ctRoot(res));
           const template = templates[locale];
           const rawMeta = resolveAllTemplateVars(template?.meta ?? {}, {
             singleEntry: item as Record<string, unknown>,
@@ -3802,7 +3695,7 @@ export function registerContentRoutes(app: Express): void {
           res.status(404).json({ error: `Database "${dbName}" not found` });
           return;
         }
-        const items = await getDB(res).fetchMappedItems(type);
+        const items = await loadTypeListing(getCI(res), type, getDB(res));
         const localeKey = getLocaleKey(type, ctRoot(res)) || "lang";
         const bySlug = new Map<
           string,
@@ -3811,7 +3704,7 @@ export function registerContentRoutes(app: Express): void {
         for (const item of items) {
           const slug = typeof item.slug === "string" ? item.slug : "";
           if (!slug) continue;
-          const locale = String(item[localeKey] || "en");
+          const locale = entryItemLocale(item, type, ctRoot(res));
           const existing = bySlug.get(slug);
           const title =
             typeof item.title === "string" && item.title.trim()
@@ -4160,12 +4053,12 @@ export function registerContentRoutes(app: Express): void {
           res.status(404).json({ error: `Database "${dbName}" not found` });
           return;
         }
-        const items = await getDB(res).fetchMappedItems(type);
+        const items = await loadTypeListing(getCI(res), type, getDB(res));
         const localeKey = getLocaleKey(type, ctRoot(res)) || "lang";
         const template = mergeSingleTemplate(type, locale, undefined, undefined, contentRoot);
         const entries: OrganicEntryRow[] = [];
         for (const item of items) {
-          const itemLocale = String(item[localeKey] || "en");
+          const itemLocale = entryItemLocale(item, type, ctRoot(res));
           if (itemLocale !== locale) continue;
           const slug = typeof item.slug === "string" ? item.slug : "";
           if (!slug) continue;
@@ -4343,10 +4236,10 @@ export function registerContentRoutes(app: Express): void {
             res.status(404).json({ error: `Database "${dbName}" not found` });
             return;
           }
-          const items = await getDB(res).fetchMappedItems(type);
+          const items = await loadTypeListing(getCI(res), type, getDB(res));
           const localeKey = getLocaleKey(type, ctRoot(res)) || "lang";
           const item = items.find((it) => {
-            const itemLocale = String(it[localeKey] || "en");
+            const itemLocale = entryItemLocale(it, type, ctRoot(res));
             return itemLocale === locale && typeof it.slug === "string" && it.slug === slug;
           });
           if (!item) {
@@ -4578,7 +4471,7 @@ export function registerContentRoutes(app: Express): void {
         const entry =
           entries.find((item) => {
             const itemLocale = localeKey
-              ? String(item[localeKey] || "en")
+              ? entryItemLocale(item, type, ctRoot(res))
               : String(item.lang ?? item.locale ?? item.language ?? "en");
             return String(item.slug ?? "") === slug && itemLocale === locale;
           }) || entries.find((item) => String(item.slug ?? "") === slug);
@@ -4651,7 +4544,7 @@ export function registerContentRoutes(app: Express): void {
       const entry =
         entries.find((item) => {
           const itemLocale = localeKey
-            ? String(item[localeKey] || "en")
+            ? entryItemLocale(item, type, ctRoot(res))
             : String(item.lang ?? item.locale ?? item.language ?? "en");
           return String(item.slug ?? "") === slug && itemLocale === locale;
         }) || entries.find((item) => String(item.slug ?? "") === slug);
@@ -4738,7 +4631,7 @@ export function registerContentRoutes(app: Express): void {
           const entry =
             entries.find((item) => {
               const itemLocale = localeKey
-                ? String(item[localeKey] || "en")
+                ? entryItemLocale(item, type, ctRoot(res))
                 : String(item.lang ?? item.locale ?? item.language ?? "en");
               return String(item.slug ?? "") === slug && itemLocale === locale;
             }) || entries.find((item) => String(item.slug ?? "") === slug);
@@ -5436,23 +5329,8 @@ export function registerContentRoutes(app: Express): void {
 
       if (isSeoField) {
         const fieldPath = field === "seo.pillar" ? "seo.pillar_path" : field;
-        let dbItem: Record<string, unknown> | null = null;
-        const dbName = config.database?.slug;
-        if (dbName && getDB(res).exists(dbName)) {
-          const lookupKey = getLookupKey(type, ctRoot(res)) || "slug";
-          const localeKey = getLocaleKey(type, ctRoot(res)) || "locale";
-          const cached = await getDB(res).fetchItems(dbName);
-          const items = cached.items as Record<string, unknown>[];
-          const loc = locale.toLowerCase();
-          dbItem =
-            items.find((i) => {
-              if (String(i[lookupKey] ?? "") !== slug) return false;
-              const fromItem = i[localeKey] ?? i.locale ?? i.lang;
-              return typeof fromItem === "string" && fromItem.trim().toLowerCase() === loc;
-            }) ??
-            items.find((i) => String(i[lookupKey] ?? "") === slug) ??
-            null;
-        }
+        // Effective SEO after the reset: the page's entry layer (source item with overrides), if any.
+        const dbItem = entryItemLayer(getCI(res), type, slug, locale)?.singleEntry ?? null;
         const { resetSeoOverlayField } = await import("../seo-index");
         const result = resetSeoOverlayField({
           contentType: type,

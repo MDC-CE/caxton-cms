@@ -129,6 +129,7 @@ import {
   resolveEntryUpdatedAt,
 } from "../content-types";
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
+import { loadMergedSinglePage } from "../entry-delivery";
 import { resolveAllTemplateVars } from "../resolve-template-vars";
 import {
   normalizeLocale,
@@ -172,7 +173,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getSiteBaseUrl } from "../site-urls";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -1345,7 +1345,7 @@ export function registerSeoRoutes(app: Express): void {
       }
 
       if (hasDatabaseSingle(contentType, getContentRoot(res))) {
-        const page = await loadDatabaseSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+        const page = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
         if (!page) {
           res.status(404).json({ error: "Content not found" });
           return;

@@ -11,6 +11,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
 import { decodeHtmlValues } from "@shared/htmlEncoding";
+import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { execSync as _execSync, execFile } from "child_process";
 import {
   versioningUpdateSchema,
@@ -181,7 +182,8 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadMergedSinglePage, mergeSingleTemplate } from "../database-single-loader";
+import { mergeSingleTemplate, pruneStaleSectionAliases } from "../database-single-loader";
+import { loadMergedSinglePage } from "../entry-delivery";
 import { rejectAttachedStructuralEdit } from "../shared-layout-entry";
 import {
   resolveTemplateLocalePath,
@@ -293,7 +295,7 @@ export function registerSectionsRoutes(app: Express): void {
       const entryFilePath = path.join(entryDir, `${locale}.yml`);
 
       // Load the current merged page to get the section (DB or static single_template)
-      const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       if (!mergedPage) {
         res.status(404).json({ error: "Entry not found" });
         return;
@@ -626,7 +628,7 @@ export function registerSectionsRoutes(app: Express): void {
           // Insert before all sections
           newSection._insertAfterSectionId = null;
         } else {
-          const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+          const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
           const mergedSections = Array.isArray(mergedPage?.sections)
             ? (mergedPage!.sections as Record<string, unknown>[])
             : [];
@@ -682,7 +684,7 @@ export function registerSectionsRoutes(app: Express): void {
       }
 
       // Return updated merged section list so the client can update without a full page reload
-      const updatedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const updatedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       res.json({
         success: true,
         sections: updatedPage?.sections ?? [],
@@ -818,7 +820,7 @@ export function registerSectionsRoutes(app: Express): void {
 
         // Fan out delete to sibling locale singles + clean entry overlays
         const typeConfig = getContentTypeConfig(contentType, getContentRoot(res));
-        const isSharedLayout = !!(typeConfig?.database?.slug || typeConfig?.single_template);
+        const isSharedLayout = typeUsesSharedTemplate(typeConfig);
         if (isSharedLayout) {
           const {
             fanOutStructuralOpsToSiblings,
@@ -908,7 +910,7 @@ export function registerSectionsRoutes(app: Express): void {
       const entryFilePath = path.join(entryDir, `${locale}.yml`);
 
       // Load the current merged page to get the section and its id (DB or static single_template)
-      const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       if (!mergedPage) {
         res.status(404).json({ error: "Entry not found" });
         return;
@@ -1340,6 +1342,12 @@ export function registerSectionsRoutes(app: Express): void {
             if (fileMentionsRedirects(singlePath)) syncSlow = true;
             wroteSharedTemplate = true;
           } catch { /* ignore */ }
+        }
+
+        if (wroteSharedTemplate || isTemplateVersioningSlug(slug)) {
+          try {
+            pruneStaleSectionAliases(contentType, locale, getContentRoot(res));
+          } catch { /* non-fatal */ }
         }
 
         flushAfterContentWrites({

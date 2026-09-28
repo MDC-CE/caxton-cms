@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getAllConfigs = vi.fn();
 const validateFieldMapping = vi.fn();
 
-vi.mock("../../../server/content-types", () => ({
+vi.mock("../../../server/content-types", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../server/content-types")>()),
   getAllConfigs: (...args: unknown[]) => getAllConfigs(...args),
 }));
 

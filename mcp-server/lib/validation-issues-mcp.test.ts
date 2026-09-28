@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   clampIssuesLimit,
+  issueSourceGuidance,
   isValidationIssuesScoped,
   issuesNextOffset,
   openStatsFromCacheTotals,
@@ -70,5 +71,47 @@ describe("validation-issues-mcp", () => {
       { set: "open", sort: "lastFullRunAt", sort_dir: "desc" },
     );
     expect(byDate.map((r) => r.id)).toEqual(["y", "z", "x"]);
+  });
+
+  it("adds stale_source_data with a refresh-first action for old database copies", () => {
+    const out = issueSourceGuidance([
+      { code: "X", stale_source_age_ms: 3 * 86400000, stale_source_database: "exercises" },
+      { code: "Y" },
+    ]);
+    expect(out.warnings.map((w) => w.code)).toEqual(["stale_source_data"]);
+    expect(out.next_actions).toEqual([
+      expect.objectContaining({
+        tool: "list_database_items",
+        args_hint: { database: "exercises", refresh: true },
+      }),
+    ]);
+  });
+
+  it("turns a SOURCE_ITEM_REMOVED suggestion into an update_redirect action with removed_entry", () => {
+    const out = issueSourceGuidance([
+      {
+        code: "SOURCE_ITEM_REMOVED",
+        redirect_suggestion: {
+          content_type: "exercise",
+          slug: "gone",
+          locale: "en",
+          from: "/en/exercise/gone",
+          to: "/en/exercise",
+          reason: "listing_page",
+          inbound: [{ from: "/en/old", source: "site_x/exercises/gone/en.yml", all_languages: false }],
+        },
+      },
+    ]);
+    expect(out.warnings).toEqual([]);
+    expect(out.next_actions[0]).toMatchObject({
+      tool: "update_redirect",
+      args_hint: {
+        action: "add",
+        from: "/en/exercise/gone",
+        to: "/en/exercise",
+        removed_entry: { content_type: "exercise", slug: "gone", locale: "en" },
+      },
+    });
+    expect(out.next_actions[0].reason).toContain("/en/old");
   });
 });
