@@ -41,6 +41,7 @@ import {
 } from "./html-page-cache";
 import { injectGtmWebContainerId } from "./gtm-web-inject";
 import { child as loggerChild } from "./logger";
+import { notePage, pageRouteForPath } from "./process-stats";
 import { recordPublicNotFound } from "./runtime-issues-store";
 
 function maybeRecordPublicNotFound(req: Request, res: Response, status: number): void {
@@ -417,6 +418,8 @@ export function serveStatic(app: Express) {
     }
 
     const url = _req.originalUrl;
+    const tHtml = Date.now();
+    let pageOutcome = "client_fallback";
 
     let status = resolvePublicHtmlStatus({
       url,
@@ -434,6 +437,19 @@ export function serveStatic(app: Express) {
       site?.domain ||
       "default";
     const bypassCache = skipSsr || shouldBypassHtmlCache(_req);
+    res.on("finish", () => {
+      try {
+        notePage(
+          pageRouteForPath(cleanUrlForSsr, site?.contentRoot),
+          cleanUrlForSsr,
+          Date.now() - tHtml,
+          res.statusCode,
+          pageOutcome,
+        );
+      } catch (err) {
+        ssrLogger.warn({ err, url: cleanUrlForSsr }, "process stats page note failed");
+      }
+    });
 
     try {
       // Ensure variant key is resolved before MISS populate
@@ -484,6 +500,7 @@ export function serveStatic(app: Express) {
             },
             "SSR returned empty body after retry — not caching empty #root",
           );
+          pageOutcome = "ssr_empty_fallback";
           throw new Error("empty_ssr_app_html");
         }
 
@@ -523,12 +540,19 @@ export function serveStatic(app: Express) {
           setCachedHtml(cacheKey, htmlForCache, status);
           res.setHeader("X-HTML-Cache", "MISS");
         }
+        pageOutcome = "ssr_ok";
 
         maybeRecordPublicNotFound(_req, res, status);
         res.status(status).set({ "Content-Type": "text/html" }).send(html);
         return;
       }
     } catch (e) {
+      if (pageOutcome === "client_fallback") {
+        pageOutcome =
+          e instanceof Error && e.message === "empty_ssr_app_html"
+            ? "ssr_empty_fallback"
+            : "ssr_error_fallback";
+      }
       ssrDiag(
         {
           err: e,

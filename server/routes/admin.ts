@@ -339,6 +339,23 @@ function loadSiteLLMConfig(res: Response): Record<string, unknown> {
 }
 
 export function registerAdminRoutes(app: Express): void {
+  app.get("/api/admin/process-stats", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const from = req.query.from != null ? Number(req.query.from) : undefined;
+    const to = req.query.to != null ? Number(req.query.to) : undefined;
+    try {
+      const { readProcessStats } = await import("../process-stats");
+      res.json(readProcessStats({
+        from: Number.isFinite(from) ? from : undefined,
+        to: Number.isFinite(to) ? to : undefined,
+      }));
+    } catch (err) {
+      log.error({ err }, "Failed to read process stats");
+      res.status(500).json({ error: "Failed to read process stats" });
+    }
+  });
+
   // GCS bucket status — migrationRequired flag + bucket name
   app.get("/api/admin/gcs-status", async (_req, res) => {
     const diagnostics = await gcs.checkArchitecture();

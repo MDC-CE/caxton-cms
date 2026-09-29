@@ -19,7 +19,9 @@ import {
   writeSidequestHeartbeat,
   writeSidequestWorkerPid,
 } from "./queue";
+import { randomUUID } from "node:crypto";
 import { createSidequestWorkerLogger } from "./sidequest-worker-logger";
+import { flushTick, startTick } from "../process-stats";
 
 const log = createSidequestWorkerLogger();
 
@@ -47,6 +49,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log.info({ signal }, "[SidequestWorker] shutting down");
+  try {
+    flushTick();
+  } catch (err) {
+    log.warn({ err }, "[SidequestWorker] process stats flush failed");
+  }
   stopHeartbeatLoop();
   try {
     clearSidequestWorkerPid(process.pid);
@@ -77,6 +84,7 @@ async function main(): Promise<void> {
   writeSidequestWorkerPid(process.pid);
   clearSidequestRestartFlag();
   startHeartbeatLoop();
+  startTick({ processName: "sidequest", processStartId: randomUUID() });
   log.info({ pid: process.pid }, "[SidequestWorker] engine ready (pid + heartbeat written)");
 }
 

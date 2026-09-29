@@ -47,6 +47,7 @@ import { registerSgtmProxy } from "./sgtm-proxy";
 import { IPN_MOUNT_PATH, registerIpnProxy } from "./ipn-proxy";
 import { getOptimizationSettings } from "./settings";
 import { BOOT_ID, BOOT_TIME, getLastSoftReload, registerShutdownHandler } from "./server-control";
+import { beginRequest, endRequest, flushTick, noteApi, resolveApiRoute, startTick } from "./process-stats";
 import logger from "./logger";
 // Note: gcs.initFromEnv() is called by media.initFromEnv() in routes.ts,
 // which happens before sync-state needs it.
@@ -237,6 +238,7 @@ function formatApiResponseForLog(path: string, body: Record<string, unknown>): s
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
+  beginRequest();
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
@@ -247,7 +249,9 @@ app.use((req, res, next) => {
 
   res.on("finish", () => {
     const duration = Date.now() - start;
+    endRequest();
     if (path.startsWith("/api")) {
+      noteApi(req.method, resolveApiRoute(req), duration, res.statusCode);
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       // 304 + polling endpoints: status line only (body unchanged / not useful in logs).
       if (capturedJsonResponse && res.statusCode !== 304) {
@@ -516,6 +520,8 @@ app.use((req, res, next) => {
   // It is the only port that is not firewalled.
   // VPS: bind loopback only (Nginx proxies). Do not merge this hardcode to
   // breatheco-de/Replit — there the process must listen on 0.0.0.0.
+  startTick({ processName: "web", processStartId: BOOT_ID, ingest: true });
+
   const port = parseInt(process.env.PORT || '5000', 10);
   server.listen({
     port,
@@ -758,6 +764,12 @@ app.use((req, res, next) => {
   async function gracefulShutdown(signal: string): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
+
+    try {
+      flushTick();
+    } catch (err) {
+      logger.warn({ err }, "[Shutdown] process stats flush failed");
+    }
 
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");
     try {
