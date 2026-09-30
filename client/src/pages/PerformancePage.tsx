@@ -691,41 +691,15 @@ function PerformanceInner() {
           ))}
         </ToggleButtonBar>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!zoomIn && !chartZoomed}
-            onClick={() => {
-              setCue(null);
-              if (zoomIn) write({ zoomed: true, zoomFrom: parsed.startingAt, zoomTo: parsed.endingAt });
-              else write({ zoomed: false, zoomFrom: null, zoomTo: null });
-            }}
-            data-testid="button-zoom-selection"
-          >
-            {chartZoomed && !zoomIn ? <ZoomOut /> : <ZoomIn />}
-            {chartZoomed && !zoomIn ? "Zoom out" : "Zoom in"}
-          </Button>
-          <Button
-            type="button"
-            variant="default"
-            size="sm"
-            disabled={!selected}
-            onClick={() => write({ startingAt: null, endingAt: null })}
-            data-testid="button-clear-range"
-          >
-            <Trash2 />
-            Clear selection
-          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="sm" data-testid="button-range">
+              <Button type="button" variant="outline" size="sm" className="gap-1 tabular-nums" data-testid="button-range">
                 <Clock />
                 {rangeLabel}
                 <ChevronDown />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="start">
               {RANGE_PRESETS.map((preset) => {
                 const active = !chartZoomed && parsed.range === preset;
                 return (
@@ -751,6 +725,33 @@ function PerformanceInner() {
               })}
             </DropdownMenuContent>
           </DropdownMenu>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-w-[102px] shrink-0"
+            disabled={!zoomIn && !chartZoomed}
+            onClick={() => {
+              setCue(null);
+              if (zoomIn) write({ zoomed: true, zoomFrom: parsed.startingAt, zoomTo: parsed.endingAt });
+              else write({ zoomed: false, zoomFrom: null, zoomTo: null });
+            }}
+            data-testid="button-zoom-selection"
+          >
+            {chartZoomed && !zoomIn ? <ZoomOut /> : <ZoomIn />}
+            {chartZoomed && !zoomIn ? "Zoom out" : "Zoom in"}
+          </Button>
+          <Button
+            type="button"
+            variant="default"
+            size="sm"
+            disabled={!selected}
+            onClick={() => write({ startingAt: null, endingAt: null })}
+            data-testid="button-clear-range"
+          >
+            <Trash2 />
+            Clear selection
+          </Button>
         </div>
       </div>
 
