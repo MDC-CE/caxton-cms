@@ -54,6 +54,17 @@ function readLines(file: string): string[] {
   }
 }
 
+function deadPid(): number {
+  for (let pid = 1_000_000; pid < 1_001_000; pid++) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return pid;
+    }
+  }
+  throw new Error("no unused pid");
+}
+
 function ownFile(): string {
   return path.join(dir, `web-${process.pid}.jsonl`);
 }
@@ -289,6 +300,29 @@ describe("files and ingest", () => {
     const stats = readProcessStats({ from: 40_000, to: 60_000, now: 60_000, processName: "web" });
     expect(detail(40_000, 60_000).routes[0].route).toBe("/api/content/:contentType/:slug");
     expect(stats.windows[0].cpuProcessPercent).toBe(0);
+  });
+
+  it("removes an empty file when its pid is gone, and keeps one whose pid is still running", () => {
+    const dead = deadPid();
+    const deadFile = path.join(dir, `sidequest-${dead}.jsonl`);
+    const liveFile = path.join(dir, `sidequest-${process.pid}.jsonl`);
+    const window = (pid: number) => JSON.stringify({
+      timestamp: 60_000,
+      pid,
+      bootId: "boot",
+      processName: "sidequest",
+      process: { ...sample(60_000, pid), processName: "sidequest", cpuMachinePercent: null },
+      api: [],
+      pages: [],
+    });
+    fs.writeFileSync(deadFile, `${window(dead)}\n`);
+    fs.writeFileSync(liveFile, `${window(process.pid)}\n`);
+    ingestStatsFiles(dir);
+    expect(fs.existsSync(deadFile)).toBe(false);
+    expect(fs.existsSync(liveFile)).toBe(true);
+    expect(readLines(liveFile)).toEqual([]);
+    flushTick(70_000);
+    expect(fs.existsSync(ownFile())).toBe(false);
   });
 
   it("uses one INSERT per table, and splits only when a statement would exceed the variable cap", () => {

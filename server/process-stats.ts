@@ -10,7 +10,10 @@
  *
  * Only web opens data/process-stats.db (separate from data/app.db). On the same
  * tick, after appending its own line, it reads every jsonl, inserts, then
- * deletes what it consumed. Importing this module does not open the database.
+ * drops what it consumed. An empty file is removed when that pid is not
+ * running, and web also removes its own file. A live sibling keeps an empty
+ * file, so an append in the same moment is not unlinked. Importing this
+ * module does not open the database.
  *
  * noteApi and notePage only update in-memory maps. API and page sheets are
  * filled by web traffic, because the other processes never call them. Those
@@ -850,7 +853,8 @@ export function stopTick(): void {
 
 // --- Database write ---
 // Web only. Read every jsonl, insert, then delete the lines just consumed.
-// Importing this file does not open SQLite.
+// An empty file goes away when its writer is gone. Importing this file does
+// not open SQLite.
 
 type Sqlite = import("better-sqlite3").Database;
 
@@ -1071,12 +1075,35 @@ function rowsFromWindows(windows: WindowObject[]): {
   return { processRows, apiRowsOut, pageRowsOut };
 }
 
+const STATS_FILE_NAME = /^(web|sidequest|mcp|diagnostics-worker)-(\d+)\.jsonl$/;
+
+/**
+ * Empty files are removed only when nobody will append to them. This process
+ * will not append again until the tick returns, so its own file is safe.
+ * Another process's file is safe only when that pid is gone (ESRCH). EPERM
+ * means the pid is alive. A name this writer does not use is left in place.
+ */
+function emptyStatsFileCanBeRemoved(file: string): boolean {
+  const match = path.basename(file).match(STATS_FILE_NAME);
+  if (!match) return false;
+  const name = match[1] as ProcessName;
+  const pid = Number(match[2]);
+  if (pid === process.pid && name === processName) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 /**
  * Insert every pending jsonl. One transaction, one INSERT per table (split
  * only if a statement would exceed the variable cap). Broken lines are already
  * gone. On failure the good lines stay for the next tick. After commit,
  * re-read each file and drop only the consumed lines, so an append that
- * landed during the insert is kept. No-op unless this process started with ingest.
+ * landed during the insert is kept. If nothing remains and the writer is
+ * gone, the file is removed. No-op unless this process started with ingest.
  */
 export function ingestStatsFiles(dir = statsDir): void {
   if (!ingestEnabled) return;
@@ -1114,7 +1141,19 @@ export function ingestStatsFiles(dir = statsDir): void {
     }
     const consumed = new Set(file.rows.map((row) => row.raw));
     const kept = fresh.split("\n").filter((l) => l.length > 0 && !consumed.has(l));
-    fs.writeFileSync(file.file, kept.length ? `${kept.join("\n")}\n` : "");
+    if (kept.length > 0) {
+      fs.writeFileSync(file.file, `${kept.join("\n")}\n`);
+      continue;
+    }
+    if (emptyStatsFileCanBeRemoved(file.file)) {
+      try {
+        fs.unlinkSync(file.file);
+      } catch {
+        /* already gone */
+      }
+      continue;
+    }
+    fs.writeFileSync(file.file, "");
   }
 }
 
