@@ -39,6 +39,7 @@ import {
   triggerGracefulShutdown,
   isShutdownHandlerRegistered,
 } from "../server-control";
+import { resolveProcessStatsDetailRequest, resolveProcessStatsRequest } from "../process-stats";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
@@ -340,6 +341,116 @@ function loadSiteLLMConfig(res: Response): Record<string, unknown> {
 }
 
 export function registerAdminRoutes(app: Express): void {
+  app.get("/api/admin/process-stats", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveProcessStatsRequest({
+        process: req.query.process,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json(result.stats);
+    } catch (err) {
+      log.error({ err }, "Failed to read process stats");
+      res.status(500).json({ error: "Failed to read process stats" });
+    }
+  });
+
+  api.get(app, "/api/admin/process-stats/detail", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveProcessStatsDetailRequest({
+        process: req.query.process,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      const wantLogs = req.query.logs === "1";
+      if (!wantLogs) {
+        res.json(result.stats);
+        return;
+      }
+      const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+      const from = result.stats.startingAt;
+      const to = result.stats.endingAt;
+      let logsCoverage: "full" | "partial" | "none" = "full";
+      let logsSince: number | undefined;
+      if (to < cutoff) {
+        logsCoverage = "none";
+      } else if (from < cutoff) {
+        logsCoverage = "partial";
+        logsSince = cutoff;
+      }
+      const logFrom = Math.max(from, cutoff);
+      const rows = logsCoverage === "none"
+        ? []
+        : sqlite.prepare(
+          `SELECT id, ts, level, module, message, err_name
+           FROM error_log
+           WHERE ts >= ? AND ts <= ?
+           ORDER BY ts DESC, id DESC`,
+        ).all(logFrom, to) as Array<{
+          id: number;
+          ts: number;
+          level: string;
+          module: string;
+          message: string;
+          err_name: string | null;
+        }>;
+      type UniqueIssue = {
+        fingerprint: string;
+        module: string;
+        level: "error" | "warn";
+        message: string;
+        err_name: string | null;
+        count: number;
+        lastTs: number;
+        lastId: number;
+        sampleTs: number[];
+      };
+      const byFingerprint = new Map<string, UniqueIssue>();
+      for (const row of rows) {
+        const level: "error" | "warn" = row.level === "error" ? "error" : "warn";
+        const fingerprint = `${level}|${errorLogFingerprint(row.module, row.message)}`;
+        const existing = byFingerprint.get(fingerprint);
+        if (existing) {
+          existing.count += 1;
+          if (existing.sampleTs.length < 3) existing.sampleTs.push(row.ts);
+        } else {
+          byFingerprint.set(fingerprint, {
+            fingerprint,
+            module: row.module,
+            level,
+            message: row.message,
+            err_name: row.err_name,
+            count: 1,
+            lastTs: row.ts,
+            lastId: row.id,
+            sampleTs: [row.ts],
+          });
+        }
+      }
+      res.json({
+        ...result.stats,
+        logs: [...byFingerprint.values()],
+        logsCoverage,
+        ...(logsSince != null ? { logsSince } : {}),
+      });
+    } catch (err) {
+      log.error({ err }, "Failed to read process stats detail");
+      res.status(500).json({ error: "Failed to read process stats detail" });
+    }
+  });
+
   // GCS bucket status — migrationRequired flag + bucket name
   app.get("/api/admin/gcs-status", async (_req, res) => {
     const diagnostics = await gcs.checkArchitecture();

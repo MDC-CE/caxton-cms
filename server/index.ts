@@ -47,6 +47,7 @@ import { registerSgtmProxy } from "./sgtm-proxy";
 import { IPN_MOUNT_PATH, registerIpnProxy } from "./ipn-proxy";
 import { getOptimizationSettings } from "./settings";
 import { BOOT_ID, BOOT_TIME, getLastSoftReload, registerShutdownHandler } from "./server-control";
+import { beginRequest, endRequest, flushTick, noteApi, resolveApiRoute, startTick } from "./process-stats";
 import logger from "./logger";
 // Note: gcs.initFromEnv() is called by media.initFromEnv() in routes.ts,
 // which happens before sync-state needs it.
@@ -237,6 +238,7 @@ function formatApiResponseForLog(path: string, body: Record<string, unknown>): s
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
+  beginRequest(req);
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
@@ -245,9 +247,18 @@ app.use((req, res, next) => {
     return originalResJson.apply(res, [bodyJson, ...args]);
   };
 
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    endRequest(req);
+  };
+
   res.on("finish", () => {
     const duration = Date.now() - start;
+    settle();
     if (path.startsWith("/api")) {
+      noteApi(req.method, resolveApiRoute(req), duration, res.statusCode);
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       // 304 + polling endpoints: status line only (body unchanged / not useful in logs).
       if (capturedJsonResponse && res.statusCode !== 304) {
@@ -268,6 +279,7 @@ app.use((req, res, next) => {
       }
     }
   });
+  res.on("close", settle);
 
   next();
 });
@@ -450,7 +462,6 @@ app.use((req, res, next) => {
       const cached = getCachedHtml(buildHtmlCacheKey(siteId, cleanUrl, variantKey));
       if (!cached) return next();
 
-      const tHit = Date.now();
       const { injectGtmWebContainerId } = await import("./gtm-web-inject");
       const html = injectGtmWebContainerId(cached.html, site?.contentRoot);
 
@@ -458,17 +469,6 @@ app.use((req, res, next) => {
         .status(cached.status)
         .set({ "Content-Type": "text/html", "X-HTML-Cache": "HIT" })
         .send(html);
-
-      void import("./utils/request-health").then(({ logSlowHtmlIfNeeded }) => {
-        logSlowHtmlIfNeeded({
-          url: cleanUrl,
-          ms: Date.now() - tHit,
-          status: cached.status,
-          cache: "HIT",
-          outcome: "cache_hit",
-          appHtmlLength: cached.html?.length,
-        });
-      });
     });
   }
 
@@ -528,6 +528,8 @@ app.use((req, res, next) => {
   // It is the only port that is not firewalled.
   // VPS: bind loopback only (Nginx proxies). Do not merge this hardcode to
   // breatheco-de/Replit — there the process must listen on 0.0.0.0.
+  startTick({ processName: "web", processStartId: BOOT_ID, ingest: true });
+
   const port = parseInt(process.env.PORT || '5000', 10);
   server.listen({
     port,
@@ -537,7 +539,7 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on port ${port}`);
 
-    // ─── Periodic memory + event-loop health ─────────────────────────────────
+    // ─── Periodic memory usage logging ───────────────────────────────────────
     const memLogger = logger.child({ module: "memory" });
     setInterval(() => {
       const mem = process.memoryUsage();
@@ -548,9 +550,6 @@ app.use((req, res, next) => {
       const logFn = heapRatio > 0.80 ? memLogger.warn.bind(memLogger) : memLogger.info.bind(memLogger);
       logFn({ heapUsedMb, heapTotalMb, rssMb }, `high memory usage: heap ${heapUsedMb}/${heapTotalMb} MB (${Math.round(heapRatio * 100)}% used), rss ${rssMb} MB`);
     }, 5 * 60 * 1000).unref();
-    void import("./utils/request-health").then(({ startProcessHealthMonitor }) => {
-      startProcessHealthMonitor();
-    });
     // ─────────────────────────────────────────────────────────────────────────
 
     // All deferred background tasks fire here — server is already ready to handle requests.
@@ -773,6 +772,12 @@ app.use((req, res, next) => {
   async function gracefulShutdown(signal: string): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
+
+    try {
+      flushTick();
+    } catch (err) {
+      logger.warn({ err }, "[Shutdown] process stats flush failed");
+    }
 
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");
     try {

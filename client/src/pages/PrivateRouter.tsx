@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation, useParams } from "wouter";
+import { Switch, Route, useLocation, useParams, useSearch } from "wouter";
 import { lazy, Suspense, type ReactNode } from "react";
 import NotFound from "@/pages/not-found";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
@@ -37,6 +37,7 @@ const ConversionsPage = lazy(() => import("@/pages/ConversionsPage"));
 const McpServerPage = lazy(() => import("@/pages/McpServerPage"));
 const AgentsOrgChartPage = lazy(() => import("@/pages/AgentsOrgChartPage"));
 const ErrorLogPage = lazy(() => import("@/pages/ErrorLogPage"));
+const PerformancePage = lazy(() => import("@/pages/PerformancePage"));
 const BackgroundPipelinePage = lazy(() => import("@/pages/BackgroundPipelinePage"));
 const EventWebhooksPage = lazy(() => import("@/pages/EventWebhooksPage"));
 const PrivateOverlays = lazy(() => import("@/pages/PrivateOverlays"));
@@ -85,6 +86,15 @@ function SeoGeoRedirect() {
 function AgentsRedirect() {
   if (typeof window !== "undefined") {
     window.location.replace("/private/agents/orgchart");
+  }
+  return null;
+}
+
+function ServerLogsRedirect() {
+  const search = useSearch();
+  if (typeof window !== "undefined") {
+    const qs = search.replace(/^\?/, "");
+    window.location.replace(qs ? `/private/server/error-log?${qs}` : "/private/server/error-log");
   }
   return null;
 }
@@ -190,7 +200,10 @@ export default function PrivateRouter() {
           <Route path="/private/agents/proposals/:id" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals" component={AgentsOrgChartPage} />
           <Route path="/private/agents" component={AgentsRedirect} />
-          <Route path="/private/error-log" component={ErrorLogPage} />
+          <Route path="/private/server/error-log" component={ErrorLogPage} />
+          <Route path="/private/server/performance" component={PerformancePage} />
+          <Route path="/private/server" component={ServerLogsRedirect} />
+          <Route path="/private/error-log" component={ServerLogsRedirect} />
           <Route path="/private/background-pipeline" component={BackgroundPipelinePage} />
           <Route path="/private/webhooks/hooks" component={EventWebhooksPage} />
           <Route path="/private/webhooks/logs" component={EventWebhooksPage} />

@@ -1129,7 +1129,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={IconAlertTriangle}
-                label="Server Error Log"
+                label="Server Error Log & Performance"
                 href="/private/error-log"
                 indicator="arrow"
                 testId="link-error-log"

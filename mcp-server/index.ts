@@ -1253,6 +1253,12 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[MCP] ${signal} received — flushing GCS auth writes…`);
+  try {
+    const { flushTick } = await import("../server/process-stats");
+    flushTick();
+  } catch (err) {
+    console.error("[MCP] process stats flush failed", err);
+  }
   await flushGcsWrites();
   process.exit(0);
 }
@@ -1296,6 +1302,9 @@ async function startServer(): Promise<void> {
   warnMcpBucketParity();
 
   startHeapWatchdog();
+  const { randomUUID } = await import("node:crypto");
+  const { startTick } = await import("../server/process-stats");
+  startTick({ processName: "mcp", processStartId: randomUUID() });
 
   app.listen(PORT, "127.0.0.1", () => {
     console.log(`[MCP] Content-pages MCP server running on port ${PORT}`);
