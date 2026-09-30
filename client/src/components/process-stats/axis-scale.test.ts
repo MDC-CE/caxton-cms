@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { axisScale } from "./ProcessLineChart";
+import { axisScale, isIsolatedReading } from "./ProcessLineChart";
 
 describe("axisScale", () => {
   it("keeps CPU on steps of 20 and grows only when the peak does not fit", () => {
@@ -30,6 +30,17 @@ describe("axisScale", () => {
   it("reserves the same width for every axis", () => {
     const widths = (["cpu", "memory", "eventLoop", "latency", "count"] as const).map((kind) => axisScale(kind, 80).width);
     expect(new Set(widths).size).toBe(1);
+  });
+
+  it("marks a reading only when neither neighbor has a number", () => {
+    const values = [10, null, 80, 90, null, 40];
+    expect(isIsolatedReading(values, 0)).toBe(true);
+    expect(isIsolatedReading(values, 1)).toBe(false);
+    expect(isIsolatedReading(values, 2)).toBe(false);
+    expect(isIsolatedReading(values, 3)).toBe(false);
+    expect(isIsolatedReading(values, 5)).toBe(true);
+    expect(isIsolatedReading([null, 0, null], 1)).toBe(true);
+    expect(isIsolatedReading([Number.NaN], 0)).toBe(false);
   });
 
   it("counts calls on a linear axis", () => {
