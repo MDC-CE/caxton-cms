@@ -508,7 +508,6 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
     if (!detachConfirmOpen) setShowDetachAdvanced(false);
   }, [detachConfirmOpen]);
   const { hasCapability } = useDebugAuth();
-  const canManageUsers = hasCapability("users_manage");
   const canViewMetrics = hasCapability("metrics_view");
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -932,7 +931,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                             robots settings are ignored until this is turned off.
                           </p>
                           <a
-                            href="/private/settings?tab=robots"
+                            href="/private/settings/robots"
                             className="text-xs text-primary underline"
                             onClick={(e) => e.stopPropagation()}
                           >
@@ -1156,6 +1155,13 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                 indicator="arrow"
                 testId="link-diagnostics-seo"
               />
+              <MenuItem
+                icon={Megaphone}
+                label="Ads overview"
+                href="/private/diagnostics/ads"
+                indicator="arrow"
+                testId="link-diagnostics-ads"
+              />
             </ExpandableMenuItem>
             )}
 
@@ -1255,15 +1261,13 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                   testId="link-tracking"
                 />
               )}
-              {canManageUsers && (
-                <MenuItem
-                  icon={IconShield}
-                  label="Security and Users"
-                  href="/private/security/captcha"
-                  indicator="arrow"
-                  testId="link-security"
-                />
-              )}
+              <MenuItem
+                icon={IconShield}
+                label="Security and Users"
+                href="/private/security"
+                indicator="arrow"
+                testId="link-security"
+              />
             </ExpandableMenuItem>
           </div>
 

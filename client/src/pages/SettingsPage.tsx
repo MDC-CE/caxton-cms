@@ -11,25 +11,25 @@ import {
   IconPlayerPlay,
   IconAlertCircle,
   IconPhoto,
-  IconChartBar,
   IconInfoCircle,
   IconScale,
   IconMessage,
   IconServer,
   IconRobot,
+  IconSettings,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { BRAND_LOGO_ENSURE_TAGS, OG_IMAGE_ENSURE_TAGS } from "@shared/standardMediaTags";
 import { ImagePickerDialog } from "@/components/editing/ImagePickerDialog";
 import { LinkPicker } from "@/components/editing/LinkPicker";
-import { Link, useSearch, useLocation } from "wouter";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { useLocation } from "wouter";
+import { SettingsShell, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
+import { generalSettingsHref, resolveGeneralSettingsTab, type GeneralSettingsTab } from "@/lib/settings-tab";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import { ToggleButtonBarList, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -57,16 +57,14 @@ import {
   stripConsentHtml,
 } from "@shared/consent-settings";
 
-const SETTINGS_TABS = ["locales", "migrations", "brand", "robots", "legal", "server"] as const;
-type SettingsTab = (typeof SETTINGS_TABS)[number];
-
-function resolveSettingsTab(search: string): SettingsTab {
-  const tab = new URLSearchParams(search).get("tab");
-  if (tab && (SETTINGS_TABS as readonly string[]).includes(tab)) {
-    return tab as SettingsTab;
-  }
-  return "locales";
-}
+const GENERAL_TABS: SettingsSecondaryTab<GeneralSettingsTab>[] = [
+  { id: "locales", label: "Locales", href: generalSettingsHref("locales"), Icon: IconLanguage },
+  { id: "migrations", label: "Migrations", href: generalSettingsHref("migrations"), Icon: IconCode },
+  { id: "brand", label: "Brand", href: generalSettingsHref("brand"), Icon: IconPhoto },
+  { id: "robots", label: "Robots", href: generalSettingsHref("robots"), Icon: IconRobot },
+  { id: "legal", label: "Legal", href: generalSettingsHref("legal"), Icon: IconScale },
+  { id: "server", label: "Server", href: generalSettingsHref("server"), Icon: IconServer },
+];
 
 interface LocaleEntry {
   code: string;
@@ -109,18 +107,13 @@ interface BrandSettings {
 export default function SettingsPage() {
   const { toast } = useToast();
   const { hasCapability, isValidated } = useDebugAuth();
-  const searchString = useSearch();
-  const [, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState<SettingsTab>(() => resolveSettingsTab(searchString));
+  const [pathname, setLocation] = useLocation();
+  const routeTab = resolveGeneralSettingsTab(pathname);
+  const activeTab: GeneralSettingsTab = routeTab ?? "locales";
 
   useEffect(() => {
-    const tab = new URLSearchParams(searchString).get("tab");
-    if (tab === "auth") {
-      setLocation("/private/security/auth");
-      return;
-    }
-    setActiveTab(resolveSettingsTab(searchString));
-  }, [searchString, setLocation]);
+    if (!routeTab) setLocation(generalSettingsHref("locales"), { replace: true });
+  }, [routeTab, setLocation]);
 
   const { data, isLoading } = useQuery<LocaleSettings>({
     queryKey: ["/api/settings/locales"],
@@ -546,66 +539,24 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-4">
-        <div className="flex items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3">
-            <PrivateHistoryBackButton data-testid="button-back-settings" iconClassName="h-4 w-4" />
-            <div>
-              <h1 className="text-xl font-semibold" data-testid="text-settings-title">Settings</h1>
-              <p className="text-sm text-muted-foreground">Site-wide configuration</p>
-            </div>
-          </div>
-          <Link href="/private/tracking">
-            <Button variant="outline" size="sm" data-testid="button-go-tracking">
-              <IconChartBar className="h-4 w-4 mr-1.5" />
-              Tracking
-            </Button>
-          </Link>
-        </div>
+    <SettingsShell
+      section="general"
+      icon={IconSettings}
+      title="General"
+      titleTestId="text-settings-title"
+      description="Site-wide configuration"
+      backTestId="button-back-settings"
+      dirty={dirty}
+      secondary={{
+        value: activeTab,
+        tabs: GENERAL_TABS,
+        listTestId: "tabs-settings",
+        triggerTestId: (id) => `tab-${id}`,
+      }}
+    >
+        <Tabs value={activeTab}>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(v) => {
-            const next = v as SettingsTab;
-            setActiveTab(next);
-            const url = new URL(window.location.href);
-            if (next === "locales") {
-              url.searchParams.delete("tab");
-            } else {
-              url.searchParams.set("tab", next);
-            }
-            window.history.replaceState({}, "", url.pathname + url.search);
-          }}
-        >
-          <ToggleButtonBarList className="flex w-full" data-testid="tabs-settings">
-            <ToggleButtonBarTrigger value="locales" data-testid="tab-locales" className="gap-1.5">
-              <IconLanguage className="h-3.5 w-3.5" />
-              Locales
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="migrations" data-testid="tab-migrations" className="gap-1.5">
-              <IconCode className="h-3.5 w-3.5" />
-              Migrations
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="brand" data-testid="tab-brand" className="gap-1.5">
-              <IconPhoto className="h-3.5 w-3.5" />
-              Brand
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="robots" data-testid="tab-robots" className="gap-1.5">
-              <IconRobot className="h-3.5 w-3.5" />
-              Robots
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="legal" data-testid="tab-legal" className="gap-1.5">
-              <IconScale className="h-3.5 w-3.5" />
-              Legal
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="server" data-testid="tab-server" className="gap-1.5">
-              <IconServer className="h-3.5 w-3.5" />
-              Server
-            </ToggleButtonBarTrigger>
-          </ToggleButtonBarList>
-
-          <TabsContent value="locales" className="mt-4">
+          <TabsContent value="locales" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between gap-2 pb-4">
                 <div className="flex items-center gap-2">
@@ -717,7 +668,7 @@ export default function SettingsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="migrations" className="mt-4">
+          <TabsContent value="migrations" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center gap-2 pb-4">
                 <IconCode className="h-5 w-5 text-muted-foreground" />
@@ -803,7 +754,7 @@ export default function SettingsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="brand" className="mt-4">
+          <TabsContent value="brand" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center gap-2 pb-4">
                 <IconPhoto className="h-5 w-5 text-muted-foreground" />
@@ -1168,11 +1119,11 @@ export default function SettingsPage() {
             />
           </TabsContent>
 
-          <TabsContent value="robots" className="mt-4">
+          <TabsContent value="robots" className="mt-0">
             <RobotsTab />
           </TabsContent>
 
-          <TabsContent value="legal" className="mt-4">
+          <TabsContent value="legal" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center gap-2 pb-4">
                 <IconScale className="h-5 w-5 text-muted-foreground" />
@@ -1486,12 +1437,11 @@ export default function SettingsPage() {
             </Dialog>
           </TabsContent>
 
-          <TabsContent value="server" className="mt-4">
+          <TabsContent value="server" className="mt-0">
             <ServerTab />
           </TabsContent>
 
         </Tabs>
-      </div>
-    </div>
+    </SettingsShell>
   );
 }

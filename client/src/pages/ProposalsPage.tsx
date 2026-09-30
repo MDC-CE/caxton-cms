@@ -132,6 +132,7 @@ import { IdeaSeoTargetPanel, type IdeaSeoTarget } from "@/components/agents/Idea
 import { apiFetch, apiRequestWithAuth } from "@/lib/queryClient";
 import { Checkbox } from "@/components/ui/checkbox";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
+import { outcomesBackHref } from "@/lib/agents-tab";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -1166,7 +1167,8 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const { roles } = useDebugAuth();
   const isSteward = roles.includes("platform_steward");
   const searchString = useSearch();
-  const backHref = proposalsListHref(searchString);
+  const outcomesBack = outcomesBackHref(searchString);
+  const backHref = outcomesBack ?? proposalsListHref(searchString);
   const [blockerBody, setBlockerBody] = useState("");
   const [resolveNotes, setResolveNotes] = useState<Record<number, string>>({});
   const [confirmExperiment, setConfirmExperiment] = useState(false);
@@ -1566,9 +1568,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   return (
     <div className="space-y-5" data-testid="panel-agents-proposal-detail">
       <Button variant="ghost" asChild className="-ml-2 h-10 gap-1.5 px-3 text-sm text-muted-foreground">
-        <Link href={backHref}>
+        <Link href={backHref} data-testid="link-proposal-detail-back">
           <IconChevronLeft className="h-5 w-5" />
-          All proposals
+          {outcomesBack ? "All outcomes" : "All proposals"}
         </Link>
       </Button>
       {isLoading && (

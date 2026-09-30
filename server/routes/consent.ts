@@ -5,14 +5,16 @@
  *   GET  /api/consent-window  — banner mode for this visitor + copy + durations
  *   POST /api/consent         — record "shown" or a decision; decisions set the `4g_consent` cookie
  *   POST /api/ad-context      — after consent, merge campaign context into the HttpOnly `4g_ads` cookie
- * Staff (ads_settings):
+ * Staff (consent_settings):
  *   GET/PUT /api/settings/consent/window — countries, unknown-country mode, durations, banner copy
+ * Staff (metrics_view):
+ *   GET /api/diagnostics/legal — Diagnostics Legal tab (or ?summary=1 roll-up)
  */
 
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { api } from "../rate-limit/api";
-import { getDefaultContentRoot } from "../site-config";
+import { getDefaultContentFolder, getDefaultContentRoot } from "../site-config";
 import { getVM } from "../site-manager";
 import { getDefaultLocale, normalizeLocale, getConsentWindowSettings, updateConsentWindowSettings } from "../settings";
 import { markFileAsModified } from "../sync-state";
@@ -20,6 +22,7 @@ import { requireCapability } from "./_helpers";
 import { getParentCookieDomain } from "../versioning/cookie-utils";
 import { resolveVisitorCountry } from "../ads/visitor-country";
 import { recordConsentEvent } from "../ads/consent-store";
+import { buildLegalDiagnostics, legalDiagnosticsSummary } from "../legal/legal-diagnostics";
 import {
   clearAdContext,
   hasTrackingConsentCookie,
@@ -161,7 +164,7 @@ export function registerConsentRoutes(app: Express): void {
   });
 
   api.get(app, "/api/settings/consent/window", { rate: "staffWrite" }, async (req: Request, res: Response) => {
-    const auth = await requireCapability(req, res, "ads_settings");
+    const auth = await requireCapability(req, res, "consent_settings");
     if (!auth.authorized) return;
     try {
       res.json(staffWindowPayload(res));
@@ -171,7 +174,7 @@ export function registerConsentRoutes(app: Express): void {
   });
 
   api.put(app, "/api/settings/consent/window", { rate: "staffWrite" }, async (req: Request, res: Response) => {
-    const auth = await requireCapability(req, res, "ads_settings");
+    const auth = await requireCapability(req, res, "consent_settings");
     if (!auth.authorized) return;
     const parsed = windowUpdateSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -193,6 +196,22 @@ export function registerConsentRoutes(app: Express): void {
       res.json({ success: true, ...staffWindowPayload(res) });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save consent window" });
+    }
+  });
+
+  api.get(app, "/api/diagnostics/legal", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const site = getSiteKey(res) ?? getDefaultContentFolder();
+      if (req.query.summary === "1") {
+        return res.json(legalDiagnosticsSummary(site));
+      }
+      const days = Number(req.query.days) === 7 ? 7 : 28;
+      res.json(buildLegalDiagnostics({ site, days }));
+    } catch (err) {
+      log.warn({ err }, "[consent] legal diagnostics failed");
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Legal diagnostics" });
     }
   });
 }

@@ -163,7 +163,14 @@ export default function PrivateRouter() {
           <Route path="/private/settings/seo/openrush" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/ads/meta" component={AdsSettingsPage} />
+          <Route path="/private/settings/ads/google" component={AdsSettingsPage} />
           <Route path="/private/settings/ads" component={AdsSettingsPage} />
+          <Route path="/private/settings/locales" component={SettingsPage} />
+          <Route path="/private/settings/migrations" component={SettingsPage} />
+          <Route path="/private/settings/brand" component={SettingsPage} />
+          <Route path="/private/settings/robots" component={SettingsPage} />
+          <Route path="/private/settings/legal" component={SettingsPage} />
+          <Route path="/private/settings/server" component={SettingsPage} />
           <Route path="/private/settings" component={SettingsPage} />
           <Route path="/private/sync-log" component={SyncLogRedirect} />
           <Route path="/private/repository-sync" component={SyncLogPage} />
@@ -189,6 +196,7 @@ export default function PrivateRouter() {
           <Route path="/private/mcp-server" component={McpServerPage} />
           <Route path="/private/agents/orgchart" component={AgentsOrgChartPage} />
           <Route path="/private/agents/rules" component={AgentsOrgChartPage} />
+          <Route path="/private/agents/outcomes" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals/:id" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals" component={AgentsOrgChartPage} />
           <Route path="/private/agents" component={AgentsRedirect} />

@@ -5,7 +5,8 @@ export type DiagnosticsTabId =
   | "seo"
   | "geo"
   | "funnel"
-  | "ads";
+  | "ads"
+  | "legal";
 
 export function resolveDiagnosticsTab(pathname: string): DiagnosticsTabId {
   if (pathname.endsWith("/leads")) return "leads";
@@ -14,6 +15,7 @@ export function resolveDiagnosticsTab(pathname: string): DiagnosticsTabId {
   if (pathname.endsWith("/geo")) return "geo";
   if (pathname.endsWith("/funnel")) return "funnel";
   if (pathname.endsWith("/diagnostics/ads")) return "ads";
+  if (pathname.endsWith("/diagnostics/legal")) return "legal";
   if (pathname.endsWith("/global-health")) return "global-health";
   return "global-health";
 }

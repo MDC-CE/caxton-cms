@@ -1,0 +1,394 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_ADS_SETTINGS } from "@shared/ads-settings";
+import type { AdsPageRow, AdsReport, AdsUnrecognizedCampaigns, Resolved } from "./ads-report";
+import type { MetaAdCreativeInfo, MetaAdDayRow } from "./meta-client";
+
+const h = vi.hoisted(() => ({
+  cacheDir: "",
+  reportBuilds: 0,
+  ga4Configured: false,
+  totals: {} as Record<string, number>,
+  connected: true,
+  syncFailures: 0,
+  known: [] as Array<{ key: string; note?: string }>,
+  unrecognized: undefined as AdsUnrecognizedCampaigns | undefined,
+  offSite: null as AdsPageRow | null,
+}));
+h.cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "ads-diagnostics-build-test-"));
+
+const SITE = "site_test";
+const NOW = new Date("2026-09-29T12:00:00.000Z");
+const READ_111 = "2026-09-29T06:00:00.000Z";
+
+function row(ad_id: string, spend: number, campaign_id: string, account_id = "111"): MetaAdDayRow {
+  return {
+    date: "2026-09-20",
+    account_id,
+    currency: "USD",
+    campaign_id,
+    campaign_name: `Campaign ${campaign_id}`,
+    adset_id: `s-${campaign_id}`,
+    adset_name: "Set",
+    ad_id,
+    ad_name: `Ad ${ad_id}`,
+    spend,
+    impressions: 100,
+    reach: 90,
+    frequency: 1.1,
+    link_clicks: 10,
+    landing_page_views: 8,
+    pixel_leads: 0,
+    instant_form_leads: 0,
+  };
+}
+
+const ROWS: MetaAdDayRow[] = [
+  row("a1", 100, "c1"),
+  row("a2", 40, "c1"),
+  row("a3", 30, "c2", "222"),
+  row("a4", 20, "c3"),
+];
+
+const CREATIVES: Record<string, MetaAdCreativeInfo> = {
+  a1: {
+    ad_id: "a1",
+    campaign_id: "c1",
+    adset_id: "s-c1",
+    effective_status: "PAUSED",
+    links: ["https://4geeks.com/landing/x"],
+    url_tags: "utm_source=facebook&utm_medium=paid_social",
+    instant_form: false,
+  },
+  a4: { ad_id: "a4", campaign_id: "c3", adset_id: "s-c3", effective_status: "ACTIVE", links: [], instant_form: false },
+};
+
+const OFF_SITE: AdsPageRow = {
+  key: "dest:learn.4geeks.com|/choose-program",
+  kind: "off_site",
+  kind_label: "Off-site",
+  url: "https://learn.4geeks.com/choose-program",
+  spend: {},
+  paid_visits: 12,
+  ga4_ads: [
+    {
+      platform: "google",
+      source: "google",
+      medium: "cpc",
+      campaign: "Brand",
+      campaign_id: null,
+      adset_id: null,
+      ad_id: null,
+      visits: 12,
+      leads: 1,
+      first_seen: "2026-09-02",
+      last_seen: "2026-09-28",
+    },
+  ],
+  ga4_untagged_visits: 12,
+} as unknown as AdsPageRow;
+
+function fakeReport(): AdsReport {
+  return {
+    window: { start: "2026-09-01", end: "2026-09-28", days: 28 },
+    meta: { connected: true, last_synced_at: READ_111, last_error: null, consecutive_failures: 0, accounts: [] },
+    ga4: { configured: h.ga4Configured, last_synced_at: null, last_export_date: null, last_error: null },
+    refreshing: false,
+    refresh: { state: "idle" },
+    collecting_since: null,
+    totals: {
+      spend: { USD: 190 },
+      tracked_spend: { USD: 100 },
+      clicks: 40,
+      landing_page_views: 32,
+      paid_visits: 0,
+      unclear_visits: 0,
+      meta_leads: 0,
+      instant_form_leads: 0,
+      ga4_leads: 0,
+      unique_leads: 0,
+      submissions: 0,
+      repeat_submissions: 0,
+      test_submissions: 0,
+      matched_visits: 0,
+      unmatched_meta_visits: 0,
+      ratio_clicks: 0,
+      untagged_clicks: 0,
+      ...h.totals,
+    },
+    lead_gap_compare: { days: 0, ga4_leads: 0, submissions: 0 },
+    pages: [],
+    destinations: [h.offSite ?? OFF_SITE],
+    campaigns: [],
+    warnings: [],
+    unrecognized_campaigns: h.unrecognized,
+  } as unknown as AdsReport;
+}
+
+vi.mock("../db-cache", () => ({ CACHE_DIR: h.cacheDir }));
+vi.mock("../settings", () => ({
+  getAdsSettings: () => ({
+    ...DEFAULT_ADS_SETTINGS,
+    meta: { ...DEFAULT_ADS_SETTINGS.meta, enabled: true, ad_account_ids: ["111", "222"], known_external_campaigns: h.known },
+  }),
+}));
+vi.mock("./ads-report", () => ({
+  getAdsReport: async () => fakeReport(),
+  buildAdsReport: () => {
+    h.reportBuilds += 1;
+    return fakeReport();
+  },
+  makeDestinationResolver:
+    () =>
+    (host: string, p: string): Resolved => ({
+      kind: host === "4geeks.com" ? "entry" : "off_site",
+      key: host === "4geeks.com" ? "entry:landing/x/en" : `dest:${host}|${p}`,
+      host,
+      path: p,
+      content_type: null,
+      slug: null,
+      locale: null,
+      redirect_chain: [],
+    }),
+}));
+vi.mock("./meta-ads-days", async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  loadMetaRows: () => ROWS,
+  loadMetaCreatives: () => ({ fetched_at: READ_111, ads: CREATIVES }),
+  loadMetaState: () => ({
+    consecutive_failures: h.syncFailures,
+    last_error: h.syncFailures > 0 ? "Meta timeout" : null,
+    last_success_at: READ_111,
+    accounts: {
+      "111": { name: "A", currency: "USD", account_status: 1, setup_read_at: READ_111 },
+      "222": { name: "B", currency: "USD", account_status: 1, setup_error: "Meta timeout" },
+    },
+  }),
+}));
+vi.mock("./paid-detection", () => ({ lastCompleteGa4Date: () => "2026-09-27" }));
+vi.mock("./lead-ledger", () => ({ ledgerLastRecordedAt: () => null }));
+vi.mock("./ads-refresh", () => ({ isMetaConnected: () => h.connected, hasMetaData: () => h.connected }));
+vi.mock("../legal/legal-diagnostics", () => ({
+  loadConsentWindow: () => ({ current: [], trailing: [] }),
+  consentDropPct: () => null,
+  consentTotals: () => ({ accept_pct: null }),
+}));
+
+const { buildAdsDiagnostics } = await import("./ads-diagnostics");
+
+function seedIssueState(open: Record<string, { first_seen: string; title: string; severity: string }>) {
+  const file = path.join(h.cacheDir, SITE, "ads-issues.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ open, resolved: [], resolver_version: 2 }), "utf-8");
+}
+
+beforeEach(() => {
+  fs.rmSync(path.join(h.cacheDir, SITE), { recursive: true, force: true });
+  h.reportBuilds = 0;
+  h.ga4Configured = false;
+  h.totals = {};
+  h.connected = true;
+  h.syncFailures = 0;
+  h.known = [];
+  h.unrecognized = undefined;
+  h.offSite = null;
+});
+
+afterAll(() => {
+  fs.rmSync(h.cacheDir, { recursive: true, force: true });
+});
+
+describe("buildAdsDiagnostics issue details", () => {
+  it("lists a campaign's missing and unchecked ads with account, status and setup read time", async () => {
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
+    expect(missing.scope).toMatchObject({ campaign_id: "c1", account_id: "111" });
+    expect(missing.details!.ads.map((a) => [a.ad_id, a.effective_status, a.unchecked_reason ?? null])).toEqual([
+      ["a1", "PAUSED", null],
+      ["a2", null, "ad_removed_in_meta"],
+    ]);
+    expect(missing.details!.ads[0]!.missing).toEqual(["utm_id", "utm_content"]);
+    expect(missing.details!.unchecked).toEqual([{ reason: "ad_removed_in_meta", ads: 1, spend: { USD: 40 } }]);
+    expect(missing.details!.setup_last_read_at).toBe(READ_111);
+  });
+
+  it("raises tracking_params_unchecked (info) per campaign with the reason", async () => {
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const failed = d.issues.find((i) => i.id === "tracking_params_unchecked:c2")!;
+    expect(failed).toMatchObject({ severity: "info", scope: { account_id: "222" }, spend_affected: { USD: 30 } });
+    expect(failed.details!.unchecked).toEqual([{ reason: "setup_fetch_failed", ads: 1, spend: { USD: 30 } }]);
+    expect(failed.details!.setup_last_read_at).toBeNull();
+    const noLink = d.issues.find((i) => i.id === "tracking_params_unchecked:c3")!;
+    expect(noLink.details!.ads[0]).toMatchObject({ ad_id: "a4", unchecked_reason: "no_link_found", effective_status: "ACTIVE" });
+    expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c1")).toBeUndefined();
+  });
+
+  it("shows GA4-seen campaigns on destinations with no synced ad", async () => {
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const off = d.issues.find((i) => i.id === "off_site_destination:dest:learn.4geeks.com|/choose-program")!;
+    expect(off.details!.ads_total).toBe(0);
+    expect(off.details!.ga4_seen).toEqual(OFF_SITE.ga4_ads);
+    expect(off.details!.ga4_untagged_visits).toBe(12);
+  });
+
+  it("sorts severity first, then spend", async () => {
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const ranks = d.issues.map((i) => ({ error: 0, warning: 1, info: 2 })[i.severity]);
+    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+    const infos = d.issues.filter((i) => i.severity === "info" && Object.keys(i.spend_affected).length > 0);
+    expect(infos.map((i) => i.id).slice(0, 2)).toEqual(["tracking_params_unchecked:c2", "tracking_params_unchecked:c3"]);
+  });
+
+  it("carries first_seen from the issue history", async () => {
+    seedIssueState({ "missing_tracking_params:c1": { first_seen: "2026-09-10T00:00:00.000Z", title: "t", severity: "warning" } });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.id === "missing_tracking_params:c1")!.first_seen).toBe("2026-09-10T00:00:00.000Z");
+    expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")!.first_seen).toBeUndefined();
+  });
+
+  it("skips the separate KPI report on issue-only builds", async () => {
+    await buildAdsDiagnostics({ site: SITE, probe: false, days: 90, now: NOW });
+    expect(h.reportBuilds).toBe(2);
+    h.reportBuilds = 0;
+    await buildAdsDiagnostics({ site: SITE, probe: false, days: 90, issuesOnly: true, now: NOW });
+    expect(h.reportBuilds).toBe(1);
+  });
+});
+
+const EXTERNAL_ID = "120249995075650344";
+
+function unrecognizedCampaign(key: string, visits: number, campaign_name = key): AdsUnrecognizedCampaigns["campaigns"][number] {
+  const campaign_id = /^\d+$/.test(key) ? key : null;
+  return {
+    key,
+    campaign_id,
+    campaign_name,
+    visits,
+    leads: 1,
+    untagged_visits: 0,
+    pages: [{ key: "entry:landing/ai-fluency-es/es", url: "https://4geeks.com/landing/ai-fluency-es", title: "AI Fluency", visits }],
+    ga4_seen: [
+      {
+        platform: "meta",
+        source: "facebook",
+        medium: "paid_social",
+        campaign: campaign_name,
+        campaign_id,
+        adset_id: null,
+        ad_id: "9",
+        visits,
+        leads: 1,
+        first_seen: "2026-09-02",
+        last_seen: "2026-09-27",
+      },
+    ],
+    first_seen: "2026-09-02",
+    last_seen: "2026-09-27",
+  };
+}
+
+describe("buildAdsDiagnostics unrecognized campaigns", () => {
+  const data = (): AdsUnrecognizedCampaigns => ({
+    paid_meta_visits: 1000,
+    campaigns: [unrecognizedCampaign(EXTERNAL_ID, 785, "AI Fluency ES"), unrecognizedCampaign("Spring promo", 5), unrecognizedCampaign("Tiny", 2)],
+  });
+
+  it("raises an error, a warning, and nothing below the minimum", async () => {
+    h.unrecognized = data();
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const big = d.issues.find((i) => i.id === `unrecognized_campaign:${EXTERNAL_ID}`)!;
+    expect(big).toMatchObject({
+      code: "unrecognized_campaign",
+      severity: "error",
+      title: "Campaign we can't see: AI Fluency ES",
+      site_fixable: false,
+      spend_affected: {},
+      scope: { campaign_id: EXTERNAL_ID, campaign_name: "AI Fluency ES" },
+    });
+    expect(big.why).toContain("isn't in any connected ad account");
+    expect(big.details!.pages![0]).toMatchObject({ url: "https://4geeks.com/landing/ai-fluency-es", visits: 785 });
+    expect(big.details!.ga4_totals).toEqual({ visits: 785, leads: 1 });
+    expect(d.issues.find((i) => i.id === "unrecognized_campaign:Spring promo")!.severity).toBe("warning");
+    expect(d.issues.find((i) => i.id === "unrecognized_campaign:Tiny")).toBeUndefined();
+  });
+
+  it("downgrades known external campaigns to info", async () => {
+    h.unrecognized = data();
+    h.known = [{ key: EXTERNAL_ID, note: "Agency" }, { key: "spring PROMO" }];
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const big = d.issues.find((i) => i.id === `unrecognized_campaign:${EXTERNAL_ID}`)!;
+    expect(big).toMatchObject({ severity: "info", title: "Known external campaign: AI Fluency ES" });
+    expect(big.how_to_fix).toContain("Nothing to fix");
+    expect(d.issues.find((i) => i.id === "unrecognized_campaign:Spring promo")!.severity).toBe("info");
+  });
+
+  it("skips the check when Meta isn't connected or sync keeps failing", async () => {
+    h.unrecognized = data();
+    h.connected = false;
+    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.some((i) => i.code === "unrecognized_campaign")).toBe(false);
+
+    h.connected = true;
+    h.syncFailures = 3;
+    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.some((i) => i.code === "meta_sync_failing")).toBe(true);
+    expect(d.issues.some((i) => i.code === "unrecognized_campaign")).toBe(false);
+  });
+
+  it("explains GA4-only off-site rows and points at the flagged campaign", async () => {
+    const plain = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const plainOff = plain.issues.find((i) => i.code === "off_site_destination")!;
+    expect(plainOff.why).toContain("None of your ads link here. GA4 counted 12 visits here as paid");
+    expect(plainOff.why).not.toContain("flagged separately");
+    expect(plainOff.how_to_fix).toBe("Nothing to fix here.");
+
+    h.unrecognized = data();
+    h.offSite = {
+      ...OFF_SITE,
+      key: "dest:learn.4geeks.com|/cohort/x",
+      url: "https://learn.4geeks.com/cohort/x",
+      paid_visits: 4,
+      ga4_ads: [{ ...unrecognizedCampaign(EXTERNAL_ID, 4, "AI Fluency ES").ga4_seen[0]! }],
+      ga4_untagged_visits: 0,
+    } as unknown as AdsPageRow;
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const off = d.issues.find((i) => i.code === "off_site_destination")!;
+    expect(off.why).toContain("Most come from campaign AI Fluency ES (flagged separately).");
+  });
+});
+
+describe("buildAdsDiagnostics clicks → visits", () => {
+  it("uses matched visits over tagged clicks and passes the exclusions through", async () => {
+    h.ga4Configured = true;
+    h.totals = { paid_visits: 900, matched_visits: 150, ratio_clicks: 200, untagged_clicks: 35, unmatched_meta_visits: 750 };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: 75, clicks_to_visits_mismatch: false, untagged_clicks: 35, unmatched_meta_visits: 750 });
+    expect(d.issues.find((i) => i.code === "clicks_visits_low")).toBeUndefined();
+  });
+
+  it("flags a mismatch above 110% and raises no clicks_visits_low", async () => {
+    h.ga4Configured = true;
+    h.totals = { matched_visits: 900, ratio_clicks: 200 };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: 450, clicks_to_visits_mismatch: true });
+    expect(d.issues.find((i) => i.code === "clicks_visits_low")).toBeUndefined();
+  });
+
+  it("still warns when few tagged clicks become matched visits", async () => {
+    h.ga4Configured = true;
+    h.totals = { paid_visits: 400, matched_visits: 40, ratio_clicks: 200 };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const cv = d.issues.find((i) => i.code === "clicks_visits_low")!;
+    expect(cv.title).toBe("Few ad clicks become visits");
+    expect(cv.why).toContain("Only 20% of Meta clicks from tagged ads");
+    expect(d.kpis.clicks_to_visits_mismatch).toBe(false);
+  });
+
+  it("shows no ratio without GA4", async () => {
+    h.totals = { matched_visits: 40, ratio_clicks: 200 };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: null, clicks_to_visits_mismatch: false });
+  });
+});

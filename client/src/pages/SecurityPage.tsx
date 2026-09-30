@@ -24,7 +24,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { SettingsShell } from "@/components/settings/SettingsShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -54,7 +54,6 @@ import {
   getCapabilityScopeKind,
 } from "@shared/capabilities";
 import { cn } from "@/lib/utils";
-import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { AuthTab } from "@/components/settings/AuthTab";
 
 type SecurityTab = "roles" | "users" | "auth" | "captcha";
@@ -86,6 +85,7 @@ const BUILT_IN_STAFF_ROLE_IDS = new Set([
   "platform_ops",
   "metrics_viewer",
   "content_viewer",
+  "ads_manager",
 ]);
 
 function isBuiltInStaffRole(roleId: string): boolean {
@@ -1536,6 +1536,39 @@ function RolesTab() {
                         </div>
                       </details>
                     )}
+                    {roleId === "ads_manager" && (
+                      <>
+                        <p className="text-xs text-muted-foreground mb-2">
+                          For paid-ads staff: see ads diagnostics, manage ad connections and syncs, and fix ad
+                          tracking in Meta. Cannot change cookie consent or edit site content.
+                        </p>
+                        <details className="mb-2 group">
+                          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1">
+                            <IconChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                            Read more (advanced)
+                          </summary>
+                          <div className="mt-2 text-xs text-muted-foreground space-y-1.5 pl-4 border-l border-border">
+                            <p>
+                              Grants <code className="font-mono">metrics_view</code>,{" "}
+                              <code className="font-mono">content_view</code> (all types),{" "}
+                              <code className="font-mono">ads_settings</code>,{" "}
+                              <code className="font-mono">ads_edit</code>, and{" "}
+                              <code className="font-mono">proposals_create</code>.
+                            </p>
+                            <p>
+                              <code className="font-mono">ads_edit</code> powers the Fix via Meta button in
+                              Diagnostics → Ads. It works from the staff UI only; MCP agents on{" "}
+                              <code className="font-mono">/mcp/role/ads_manager</code> cannot edit live ads.
+                            </p>
+                            <p>
+                              Does not include <code className="font-mono">consent_settings</code>, SEO, redirects, or
+                              content writes. Defined in <code className="font-mono">shared/capabilities.ts</code> and{" "}
+                              <code className="font-mono">server/user-store.ts</code>.
+                            </p>
+                          </div>
+                        </details>
+                      </>
+                    )}
                     <div className="flex flex-wrap gap-1">
                       {role.capabilities.map((cap) => (
                         <CapabilityGrantChip
@@ -2346,7 +2379,7 @@ export default function SecurityPage() {
 
   useEffect(() => {
     if (pathname === "/private/security" || pathname === "/private/security/") {
-      setLocation(canManageUsers ? "/private/security/roles" : "/private/security/captcha");
+      setLocation(canManageUsers ? "/private/security/roles" : "/private/security/captcha", { replace: true });
     }
   }, [pathname, canManageUsers, setLocation]);
 
@@ -2359,46 +2392,23 @@ export default function SecurityPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3 min-w-0">
-            <PrivateHistoryBackButton data-testid="button-back-security" iconClassName="h-4 w-4" />
-            <div className="min-w-0">
-              <h1 className="text-xl font-semibold" data-testid="text-security-title">Security</h1>
-              <p className="text-sm text-muted-foreground">Roles, users and security configuration</p>
-            </div>
-          </div>
-
-          <ToggleButtonBar
-            value={activeTab}
-            onValueChange={(id) => {
-              const tab = SECURITY_TABS.find((t) => t.id === id);
-              if (!tab) return;
-              if (tab.requiresManage && !canManageUsers) return;
-              setLocation(tab.href);
-            }}
-            listTestId="security-tablist"
-            listClassName="flex"
-          >
-            {SECURITY_TABS.map(({ id, label, Icon, requiresManage }) => {
-              const disabled = requiresManage && !canManageUsers;
-              return (
-                <ToggleButtonBarTrigger
-                  key={id}
-                  value={id}
-                  disabled={disabled}
-                  data-testid={`tab-${id}`}
-                  className="gap-1.5"
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  {label}
-                </ToggleButtonBarTrigger>
-              );
-            })}
-          </ToggleButtonBar>
-        </div>
-
+    <SettingsShell
+      section="security"
+      icon={IconShield}
+      title="Security"
+      titleTestId="text-security-title"
+      backTestId="button-back-security"
+      description="Roles, users and security configuration"
+      secondary={{
+        value: activeTab,
+        tabs: SECURITY_TABS.map(({ requiresManage, ...tab }) => ({
+          ...tab,
+          disabled: requiresManage && !canManageUsers,
+        })),
+        listTestId: "security-tablist",
+        triggerTestId: (id) => `tab-${id}`,
+      }}
+    >
         <div role="tabpanel">
           {activeTab === "roles" && (
             canManageUsers ? (
@@ -2432,7 +2442,6 @@ export default function SecurityPage() {
 
           {activeTab === "captcha" && <CaptchaTab />}
         </div>
-      </div>
-    </div>
+    </SettingsShell>
   );
 }

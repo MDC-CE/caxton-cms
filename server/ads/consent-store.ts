@@ -82,6 +82,28 @@ export function summarizeConsentRates(rows: ConsentDailyRow[]): ConsentRateByMod
   }));
 }
 
+/** Replace every row from `sinceDate` onward with `rows`, in one transaction. Returns distinct days written. */
+export function replaceConsentFromSnapshot(site: string, rows: ConsentDailyRow[], sinceDate: string): number {
+  ensurePipelineDb(site);
+  const db = getSiteSqlite(site);
+  const del = db.prepare("DELETE FROM consent_daily WHERE date >= ?");
+  const ins = db.prepare(
+    `INSERT OR REPLACE INTO consent_daily (date, country, mode, shown, granted_explicit, granted_implied, denied)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const days = new Set<string>();
+  const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  db.transaction(() => {
+    del.run(sinceDate);
+    for (const r of rows) {
+      if (typeof r.date !== "string" || r.date < sinceDate || typeof r.country !== "string" || typeof r.mode !== "string") continue;
+      ins.run(r.date, r.country, r.mode, count(r.shown), count(r.granted_explicit), count(r.granted_implied), count(r.denied));
+      days.add(r.date);
+    }
+  })();
+  return days.size;
+}
+
 export function pruneConsentDaily(site: string, now: number = Date.now()): number {
   ensurePipelineDb(site);
   const cutoff = utcDateKey(now - CONSENT_DAILY_RETENTION_DAYS * 86_400_000);

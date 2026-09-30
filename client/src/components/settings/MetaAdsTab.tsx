@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  IconAdjustments,
   IconAlertTriangle,
   IconBrandMeta,
   IconChevronDown,
@@ -12,26 +11,52 @@ import {
   IconLoader2,
   IconPlugConnected,
   IconRefresh,
+  IconPlus,
   IconToggleLeft,
   IconToggleRight,
+  IconX,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
+import { SearchableMultiCombobox, type SearchableMultiComboboxOption } from "@/components/ui/searchable-multi-combobox";
 import { Textarea } from "@/components/ui/textarea";
+import { useSettingsDirty } from "@/components/settings/SettingsShell";
+import { AdsAlertThresholdsCard } from "@/components/settings/AdsAlertThresholdsCard";
+import { MetaTrackingParamsStatus } from "@/components/settings/MetaTrackingParamsStatus";
+import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
+import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
+import type { TrackingParamsCoverage } from "@shared/ads-diagnostics-rules";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { apiFetch, apiRequest } from "@/lib/queryClient";
-import { DEFAULT_ADS_ALERT_THRESHOLDS, type AdsAlertThresholds, type AdsSettings } from "@shared/ads-settings";
+import { cn } from "@/lib/utils";
+import {
+  DEFAULT_ADS_ALERT_THRESHOLDS,
+  MAX_KNOWN_EXTERNAL_CAMPAIGNS,
+  isKnownExternalCampaign,
+  type AdsAlertThresholds,
+  type AdsSettings,
+  type KnownExternalCampaign,
+} from "@shared/ads-settings";
+import {
+  isRefreshActive,
+  refreshProgressPercent,
+  refreshStatusCopy,
+  type AdsRefreshStatus,
+} from "@shared/ads-refresh-status";
 
 type SettingsResponse = {
   ads: AdsSettings;
   token_configured: boolean;
   api_version: string;
   utm_template: string;
+  tracking_params: TrackingParamsCoverage | null;
   refreshing: boolean;
+  refresh: AdsRefreshStatus;
   sync: {
     last_success_at: string | null;
     last_attempt_at: string | null;
@@ -41,6 +66,9 @@ type SettingsResponse = {
     history_since: string | null;
     history_until: string | null;
     accounts: Record<string, { name?: string; currency?: string; account_status?: number; error?: string }>;
+    pulled_from_production_at?: string | null;
+    production_origin?: string | null;
+    snapshot_last_date?: string | null;
   };
   ga4: { configured: boolean; last_success_at: string | null; last_export_date: string | null; last_error: string | null };
   policy: { refresh_days: number; backfill_days: number; retention_days: number; cache_dir: string };
@@ -53,20 +81,12 @@ type TestResponse = {
   accounts: Array<{ id: string; ok: boolean; name?: string; currency?: string; error?: string }>;
 };
 
-type NumericThresholdKey = Exclude<keyof AdsAlertThresholds, "severity_spend_floor">;
-
-const THRESHOLD_FIELDS: { key: NumericThresholdKey; label: string; hint: string; suffix?: string }[] = [
-  { key: "severity_spend_share_pct", label: "Urgent when share of spend ≥", hint: "An issue becomes an error at this share of total spend…", suffix: "%" },
-  { key: "clicks_visits_drop_pct", label: "Clicks → visits drop", hint: "Warn when the ratio falls this much vs the previous 28 days.", suffix: "%" },
-  { key: "clicks_visits_floor_pct", label: "Clicks → visits floor", hint: "Always warn below this ratio.", suffix: "%" },
-  { key: "ratio_min_clicks", label: "Min clicks to judge", hint: "Ignore the ratio below this many clicks." },
-  { key: "unclear_share_pct", label: "Unclear Meta visits above", hint: "Visits with only Meta's click id and no tags.", suffix: "%" },
-  { key: "unclear_min_sessions", label: "…with at least", hint: "Meta visits in the window.", suffix: "visits" },
-  { key: "ga4_ledger_gap_widen_pts", label: "GA4 vs site gap widens by", hint: "Points vs the previous 28 days.", suffix: "pts" },
-  { key: "ga4_ledger_gap_bootstrap_pct", label: "First 28 days gap", hint: "Fixed gap while our lead records are new.", suffix: "%" },
-  { key: "zero_visits_complete_days", label: "Spend with no visits over", hint: "Complete GA4 days before it counts as an error.", suffix: "days" },
-  { key: "min_paid_visits_for_rates", label: "Grey out rates below", hint: "Paid visits needed before rates are shown.", suffix: "visits" },
-];
+type AccountsResponse = {
+  token_configured: boolean;
+  accounts: Array<{ id: string; name: string; currency: string; account_status: number }>;
+  error?: string;
+  error_kind?: string;
+};
 
 function fmtWhen(iso: string | null): string {
   if (!iso) return "never";
@@ -105,27 +125,47 @@ export function MetaAdsTab() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads settings");
       return res.json() as Promise<SettingsResponse>;
     },
-    refetchInterval: (q) => ((q.state.data as SettingsResponse | undefined)?.refreshing ? 5000 : false),
+    refetchInterval: (q) => {
+      const state = (q.state.data as SettingsResponse | undefined)?.refresh?.state;
+      return state === "running" ? 3000 : state === "queued" ? 5000 : false;
+    },
+  });
+
+  const { data: accountList, isLoading: accountsLoading } = useQuery({
+    queryKey: ["/api/settings/ads/meta/accounts"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/settings/ads/meta/accounts");
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load ad accounts");
+      return res.json() as Promise<AccountsResponse>;
+    },
+    enabled: !!data?.token_configured,
+    staleTime: 5 * 60 * 1000,
   });
 
   const [enabled, setEnabled] = useState(false);
-  const [idsText, setIdsText] = useState("");
+  const [accountIds, setAccountIds] = useState<string[]>([]);
   const [patternsText, setPatternsText] = useState("");
   const [thresholds, setThresholds] = useState<AdsAlertThresholds>(DEFAULT_ADS_ALERT_THRESHOLDS);
   const [floorText, setFloorText] = useState<Record<string, string>>({});
+  const [knownCampaigns, setKnownCampaigns] = useState<KnownExternalCampaign[]>([]);
+  const [newKnownKey, setNewKnownKey] = useState("");
+  const [newKnownNote, setNewKnownNote] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState<null | "refresh" | "older">(null);
   const [testResult, setTestResult] = useState<TestResponse | null>(null);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  useSettingsDirty(dirty);
 
   useEffect(() => {
     if (!data || dirty) return;
     setEnabled(data.ads.meta.enabled);
-    setIdsText(data.ads.meta.ad_account_ids.join("\n"));
+    setAccountIds(data.ads.meta.ad_account_ids);
     setPatternsText(data.ads.test_email_patterns.join("\n"));
     setThresholds(data.ads.meta.alert_thresholds);
     setFloorText(Object.fromEntries(Object.entries(data.ads.meta.alert_thresholds.severity_spend_floor).map(([c, v]) => [c, String(v)])));
+    setKnownCampaigns(data.ads.meta.known_external_campaigns ?? []);
   }, [data, dirty]);
 
   const accountCurrencies = useMemo(
@@ -133,6 +173,23 @@ export function MetaAdsTab() {
     [data],
   );
   const missingFloors = accountCurrencies.filter((c) => !(c in floorText));
+
+  const accountOptions = useMemo<SearchableMultiComboboxOption[]>(() => {
+    const listed = accountList?.accounts ?? [];
+    const options: SearchableMultiComboboxOption[] = listed.map((a) => ({
+      value: a.id,
+      label: [a.name || "Unnamed", a.currency, a.account_status !== 1 ? "disabled" : null].filter(Boolean).join(" · "),
+    }));
+    const listedIds = new Set(listed.map((a) => a.id));
+    const listLoaded = !!accountList && !accountList.error;
+    for (const id of accountIds) {
+      if (listedIds.has(id)) continue;
+      const known = data?.sync.accounts[id]?.name;
+      if (listLoaded) options.push({ value: id, label: `${known || id} · not visible to the access key` });
+      else if (known) options.push({ value: id, label: known });
+    }
+    return options;
+  }, [accountList, accountIds, data]);
 
   async function save() {
     setSaving(true);
@@ -144,9 +201,10 @@ export function MetaAdsTab() {
       }
       const res = await apiRequest("PUT", "/api/settings/ads/meta", {
         enabled,
-        ad_account_ids: parseIds(idsText),
+        ad_account_ids: accountIds,
         test_email_patterns: patternsText.split(/\n+/).map((s) => s.trim()).filter(Boolean),
         alert_thresholds: { ...thresholds, severity_spend_floor: floors },
+        known_external_campaigns: knownCampaigns,
       });
       const body = (await res.json()) as SettingsResponse & { sync_requested?: boolean };
       setDirty(false);
@@ -166,7 +224,7 @@ export function MetaAdsTab() {
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await apiRequest("POST", "/api/settings/ads/meta/test", { ad_account_ids: parseIds(idsText) });
+      const res = await apiRequest("POST", "/api/settings/ads/meta/test", { ad_account_ids: accountIds });
       const body = (await res.json()) as TestResponse;
       setTestResult(body);
       toast({
@@ -184,8 +242,21 @@ export function MetaAdsTab() {
   async function sync(mode: "refresh" | "older") {
     setSyncing(mode);
     try {
-      await apiRequest("POST", "/api/ads/meta/sync", { mode });
-      toast({ title: mode === "older" ? "Loading older history" : "Sync started", description: "This runs in the background." });
+      const res = await apiRequest("POST", "/api/ads/meta/sync", { mode });
+      const body = (await res.json()) as { refresh?: AdsRefreshStatus };
+      const state = body.refresh?.state;
+      if (state === "failed" || state === "worker_down") {
+        toast({
+          title: "Sync didn't start",
+          description: refreshStatusCopy(body.refresh, "settings")?.message,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: mode === "older" ? "Loading older history" : "Sync started",
+          description: state === "queued" ? "Queued for the background worker." : "This runs in the background.",
+        });
+      }
       await refetch();
     } catch (err) {
       toast({ title: "Sync failed to start", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
@@ -204,23 +275,39 @@ export function MetaAdsTab() {
   }
 
   const markDirty = () => setDirty(true);
+  const refreshActive = isRefreshActive(data.refresh);
+  const refreshCopy = refreshStatusCopy(data.refresh, "settings");
+  const progressPct = data.refresh.state === "running" ? refreshProgressPercent(data.refresh.progress) : null;
 
   return (
     <div className="space-y-4" data-testid="tab-panel-ads-meta">
       <Card data-testid="card-meta-connection">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <IconBrandMeta className="h-4 w-4" />
-            Meta connection
-          </CardTitle>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 text-left"
+            aria-expanded={connectionOpen}
+            onClick={() => setConnectionOpen((v) => !v)}
+            data-testid="button-meta-connection-toggle"
+          >
+            <CardTitle className="text-base flex items-center gap-2">
+              <IconBrandMeta className="h-4 w-4" />
+              Meta connection
+            </CardTitle>
+            <IconChevronDown
+              className={cn("h-4 w-4 text-muted-foreground transition-transform", connectionOpen && "rotate-180")}
+            />
+          </button>
         </CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Connect your Meta ad accounts so Caxton can show spend and leads next to your pages. Caxton only reads — it
-            never changes your ads.
-          </p>
+          {connectionOpen && (
+            <p className="text-sm text-muted-foreground">
+              Connect your Meta ad accounts so Caxton can show spend and leads next to your pages. Syncing only reads — ads
+              change only when someone with Edit live ads confirms Fix via Meta in Diagnostics.
+            </p>
+          )}
 
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3" data-testid="meta-connection-status">
             <div>
               <p className="text-sm font-medium text-foreground">Use Meta data</p>
               <p className="text-xs text-muted-foreground">
@@ -262,76 +349,80 @@ export function MetaAdsTab() {
             </Button>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-foreground" htmlFor="meta-account-ids">
-              Ad accounts
-            </label>
-            <Textarea
-              id="meta-account-ids"
-              rows={3}
-              placeholder={"1234567890\nact_9876543210"}
-              value={idsText}
-              disabled={!canEdit}
-              onChange={(e) => {
-                setIdsText(e.target.value);
-                markDirty();
-              }}
-              data-testid="input-meta-account-ids"
-            />
-            <p className="text-xs text-muted-foreground">One account id per line (from Ads Manager, with or without “act_”).</p>
-            {Object.keys(data.sync.accounts).length > 0 && (
-              <ul className="text-xs text-muted-foreground space-y-0.5" data-testid="list-meta-accounts">
-                {Object.entries(data.sync.accounts).map(([id, a]) => (
-                  <li key={id}>
-                    <span className="font-mono">{id}</span> — {a.name || "unnamed"} {a.currency ? `(${a.currency})` : ""}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {connectionOpen && (
+            <div className="space-y-4" data-testid="meta-connection-details">
+              {data.token_configured && (
+                <div className="space-y-1.5" data-testid="field-meta-account-ids">
+                  <p className="text-sm font-medium text-foreground">Ad accounts</p>
+                  <p className="text-xs text-muted-foreground">
+                    Pick the accounts to report on. The list shows every account the server&apos;s Meta key can read.
+                  </p>
+                  <SearchableMultiCombobox
+                    values={accountIds}
+                    onChange={(next) => {
+                      setAccountIds(parseIds(next.join("\n")));
+                      markDirty();
+                    }}
+                    options={accountOptions}
+                    placeholder="Select ad accounts…"
+                    searchPlaceholder="Search by name or id…"
+                    emptyMessage="No accounts match"
+                    isLoading={accountsLoading}
+                    disabled={!canEdit}
+                    testId="meta-account-ids"
+                  />
+                  {accountList?.error && (
+                    <p className="text-xs text-destructive" data-testid="text-meta-accounts-error">
+                      Could not load accounts from Meta: {accountList.error}. You can still type an account id.
+                    </p>
+                  )}
+                </div>
+              )}
 
-          {testResult && (
-            <div className="rounded-md border border-border p-3 space-y-1 text-xs" data-testid="meta-test-result">
-              {testResult.error && <p className="text-destructive">{testResult.error}</p>}
-              {testResult.accounts.map((a) => (
-                <p key={a.id} className={a.ok ? "text-foreground" : "text-destructive"}>
-                  {a.ok ? <IconCircleCheck className="inline h-3.5 w-3.5 mr-1 text-chart-3" /> : <IconAlertTriangle className="inline h-3.5 w-3.5 mr-1" />}
-                  <span className="font-mono">{a.id}</span> {a.ok ? `— ${a.name} (${a.currency})` : `— ${a.error}`}
+              {testResult && (
+                <div className="rounded-md border border-border p-3 space-y-1 text-xs" data-testid="meta-test-result">
+                  {testResult.error && <p className="text-destructive">{testResult.error}</p>}
+                  {testResult.accounts.map((a) => (
+                    <p key={a.id} className={a.ok ? "text-foreground" : "text-destructive"}>
+                      {a.ok ? <IconCircleCheck className="inline h-3.5 w-3.5 mr-1 text-chart-3" /> : <IconAlertTriangle className="inline h-3.5 w-3.5 mr-1" />}
+                      <span className="font-mono">{a.id}</span> {a.ok ? `— ${a.name} (${a.currency})` : `— ${a.error}`}
+                    </p>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={test}
+                  disabled={!canEdit || testing || accountIds.length === 0}
+                  data-testid="button-meta-test"
+                >
+                  {testing ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconPlugConnected className="h-4 w-4 mr-1.5" />}
+                  Test connection
+                </Button>
+              </div>
+
+              <ReadMore testId="button-meta-connection-advanced">
+                <p>
+                  Key: <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (env only; System User token with <code className="font-mono">ads_read</code>).
                 </p>
-              ))}
+                <p>
+                  Live-ad edits (Fix via Meta) use the same key and also need <code className="font-mono">ads_management</code> on those accounts.
+                  Only staff with the <code className="font-mono">ads_edit</code> permission can run them.
+                </p>
+                <p>
+                  Non-secret config: <code className="font-mono">settings.yml → ads.meta</code> (per site).
+                </p>
+                <p>
+                  Cache: <code className="font-mono">{data.policy.cache_dir}</code> · refresh last {data.policy.refresh_days} days · keep{" "}
+                  {Math.round(data.policy.retention_days / 30)} months · first connect loads {data.policy.backfill_days} days.
+                </p>
+                <p>Marketing API {data.api_version}. Data older than ~24h refreshes in the background when someone opens a report.</p>
+              </ReadMore>
             </div>
           )}
-
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={save} disabled={!canEdit || !dirty || saving} data-testid="button-meta-save">
-              {saving ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconDeviceFloppy className="h-4 w-4 mr-1.5" />}
-              Save
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={test}
-              disabled={!canEdit || testing || parseIds(idsText).length === 0}
-              data-testid="button-meta-test"
-            >
-              {testing ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconPlugConnected className="h-4 w-4 mr-1.5" />}
-              Test connection
-            </Button>
-          </div>
-
-          <ReadMore testId="button-meta-connection-advanced">
-            <p>
-              Key: <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (env only; System User token with <code className="font-mono">ads_read</code>).
-            </p>
-            <p>
-              Non-secret config: <code className="font-mono">settings.yml → ads.meta</code> (per site).
-            </p>
-            <p>
-              Cache: <code className="font-mono">{data.policy.cache_dir}</code> · refresh last {data.policy.refresh_days} days · keep{" "}
-              {Math.round(data.policy.retention_days / 30)} months · first connect loads {data.policy.backfill_days} days.
-            </p>
-            <p>Marketing API {data.api_version}. Data older than ~24h refreshes in the background when someone opens a report.</p>
-          </ReadMore>
         </CardContent>
       </Card>
 
@@ -340,7 +431,7 @@ export function MetaAdsTab() {
           <CardTitle className="text-base flex items-center gap-2">
             <IconRefresh className="h-4 w-4" />
             Sync
-            {data.refreshing && <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            {refreshActive && <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
@@ -367,12 +458,41 @@ export function MetaAdsTab() {
               Last sync failed{data.sync.consecutive_failures > 1 ? ` (${data.sync.consecutive_failures} times in a row)` : ""}: {data.sync.last_error}
             </p>
           )}
+          {progressPct !== null && data.refresh.progress ? (
+            <div className="space-y-1.5" data-testid="meta-refresh-progress">
+              <Progress value={progressPct} className="h-2" aria-label="Sync progress" />
+              <p className="text-xs text-muted-foreground tabular-nums" data-testid="text-meta-refresh-progress">
+                {progressPct}% · {data.refresh.progress.label}
+              </p>
+            </div>
+          ) : refreshCopy && (
+            <div className="flex flex-wrap items-center gap-2" data-testid="meta-refresh-status">
+              <p
+                className={`text-xs ${refreshCopy.tone === "error" ? "text-destructive" : "text-muted-foreground"}`}
+                data-testid="text-meta-refresh-status"
+              >
+                {refreshCopy.message}
+              </p>
+              {data.refresh.state === "failed" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => sync("refresh")}
+                  disabled={!canEdit || syncing !== null}
+                  data-testid="button-meta-refresh-try-again"
+                >
+                  Try again
+                </Button>
+              )}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               variant="secondary"
               onClick={() => sync("refresh")}
-              disabled={!canEdit || syncing !== null || data.refreshing}
+              disabled={!canEdit || syncing !== null || refreshActive}
               data-testid="button-meta-sync-now"
             >
               {syncing === "refresh" ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconRefresh className="h-4 w-4 mr-1.5" />}
@@ -382,13 +502,28 @@ export function MetaAdsTab() {
               size="sm"
               variant="outline"
               onClick={() => sync("older")}
-              disabled={!canEdit || syncing !== null || data.refreshing || !data.sync.history_since}
+              disabled={!canEdit || syncing !== null || refreshActive || !data.sync.history_since}
               data-testid="button-meta-load-older"
             >
               {syncing === "older" ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconHistory className="h-4 w-4 mr-1.5" />}
               Load older history
             </Button>
+            <AdsPullProductionButton variant="button" onDone={() => void refetch()} testIdPrefix="meta-sync" />
           </div>
+          <ReadMore testId="button-meta-sync-advanced">
+            <p>
+              Background job <code className="font-mono">meta_ads_sync</code> runs in the Sidequest worker (locally:{" "}
+              <code className="font-mono">npm run sidequest</code>). When the worker is down, Sync now runs the refresh in the web server
+              instead; automatic refreshes never do.
+            </p>
+            <p>
+              A job still waiting after 5 minutes counts as failed. A started sync with no finish after 15 minutes counts as stopped.
+            </p>
+            <p>After a failure, automatic refreshes wait 1h, then 2h, 4h, and at most 6h. Sync now skips the wait; a successful sync resets it.</p>
+            <p>
+              State file: <code className="font-mono">.cache/&lt;site&gt;/ads-refresh-state.json</code>. Cached numbers stay visible in every state.
+            </p>
+          </ReadMore>
         </CardContent>
       </Card>
 
@@ -400,6 +535,7 @@ export function MetaAdsTab() {
           <p className="text-sm text-muted-foreground">
             Paste this into each ad under Tracking → URL parameters. It lets us match visits and leads to the exact campaign and ad.
           </p>
+          <MetaTrackingParamsStatus coverage={data.tracking_params} />
           <div className="flex gap-2">
             <Input readOnly value={data.utm_template} className="font-mono text-xs" data-testid="input-meta-utm-template" />
             <Button
@@ -414,81 +550,136 @@ export function MetaAdsTab() {
               <IconCopy className="h-4 w-4" />
             </Button>
           </div>
+          {data.tracking_params && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="meta-utm-checked-at">
+              <span>Checked at last sync: {fmtWhen(data.tracking_params.checked_at)}</span>
+              <AdsResyncButton
+                refresh={data.refresh}
+                onStarted={() => void refetch()}
+                testIdPrefix="meta-utm"
+                snapshotPulledAt={!data.token_configured ? (data.sync.pulled_from_production_at ?? undefined) : undefined}
+              />
+              <AdsPullProductionButton onDone={() => void refetch()} testIdPrefix="meta-utm" />
+            </div>
+          )}
+          <ReadMore testId="button-meta-utm-advanced">
+            <p>
+              Required on every ad: <code className="font-mono">utm_source</code>, <code className="font-mono">utm_medium</code>,{" "}
+              <code className="font-mono">utm_id</code> (campaign id) and <code className="font-mono">utm_content</code> (ad id). They can sit in
+              the ad's URL parameters field or in the website URL itself.
+            </p>
+            <p>
+              Only ads with spend in the last 28 days are checked — the same window Diagnostics uses. Instant Form ads and ads without a website
+              link are skipped. Paused or new ads are checked once they spend.
+            </p>
+            <p>
+              Ad setups are read by the <code className="font-mono">meta_ads_sync</code> job and saved under{" "}
+              <code className="font-mono">.cache/&lt;site&gt;/</code>. Caxton only reads your ads; it never edits them in Meta.
+            </p>
+          </ReadMore>
         </CardContent>
       </Card>
 
-      <Card data-testid="card-meta-thresholds">
+      <AdsAlertThresholdsCard
+        thresholds={thresholds}
+        onThresholdsChange={(next) => {
+          setThresholds(next);
+          markDirty();
+        }}
+        floorText={floorText}
+        onFloorTextChange={(next) => {
+          setFloorText(next);
+          markDirty();
+        }}
+        missingFloors={missingFloors}
+        canEdit={canEdit}
+      />
+
+      <Card data-testid="card-known-external-campaigns">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <IconAdjustments className="h-4 w-4" />
-            Alert thresholds
-          </CardTitle>
+          <CardTitle className="text-base">Known external campaigns</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">These decide when Diagnostics warns you and when a problem is urgent.</p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {THRESHOLD_FIELDS.map((f) => (
-              <div key={f.key} className="space-y-1">
-                <label className="text-sm font-medium text-foreground" htmlFor={`threshold-${f.key}`}>
-                  {f.label}
-                </label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id={`threshold-${f.key}`}
-                    type="number"
-                    min={0}
-                    value={thresholds[f.key]}
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Campaigns you know about that run outside your connected ad accounts, like a partner or agency. Diagnostics still lists them, but as
+            info instead of a problem. Their spend is never included.
+          </p>
+          {knownCampaigns.length === 0 ? (
+            <p className="text-xs text-muted-foreground" data-testid="text-known-campaigns-empty">
+              None yet. Use Mark as known on a &quot;Campaign we can&apos;t see&quot; issue in Diagnostics, or add a campaign id below.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border rounded-md border border-border" data-testid="list-known-campaigns">
+              {knownCampaigns.map((c) => (
+                <li key={c.key} className="flex items-center justify-between gap-3 px-3 py-2 text-sm" data-testid={`known-campaign-${c.key}`}>
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs text-foreground">{c.key}</p>
+                    {c.note && <p className="truncate text-xs text-muted-foreground">{c.note}</p>}
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 shrink-0 p-0"
+                    aria-label={`Remove ${c.key}`}
                     disabled={!canEdit}
-                    onChange={(e) => {
-                      setThresholds((t) => ({ ...t, [f.key]: Number(e.target.value) }));
+                    onClick={() => {
+                      setKnownCampaigns((list) => list.filter((x) => x.key !== c.key));
                       markDirty();
                     }}
-                    data-testid={`input-threshold-${f.key}`}
-                  />
-                  {f.suffix && <span className="text-xs text-muted-foreground shrink-0">{f.suffix}</span>}
-                </div>
-                <p className="text-xs text-muted-foreground">{f.hint}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="space-y-2 rounded-md border border-border p-3">
-            <p className="text-sm font-medium text-foreground">…or when spend affected reaches</p>
-            <div className="flex flex-wrap gap-3">
-              {Object.keys(floorText)
-                .concat(missingFloors)
-                .map((cur) => (
-                  <div key={cur} className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-muted-foreground w-9">{cur}</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      className="w-24"
-                      value={floorText[cur] ?? ""}
-                      placeholder="—"
-                      disabled={!canEdit}
-                      onChange={(e) => {
-                        setFloorText((f) => ({ ...f, [cur]: e.target.value }));
-                        markDirty();
-                      }}
-                      data-testid={`input-floor-${cur}`}
-                    />
-                  </div>
-                ))}
+                    data-testid={`button-remove-known-campaign-${c.key}`}
+                  >
+                    <IconX className="h-4 w-4" />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {canEdit && knownCampaigns.length < MAX_KNOWN_EXTERNAL_CAMPAIGNS && (
+            <div className="flex flex-col gap-2 sm:flex-row" data-testid="form-add-known-campaign">
+              <Input
+                value={newKnownKey}
+                maxLength={200}
+                placeholder="Campaign id or name"
+                className="text-xs sm:w-56"
+                onChange={(e) => setNewKnownKey(e.target.value)}
+                data-testid="input-known-campaign-key"
+              />
+              <Input
+                value={newKnownNote}
+                maxLength={200}
+                placeholder="Note (optional)"
+                className="text-xs"
+                onChange={(e) => setNewKnownNote(e.target.value)}
+                data-testid="input-known-campaign-note"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="shrink-0"
+                disabled={!newKnownKey.trim() || isKnownExternalCampaign(knownCampaigns, newKnownKey)}
+                onClick={() => {
+                  const key = newKnownKey.trim();
+                  const note = newKnownNote.trim();
+                  setKnownCampaigns((list) => [...list, note ? { key, note } : { key }]);
+                  setNewKnownKey("");
+                  setNewKnownNote("");
+                  markDirty();
+                }}
+                data-testid="button-add-known-campaign"
+              >
+                <IconPlus className="h-4 w-4 mr-1.5" />
+                Add
+              </Button>
             </div>
-            {missingFloors.length > 0 && (
-              <p className="text-xs text-amber-500" data-testid="text-missing-floors">
-                Set an amount for {missingFloors.join(", ")} — until then only the share-of-spend rule applies to those accounts.
-              </p>
-            )}
-          </div>
-
-          <ReadMore testId="button-meta-thresholds-advanced">
-            <p>Drops compare the current window with the previous 28 days. Ratios are judged only above the minimum clicks / visits.</p>
-            <p>GA4 days count as complete 2 days after the date (export delay). Issues clear on the next sync once fixed.</p>
+          )}
+          <ReadMore testId="button-known-campaigns-advanced">
             <p>
-              Stored in <code className="font-mono">settings.yml → ads.meta.alert_thresholds</code>.
+              Stored in <code className="font-mono">settings.yml → ads.meta.known_external_campaigns</code> (max {MAX_KNOWN_EXTERNAL_CAMPAIGNS}).
+              Matching is by campaign id, or by campaign name ignoring case.
             </p>
+            <p>Removing an entry flags the campaign again on the next Diagnostics load if it still sends visitors.</p>
           </ReadMore>
         </CardContent>
       </Card>
@@ -516,12 +707,36 @@ export function MetaAdsTab() {
             data-testid="input-test-email-patterns"
           />
           <p className="text-xs text-muted-foreground">One pattern per line; * matches anything. Emails are never stored by us.</p>
-          <Button size="sm" onClick={save} disabled={!canEdit || !dirty || saving} data-testid="button-test-leads-save">
-            {saving ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconDeviceFloppy className="h-4 w-4 mr-1.5" />}
-            Save
-          </Button>
         </CardContent>
       </Card>
+
+      <div
+        className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-lg"
+        data-testid="ads-meta-save-bar"
+      >
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-end gap-3">
+          <p
+            className={cn("text-xs min-w-0 truncate text-right", dirty ? "text-destructive" : "text-muted-foreground")}
+            data-testid="text-ads-meta-save-status"
+          >
+            {saving ? "Saving…" : dirty ? "Unsaved changes" : "All changes saved"}
+          </p>
+          <Button
+            size="sm"
+            className="gap-1.5 shrink-0"
+            onClick={save}
+            disabled={!canEdit || !dirty || saving}
+            data-testid="button-meta-save"
+          >
+            {saving ? (
+              <IconLoader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : (
+              <IconDeviceFloppy className="h-3.5 w-3.5" aria-hidden />
+            )}
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -358,10 +358,52 @@ export function listLedgerRows(site: string, sinceMs: number): LedgerQueryRow[] 
     .all(sinceMs) as LedgerQueryRow[];
 }
 
+const LEDGER_COLUMNS: (keyof LedgerRow)[] = [
+  "submission_id", "created_at", "form", "browser_hash", "host", "locale",
+  "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+  "platform", "campaign_id", "adset_id", "ad_id", "click_id_type",
+  "landing_path", "conversion_path",
+  "first_paid_host", "first_paid_path", "first_paid_at",
+  "last_paid_host", "last_paid_path", "last_paid_at",
+  "experiment_id", "variant", "is_test", "test_reason", "is_repeat", "repeat_of", "consent_state",
+];
+
+/**
+ * Replace real (non-test) rows from `sinceMs` onward with `rows`, in one transaction.
+ * Local test rows (`is_test = 1`) are kept; only whitelisted columns are written.
+ */
+export function replaceLedgerFromSnapshot(site: string, rows: LedgerRow[], sinceMs: number): number {
+  ensurePipelineDb(site);
+  const db = getSiteSqlite(site);
+  const del = db.prepare("DELETE FROM lead_submissions WHERE created_at >= ? AND is_test = 0");
+  const ins = db.prepare(
+    `INSERT OR REPLACE INTO lead_submissions (${LEDGER_COLUMNS.join(", ")}) VALUES (${LEDGER_COLUMNS.map(() => "?").join(", ")})`,
+  );
+  let written = 0;
+  db.transaction(() => {
+    del.run(sinceMs);
+    for (const row of rows) {
+      if (typeof row.submission_id !== "string" || typeof row.created_at !== "number" || row.created_at < sinceMs) continue;
+      ins.run(...LEDGER_COLUMNS.map((c) => row[c] ?? null));
+      written++;
+    }
+  })();
+  return written;
+}
+
 export function ledgerCollectingSince(site: string): number | null {
   ensurePipelineDb(site);
   const row = getSiteSqlite(site).prepare("SELECT MIN(created_at) AS first FROM lead_submissions").get() as
     | { first: number | null }
     | undefined;
   return row?.first ?? null;
+}
+
+/** Newest non-test submission (ms), or null when the ledger never recorded a real lead. */
+export function ledgerLastRecordedAt(site: string): number | null {
+  ensurePipelineDb(site);
+  const row = getSiteSqlite(site).prepare("SELECT MAX(created_at) AS last FROM lead_submissions WHERE is_test = 0").get() as
+    | { last: number | null }
+    | undefined;
+  return row?.last ?? null;
 }

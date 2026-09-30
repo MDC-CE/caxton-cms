@@ -149,6 +149,8 @@ interface UsersState {
   pendingUsers?: Record<string, PendingUserRecord>;
   /** Staff-edited MCP descriptions for built-in roles (capabilities still come from code). */
   builtInDescriptionOverrides?: Record<string, string>;
+  /** One-time role migrations already applied (so staff removals are not re-granted on boot). */
+  appliedMigrations?: string[];
 }
 
 // ─── Built-in roles ────────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ export const BUILT_IN_ROLE_IDS = [
   "platform_ops",
   "metrics_viewer",
   "content_viewer",
+  "ads_manager",
 ] as const;
 export type BuiltInRoleId = (typeof BUILT_IN_ROLE_IDS)[number];
 
@@ -190,7 +193,7 @@ const BUILT_IN_USER_ADMIN_ROLE: RoleDefinition = {
 const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
   label: "Platform Steward",
   description:
-    "Site health: diagnostics, runtime issues, redirects, SEO and Ads settings (incl. cookie consent window), content-type schema, private database definitions, and full proposal create/review (bulk proposal delete is staff UI only, never via MCP). Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
+    "Site health: diagnostics, runtime issues, redirects, SEO and Ads settings, cookie consent window, content-type schema, private database definitions, and full proposal create/review (bulk proposal delete and live-ad edits are staff UI only, never via MCP). Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure. For paid-ads-only work prefer /mcp/role/ads_manager.",
   capabilities: [
     { name: "metrics_view" },
     { name: "content_view", contentTypes: "*" },
@@ -200,6 +203,8 @@ const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
     { name: "overlays_configure" },
     { name: "seo_settings" },
     { name: "ads_settings" },
+    { name: "ads_edit" },
+    { name: "consent_settings" },
     { name: "components_manage" },
     { name: "content_types_manage" },
     { name: "databases_manage" },
@@ -234,12 +239,26 @@ const BUILT_IN_CONTENT_VIEWER_ROLE: RoleDefinition = {
   capabilities: [{ name: "content_view", contentTypes: "*" }],
 };
 
+const BUILT_IN_ADS_MANAGER_ROLE: RoleDefinition = {
+  label: "Ads Manager",
+  description:
+    "Paid ads: read ads diagnostics, paid traffic, conversions and content, manage Meta ad account settings and syncs, and file proposals for landing pages. Use /mcp/role/ads_manager for paid-traffic analysis and proposals — not for editing live ads (staff UI only), cookie consent, content or SEO writes. Unlike metrics_viewer it can change Ads settings; unlike platform_steward it has no SEO, redirect, schema or consent access.",
+  capabilities: [
+    { name: "metrics_view" },
+    { name: "content_view", contentTypes: "*" },
+    { name: "ads_settings" },
+    { name: "ads_edit" },
+    { name: "proposals_create" },
+  ],
+};
+
 const BUILT_IN_ROLES_BY_ID: Record<BuiltInRoleId, RoleDefinition> = {
   user_admin: BUILT_IN_USER_ADMIN_ROLE,
   platform_steward: BUILT_IN_PLATFORM_STEWARD_ROLE,
   platform_ops: BUILT_IN_PLATFORM_OPS_ROLE,
   metrics_viewer: BUILT_IN_METRICS_VIEWER_ROLE,
   content_viewer: BUILT_IN_CONTENT_VIEWER_ROLE,
+  ads_manager: BUILT_IN_ADS_MANAGER_ROLE,
 };
 
 function cloneRoleDefinition(def: RoleDefinition): RoleDefinition {
@@ -299,6 +318,7 @@ const DEFAULT_STATE: UsersState = {
     platform_ops: BUILT_IN_PLATFORM_OPS_ROLE,
     metrics_viewer: BUILT_IN_METRICS_VIEWER_ROLE,
     content_viewer: BUILT_IN_CONTENT_VIEWER_ROLE,
+    ads_manager: BUILT_IN_ADS_MANAGER_ROLE,
   },
   users: {},
 };
@@ -574,6 +594,29 @@ export function ensureAdsSettingsOnSeoSettingsRoles(
   return changed;
 }
 
+export const CONSENT_SETTINGS_SPLIT_MIGRATION = "consent_settings_split";
+
+/**
+ * One-time: custom roles that could edit the consent window via ads_settings keep that
+ * access through consent_settings. Recorded in `applied` so a later staff removal sticks.
+ * @returns true when roles or `applied` changed (caller should persist).
+ */
+export function ensureConsentSettingsOnAdsSettingsRoles(
+  roles: Record<string, RoleDefinition>,
+  applied: string[],
+): boolean {
+  if (applied.includes(CONSENT_SETTINGS_SPLIT_MIGRATION)) return false;
+  for (const [roleId, role] of Object.entries(roles)) {
+    if (isBuiltInRole(roleId) || role?.agentic || isAgenticSwarmRoleId(roleId)) continue;
+    if (!role?.capabilities) continue;
+    if (!role.capabilities.some((g) => g.name === "ads_settings")) continue;
+    if (role.capabilities.some((g) => g.name === "consent_settings")) continue;
+    role.capabilities = [...role.capabilities, { name: "consent_settings" }];
+  }
+  applied.push(CONSENT_SETTINGS_SPLIT_MIGRATION);
+  return true;
+}
+
 /** True when grants include a mutating cap (not only metrics_view / content_view). */
 export function grantsCanMutateMetrics(caps: CapabilityGrant[]): boolean {
   return caps.some((g) => !VIEW_ONLY_CAPABILITIES.has(g.name));
@@ -603,6 +646,10 @@ function finishLoad(persist: "local" | "all"): void {
   }
   if (ensureAdsSettingsOnSeoSettingsRoles(state.roles)) {
     log.info("[UserStore] Migrated custom roles: added ads_settings from seo_settings");
+  }
+  if (!state.appliedMigrations) state.appliedMigrations = [];
+  if (ensureConsentSettingsOnAdsSettingsRoles(state.roles, state.appliedMigrations)) {
+    log.info("[UserStore] Migrated custom roles: added consent_settings from ads_settings (one-time)");
   }
   if (ensureAgenticSwarmRoles(state.roles)) {
     log.info("[UserStore] Seeded agentic swarm roles");

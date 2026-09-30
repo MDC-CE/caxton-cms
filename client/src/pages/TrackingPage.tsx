@@ -28,7 +28,7 @@ import {
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { SettingsShell, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -37,7 +37,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import JsonViewer from "@/components/editing/JsonViewer";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { useToast } from "@/hooks/use-toast";
 import { getGtmWebStatus, type GtmWebStatus } from "@/lib/gtm-web";
 import { apiRequest, apiFetch, queryClient } from "@/lib/queryClient";
@@ -48,12 +47,7 @@ import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 
 type TrackingTab = "events" | "sgtm" | "ipn" | "ga4";
 
-const TRACKING_TABS: {
-  id: TrackingTab;
-  href: string;
-  label: string;
-  Icon: typeof IconChartBar;
-}[] = [
+const TRACKING_TABS: SettingsSecondaryTab<TrackingTab>[] = [
   { id: "events", href: "/private/tracking", label: "Events", Icon: IconChartBar },
   { id: "sgtm", href: "/private/tracking/sgtm", label: "sGTM", Icon: IconServer },
   { id: "ipn", href: "/private/tracking/ipn", label: "IP Normalization", Icon: IconShieldLock },
@@ -2030,54 +2024,24 @@ export default function TrackingPage() {
 }
 
 function TrackingPageInner() {
-  const [pathname, setLocation] = useLocation();
+  const [pathname] = useLocation();
   const activeTab = resolveTrackingTab(pathname);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
-        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
-          <div className="flex items-start gap-4 min-w-0 flex-1">
-            <PrivateHistoryBackButton data-testid="button-back-tracking" />
-            <div className="min-w-0 space-y-1">
-              <div className="flex items-center gap-2">
-                <IconChartBar className="h-5 w-5 text-muted-foreground" />
-                <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-tracking-title">
-                  Tracking
-                </h1>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Event catalog, server-side tagging, IP normalization, and Google Analytics for Store
-                journey metrics.
-              </p>
-            </div>
-          </div>
-
-          <ToggleButtonBar
-            className="shrink-0"
-            value={activeTab}
-            onValueChange={(id) => {
-              const tab = TRACKING_TABS.find((t) => t.id === id);
-              if (!tab) return;
-              setLocation(tab.href);
-            }}
-            listTestId="toggle-tracking-view"
-            listClassName="flex"
-          >
-            {TRACKING_TABS.map(({ id, label, Icon }) => (
-              <ToggleButtonBarTrigger
-                key={id}
-                value={id}
-                data-testid={`button-view-${id}`}
-                className="gap-1.5"
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </ToggleButtonBarTrigger>
-            ))}
-          </ToggleButtonBar>
-        </div>
-
+    <SettingsShell
+      section="tracking"
+      icon={IconChartBar}
+      title="Tracking"
+      titleTestId="text-tracking-title"
+      backTestId="button-back-tracking"
+      description="Event catalog, server-side tagging, IP normalization, and Google Analytics for Store journey metrics."
+      secondary={{
+        value: activeTab,
+        tabs: TRACKING_TABS,
+        listTestId: "toggle-tracking-view",
+        triggerTestId: (id) => `button-view-${id}`,
+      }}
+    >
         <div role="tabpanel">
           {activeTab === "sgtm" ? (
             <div className="space-y-2">
@@ -2117,7 +2081,6 @@ function TrackingPageInner() {
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </SettingsShell>
   );
 }

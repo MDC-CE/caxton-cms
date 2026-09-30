@@ -10,6 +10,7 @@
 
 import path from "path";
 import fs from "fs";
+import os from "os";
 import crypto from "crypto";
 import { execFileSync } from "child_process";
 import { DuplicatedJobError } from "@sidequest/core";
@@ -19,7 +20,10 @@ import { getPackageRoot } from "@shared/paths";
 
 const log = child({ module: "job-queue" });
 
-const dataDir = path.resolve("data");
+// Tests must not touch the live worker's PID/heartbeat/restart files in data/.
+const dataDir = process.env.VITEST
+  ? path.join(os.tmpdir(), `website-v3-vitest-sidequest-${process.pid}`)
+  : path.resolve("data");
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const SIDEQUEST_DB = path.join(dataDir, "sidequest.sqlite");
@@ -322,6 +326,11 @@ export type JobEnqueueOpts = {
   uniqueKey?: string;
   /** When uniqueKey is set, default true — pass false to coalesce one job per class (e.g. index_refresh). */
   uniqueWithArgs?: boolean;
+  /**
+   * With uniqueWithArgs: dedupe only while a matching job is waiting/running (alive-job),
+   * instead of a fixed 1-hour window that also blocks retries after a failed job.
+   */
+  uniqueWhileAlive?: boolean;
   delayMs?: number;
   queue?: string;
 };
@@ -479,6 +488,8 @@ export async function enqueueJob(
     if (opts.uniqueWithArgs === false) {
       // Coalesce one pending job per class (e.g. index_refresh per site).
       builder = builder.unique(true);
+    } else if (opts.uniqueWhileAlive) {
+      builder = builder.unique({ withArgs: true });
     } else {
       // Dedupe by class + payload within a fixed window (requires period).
       builder = builder.unique({ withArgs: true, period: "hour" });

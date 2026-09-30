@@ -464,6 +464,8 @@ export type ProposalListStats = {
   >;
   stalled_ideas?: number;
   needs_review_edits?: number;
+  /** `none` = closed, unreviewed, not a system closure; `bad_open` = bad with no lesson captured. */
+  by_outcome?: { good: number; bad: number; bad_open: number; none: number };
 };
 
 export const PROPOSAL_KPI_CARD_STATUSES = ["open", "finished", "rejected"] as const;

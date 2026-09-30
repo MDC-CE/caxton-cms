@@ -1,9 +1,11 @@
 /**
  * Read-only Meta Marketing API client (Graph insights + creatives + account info).
- * Token: META_ADS_ACCESS_TOKEN (System User, `ads_read`). Never writes to Meta.
+ * Token: META_ADS_ACCESS_TOKEN (System User, `ads_read`). Never writes to Meta
+ * (staff-confirmed live-ad edits live in ./meta-write.ts and reuse this token).
  */
 
 import { child } from "../logger";
+import { metaPlacementFromPublisher, type MetaPlacement } from "@shared/paid-traffic";
 
 const log = child({ module: "ads/meta-client" });
 
@@ -52,6 +54,21 @@ export type MetaAdDayRow = {
   instant_form_leads: number;
 };
 
+/** One ad's day on one placement (`breakdowns=publisher_platform`); kept apart from `MetaAdDayRow`. */
+export type MetaAdPlatformDayRow = {
+  date: string;
+  account_id: string;
+  currency: string;
+  campaign_id: string;
+  adset_id: string;
+  ad_id: string;
+  platform: MetaPlacement;
+  spend: number;
+  impressions: number;
+  link_clicks: number;
+  pixel_leads: number;
+};
+
 export type MetaAccountInfo = {
   id: string;
   name: string;
@@ -64,6 +81,8 @@ export type MetaAdCreativeInfo = {
   ad_id: string;
   campaign_id: string;
   adset_id: string;
+  /** Ad account the setup was read from (set by the sync). */
+  account_id?: string;
   effective_status?: string;
   /** Destination URLs found on the creative (link_data.link, asset_feed_spec.link_urls, …). */
   links: string[];
@@ -93,7 +112,7 @@ export function isMetaTokenConfigured(): boolean {
   return !!getMetaAccessToken();
 }
 
-function classifyError(status: number, code?: number): MetaApiError["kind"] {
+export function classifyError(status: number, code?: number): MetaApiError["kind"] {
   if (code === 190 || status === 401) return "auth";
   if (code === 10 || code === 200 || code === 270 || status === 403) return "permission";
   if (code === 4 || code === 17 || code === 32 || code === 613 || code === 80004 || status === 429) return "rate_limit";
@@ -173,6 +192,26 @@ export function parseInsightRow(raw: Record<string, unknown>, fallbackCurrency =
     landing_page_views: Math.round(actionValue(raw.actions, ["landing_page_view", "omni_landing_page_view"])),
     pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
     instant_form_leads: Math.round(actionValue(raw.actions, ["lead", "onsite_conversion.lead_grouped"])),
+  };
+}
+
+/** Parse one ad-level insights row broken down by `publisher_platform`. */
+export function parseAdPlatformRow(raw: Record<string, unknown>, fallbackCurrency = ""): MetaAdPlatformDayRow | null {
+  const date = typeof raw.date_start === "string" ? raw.date_start : "";
+  const adId = raw.ad_id != null ? String(raw.ad_id) : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !adId) return null;
+  return {
+    date,
+    account_id: String(raw.account_id ?? "").replace(/^act_/, ""),
+    currency: String(raw.account_currency || fallbackCurrency || "").toUpperCase(),
+    campaign_id: String(raw.campaign_id ?? ""),
+    adset_id: String(raw.adset_id ?? ""),
+    ad_id: adId,
+    platform: metaPlacementFromPublisher(typeof raw.publisher_platform === "string" ? raw.publisher_platform : ""),
+    spend: toNum(raw.spend),
+    impressions: Math.round(toNum(raw.impressions)),
+    link_clicks: Math.round(toNum(raw.inline_link_clicks)),
+    pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
   };
 }
 
@@ -257,6 +296,30 @@ export async function fetchAdInsights(
   return rows;
 }
 
+/** Daily ad-level spend per placement (Facebook, Instagram, …) for an inclusive date range. */
+export async function fetchAdPlatformInsights(
+  accountId: string,
+  since: string,
+  until: string,
+  currency = "",
+): Promise<MetaAdPlatformDayRow[]> {
+  const raw = await graphGetAll(`act_${accountId}/insights`, {
+    level: "ad",
+    time_increment: "1",
+    time_range: JSON.stringify({ since, until }),
+    breakdowns: "publisher_platform",
+    fields: "date_start,account_id,account_currency,campaign_id,adset_id,ad_id,spend,impressions,inline_link_clicks,actions",
+    action_attribution_windows: JSON.stringify(["7d_click", "1d_view"]),
+    limit: "500",
+  });
+  const rows: MetaAdPlatformDayRow[] = [];
+  for (const r of raw) {
+    const parsed = parseAdPlatformRow(r, currency);
+    if (parsed) rows.push({ ...parsed, account_id: parsed.account_id || accountId });
+  }
+  return rows;
+}
+
 export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativeInfo[]> {
   const raw = await graphGetAll(`act_${accountId}/ads`, {
     fields:
@@ -264,6 +327,55 @@ export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativ
     limit: "200",
   });
   return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
+}
+
+export type MetaAdAccountSummary = {
+  id: string;
+  name: string;
+  currency: string;
+  /** 1 = active; anything else is disabled, closed, unsettled, etc. */
+  account_status: number;
+};
+
+const ACCOUNT_LIST_TTL_MS = 5 * 60 * 1000;
+let accountListCache: { token: string; at: number; accounts: MetaAdAccountSummary[] } | null = null;
+
+export function parseAdAccount(raw: Record<string, unknown>): MetaAdAccountSummary | null {
+  const id = String(raw.account_id ?? raw.id ?? "").replace(/^act_/i, "").trim();
+  if (!/^\d+$/.test(id)) return null;
+  return {
+    id,
+    name: String(raw.name ?? ""),
+    currency: String(raw.currency ?? "").toUpperCase(),
+    account_status: toNum(raw.account_status),
+  };
+}
+
+/** Every ad account the token can read (`me/adaccounts`), sorted by name. Cached briefly per token. */
+export async function listMetaAdAccounts(opts: { now?: number } = {}): Promise<MetaAdAccountSummary[]> {
+  const token = getMetaAccessToken();
+  if (!token) throw new MetaApiError("META_ADS_ACCESS_TOKEN is not set", 0, undefined, "auth");
+  const now = opts.now ?? Date.now();
+  if (accountListCache && accountListCache.token === token && now - accountListCache.at < ACCOUNT_LIST_TTL_MS) {
+    return accountListCache.accounts;
+  }
+  const raw = await graphGetAll("me/adaccounts", { fields: "account_id,name,currency,account_status", limit: "200" });
+  const seen = new Set<string>();
+  const accounts: MetaAdAccountSummary[] = [];
+  for (const r of raw) {
+    const a = parseAdAccount(r);
+    if (a && !seen.has(a.id)) {
+      seen.add(a.id);
+      accounts.push(a);
+    }
+  }
+  accounts.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  accountListCache = { token, at: now, accounts };
+  return accounts;
+}
+
+export function resetMetaAdAccountCache(): void {
+  accountListCache = null;
 }
 
 export type MetaConnectionTest = {

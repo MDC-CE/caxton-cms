@@ -16,7 +16,7 @@ import { bqNormalizedPagePathSql, bqSessionLastClickChannelSql } from "../analyt
 import { getLeadConversionEventNames } from "../settings";
 import { normalizeLandingPath, PAID_MEDIUMS, CLICK_ID_PARAMS, type ClickIdParam } from "@shared/paid-traffic";
 import { child } from "../logger";
-import { addDays, dateRange, utcDate } from "./meta-ads-days";
+import { addDays, dateRange, shortDateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
 
 const log = child({ module: "ads/paid-detection" });
 
@@ -74,12 +74,15 @@ export type PaidLandingState = {
   last_export_date?: string;
 };
 
+export const PAID_LANDING_DAYS_DIR = "paid-landing-days";
+export const PAID_LANDING_STATE_FILE = "paid-landing-state.json";
+
 function dir(site: string): string {
-  return path.join(CACHE_DIR, site, "paid-landing-days");
+  return path.join(CACHE_DIR, site, PAID_LANDING_DAYS_DIR);
 }
 
 function statePath(site: string): string {
-  return path.join(CACHE_DIR, site, "paid-landing-state.json");
+  return path.join(CACHE_DIR, site, PAID_LANDING_STATE_FILE);
 }
 
 function readJson<T>(file: string): T | null {
@@ -123,6 +126,29 @@ export function loadPaidLandingDays(site: string, since: string, until: string):
     .filter((f): f is PaidLandingDayFile => !!f);
 }
 
+export type PaidLandingSnapshot = {
+  paid_landing_days: PaidLandingDayFile[];
+  paid_landing_state: PaidLandingState;
+};
+
+/** Every cached GA4 paid-landing day on or after `since` (for "Download from production"). */
+export function exportPaidLandingSnapshot(site: string, since: string): PaidLandingSnapshot {
+  return {
+    paid_landing_days: listPaidLandingDates(site)
+      .filter((d) => d >= since)
+      .map((d) => loadPaidLandingDay(site, d))
+      .filter((f): f is PaidLandingDayFile => !!f),
+    paid_landing_state: loadPaidLandingState(site),
+  };
+}
+
+/** Writes a snapshot under `stagingRoot` using the live cache layout; the caller swaps it in. */
+export function stagePaidLandingSnapshot(stagingRoot: string, snap: PaidLandingSnapshot): void {
+  fs.mkdirSync(path.join(stagingRoot, PAID_LANDING_DAYS_DIR), { recursive: true });
+  for (const f of snap.paid_landing_days) writeJson(path.join(stagingRoot, PAID_LANDING_DAYS_DIR, `${f.date}.json`), f);
+  writeJson(path.join(stagingRoot, PAID_LANDING_STATE_FILE), snap.paid_landing_state);
+}
+
 export function isGa4Configured(contentRoot?: string): boolean {
   return getBigQueryConfigStatus(contentRoot).configured;
 }
@@ -142,6 +168,12 @@ export function paidLandingDatesToFetch(site: string, now = new Date()): string[
     if (!f || (!f.complete && d <= completeCutoff) || d > completeCutoff) out.push(d);
   }
   return out;
+}
+
+/** GA4 days `syncPaidLandingDays` will query on a run starting now; 0 when GA4 isn't configured. */
+export function planPaidLandingSteps(site: string, contentRoot?: string, now = new Date()): number {
+  if (!isGa4Configured(contentRoot)) return 0;
+  return Math.min(paidLandingDatesToFetch(site, now).length, MAX_DAYS_PER_RUN);
 }
 
 export function buildPaidLandingSql(eventsTable: string, includeSessionLastClick: boolean): string {
@@ -325,13 +357,21 @@ async function queryDay(date: string, contentRoot?: string): Promise<Pick<PaidLa
 
 export type PaidLandingSyncResult = { ok: boolean; fetched: string[]; error?: string; skipped?: "ga4_not_configured" };
 
-export async function syncPaidLandingDays(site: string, contentRoot?: string, now = new Date()): Promise<PaidLandingSyncResult> {
+export async function syncPaidLandingDays(
+  site: string,
+  contentRoot?: string,
+  now = new Date(),
+  onStep?: SyncStepCallback,
+): Promise<PaidLandingSyncResult> {
   if (!isGa4Configured(contentRoot)) return { ok: false, fetched: [], skipped: "ga4_not_configured" };
   const state = loadPaidLandingState(site);
   const completeCutoff = lastCompleteGa4Date(now);
   const fetched: string[] = [];
   try {
-    for (const date of paidLandingDatesToFetch(site, now).slice(0, MAX_DAYS_PER_RUN)) {
+    const dates = paidLandingDatesToFetch(site, now).slice(0, MAX_DAYS_PER_RUN);
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
+      onStep?.(`GA4: day ${i + 1} of ${dates.length} (${shortDateRange(date, date)})`);
       const rows = await queryDay(date, contentRoot);
       const hasData = rows.candidates.length + rows.organic.length + rows.cookieless.length > 0;
       writeJson(path.join(dir(site), `${date}.json`), {

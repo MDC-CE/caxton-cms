@@ -9,7 +9,9 @@ import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { apiFetch } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { AttributionModel } from "@shared/paid-attribution";
+import { isRefreshActive } from "@shared/ads-refresh-status";
 import type { AdsEntriesResponse, AdsPageRow } from "./ads-types";
+import { AdsRefreshNotice } from "./AdsRefreshNotice";
 import { formatMoney, formatNum, formatPct, formatWhen, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 
 type SortField = "paid_visits" | "spend" | "unique_leads" | "conversion_rate" | "cost_per_lead" | "bounce_rate";
@@ -20,7 +22,7 @@ const COLUMNS: { id: SortField; label: string; title: string }[] = [
   { id: "unique_leads", label: "Leads", title: "Unique leads credited to this entry (repeats shown separately)" },
   { id: "conversion_rate", label: "Conv. rate", title: "Unique leads ÷ paid visits" },
   { id: "cost_per_lead", label: "CPL", title: "Spend ÷ unique leads" },
-  { id: "bounce_rate", label: "Bounce", title: "Share of paid visits that did not engage" },
+  { id: "bounce_rate", label: "Paid bounce", title: "Share of paid visits that did not engage" },
 ];
 
 function sortValue(row: AdsPageRow, field: SortField): number | null {
@@ -51,7 +53,7 @@ export function ContentTypeAdsList({ contentType, locale, q }: { contentType: st
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads entries");
       return res.json() as Promise<AdsEntriesResponse>;
     },
-    refetchInterval: (query) => ((query.state.data as AdsEntriesResponse | undefined)?.refreshing ? 8000 : false),
+    refetchInterval: (query) => (isRefreshActive((query.state.data as AdsEntriesResponse | undefined)?.refresh) ? 8000 : false),
   });
 
   const rows = useMemo(() => {
@@ -115,12 +117,13 @@ export function ContentTypeAdsList({ contentType, locale, q }: { contentType: st
             All paid pages
           </Link>
         </div>
-        {data?.refreshing && (
+        {isRefreshActive(data?.refresh) && (
           <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs" data-testid="banner-ads-refreshing">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Refreshing ad data in the background. Numbers update automatically when it finishes.
           </div>
         )}
+        <AdsRefreshNotice refresh={data?.refresh} testId="banner-ads-refresh-failed" />
       </div>
 
       {isLoading ? (

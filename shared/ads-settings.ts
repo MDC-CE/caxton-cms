@@ -26,6 +26,21 @@ export interface AdsAlertThresholds {
   zero_visits_complete_days: number;
   /** Rates are greyed out below this many paid visits. */
   min_paid_visits_for_rates: number;
+  /** A campaign outside every connected ad account needs at least this many paid visits to be flagged. */
+  unrecognized_campaign_min_visits: number;
+  /** … and is an error at ≥ this many visits … */
+  unrecognized_campaign_error_visits: number;
+  /** … or at ≥ this % of paid Meta visits … */
+  unrecognized_campaign_error_share_pct: number;
+  /** … once the window has at least this many paid Meta visits. */
+  unrecognized_campaign_share_min_visits: number;
+}
+
+/** A campaign staff know about but don't connect (agency, partner). Still shown, never counted as a problem. */
+export interface KnownExternalCampaign {
+  /** Campaign id, or the utm_campaign name when the visits carry no id. */
+  key: string;
+  note?: string;
 }
 
 export interface MetaAdsSettings {
@@ -33,6 +48,7 @@ export interface MetaAdsSettings {
   /** Ad account ids without the `act_` prefix. */
   ad_account_ids: string[];
   alert_thresholds: AdsAlertThresholds;
+  known_external_campaigns: KnownExternalCampaign[];
 }
 
 export interface AdsSettings {
@@ -53,10 +69,17 @@ export const DEFAULT_ADS_ALERT_THRESHOLDS: AdsAlertThresholds = {
   ga4_ledger_gap_bootstrap_pct: 35,
   zero_visits_complete_days: 2,
   min_paid_visits_for_rates: 20,
+  unrecognized_campaign_min_visits: 3,
+  unrecognized_campaign_error_visits: 20,
+  unrecognized_campaign_error_share_pct: 5,
+  unrecognized_campaign_share_min_visits: 100,
 };
 
+export const MAX_KNOWN_EXTERNAL_CAMPAIGNS = 100;
+const MAX_KNOWN_CAMPAIGN_CHARS = 200;
+
 export const DEFAULT_ADS_SETTINGS: AdsSettings = {
-  meta: { enabled: false, ad_account_ids: [], alert_thresholds: { ...DEFAULT_ADS_ALERT_THRESHOLDS } },
+  meta: { enabled: false, ad_account_ids: [], alert_thresholds: { ...DEFAULT_ADS_ALERT_THRESHOLDS }, known_external_campaigns: [] },
   test_email_patterns: [],
 };
 
@@ -96,13 +119,43 @@ export function parseAdsAlertThresholds(raw: unknown): AdsAlertThresholds {
     ga4_ledger_gap_bootstrap_pct: num(r.ga4_ledger_gap_bootstrap_pct, d.ga4_ledger_gap_bootstrap_pct, 0, 100),
     zero_visits_complete_days: Math.round(num(r.zero_visits_complete_days, d.zero_visits_complete_days, 1, 30)),
     min_paid_visits_for_rates: Math.round(num(r.min_paid_visits_for_rates, d.min_paid_visits_for_rates, 1)),
+    unrecognized_campaign_min_visits: Math.round(num(r.unrecognized_campaign_min_visits, d.unrecognized_campaign_min_visits, 1)),
+    unrecognized_campaign_error_visits: Math.round(num(r.unrecognized_campaign_error_visits, d.unrecognized_campaign_error_visits, 1)),
+    unrecognized_campaign_error_share_pct: num(r.unrecognized_campaign_error_share_pct, d.unrecognized_campaign_error_share_pct, 0, 100),
+    unrecognized_campaign_share_min_visits: Math.round(
+      num(r.unrecognized_campaign_share_min_visits, d.unrecognized_campaign_share_min_visits, 1),
+    ),
   };
+}
+
+/** Trimmed, deduped by key (case-insensitive), capped. Accepts `{ key, note }` objects or bare strings. */
+export function parseKnownExternalCampaigns(raw: unknown): KnownExternalCampaign[] {
+  if (!Array.isArray(raw)) return [];
+  const out: KnownExternalCampaign[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const rec = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+    const rawKey = typeof item === "string" || typeof item === "number" ? String(item) : rec?.key;
+    if (typeof rawKey !== "string" && typeof rawKey !== "number") continue;
+    const key = String(rawKey).trim().slice(0, MAX_KNOWN_CAMPAIGN_CHARS);
+    if (!key || seen.has(key.toLowerCase())) continue;
+    seen.add(key.toLowerCase());
+    const note = typeof rec?.note === "string" ? rec.note.trim().slice(0, MAX_KNOWN_CAMPAIGN_CHARS) : "";
+    out.push(note ? { key, note } : { key });
+    if (out.length >= MAX_KNOWN_EXTERNAL_CAMPAIGNS) break;
+  }
+  return out;
+}
+
+export function isKnownExternalCampaign(list: KnownExternalCampaign[], key: string): boolean {
+  const k = key.trim().toLowerCase();
+  return list.some((c) => c.key.toLowerCase() === k);
 }
 
 export function parseAdsSettings(raw: unknown): AdsSettings {
   if (!raw || typeof raw !== "object") {
     return {
-      meta: { ...DEFAULT_ADS_SETTINGS.meta, alert_thresholds: parseAdsAlertThresholds(undefined) },
+      meta: { ...DEFAULT_ADS_SETTINGS.meta, alert_thresholds: parseAdsAlertThresholds(undefined), known_external_campaigns: [] },
       test_email_patterns: [],
     };
   }
@@ -115,6 +168,7 @@ export function parseAdsSettings(raw: unknown): AdsSettings {
       enabled: meta.enabled === true,
       ad_account_ids: Array.from(new Set(ids.map(normalizeAdAccountId).filter((x): x is string => !!x))),
       alert_thresholds: parseAdsAlertThresholds(meta.alert_thresholds),
+      known_external_campaigns: parseKnownExternalCampaigns(meta.known_external_campaigns),
     },
     test_email_patterns: Array.from(
       new Set(
@@ -140,4 +194,4 @@ export function emailMatchesPattern(email: string, pattern: string): boolean {
 
 /** Meta URL parameters template staff paste into every ad (ids enable matching). */
 export const META_UTM_TEMPLATE =
-  "utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
+  "utm_source={{site_source_name}}&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";

@@ -30,6 +30,7 @@ const BUILT_IN_ROLE_LABELS: Record<string, string> = {
   platform_ops: "Platform Ops",
   metrics_viewer: "Metrics Viewer",
   content_viewer: "Content Viewer",
+  ads_manager: "Ads Manager",
 };
 
 function capabilityLabel(name: string): string {

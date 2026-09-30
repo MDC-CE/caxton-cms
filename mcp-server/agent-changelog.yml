@@ -5,6 +5,223 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-30"
+    summary: "get_paid_traffic: local 'Download from production' copies show up as meta.source production_snapshot"
+    agent_impact:
+      - "On a local/dev server, staff can replace Ads data (Meta + GA4 cache, optionally leads + consent) with production's. Reports then show that copy even without a Meta token: meta.source = production_snapshot with pulled_at, last_date, production_origin."
+      - "New warnings meta_production_snapshot (copy, not re-synced; days after last_date are missing, not zero) and meta_snapshot_hidden_accounts (downloaded accounts missing from local settings; their spend is left out). Say 'production copy as of …', never 'live'."
+    tools_changed: false
+    paths:
+      - server/ads/ads-report.ts
+      - server/ads/ads-refresh.ts
+      - server/ads/pull-production.ts
+      - server/ads/leads-pull-production.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
+    summary: "get_paid_traffic: Facebook vs Instagram breakdown (meta_platforms) in summary + diagnostics; Meta template now utm_source={{site_source_name}}"
+    agent_impact:
+      - "Recommended Meta UTM template (Settings → Ads, utm_template, Fix via Meta) now uses utm_source={{site_source_name}} (Meta fills fb / ig / msg / an). Existing ads keep utm_source=facebook until staff edit them; Fix via Meta never rewrites an existing utm_source."
+      - "New meta_platforms block: rows facebook / instagram / messenger / audience_network / other / not_split with spend, clicks, meta_leads, paid_visits, unique_leads, cost_per_lead, conversion_rate, low_sample; plus excluded_spend { instant_form, off_site, unknown }, spend_since, spend_partial, not_split_share. Spend = site-landing ads only, from a separate per-ad × publisher_platform read; older-tag ads land in not_split. Main totals unchanged — never sum with them. Id / account / currency filters apply."
+      - "New warnings meta_platform_not_split (≥50% of placement visits from older-tag ads) and meta_platform_spend_partial (placement spend a floor). Explain topic ads → Facebook vs Instagram."
+    tools_changed: false
+    paths:
+      - shared/paid-traffic.ts
+      - shared/ads-settings.ts
+      - server/ads/meta-client.ts
+      - server/ads/meta-ads-days.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
+    summary: "Fix via Meta now uses META_ADS_ACCESS_TOKEN; META_ADS_WRITE_ACCESS_TOKEN removed"
+    agent_impact:
+      - "Staff live-ad edits (missing_tracking_params → Fix via Meta) use the same META_ADS_ACCESS_TOKEN as syncs; that token needs ads_management on top of ads_read. Without the scope syncs still work and preview/apply fail with a Meta permission error — tell staff to add ads_management, not a second token."
+      - "Settings → Ads no longer reports a separate live-ad edit token status. Agents still cannot run the fix (routes refuse MCP loopback)."
+    tools_changed: false
+    paths:
+      - server/ads/meta-write.ts
+      - server/routes/ads.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
+    summary: "New built-in role ads_manager; new caps ads_edit (staff Fix via Meta) and consent_settings (split from ads_settings)"
+    agent_impact:
+      - "New MCP role /mcp/role/ads_manager: metrics_view, content_view:*, ads_settings, ads_edit, proposals_create — paid-traffic reads, refresh: true, and proposals; no SEO/redirect/content/consent writes. platform_steward also gains ads_edit + consent_settings."
+      - "ads_edit powers a staff-only Diagnostics → Ads button that adds missing template params to live Meta ads (new creative from the same page post; ads go back to Meta review, ad set may re-enter learning; budgets/audiences/content unchanged). No MCP tool; the routes refuse MCP loopback — point staff to the missing_tracking_params drawer. See explain topic ads."
+      - "Cookie consent window edits now need consent_settings (was ads_settings). Custom roles holding ads_settings got consent_settings once; ads_settings alone no longer covers consent."
+    tools_changed: false
+    paths:
+      - shared/capabilities.ts
+      - server/user-store.ts
+      - server/routes/ads.ts
+      - server/routes/consent.ts
+      - server/ads/tracking-fix.ts
+      - server/ads/meta-write.ts
+      - mcp-server/explain/ads.md
+
+  - date: "2026-09-30"
+    summary: "get_paid_traffic diagnostics: new unrecognized_campaign issue for Meta campaigns outside connected accounts"
+    agent_impact:
+      - "New issue code unrecognized_campaign (id unrecognized_campaign:{key}): GA4 paid Meta visits to own pages (entry / missing_page only) from a campaign id/name not in any stored Meta row (~90 days, connected accounts), creative, or connected campaign name. Warning ≥ thresholds.unrecognized_campaign_min_visits (3); error ≥ unrecognized_campaign_error_visits (20) or ≥ unrecognized_campaign_error_share_pct (5%) of paid Meta visits when those are ≥ unrecognized_campaign_share_min_visits (100). Skipped when Meta not connected or meta_access_failed / meta_sync_failing is open. details.pages + ga4_seen + ga4_totals; spend never counted."
+      - "settings.yml ads.meta.known_external_campaigns [{key, note?}] downgrades matches to info (\"Known external campaign\"). Staff-only write (Diagnostics Mark as known / Settings → Ads, ads_settings); no MCP write — suggest it to staff instead."
+      - "GA4-only off_site_destination rows (no ad links there) now say none of your ads link here, and name the flagged campaign when it brings ≥50% of those visits. Explain topic ads documents the rule under Diagnostics issue details."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - shared/ads-diagnostics-rules.ts
+      - shared/ads-settings.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - server/routes/ads.ts
+
+  - date: "2026-09-30"
+    summary: "get_paid_traffic: account / currency filters narrow visits + leads; per-account sync status; auto 90-day load for new accounts"
+    agent_impact:
+      - "Meaning changed: with account or currency, paid_visits (and conversion rate, cost per visit) count only visits whose utm_id / utm_term / utm_content match that account's synced ads; non-Meta and unclear visits are excluded; leads count only when the last-clicked ad is in the account. New totals.unassigned_visits (untagged Meta visits) + row.unassigned_visits, totals.unsynced_account_visits (ids from accounts we don't sync); warning visits_not_tied_to_account (floor). No filter → unchanged."
+      - "meta.accounts[] gains history_loaded and sync_error. New warnings meta_account_unreadable (skipped last sync; other accounts still saved, its old rows kept) and meta_account_not_synced (first 90-day load pending). New unchecked reason account_unreadable (tracking_unchecked_account_unreadable)."
+      - "A refresh (automatic, staff Resync or refresh: true) becomes a 90-day backfill while any configured account has history_loaded false (new or re-added). The job worker now re-reads settings.yml on change, so newly added accounts sync without a restart."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-report.ts
+      - server/ads/meta-ads-days.ts
+      - server/ads/ads-diagnostics.ts
+      - server/settings.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: campaign / ad set / ad id filters and since / until date range"
+    agent_impact:
+      - "New args campaign_ids / adset_ids / ad_ids (numeric Meta ids, ≤20 each; OR within a level, AND across levels). Report modes: spend matches row ids; GA4 visits match link tags (utm_id / utm_term / utm_content) with parents filled from synced ads; leads match the last-clicked ad regardless of model. Untagged visits are left out, never estimated (untagged_visits_excluded = floor). Unmatched ids → filter_no_match + next action mode campaigns (call still ok). Response echoes filters."
+      - "New args since / until (YYYY-MM-DD, UTC, inclusive, ≤90 days, within ~13 months) replace days; until clamps to yesterday and since to the retention floor (range_clamped); longer / reversed / invalid ranges fail. Nothing is fetched: days with no cached data → data_gaps warning + data_gaps { meta_missing_days, ga4_missing_days } — missing, not zero."
+      - "diagnostics: id filters keep issues touching those ads (plus sync/setup issues with no ad scope) and narrow details.ads / ads_total to matches; KPIs, counts and status stay whole-site (diagnostics_filtered). With issue_ids, open issues outside the filter → filtered_out_issue_ids (issue_filtered_out). since / until ignored (range_ignored_in_diagnostics). Reconnect the MCP connector to see the new args."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics-snapshots.ts
+      - server/routes/ads.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: clicks → visits now compares matched visits to tagged on-site link clicks on GA4-exported days"
+    agent_impact:
+      - "Meaning changed: row clicks_to_visits and diagnostics kpis.clicks_to_visits_pct = matched_visits (paid Meta visits whose utm_id/utm_term/utm_content match a synced ad in the filtered accounts) / link clicks from tagged ads landing on this site on days GA4 exported. Landing page views are no longer used. Instant forms, off-site destinations and untagged ads are excluded."
+      - "New fields: totals.matched_visits, unmatched_meta_visits, ratio_clicks, untagged_clicks; rows matched_visits, untagged_clicks; kpis clicks_to_visits_mismatch, unmatched_meta_visits, untagged_clicks. paid_visits and clicks are unchanged."
+      - "Above 110% (clicks_to_visits_mismatch: true) = measurement mismatch, not a loss; clicks_visits_low never fires on it. See explain_site topic ads → Clicks → visits."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/ads.md
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic diagnostics: GA4 vs lead-records gap compares shared days only; new code ledger_not_recording"
+    agent_impact:
+      - "New issue ledger_not_recording (site_fixable true) when GA4 has paid leads but the ledger has 0 credited paid submissions in the 28-day issue window: info = ledger never recorded a non-test lead (new setup / local or staging copy), warning = it stopped (why carries the last recorded date). It replaces ga4_ledger_gap — never both."
+      - "ga4_ledger_gap now compares only GA4-exported days from the ledger's first full day on, needs ≥7 such days and ≥1 submission, and states the day count in why. Starter threshold applies until the trailing 28 days also have ≥7 comparable days."
+      - "A skipped or replaced gap check drops from the open list without a resolved entry — do not report it as fixed."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/ads.md
+      - server/ads/ads-diagnostics.ts
+      - server/ads/ads-report.ts
+      - server/ads/lead-ledger.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic diagnostics: per-ad issue details, snapshot_id + issue_ids follow-ups, unchecked reasons, refresh: true"
+    agent_impact:
+      - "Issues sort severity → spend affected and carry scope.account_id, first_seen and details { ads (top 3 by spend; ids/names for ad, ad set, campaign, account, effective_status, spend, clicks, last_spend_date, landing_url, url_tags, missing/medium/unchecked_reason), ads_total, ads_offset, unchecked[{reason, ads, spend}], ga4_seen (destinations with no synced ad: GA4 campaign/utm_id/utm_term/utm_content, visits, leads, first/last seen) + ga4_untagged_visits, setup_last_read_at }. landing_http_error / redirect_drops_params spend_affected now sums every ad on the URL (was the top ad only). New info code tracking_params_unchecked."
+      - "Every diagnostics call returns snapshot_id (30 min). Pass snapshot_id + issue_ids (≤10) for only those issues with ads_limit default 50 (max 200) and ads_offset; missing_issue_ids lists ids not found. New warnings: ads_truncated, issue_not_found, snapshot_expired (fresh build returned), newer_data_available, tracking_unchecked_setup_fetch_failed / _ad_removed_in_meta / _no_link_found."
+      - "New arg refresh: true (any mode) queues the Meta read staff get from Resync — needs ads_settings, else refresh_not_allowed and the cached read proceeds. Side effect meta_sync_enqueued; reads only, never changes campaigns. Reconnect the MCP connector to see the new args."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-diagnostics.ts
+      - server/ads/ads-diagnostics-snapshots.ts
+      - server/ads/ads-report.ts
+      - server/ads/meta-ads-days.ts
+      - server/routes/ads.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: ad destinations now match every public page (was SEO hubs only); new diagnostics code ad_url_redirects"
+    agent_impact:
+      - "Destinations resolve like the public site: content redirects first (same answer as Redirects → Test a URL, up to 3 hops), then routing (homepage /, /en, /es and landing language from _common.yml), then database-backed pages. entries now include every public page; destinations.missing_page only means the URL really does not serve a page. Earlier missing_page / unmanaged_destination rows for live landings were false alarms and were dropped from the issue history without appearing in resolved."
+      - "New diagnostics issue ad_url_redirects (severity warning, site_fixable false): a Meta ad URL goes through a content redirect before reaching a page. scope.url = the ad's URL (no query), scope.page_key = final page; final URL + hop count are in why, fix in how_to_fix (update the ad URL in Meta). Spend is still credited to the final page. Our redirects keep the query string, so tracking is not lost; when a redirect does lose parameters the row is redirect_drops_params instead (never both for one URL). www/http host hops and homepage aliases are not flagged."
+    tools_changed: false
+    paths:
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: refresh.progress { done, total, label } while a refresh is running"
+    agent_impact:
+      - "refresh.progress is set only when refresh.state is running (null otherwise, and null when the worker reports no steps). done/total = finished steps out of a total counted before the run (Meta account lookups + 15-day insight chunks + creatives + save, then GA4 days); label is plain English, e.g. 'Meta: account 1 of 2, Jun 1–15'."
+      - "Steps are uneven in duration — do not estimate time remaining from the percent. Re-call guidance is unchanged (next_actions while queued/running)."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-refresh.ts
+      - shared/ads-refresh-status.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: refresh status object + meta_refresh_failed / jobs_worker_down warnings (no more endless re-call hints)"
+    agent_impact:
+      - "Every mode returns refresh { state: idle|queued|running|failed|worker_down, requested_at, started_at, finished_at, error, retry_after }. refreshing stays (= queued or running)."
+      - "meta_refresh_in_progress and the re-call next_action now appear only while queued/running. New warnings meta_refresh_failed (job failed or queued >5 min; message has error + retry_after) and jobs_worker_down: numbers are the last cached sync, nothing changed in Meta — do not re-call in a loop; next_actions points to explain_site topic ads."
+      - "After a failure, automatic refreshes wait 1h/2h/4h/6h (retry_after). Only staff Sync now skips the wait (and runs in the web server if the worker is down). Agents still cannot trigger a sync."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-refresh.ts
+      - shared/ads-refresh-status.ts
+
+  - date: "2026-09-29"
+    summary: "list_proposals: proposal_stats.by_outcome counts, sort=outcome_recent, and outcome_review=none now skips system closures"
+    agent_impact:
+      - "proposal_stats.by_outcome = whole-site all-time { good, bad, bad_open, none } on every list_proposals response, not filtered by args (none = closed, unreviewed, not a system closure; bad_open = bad with no lesson captured)."
+      - "New sort value outcome_recent: verdict time, else close time, else updated. Use with outcome_review filters for newest-first retros."
+      - "outcome_review=none no longer returns proposals closed with close_reason abandoned_stale or legacy_version (system housekeeping). Reviewed ones still count under good/bad. Agents still cannot set verdicts."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic diagnostics: days (1–90) now sets the KPI window only; issues stay on a fixed 28-day window"
+    agent_impact:
+      - "diagnostics passes days through (no more ≤7 → 7 else 28). window_days = KPI window (spend, tracked spend, leads, clicks_to_visits_pct, meta_unclear_pct, warnings like ledger_collecting)."
+      - "New field issue_window_days (always 28): issues, issues_total, kpis.open_errors/open_warnings, status and the consent_rate_drop warning use it. Changing days never hides or resolves an issue."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-diagnostics.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "get_paid_traffic: consent now arrives only as warnings; consent breakdown moved to staff Diagnostics → Legal"
+    agent_impact:
+      - "Removed consent objects from get_paid_traffic: report modes no longer return consent (ask-region reject % stays in the consent_estimates warning message); diagnostics no longer returns the consent region list or kpis.consent_accept_pct."
+      - "New warning consent_rate_drop (diagnostics only): ask-region accept rate fell ≥30% vs the prior 28 days. It is no longer an issues[] row. Say fewer measured visits, not fewer real visits."
+      - "Per-region consent rates and banner rules are staff-only (Diagnostics → Legal /private/diagnostics/legal, Settings → Legal). No MCP consent/settings tool."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-diagnostics.ts
+      - server/legal/legal-diagnostics.ts
+
   - date: "2026-09-29"
     summary: "New get_paid_traffic tool: Meta spend, paid landing pages, lead credit, and ad tracking health (read-only)"
     agent_impact:

@@ -1,16 +1,32 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ChevronDown, ExternalLink, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { cn } from "@/lib/utils";
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
+import { isClicksVisitsMismatch, type AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AdsPageRow } from "./ads-types";
 import { formatMoney, formatNum, formatPct, formatSeconds, PLATFORM_LABELS } from "./ads-format";
+import { PlatformTag } from "./PlatformTag";
 
 export type PaidPerspective = "traffic" | "conversion" | "engagement" | "integrity";
 
-type Metric = { label: string; value: string; muted?: boolean; testId: string };
+type Metric = { label: string; value: string; muted?: boolean; testId: string; hint?: ReactNode };
+
+const ORGANIC_RATE_HINT = (
+  <>
+    <p className="font-medium text-foreground">Organic rate</p>
+    <p>Of the visits to this page that did not come from an ad (search, direct, referral, email, unpaid social), the share that sent a lead.</p>
+    <p>
+      Use it as a baseline for <span className="text-foreground">Conv. rate</span>. If paid converts well below organic, the page works and the ad
+      traffic is the weak part — check targeting or whether the ad promises something the page doesn't. If both are low, improve the page first.
+    </p>
+    <p className="text-muted-foreground">
+      Counted per visit from GA4 lead events, so it's close to but not identical to Conv. rate. A person who clicked an ad earlier and returns
+      directly counts as organic on that return visit. "—" means no organic visits in this range.
+    </p>
+  </>
+);
 
 function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIssue[]): Metric[] {
   const grey = row.low_sample;
@@ -20,7 +36,12 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         { label: "Spend", value: formatMoney(row.spend), testId: "spend" },
         { label: "Paid visits", value: formatNum(row.paid_visits), testId: "visits" },
         { label: "Cost / visit", value: formatMoney(row.cost_per_visit, { decimals: 2 }), muted: grey, testId: "cpv" },
-        { label: "Clicks → visits", value: formatPct(row.clicks_to_visits, 0), muted: grey, testId: "ctv" },
+        {
+          label: "Clicks → visits",
+          value: isClicksVisitsMismatch(row.clicks_to_visits) ? "Mismatch" : formatPct(row.clicks_to_visits, 0),
+          muted: grey,
+          testId: "ctv",
+        },
       ];
     case "conversion":
       return [
@@ -32,12 +53,18 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         { label: "Conv. rate", value: formatPct(row.conversion_rate), muted: grey, testId: "cr" },
         { label: "Cost / lead", value: formatMoney(row.cost_per_lead, { decimals: 2 }), muted: grey, testId: "cpl" },
         { label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" },
-        { label: "Organic rate", value: formatPct(row.organic?.lead_rate ?? null), muted: true, testId: "organic-rate" },
+        {
+          label: "Organic rate",
+          value: formatPct(row.organic?.lead_rate ?? null),
+          muted: true,
+          testId: "organic-rate",
+          hint: ORGANIC_RATE_HINT,
+        },
       ];
     case "engagement":
       return [
-        { label: "Bounce", value: formatPct(row.bounce_rate, 0), muted: grey, testId: "bounce" },
-        { label: "Engaged time", value: formatSeconds(row.avg_engaged_seconds), muted: grey, testId: "engaged" },
+        { label: "Paid bounce", value: formatPct(row.bounce_rate, 0), muted: grey, testId: "bounce" },
+        { label: "Paid engaged time", value: formatSeconds(row.avg_engaged_seconds), muted: grey, testId: "engaged" },
         { label: "Organic bounce", value: formatPct(row.organic?.bounce_rate ?? null, 0), muted: true, testId: "organic-bounce" },
       ];
     case "integrity": {
@@ -99,9 +126,7 @@ export function PaidPageRow({
                 </Badge>
               )}
               {row.platforms.map((p) => (
-                <span key={p} className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {PLATFORM_LABELS[p] ?? p}
-                </span>
+                <PlatformTag key={p} platform={p} row={row} />
               ))}
             </div>
             <p className="truncate text-xs text-muted-foreground">
@@ -114,7 +139,26 @@ export function PaidPageRow({
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
           {metrics.map((m) => (
             <div key={m.testId} className="min-w-[72px] text-right" data-testid={`metric-${m.testId}`}>
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{m.label}</p>
+              <p className="flex items-center justify-end gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                {m.label}
+                {m.hint && (
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className="rounded text-muted-foreground hover:text-foreground"
+                        aria-label={`What is ${m.label}?`}
+                        data-testid={`button-metric-hint-${m.testId}`}
+                      >
+                        <Info className="h-3 w-3" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-72 space-y-2 text-xs normal-case tracking-normal" align="end">
+                      {m.hint}
+                    </PopoverContent>
+                  </Popover>
+                )}
+              </p>
               <p className={cn("text-sm tabular-nums", m.muted ? "text-muted-foreground" : "text-foreground")}>{m.value}</p>
             </div>
           ))}
@@ -147,6 +191,9 @@ export function PaidPageRow({
                 <p>
                   Started here: {row.started_here} · Form sent here: {row.closed_here}
                 </p>
+                {row.unassigned_visits > 0 && (
+                  <p>{formatNum(row.unassigned_visits)} paid visit(s) here had no ad tags, so they aren't counted under the selected account or currency.</p>
+                )}
                 {row.last_visit_organic > 0 && (
                   <p>{row.last_visit_organic} lead(s) came back later without a new ad click; still credited here.</p>
                 )}

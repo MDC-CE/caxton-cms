@@ -14,16 +14,20 @@ export type AdsIssueCode =
   | "spend_zero_visits"
   | "landing_http_error"
   | "redirect_drops_params"
+  | "ad_url_redirects"
   | "missing_tracking_params"
+  | "tracking_params_unchecked"
   | "non_paid_medium"
   | "pixel_not_reporting_leads"
   | "ga4_ledger_gap"
+  | "ledger_not_recording"
   | "clicks_visits_low"
   | "unclear_share_high"
   | "consent_rate_drop"
   | "off_site_destination"
   | "instant_form_destination"
-  | "unmanaged_destination";
+  | "unmanaged_destination"
+  | "unrecognized_campaign";
 
 export type AdsIssue = {
   id: string;
@@ -34,10 +38,140 @@ export type AdsIssue = {
   how_to_fix: string;
   /** Spend affected, per currency. */
   spend_affected: Record<string, number>;
-  scope: { page_key?: string; url?: string; ad_id?: string; campaign_id?: string; campaign_name?: string };
+  scope: { page_key?: string; url?: string; ad_id?: string; campaign_id?: string; campaign_name?: string; account_id?: string };
   /** True when the fix is on our site (content/redirects) — Solve with AI is offered only then. */
   site_fixable: boolean;
+  /** Affected ads and evidence; `ads` is trimmed per request (see `ads_total` / `ads_offset`). */
+  details?: AdsIssueDetails;
+  /** When this issue first appeared (ISO), from the Issues | Resolved bookkeeping. */
+  first_seen?: string;
 };
+
+/** Why an ad with spend could not be checked against the URL parameters template. */
+export type AdsUncheckedReason = "account_unreadable" | "setup_fetch_failed" | "ad_removed_in_meta" | "no_link_found";
+
+export const ADS_UNCHECKED_REASON_LABELS: Record<AdsUncheckedReason, string> = {
+  account_unreadable: "Meta wouldn't let us read this ad account on the last sync",
+  setup_fetch_failed: "Meta didn't return this ad's setup on the last sync",
+  ad_removed_in_meta: "This ad was removed in Meta",
+  no_link_found: "We couldn't find a website link in this ad",
+};
+
+/** One Meta ad behind an issue, summed over the issue window. */
+export type AdsIssueAd = {
+  ad_id: string;
+  ad_name: string;
+  adset_id: string;
+  adset_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  account_id: string;
+  /** Meta's status at the last setup read (ACTIVE, PAUSED, …); null when the setup was never read. */
+  effective_status: string | null;
+  spend: Record<string, number>;
+  link_clicks: number;
+  impressions: number;
+  landing_page_views: number;
+  last_spend_date: string | null;
+  landing_url: string | null;
+  url_tags: string | null;
+  /** Template params this ad lacks (missing_tracking_params). */
+  missing?: string[];
+  /** utm_medium the ad sets when it is not a paid medium (non_paid_medium). */
+  medium?: string;
+  unchecked_reason?: AdsUncheckedReason;
+};
+
+/** GA4 paid visits that landed on a destination with no synced ad behind it. */
+export type AdsGa4SeenRow = {
+  platform: string | null;
+  source: string;
+  medium: string;
+  campaign: string;
+  /** utm_id when present. */
+  campaign_id: string | null;
+  /** utm_term (ad set id in our template) when present. */
+  adset_id: string | null;
+  /** utm_content (ad id in our template) when present. */
+  ad_id: string | null;
+  visits: number;
+  leads: number;
+  first_seen: string;
+  last_seen: string;
+};
+
+export type AdsUnrecognizedCampaignPage = { key: string; url: string; title: string; visits: number };
+
+/** Meta-tagged GA4 visits to our pages from a campaign no connected ad account knows. */
+export type AdsUnrecognizedCampaign = {
+  key: string;
+  campaign_id: string | null;
+  campaign_name: string;
+  visits: number;
+  leads: number;
+  /** Visits with no ad id (utm_content) tag. */
+  untagged_visits: number;
+  pages: AdsUnrecognizedCampaignPage[];
+  ga4_seen: AdsGa4SeenRow[];
+  first_seen: string;
+  last_seen: string;
+};
+
+export type AdsIssueDetails = {
+  ads: AdsIssueAd[];
+  ads_total: number;
+  ads_offset: number;
+  unchecked?: Array<{ reason: AdsUncheckedReason; ads: number; spend: Record<string, number> }>;
+  ga4_seen?: AdsGa4SeenRow[];
+  /** GA4 paid visits on this destination with no ad id tag (ad set / ad cannot be known). */
+  ga4_untagged_visits?: number;
+  /** unrecognized_campaign: our pages the campaign sends visitors to, by visits. */
+  pages?: AdsUnrecognizedCampaignPage[];
+  /** unrecognized_campaign: all GA4 paid visits / leads behind the issue (`ga4_seen` keeps only the top tag groups). */
+  ga4_totals?: { visits: number; leads: number };
+  /** When the ad setups (links, URL parameters, status) for this issue's account(s) were last read from Meta. */
+  setup_last_read_at?: string | null;
+};
+
+/** Ads with spend in the issue window vs the URL parameters template (Settings card + Diagnostics). */
+export type TrackingParamsCoverage = {
+  window_days: number;
+  /** When the ad setups were last read from Meta. */
+  checked_at: string | null;
+  /** Ads with spend that send people to a website (Instant Form / no-link ads skipped). */
+  checked_ads: number;
+  missing_ads: number;
+  campaigns: Array<{ id: string; name: string; ads: number; missing: string[]; spend: Record<string, number> }>;
+  non_paid_campaigns: Array<{ id: string; name: string; medium: string; spend: Record<string, number> }>;
+  /** Ads with spend we could not check, by reason. */
+  unchecked?: Array<{ reason: AdsUncheckedReason; ads: number; spend: Record<string, number> }>;
+};
+
+const SEVERITY_RANK: Record<AdsIssueSeverity, number> = { error: 0, warning: 1, info: 2 };
+
+function spendSum(spend: Record<string, number>): number {
+  return Object.values(spend).reduce((s, v) => s + v, 0);
+}
+
+/** Severity first, then affected spend (summed across currencies, for ordering only), then id. */
+export function sortAdsIssues<T extends Pick<AdsIssue, "id" | "severity" | "spend_affected">>(issues: T[]): T[] {
+  return issues.sort(
+    (a, b) =>
+      SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+      spendSum(b.spend_affected) - spendSum(a.spend_affected) ||
+      a.id.localeCompare(b.id),
+  );
+}
+
+/** Problem checks always look at this many days, whatever KPI window staff pick. */
+export const ADS_ISSUE_WINDOW_DAYS = 28;
+
+/** KPI window = whole days 1–90 (default 28); issue window is fixed. */
+export function resolveAdsDiagnosticsWindows(days: unknown): { kpiDays: number; issueDays: number } {
+  const n = Math.floor(Number(days));
+  const kpiDays = Number.isFinite(n) && n >= 1 ? Math.min(n, 90) : ADS_ISSUE_WINDOW_DAYS;
+  return { kpiDays, issueDays: ADS_ISSUE_WINDOW_DAYS };
+}
 
 /**
  * Error only when the issue touches enough money: ≥ share % of total spend in any
@@ -64,7 +198,14 @@ export function currenciesMissingFloor(totalSpend: Record<string, number>, t: Ad
   return Object.keys(totalSpend).filter((c) => (totalSpend[c] ?? 0) > 0 && t.severity_spend_floor[c] == null);
 }
 
-/** Clicks → visits: warn below the floor, or on a relative drop vs the trailing baseline. */
+/** Clicks → visits above this ratio means GA4 and Meta are measuring different traffic, not a loss. */
+export const CLICKS_VISITS_MISMATCH_RATIO = 1.1;
+
+export function isClicksVisitsMismatch(ratio: number | null | undefined): boolean {
+  return ratio != null && ratio > CLICKS_VISITS_MISMATCH_RATIO;
+}
+
+/** Clicks → visits: warn below the floor, or on a relative drop vs the trailing baseline. Mismatched windows never warn. */
 export function clicksVisitsIssue(
   current: { clicks: number; visits: number },
   baselineRatio: number | null,
@@ -72,12 +213,54 @@ export function clicksVisitsIssue(
 ): { ratio: number; reason: "floor" | "drop" } | null {
   if (current.clicks < t.ratio_min_clicks) return null;
   const ratio = current.visits / current.clicks;
+  if (isClicksVisitsMismatch(ratio)) return null;
   if (ratio * 100 < t.clicks_visits_floor_pct) return { ratio, reason: "floor" };
-  if (baselineRatio != null && baselineRatio > 0) {
+  if (baselineRatio != null && baselineRatio > 0 && !isClicksVisitsMismatch(baselineRatio)) {
     const dropPct = ((baselineRatio - ratio) / baselineRatio) * 100;
     if (dropPct >= t.clicks_visits_drop_pct) return { ratio, reason: "drop" };
   }
   return null;
+}
+
+const META_ID_RE = /^\d{6,25}$/;
+
+/**
+ * Which campaign a Meta-tagged visit belongs to: numeric utm_id, else numeric
+ * utm_campaign (some setups put the id there), else the utm_campaign name.
+ * Null when the visit has no campaign tag at all.
+ */
+export function unrecognizedCampaignKey(c: { utm_id: string | null; campaign: string | null }): {
+  key: string;
+  campaign_id: string | null;
+  campaign_name: string;
+} | null {
+  const utmId = (c.utm_id ?? "").trim();
+  const name = (c.campaign ?? "").trim();
+  const nameIsTag = name !== "" && name !== "(not set)" && name !== "(direct)" && name !== "(organic)";
+  if (META_ID_RE.test(utmId)) return { key: utmId, campaign_id: utmId, campaign_name: nameIsTag && name !== utmId ? name : utmId };
+  if (META_ID_RE.test(name)) return { key: name, campaign_id: name, campaign_name: name };
+  if (nameIsTag) return { key: name, campaign_id: null, campaign_name: name };
+  return null;
+}
+
+/**
+ * Severity for a campaign outside every connected ad account. Known external
+ * campaigns are always info; the share rule only applies with enough paid Meta visits.
+ */
+export function unrecognizedCampaignSeverity(
+  input: { visits: number; paidMetaVisits: number; known: boolean },
+  t: AdsAlertThresholds,
+): AdsIssueSeverity | null {
+  if (input.visits < t.unrecognized_campaign_min_visits) return null;
+  if (input.known) return "info";
+  if (input.visits >= t.unrecognized_campaign_error_visits) return "error";
+  if (
+    input.paidMetaVisits >= t.unrecognized_campaign_share_min_visits &&
+    (input.visits / input.paidMetaVisits) * 100 >= t.unrecognized_campaign_error_share_pct
+  ) {
+    return "error";
+  }
+  return "warning";
 }
 
 export function unclearShareIssue(paid: number, unclear: number, t: AdsAlertThresholds): number | null {
@@ -94,19 +277,45 @@ export function leadGapPct(ga4Leads: number, ledgerSubmissions: number): number 
   return (Math.abs(ga4Leads - ledgerSubmissions) / max) * 100;
 }
 
+export const LEAD_GAP_MIN_OVERLAP_DAYS = 7;
+
+/** GA4 paid leads vs ledger submissions over the days both sources cover (GA4-exported, on/after the ledger's first full day). */
+export type LeadGapCompare = { days: number; ga4_leads: number; submissions: number };
+
+/** Enough shared days and at least one ledger submission — otherwise the gap says nothing. */
+export function leadGapComparable(c: LeadGapCompare): boolean {
+  return c.days >= LEAD_GAP_MIN_OVERLAP_DAYS && c.submissions > 0;
+}
+
 /**
- * During the first 28 days of ledger data a fixed gap threshold applies; afterwards
- * we warn only when the gap widens by ≥ N points vs the trailing baseline.
+ * Until the trailing 28 days are comparable a fixed gap threshold applies; afterwards
+ * we warn only when the gap widens by ≥ N points vs that baseline.
  */
 export function ga4LedgerGapIssue(
-  gapPct: number | null,
-  baselineGapPct: number | null,
-  ledgerAgeDays: number,
+  cmp: { current: LeadGapCompare; baseline: LeadGapCompare },
   t: AdsAlertThresholds,
 ): boolean {
+  if (!leadGapComparable(cmp.current)) return false;
+  const gapPct = leadGapPct(cmp.current.ga4_leads, cmp.current.submissions);
   if (gapPct == null) return false;
-  if (ledgerAgeDays < 28 || baselineGapPct == null) return gapPct >= t.ga4_ledger_gap_bootstrap_pct;
+  const baselineGapPct = leadGapComparable(cmp.baseline) ? leadGapPct(cmp.baseline.ga4_leads, cmp.baseline.submissions) : null;
+  if (baselineGapPct == null) return gapPct >= t.ga4_ledger_gap_bootstrap_pct;
   return gapPct - baselineGapPct >= t.ga4_ledger_gap_widen_pts;
+}
+
+/**
+ * GA4 sees paid leads but the ledger has none in the window. Info when the ledger never
+ * recorded a non-test lead (new setup / local copy); warning when it did and stopped.
+ */
+export function ledgerNotRecordingIssue(input: {
+  ga4Configured: boolean;
+  ga4Leads: number;
+  submissions: number;
+  /** Latest non-test ledger row (ms), any time. */
+  lastRecordedAt: number | null;
+}): { severity: "info" | "warning"; lastRecordedAt: number | null } | null {
+  if (!input.ga4Configured || input.ga4Leads <= 0 || input.submissions > 0) return null;
+  return { severity: input.lastRecordedAt == null ? "info" : "warning", lastRecordedAt: input.lastRecordedAt };
 }
 
 /** Ask-region accept rate drop vs trailing 28 days (relative %, volume guard 100 impressions). */

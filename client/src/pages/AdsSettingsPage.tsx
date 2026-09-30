@@ -1,19 +1,37 @@
 import { useEffect } from "react";
 import { Link, useLocation } from "wouter";
-import { IconBrandMeta, IconSpeakerphone } from "@tabler/icons-react";
-import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { IconBrandGoogle, IconBrandMeta, IconSpeakerphone } from "@tabler/icons-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { SettingsShell, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
 import { MetaAdsTab } from "@/components/settings/MetaAdsTab";
 
-type AdsTab = "meta";
+type AdsTab = "meta" | "google";
 
-const ADS_TABS: { id: AdsTab; href: string; label: string; Icon: typeof IconBrandMeta }[] = [
+const ADS_TABS: SettingsSecondaryTab<AdsTab>[] = [
   { id: "meta", href: "/private/settings/ads/meta", label: "Meta", Icon: IconBrandMeta },
+  { id: "google", href: "/private/settings/ads/google", label: "Google Ads", Icon: IconBrandGoogle },
 ];
 
 function resolveAdsTab(pathname: string): AdsTab | null {
   if (pathname === "/private/settings/ads/meta") return "meta";
+  if (pathname === "/private/settings/ads/google") return "google";
   return null;
+}
+
+function GoogleAdsComingSoon() {
+  return (
+    <Card data-testid="tab-panel-ads-google">
+      <CardHeader className="flex flex-row items-center gap-2 pb-4">
+        <IconBrandGoogle className="h-5 w-5 text-muted-foreground" />
+        <CardTitle className="text-base">Google Ads</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground" data-testid="text-ads-google-coming-soon">
+          Coming soon. You&apos;ll be able to connect Google Ads here so its spend and leads show up next to your pages.
+        </p>
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function AdsSettingsPage() {
@@ -22,7 +40,7 @@ export default function AdsSettingsPage() {
 
   useEffect(() => {
     if (pathname === "/private/settings/ads" || pathname === "/private/settings/ads/") {
-      setLocation("/private/settings/ads/meta");
+      setLocation("/private/settings/ads/meta", { replace: true });
     }
   }, [pathname, setLocation]);
 
@@ -35,49 +53,32 @@ export default function AdsSettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
-        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
-          <div className="flex items-start gap-4 min-w-0 flex-1">
-            <PrivateHistoryBackButton data-testid="button-ads-settings-back" />
-            <div className="min-w-0 space-y-1">
-              <div className="flex items-center gap-2">
-                <IconSpeakerphone className="h-5 w-5 text-muted-foreground" />
-                <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-ads-settings-title">
-                  Ads
-                </h1>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Connect ad platforms so paid visits, spend and leads show up next to your pages. Reports live in{" "}
-                <Link href="/private/diagnostics/ads" className="underline underline-offset-2 hover:text-foreground">
-                  Diagnostics → Ads
-                </Link>
-                .
-              </p>
-            </div>
-          </div>
-
-          <ToggleButtonBar
-            className="shrink-0"
-            value={activeTab}
-            onValueChange={(id) => {
-              const tab = ADS_TABS.find((t) => t.id === id);
-              if (tab) setLocation(tab.href);
-            }}
-            listTestId="ads-settings-tablist"
-            listClassName="flex"
-          >
-            {ADS_TABS.map(({ id, label, Icon }) => (
-              <ToggleButtonBarTrigger key={id} value={id} data-testid={`tab-ads-${id}`} className="gap-1.5">
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </ToggleButtonBarTrigger>
-            ))}
-          </ToggleButtonBar>
-        </div>
-
-        <div role="tabpanel">{activeTab === "meta" && <MetaAdsTab />}</div>
+    <SettingsShell
+      section="ads"
+      icon={IconSpeakerphone}
+      title="Ads"
+      titleTestId="text-ads-settings-title"
+      backTestId="button-ads-settings-back"
+      description={
+        <>
+          Connect ad platforms so paid visits, spend and leads show up next to your pages. Reports live in{" "}
+          <Link href="/private/diagnostics/ads" className="underline underline-offset-2 hover:text-foreground">
+            Diagnostics → Ads
+          </Link>
+          .
+        </>
+      }
+      secondary={{
+        value: activeTab,
+        tabs: ADS_TABS,
+        listTestId: "ads-settings-tablist",
+        triggerTestId: (id) => `tab-ads-${id}`,
+      }}
+    >
+      <div role="tabpanel">
+        {activeTab === "meta" && <MetaAdsTab />}
+        {activeTab === "google" && <GoogleAdsComingSoon />}
       </div>
-    </div>
+    </SettingsShell>
   );
 }

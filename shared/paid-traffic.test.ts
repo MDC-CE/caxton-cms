@@ -1,5 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { classifyTraffic, fbcFromFbclid, hasCampaignSignals, normalizeLandingPath } from "./paid-traffic";
+import {
+  adSourceTagState,
+  classifyTraffic,
+  fbcFromFbclid,
+  hasCampaignSignals,
+  metaPlacementFromPublisher,
+  metaPlatformFromSource,
+  normalizeLandingPath,
+} from "./paid-traffic";
+
+describe("Meta placements", () => {
+  it("maps {{site_source_name}} values and leaves everything else not split", () => {
+    expect(metaPlatformFromSource("fb")).toBe("facebook");
+    expect(metaPlatformFromSource(" IG ")).toBe("instagram");
+    expect(metaPlatformFromSource("msg")).toBe("messenger");
+    expect(metaPlatformFromSource("an")).toBe("audience_network");
+    expect(metaPlatformFromSource("facebook")).toBe("not_split");
+    expect(metaPlatformFromSource("instagram")).toBe("not_split");
+    expect(metaPlatformFromSource(null)).toBe("not_split");
+  });
+
+  it("maps publisher_platform and buckets unknown placements as other", () => {
+    expect(metaPlacementFromPublisher("instagram")).toBe("instagram");
+    expect(metaPlacementFromPublisher("audience_network")).toBe("audience_network");
+    expect(metaPlacementFromPublisher("threads")).toBe("other");
+  });
+
+  it("marks ads split only when utm_source tags the platform", () => {
+    expect(adSourceTagState({ utm_source: "{{site_source_name}}" })).toBe("split");
+    expect(adSourceTagState({ utm_source: "{{ site_source_name }}" })).toBe("split");
+    expect(adSourceTagState({ utm_source: "ig" })).toBe("split");
+    expect(adSourceTagState({ utm_source: "facebook" })).toBe("not_split");
+    expect(adSourceTagState({})).toBe("not_split");
+    expect(adSourceTagState(null)).toBe("not_split");
+  });
+
+  it("classifies Messenger paid visits as Meta", () => {
+    expect(classifyTraffic({ utm_source: "msg", utm_medium: "paid_social" }).platform).toBe("meta");
+  });
+});
 
 describe("classifyTraffic", () => {
   it("treats paid medium from Meta sources as paid Meta", () => {

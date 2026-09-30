@@ -1707,6 +1707,15 @@ export type ProposalStats = {
   stalled_ideas: number;
   /** Open|partial edits in awaiting_rereview or no_feedback (not blocked, not escalated). */
   needs_review_edits: number;
+  by_outcome: ProposalOutcomeCounts;
+};
+
+/** Steward verdict counts. `none` = closed, unreviewed, not a system closure; `bad_open` = bad with no lesson captured. */
+export type ProposalOutcomeCounts = {
+  good: number;
+  bad: number;
+  bad_open: number;
+  none: number;
 };
 
 const EMPTY_STATUS_COUNTS: Record<ProposalStatus, number> = {
@@ -1758,7 +1767,8 @@ function fourEyesBlockedForCaller(
   return fourEyesBlocked(proposerUsername, proposerActor, callerUsername, callerActor);
 }
 
-export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at", "attention"] as const;
+/** `outcome_recent` = verdict time, else close time, else updated (Agents → Outcomes). */
+export const PROPOSAL_SORT_FIELDS = ["created_at", "updated_at", "attention", "outcome_recent"] as const;
 export type ProposalSortField = (typeof PROPOSAL_SORT_FIELDS)[number];
 export type ProposalSortDir = "asc" | "desc";
 
@@ -1772,10 +1782,10 @@ export function parseProposalSort(
   | { ok: true; sort: ProposalSortField; sortDir: ProposalSortDir }
   | { ok: false; error: string } {
   const fieldRaw = sort == null || String(sort).trim() === "" ? "updated_at" : String(sort).trim();
-  if (fieldRaw !== "created_at" && fieldRaw !== "updated_at" && fieldRaw !== "attention") {
+  if (!(PROPOSAL_SORT_FIELDS as readonly string[]).includes(fieldRaw)) {
     return {
       ok: false,
-      error: `Invalid sort '${fieldRaw}'. Allowed: created_at, updated_at, attention`,
+      error: `Invalid sort '${fieldRaw}'. Allowed: ${PROPOSAL_SORT_FIELDS.join(", ")}`,
     };
   }
   // Attention rank is fixed; sort_dir is accepted but ignored by list().
@@ -1787,7 +1797,7 @@ export function parseProposalSort(
       error: `Invalid sort_dir '${dirRaw}'. Allowed: asc, desc`,
     };
   }
-  return { ok: true, sort: fieldRaw, sortDir: dirRaw };
+  return { ok: true, sort: fieldRaw as ProposalSortField, sortDir: dirRaw };
 }
 
 /** Empty/missing → undefined (no filter). Invalid non-empty → error. */
@@ -1829,10 +1839,26 @@ export function isClosedProposalStatus(status: ProposalStatus): boolean {
   return status === "finished" || status === "rejected" || status === "withdrawn";
 }
 
-export const OUTCOME_REVIEW_FILTERS = ["good", "bad", "none", "bad_open"] as const;
+export const OUTCOME_REVIEW_FILTERS = ["good", "bad", "none", "bad_open", "any"] as const;
 export type OutcomeReviewFilter = (typeof OUTCOME_REVIEW_FILTERS)[number];
 
-/** Empty/missing → undefined. `bad_open` = bad with no lesson captured. `none` = closed and unreviewed. */
+/** Closures the system made on its own — not a decision anyone can judge, so never "needs a verdict". */
+export const SYSTEM_CLOSE_REASONS = ["abandoned_stale", "legacy_version"] as const;
+
+/** SQL predicate: closed by a person or agent (not a system closure). */
+export function reviewableClosedSql(col: (name: string) => string = (name) => name): string {
+  const reasons = SYSTEM_CLOSE_REASONS.map((r) => `'${r}'`).join(", ");
+  return `${col("status")} IN ('finished', 'rejected', 'withdrawn') AND (${col("close_reason")} IS NULL OR ${col("close_reason")} NOT IN (${reasons}))`;
+}
+
+export function outcomeRecentAt(p: Pick<ProposalRecord, "outcome_review_at" | "closed_at" | "updated_at">): number {
+  return p.outcome_review_at ?? p.closed_at ?? p.updated_at;
+}
+
+/**
+ * Empty/missing → undefined. `bad_open` = bad with no lesson captured.
+ * `none` = closed, unreviewed, not a system closure. `any` = reviewed, or `none`.
+ */
 export function parseOutcomeReviewQuery(
   raw?: string | null,
 ): { ok: true; outcome_review: OutcomeReviewFilter | undefined } | { ok: false; error: string } {
@@ -1861,8 +1887,8 @@ function compareProposalsBySort(
     return a.id.localeCompare(b.id);
   }
   const factor = sortDir === "asc" ? 1 : -1;
-  const av = a[sort];
-  const bv = b[sort];
+  const av = sort === "outcome_recent" ? outcomeRecentAt(a) : a[sort];
+  const bv = sort === "outcome_recent" ? outcomeRecentAt(b) : b[sort];
   if (av !== bv) return (av - bv) * factor;
   return a.id.localeCompare(b.id);
 }
@@ -4279,6 +4305,17 @@ export function createProposalService(deps: ProposalServiceDeps) {
       // Blockers table missing in older DBs — leave by_attention zeros.
     }
 
+    const outcomeRow = db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN outcome_review = 'good' THEN 1 ELSE 0 END) AS good,
+           SUM(CASE WHEN outcome_review = 'bad' THEN 1 ELSE 0 END) AS bad,
+           SUM(CASE WHEN outcome_review = 'bad' AND outcome_lesson_captured_at IS NULL THEN 1 ELSE 0 END) AS bad_open,
+           SUM(CASE WHEN outcome_review IS NULL AND ${reviewableClosedSql()} THEN 1 ELSE 0 END) AS none
+         FROM content_proposals WHERE site = ?`,
+      )
+      .get(site) as Partial<Record<keyof ProposalOutcomeCounts, number | null>> | undefined;
+
     return {
       total: Number(totalRow?.n) || 0,
       by_status,
@@ -4288,6 +4325,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
       by_kind_status: liveByKindStatus(db, site),
       stalled_ideas: countStalledIdeas(db, site),
       needs_review_edits,
+      by_outcome: {
+        good: Number(outcomeRow?.good) || 0,
+        bad: Number(outcomeRow?.bad) || 0,
+        bad_open: Number(outcomeRow?.bad_open) || 0,
+        none: Number(outcomeRow?.none) || 0,
+      },
     };
   }
 
@@ -4478,8 +4521,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
     } else if (opts.outcome_review === "bad_open") {
       where += ` AND ${col("outcome_review")} = 'bad' AND ${col("outcome_lesson_captured_at")} IS NULL`;
     } else if (opts.outcome_review === "none") {
-      where += ` AND ${col("status")} IN ('finished', 'rejected', 'withdrawn') AND ${col("outcome_review")} IS NULL`;
+      where += ` AND ${reviewableClosedSql(col)} AND ${col("outcome_review")} IS NULL`;
+    } else if (opts.outcome_review === "any") {
+      where += ` AND (${col("outcome_review")} IS NOT NULL OR (${reviewableClosedSql(col)}))`;
     }
+    const sortSql = (field: Exclude<ProposalSortField, "attention">) =>
+      field === "outcome_recent"
+        ? `COALESCE(${col("outcome_review_at")}, ${col("closed_at")}, ${col("updated_at")})`
+        : col(field);
 
     const mapRow = (r: ProposalRow) =>
       mapProposal(r, loadEntries(db, r.id), loadBlockers(db, r.id));
@@ -4494,7 +4543,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       const orderSql =
         sortForRank === "attention"
           ? `ORDER BY ${col("updated_at")} DESC, ${col("id")} ASC`
-          : `ORDER BY ${col(sort === "created_at" ? "created_at" : "updated_at")} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
+          : `ORDER BY ${sortSql(sort === "attention" ? "updated_at" : sort)} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
       const rows = db
         .prepare(`SELECT ${tableAlias ? `${tableAlias}.*` : "*"} FROM ${fromSql} ${where} ${orderSql}`)
         .all(...params) as ProposalRow[];
@@ -4549,7 +4598,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
       };
     }
 
-    const orderSql = `ORDER BY ${col(sort)} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
+    const orderSql = `ORDER BY ${sortSql(sort === "attention" ? "updated_at" : sort)} ${sortDir.toUpperCase()}, ${col("id")} ASC`;
     const totalRow = db
       .prepare(`SELECT COUNT(*) AS n FROM ${fromSql} ${where}`)
       .get(...params) as { n: number };

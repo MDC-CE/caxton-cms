@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Megaphone, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
+import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Megaphone, Play, RefreshCw, Save, Scale, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link, useLocation, useSearch } from "wouter";
@@ -109,6 +109,7 @@ import LeadsTab from "@/components/diagnostics/LeadsTab";
 import RuntimeIssuesTab from "@/components/diagnostics/RuntimeIssuesTab";
 import { DiagnosticsSeoPanel, DiagnosticsGeoPanel, DiagnosticsFunnelPanel } from "@/components/diagnostics/DiagnosticsSeoGeoPanels";
 import { AdsGlobalRollupCard, DiagnosticsAdsPanel } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { DiagnosticsLegalPanel, LegalGlobalRollupCard } from "@/components/diagnostics/DiagnosticsLegalPanel";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import {
   RedirectConflictResolverModal,
@@ -1792,6 +1793,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
   return (
     <div className="space-y-6">
       <AdsGlobalRollupCard />
+      <LegalGlobalRollupCard />
       {jobPanel && (
         <div
           className="rounded-lg border border-border overflow-hidden"
@@ -3051,6 +3053,7 @@ const DIAGNOSTICS_TABS: {
   { id: "geo", label: "GEO", href: "/private/diagnostics/geo", Icon: Brain },
   { id: "funnel", label: "Funnel", href: "/private/diagnostics/funnel", Icon: Filter },
   { id: "ads", label: "Ads", href: "/private/diagnostics/ads", Icon: Megaphone },
+  { id: "legal", label: "Legal", href: "/private/diagnostics/legal", Icon: Scale },
 ];
 
 function tabHref(id: DiagnosticsTabId): string {
@@ -3132,6 +3135,9 @@ export default function DiagnosticsPage() {
             </TabsContent>
             <TabsContent value="ads">
               <DiagnosticsAdsPanel />
+            </TabsContent>
+            <TabsContent value="legal">
+              <DiagnosticsLegalPanel />
             </TabsContent>
           </Tabs>
         </div>

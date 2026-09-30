@@ -16,7 +16,7 @@ import {
   IconScale,
 } from "@tabler/icons-react";
 import { Check, ChevronsUpDown } from "lucide-react";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { SettingsShell, useSettingsDirty, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +30,6 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { useToast } from "@/hooks/use-toast";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
 import { cn } from "@/lib/utils";
@@ -42,12 +41,7 @@ const LlmYmlEditorPanel = lazy(() => import("@/components/editing/LlmYmlEditorPa
 
 type AiSettingsTab = "llms" | "qdrant" | "prompts";
 
-const AI_TABS: {
-  id: AiSettingsTab;
-  href: string;
-  label: string;
-  Icon: typeof IconBrain;
-}[] = [
+const AI_TABS: SettingsSecondaryTab<AiSettingsTab>[] = [
   { id: "llms", href: "/private/settings/ai/llms", label: "Models", Icon: IconBrain },
   { id: "qdrant", href: "/private/settings/ai/qdrant", label: "Vector DB", Icon: IconDatabase },
   { id: "prompts", href: "/private/settings/ai/prompts", label: "Prompt Library", Icon: IconFileCode },
@@ -281,6 +275,7 @@ function LlmsTab() {
     selectedChat !== (settingsQuery.data?.model_chat || "") ||
     selectedVision !== (settingsQuery.data?.model_vision || "") ||
     selectedDecision !== (settingsQuery.data?.model_decision || "");
+  useSettingsDirty(dirty);
 
   async function handleTestConnection() {
     setTesting(true);
@@ -780,7 +775,7 @@ export default function AISettingsPage() {
 
   useEffect(() => {
     if (pathname === "/private/settings/ai" || pathname === "/private/settings/ai/") {
-      setLocation("/private/settings/ai/llms");
+      setLocation("/private/settings/ai/llms", { replace: true });
     }
   }, [pathname, setLocation]);
 
@@ -793,55 +788,25 @@ export default function AISettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-6">
-        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
-          <div className="flex items-start gap-4 min-w-0 flex-1">
-            <PrivateHistoryBackButton data-testid="button-ai-settings-back" />
-            <div className="min-w-0 space-y-1">
-              <div className="flex items-center gap-2">
-                <IconSparkles className="h-5 w-5 text-muted-foreground" />
-                <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-ai-settings-title">
-                  AI Settings
-                </h1>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Models, providers, and semantic search infrastructure.
-              </p>
-            </div>
-          </div>
-
-          <ToggleButtonBar
-            className="shrink-0"
-            value={activeTab}
-            onValueChange={(id) => {
-              const tab = AI_TABS.find((t) => t.id === id);
-              if (!tab) return;
-              setLocation(tab.href);
-            }}
-            listTestId="ai-settings-tablist"
-            listClassName="flex"
-          >
-            {AI_TABS.map(({ id, label, Icon }) => (
-              <ToggleButtonBarTrigger
-                key={id}
-                value={id}
-                data-testid={`tab-${id}`}
-                className="gap-1.5"
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </ToggleButtonBarTrigger>
-            ))}
-          </ToggleButtonBar>
-        </div>
-
-        <div role="tabpanel">
-          {activeTab === "llms" && <LlmsTab />}
-          {activeTab === "qdrant" && <QdrantTab />}
-          {activeTab === "prompts" && <PromptLibraryTab />}
-        </div>
+    <SettingsShell
+      section="ai"
+      icon={IconSparkles}
+      title="AI Settings"
+      titleTestId="text-ai-settings-title"
+      backTestId="button-ai-settings-back"
+      description="Models, providers, and semantic search infrastructure."
+      secondary={{
+        value: activeTab,
+        tabs: AI_TABS,
+        listTestId: "ai-settings-tablist",
+        triggerTestId: (id) => `tab-${id}`,
+      }}
+    >
+      <div role="tabpanel">
+        {activeTab === "llms" && <LlmsTab />}
+        {activeTab === "qdrant" && <QdrantTab />}
+        {activeTab === "prompts" && <PromptLibraryTab />}
       </div>
-    </div>
+    </SettingsShell>
   );
 }

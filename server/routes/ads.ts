@@ -2,13 +2,23 @@
  * Ads (paid traffic) routes.
  *
  * Settings (ads_settings):
- *   GET/PUT /api/settings/ads/meta        — accounts, thresholds, test email patterns, sync status
+ *   GET/PUT /api/settings/ads/meta        — accounts, thresholds, known external campaigns, test email patterns, sync status
+ *   POST    /api/settings/ads/meta/known-campaigns — mark one campaign as known (idempotent append)
+ *   GET     /api/settings/ads/meta/accounts — ad accounts the token can read (picker options)
  *   POST    /api/settings/ads/meta/test   — probe token + accounts (read-only)
  *   POST    /api/ads/meta/sync            — Sync now / Load older history
+ * Live-ad edits (ads_edit, staff session only — MCP loopback is refused):
+ *   POST /api/ads/meta/tracking-fix/preview — per-ad plan for a missing_tracking_params issue
+ *   POST /api/ads/meta/tracking-fix/apply   — add missing URL parameters to the selected ads in Meta
  * Reads (metrics_view):
- *   GET /api/ads/report                   — paid pages / destinations / campaigns
+ *   GET /api/ads/report                   — paid pages / destinations / campaigns;
+ *       since / until (≤90 days) and campaign_ids / adset_ids / ad_ids (≤20 each) narrow it
  *   GET /api/content-types/:type/ads-entries — Ads perspective for one content type
- *   GET /api/diagnostics/ads              — Diagnostics Ads tab (or ?summary=1 roll-up)
+ *   GET /api/diagnostics/ads              — Diagnostics Ads tab (or ?summary=1 roll-up);
+ *       snapshot_id / issue_ids (≤10) / ads_limit / ads_offset page each issue's affected ads;
+ *       campaign_ids / adset_ids / ad_ids keep issues touching those ads
+ *   GET /api/ads/export, GET /api/ads/leads/export — snapshots for local "Download from production"
+ * Dev only (metrics_view): /api/ads/pull-production(/origin), /api/ads/leads/pull-production
  */
 
 import type { Express, Request, Response } from "express";
@@ -17,19 +27,72 @@ import { api } from "../rate-limit/api";
 import { getDefaultContentFolder, getDefaultContentRoot } from "../site-config";
 import { getAdsSettings, updateAdsSettings } from "../settings";
 import { markFileAsModified } from "../sync-state";
-import { requireCapability } from "./_helpers";
+import { isMcpLoopbackRequest, requireCapability } from "./_helpers";
 import { child } from "../logger";
-import { META_UTM_TEMPLATE, normalizeAdAccountId } from "@shared/ads-settings";
+import { MAX_KNOWN_EXTERNAL_CAMPAIGNS, META_UTM_TEMPLATE, isKnownExternalCampaign, normalizeAdAccountId } from "@shared/ads-settings";
+import { resolveAdsDiagnosticsWindows } from "@shared/ads-diagnostics-rules";
 import { parseAttributionModel } from "@shared/paid-attribution";
 import type { AdPlatform } from "@shared/paid-traffic";
-import { isMetaTokenConfigured, META_GRAPH_VERSION, testMetaConnection } from "../ads/meta-client";
+import {
+  isMetaTokenConfigured,
+  listMetaAdAccounts,
+  MetaApiError,
+  META_GRAPH_VERSION,
+  testMetaConnection,
+} from "../ads/meta-client";
 import { listMetaDayDates, loadMetaState, META_BACKFILL_DAYS, META_REFRESH_DAYS, META_RETENTION_DAYS } from "../ads/meta-ads-days";
 import { isGa4Configured, loadPaidLandingState } from "../ads/paid-detection";
-import { isAdsRefreshing, requestAdsRefresh } from "../ads/ads-refresh";
-import { getAdsReport } from "../ads/ads-report";
-import { adsDiagnosticsSummary, buildAdsDiagnostics } from "../ads/ads-diagnostics";
+import { getAdsRefreshStatus, hasMetaData, requestAdsRefresh } from "../ads/ads-refresh";
+import { isRefreshActive } from "@shared/ads-refresh-status";
+import { AdsReportRangeError, getAdsReport } from "../ads/ads-report";
+import { adsDiagnosticsSummary, buildAdsDiagnostics, loadTrackingParamsCoverage } from "../ads/ads-diagnostics";
+import {
+  ADS_DETAIL_ADS_LIMIT,
+  ADS_LIST_ADS_LIMIT,
+  AdsIdFilterError,
+  clampAdsLimit,
+  clampAdsOffset,
+  currentSnapshotMarkers,
+  filterIssuesByIds,
+  hasAdIdFilters,
+  loadAdsSnapshot,
+  newerDataAvailable,
+  parseAdIdFilters,
+  parseIssueIds,
+  saveAdsSnapshot,
+  trimIssueAds,
+  type AdsDiagnosticsSnapshot,
+} from "../ads/ads-diagnostics-snapshots";
+import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
+import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
+import { TRACKING_FIX_MAX_ADS } from "@shared/ads-tracking-fix";
+import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 
 const log = child({ module: "routes/ads" });
+
+const trackingFixSchema = z.object({
+  issue_id: z.string().regex(/^missing_tracking_params:\d{1,30}$/),
+  snapshot_id: z.string().max(64).optional(),
+});
+
+const trackingFixApplySchema = trackingFixSchema.extend({
+  ad_ids: z.array(z.string().regex(/^\d{1,30}$/)).min(1).max(TRACKING_FIX_MAX_ADS),
+});
+
+/** The issue from the staff's snapshot, or a fresh build when it expired. */
+async function findTrackingIssue(site: string, contentRoot: string, issueId: string, snapshotId?: string): Promise<AdsIssue | null> {
+  const lookup = snapshotId ? loadAdsSnapshot(site, snapshotId) : null;
+  const issues =
+    lookup?.status === "ok"
+      ? lookup.snapshot.diagnostics.issues
+      : saveAdsSnapshot(site, await buildAdsDiagnostics({ site, contentRoot, days: resolveAdsDiagnosticsWindows(undefined).kpiDays, issuesOnly: true }))
+          .diagnostics.issues;
+  return issues.find((i) => i.id === issueId && i.code === "missing_tracking_params") ?? null;
+}
+
+function isBadReportQuery(err: unknown): err is Error {
+  return err instanceof AdsReportRangeError || err instanceof AdsIdFilterError;
+}
 
 const PLATFORMS: Array<AdPlatform | "all"> = ["all", "meta", "google", "microsoft", "tiktok", "linkedin", "x", "snapchat", "pinterest", "other"];
 
@@ -48,12 +111,16 @@ function settingsPayload(res: Response) {
   const state = loadMetaState(site);
   const days = listMetaDayDates(site);
   const ga4 = loadPaidLandingState(site);
+  const refresh = getAdsRefreshStatus(site);
+  const trackingParams = hasMetaData(site, contentRoot) ? loadTrackingParamsCoverage(site, ads.meta.ad_account_ids) : null;
   return {
     ads,
     token_configured: isMetaTokenConfigured(),
     api_version: META_GRAPH_VERSION,
     utm_template: META_UTM_TEMPLATE,
-    refreshing: isAdsRefreshing(site),
+    tracking_params: trackingParams,
+    refreshing: isRefreshActive(refresh),
+    refresh,
     sync: {
       last_success_at: state.last_success_at ?? null,
       last_attempt_at: state.last_attempt_at ?? null,
@@ -63,6 +130,9 @@ function settingsPayload(res: Response) {
       history_since: days[0] ?? null,
       history_until: days[days.length - 1] ?? null,
       accounts: state.accounts,
+      pulled_from_production_at: state.pulled_from_production_at ?? null,
+      production_origin: state.production_origin ?? null,
+      snapshot_last_date: state.snapshot_last_date ?? null,
     },
     ga4: {
       configured: isGa4Configured(contentRoot),
@@ -92,13 +162,23 @@ const thresholdsSchema = z
     ga4_ledger_gap_bootstrap_pct: z.number().min(0).max(100),
     zero_visits_complete_days: z.number().int().min(1).max(30),
     min_paid_visits_for_rates: z.number().int().min(1),
+    unrecognized_campaign_min_visits: z.number().int().min(1),
+    unrecognized_campaign_error_visits: z.number().int().min(1),
+    unrecognized_campaign_error_share_pct: z.number().min(0).max(100),
+    unrecognized_campaign_share_min_visits: z.number().int().min(1),
   })
   .partial();
+
+const knownCampaignSchema = z.object({
+  key: z.string().trim().min(1).max(200),
+  note: z.string().trim().max(200).optional(),
+});
 
 const updateSchema = z.object({
   enabled: z.boolean().optional(),
   ad_account_ids: z.array(z.union([z.string(), z.number()])).max(50).optional(),
   alert_thresholds: thresholdsSchema.optional(),
+  known_external_campaigns: z.array(knownCampaignSchema).max(MAX_KNOWN_EXTERNAL_CAMPAIGNS).optional(),
   test_email_patterns: z.array(z.string().max(200)).max(100).optional(),
 });
 
@@ -106,8 +186,12 @@ function parseReportQuery(req: Request) {
   const q = req.query as Record<string, unknown>;
   const platformRaw = typeof q.platform === "string" ? q.platform : "all";
   const platform = (PLATFORMS as string[]).includes(platformRaw) ? (platformRaw as AdPlatform | "all") : "all";
+  const day = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
   return {
-    days: Number(q.days) || 28,
+    days: q.days != null && q.days !== "" ? Number(q.days) || 28 : undefined,
+    since: day(q.since),
+    until: day(q.until),
+    ...parseAdIdFilters(q),
     platform,
     currency: typeof q.currency === "string" && /^[A-Za-z]{3}$/.test(q.currency) ? q.currency.toUpperCase() : null,
     account: typeof q.account === "string" ? normalizeAdAccountId(q.account) : null,
@@ -149,6 +233,7 @@ export function registerAdsRoutes(app: Express): void {
             enabled: parsed.data.enabled,
             ad_account_ids: parsed.data.ad_account_ids?.map((id) => normalizeAdAccountId(id)!),
             alert_thresholds: parsed.data.alert_thresholds,
+            known_external_campaigns: parsed.data.known_external_campaigns,
           },
           test_email_patterns: parsed.data.test_email_patterns,
         },
@@ -159,12 +244,56 @@ export function registerAdsRoutes(app: Express): void {
       const justEnabled = next.meta.enabled && !before.enabled;
       let sync_requested = false;
       if (next.meta.enabled && next.meta.ad_account_ids.length > 0 && isMetaTokenConfigured() && (justEnabled || newAccounts.length > 0)) {
-        sync_requested = await requestAdsRefresh(site, contentRoot, listMetaDayDates(site).length > 0 && newAccounts.length === 0 ? "refresh" : "backfill");
+        const mode = listMetaDayDates(site).length > 0 && newAccounts.length === 0 ? "refresh" : "backfill";
+        sync_requested = isRefreshActive(await requestAdsRefresh(site, contentRoot, mode, { manual: true }));
       }
       res.json({ success: true, sync_requested, ...settingsPayload(res) });
     } catch (err) {
       log.warn({ err }, "[ads] failed to save settings");
       res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save Ads settings" });
+    }
+  });
+
+  api.post(app, "/api/settings/ads/meta/known-campaigns", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const parsed = knownCampaignSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    }
+    try {
+      const contentRoot = getContentRoot(res);
+      const current = getAdsSettings(contentRoot).meta.known_external_campaigns;
+      if (isKnownExternalCampaign(current, parsed.data.key)) {
+        return res.json({ success: true, already_known: true, known_external_campaigns: current });
+      }
+      if (current.length >= MAX_KNOWN_EXTERNAL_CAMPAIGNS) {
+        return res.status(400).json({ error: `Known external campaigns is full (${MAX_KNOWN_EXTERNAL_CAMPAIGNS}). Remove one in Settings → Ads first.` });
+      }
+      const entry = parsed.data.note ? { key: parsed.data.key, note: parsed.data.note } : { key: parsed.data.key };
+      const next = updateAdsSettings({ meta: { known_external_campaigns: [...current, entry] } }, contentRoot);
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      res.json({ success: true, already_known: false, known_external_campaigns: next.meta.known_external_campaigns });
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to add known external campaign");
+      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save known campaign" });
+    }
+  });
+
+  api.get(app, "/api/settings/ads/meta/accounts", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    if (!isMetaTokenConfigured()) return res.json({ token_configured: false, accounts: [] });
+    try {
+      res.json({ token_configured: true, accounts: await listMetaAdAccounts() });
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to list Meta ad accounts");
+      res.json({
+        token_configured: true,
+        accounts: [],
+        error: err instanceof Error ? err.message : "Could not list ad accounts",
+        error_kind: err instanceof MetaApiError ? err.kind : "other",
+      });
     }
   });
 
@@ -192,8 +321,8 @@ export function registerAdsRoutes(app: Express): void {
     if (mode === "older" && (!meta.enabled || meta.ad_account_ids.length === 0 || !isMetaTokenConfigured())) {
       return res.status(400).json({ error: "Connect Meta (token + at least one enabled ad account) before loading history." });
     }
-    const requested = await requestAdsRefresh(site, contentRoot, mode);
-    res.json({ success: true, requested, mode, refreshing: true });
+    const refresh = await requestAdsRefresh(site, contentRoot, mode, { manual: true });
+    res.json({ success: true, requested: isRefreshActive(refresh), mode, refreshing: isRefreshActive(refresh), refresh });
   });
 
   api.get(app, "/api/ads/report", { rate: "staffWrite" }, async (req: Request, res: Response) => {
@@ -204,6 +333,7 @@ export function registerAdsRoutes(app: Express): void {
       const report = await getAdsReport({ site: getSite(res), contentRoot: getContentRoot(res), ...q });
       res.json(report);
     } catch (err) {
+      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
       log.warn({ err }, "[ads] report failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Ads report" });
     }
@@ -219,6 +349,7 @@ export function registerAdsRoutes(app: Express): void {
         contentRoot: getContentRoot(res),
         ...q,
         content_type: req.params.type,
+        includeMetaPlatforms: false,
       });
       const locale = typeof req.query.locale === "string" && req.query.locale.trim() ? req.query.locale.trim() : null;
       const search = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
@@ -235,12 +366,14 @@ export function registerAdsRoutes(app: Express): void {
         meta: report.meta,
         ga4: report.ga4,
         refreshing: report.refreshing,
+        refresh: report.refresh,
         covered_days: report.covered_days,
         consent: report.consent,
         thresholds: { min_paid_visits_for_rates: report.thresholds.min_paid_visits_for_rates },
         warnings: report.warnings,
       });
     } catch (err) {
+      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
       log.warn({ err }, "[ads] ads-entries failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load Ads entries" });
     }
@@ -255,11 +388,226 @@ export function registerAdsRoutes(app: Express): void {
       if (req.query.summary === "1") {
         return res.json(await adsDiagnosticsSummary(site, contentRoot));
       }
-      const days = Number(req.query.days) === 7 ? 7 : 28;
-      res.json(await buildAdsDiagnostics({ site, contentRoot, days }));
+      const { kpiDays } = resolveAdsDiagnosticsWindows(req.query.days);
+      const idFilters = parseAdIdFilters(req.query as Record<string, unknown>);
+      const filtersEcho = hasAdIdFilters(idFilters)
+        ? { filters: { campaign_ids: idFilters.campaign_ids ?? [], adset_ids: idFilters.adset_ids ?? [], ad_ids: idFilters.ad_ids ?? [] } }
+        : {};
+      const issueIds = parseIssueIds(req.query.issue_ids);
+      const detail = issueIds.length > 0;
+      const adsLimit = clampAdsLimit(req.query.ads_limit, detail ? ADS_DETAIL_ADS_LIMIT : ADS_LIST_ADS_LIMIT);
+      const adsOffset = clampAdsOffset(req.query.ads_offset);
+      const requested = typeof req.query.snapshot_id === "string" ? req.query.snapshot_id : null;
+
+      let snap: AdsDiagnosticsSnapshot;
+      let snapshotExpired = false;
+      let newer = false;
+      const lookup = requested ? loadAdsSnapshot(site, requested) : null;
+      if (lookup?.status === "ok") {
+        snap = lookup.snapshot;
+        newer = newerDataAvailable(snap, currentSnapshotMarkers(site));
+      } else {
+        snapshotExpired = lookup?.status === "expired";
+        snap = saveAdsSnapshot(site, await buildAdsDiagnostics({ site, contentRoot, days: kpiDays, issuesOnly: detail }));
+      }
+      const snapshotFields = {
+        snapshot_id: snap.id,
+        snapshot_expires_at: snap.expires_at,
+        ...(snapshotExpired ? { snapshot_expired: true } : {}),
+        ...(newer ? { newer_data_available: true } : {}),
+      };
+      const d = snap.diagnostics;
+      const issues = filterIssuesByIds(d.issues, idFilters);
+      if (!detail) {
+        return res.json({ ...d, issues: trimIssueAds(issues, adsLimit, adsOffset), ...filtersEcho, ...snapshotFields });
+      }
+      const wanted = new Set(issueIds);
+      const found = issues.filter((i) => wanted.has(i.id));
+      const filteredOut = d.issues.filter((i) => wanted.has(i.id) && !found.some((f) => f.id === i.id)).map((i) => i.id);
+      res.json({
+        generated_at: d.generated_at,
+        issue_window_days: d.issue_window_days,
+        status: d.status,
+        refreshing: d.refreshing,
+        refresh: d.refresh,
+        utm_template: d.utm_template,
+        issues: trimIssueAds(found, adsLimit, adsOffset),
+        missing_issue_ids: issueIds.filter((id) => !found.some((i) => i.id === id) && !filteredOut.includes(id)),
+        ...(filteredOut.length > 0 ? { filtered_out_issue_ids: filteredOut } : {}),
+        ...filtersEcho,
+        ...snapshotFields,
+      });
     } catch (err) {
+      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
       log.warn({ err }, "[ads] diagnostics failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Ads diagnostics" });
+    }
+  });
+
+  const trackingFixDeps = (site: string, contentRoot: string): TrackingFixDeps => ({
+    writeConfigured: isMetaTokenConfigured,
+    fetchAds: fetchAdsForFix,
+    replace: replaceAdUrlTags,
+    requestRefresh: async () => isRefreshActive(await requestAdsRefresh(site, contentRoot, "refresh", { manual: true })),
+  });
+
+  api.post(app, "/api/ads/meta/tracking-fix/preview", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (isMcpLoopbackRequest(req)) return res.status(403).json({ error: "Live-ad edits are staff UI only." });
+    const auth = await requireCapability(req, res, "ads_edit");
+    if (!auth.authorized) return;
+    const parsed = trackingFixSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    try {
+      const site = getSite(res);
+      const contentRoot = getContentRoot(res);
+      const issue = await findTrackingIssue(site, contentRoot, parsed.data.issue_id, parsed.data.snapshot_id);
+      if (!issue) return res.status(404).json({ error: "This issue is no longer open. Reload the Ads tab." });
+      res.json(await previewTrackingFix(issue, trackingFixDeps(site, contentRoot)));
+    } catch (err) {
+      log.warn({ err }, "[ads] tracking-fix preview failed");
+      const status = err instanceof MetaApiError && (err.kind === "auth" || err.kind === "permission") ? 502 : 500;
+      res.status(status).json({
+        error: err instanceof Error ? err.message : "Failed to read ads from Meta",
+        ...(err instanceof MetaApiError ? { error_kind: err.kind } : {}),
+      });
+    }
+  });
+
+  api.post(app, "/api/ads/meta/tracking-fix/apply", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (isMcpLoopbackRequest(req)) return res.status(403).json({ error: "Live-ad edits are staff UI only." });
+    const auth = await requireCapability(req, res, "ads_edit");
+    if (!auth.authorized) return;
+    const parsed = trackingFixApplySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    if (!isMetaTokenConfigured()) {
+      return res.status(409).json({ error: "Meta isn't connected on this server. Ask an admin to add the Meta access token." });
+    }
+    try {
+      const site = getSite(res);
+      const contentRoot = getContentRoot(res);
+      const issue = await findTrackingIssue(site, contentRoot, parsed.data.issue_id, parsed.data.snapshot_id);
+      if (!issue) return res.status(404).json({ error: "This issue is no longer open. Reload the Ads tab." });
+      const result = await applyTrackingFix(
+        { issue, adIds: parsed.data.ad_ids, actor: auth.username ?? null, site },
+        trackingFixDeps(site, contentRoot),
+      );
+      res.json(result);
+    } catch (err) {
+      log.warn({ err }, "[ads] tracking-fix apply failed");
+      res.status(500).json({
+        error: err instanceof Error ? err.message : "Failed to update ads in Meta",
+        ...(err instanceof MetaApiError ? { error_kind: err.kind } : {}),
+      });
+    }
+  });
+
+  registerAdsProductionPullRoutes(app);
+}
+
+/** Refuse dev-only routes on production; returns true when the handler should stop. */
+function refuseInProduction(res: Response, what: string): boolean {
+  if (process.env.NODE_ENV !== "production") return false;
+  res.status(403).json({ error: "dev_only", message: `${what} is only available in development.` });
+  return true;
+}
+
+type PullFailure = { success: boolean; reason?: string; code?: string; productionOrigin: string; envVar?: string; not_supported?: boolean };
+
+function sendPullFailure(res: Response, result: PullFailure, fallback: string) {
+  if (result.code === "production_staff_token_required") {
+    return res.status(401).json({ ...result, error: result.reason ?? fallback });
+  }
+  res.status(result.not_supported ? 502 : 400).json({ ...result, error: result.reason ?? fallback });
+}
+
+/**
+ * "Download from production" (Diagnostics / Settings → Ads):
+ *   GET  /api/ads/export                   — production side: cached Meta + GA4 files (?days, default 90)
+ *   GET  /api/ads/leads/export             — production side: lead-ledger rows + consent_daily (?since ms)
+ *   GET  /api/ads/pull-production/origin   — dev only: which production origin a download would use
+ *   POST /api/ads/pull-production          — dev only: replace local Ads cache with production's
+ *   POST /api/ads/leads/pull-production    — dev only: replace local leads + consent with production's
+ */
+function registerAdsProductionPullRoutes(app: Express): void {
+  api.get(app, "/api/ads/export", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { buildAdsExport, clampExportDays } = await import("../ads/pull-production");
+      res.json(buildAdsExport(getSite(res), clampExportDays(req.query.days)));
+    } catch (err) {
+      log.warn({ err }, "[ads] export failed");
+      res.status(500).json({ error: "Failed to export Ads data" });
+    }
+  });
+
+  api.get(app, "/api/ads/leads/export", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { buildLeadsExport, defaultLeadsSince } = await import("../ads/leads-pull-production");
+      const raw = Number(req.query.since);
+      const since = Number.isFinite(raw) && raw > 0 ? raw : defaultLeadsSince();
+      res.json(buildLeadsExport(getSite(res), since));
+    } catch (err) {
+      log.warn({ err }, "[ads] leads export failed");
+      res.status(500).json({ error: "Failed to export leads" });
+    }
+  });
+
+  api.get(app, "/api/ads/pull-production/origin", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production ad data")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const { resolveProductionOrigin } = await import("../dev-production-fetch");
+    res.json({ productionOrigin: resolveProductionOrigin(getSite(res)) });
+  });
+
+  api.post(app, "/api/ads/pull-production", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production ad data")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const site = getSite(res);
+    try {
+      const { pullProductionAds } = await import("../ads/pull-production");
+      const body = (req.body ?? {}) as { productionOrigin?: unknown; days?: unknown };
+      const result = await pullProductionAds(site, {
+        productionOrigin: typeof body.productionOrigin === "string" ? body.productionOrigin : undefined,
+        days: typeof body.days === "number" ? body.days : undefined,
+      });
+      if (!result.success) return sendPullFailure(res, result, "Failed to download production ad data");
+      res.json({
+        ...result,
+        education:
+          "Replaced local Meta and GA4 ad data with production's. Leads were not changed by this call. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "[ads] pull-production failed");
+      res.status(500).json({ error: "Failed to download production ad data" });
+    }
+  });
+
+  api.post(app, "/api/ads/leads/pull-production", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production leads")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const site = getSite(res);
+    try {
+      const { pullProductionLeads } = await import("../ads/leads-pull-production");
+      const body = (req.body ?? {}) as { productionOrigin?: unknown; since?: unknown };
+      const result = await pullProductionLeads(site, {
+        sinceMs: typeof body.since === "number" && body.since > 0 ? body.since : undefined,
+        productionOrigin: typeof body.productionOrigin === "string" ? body.productionOrigin : undefined,
+      });
+      if (!result.success) return sendPullFailure(res, result, "Failed to download production leads");
+      res.json({
+        ...result,
+        education:
+          "Replaced local real leads and daily consent counts from `since` onward with production's. Local test leads were kept. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "[ads] leads pull-production failed");
+      res.status(500).json({ error: "Failed to download production leads" });
     }
   });
 }
