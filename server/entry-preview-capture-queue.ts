@@ -4,6 +4,8 @@
  */
 
 import { getSiteContextMap, type SiteContext } from "./site-manager";
+import * as fs from "fs";
+import { entryLocaleFilePath, loadEntry, refreshEntrySource } from "./entry-layer";
 import {
   DEFAULT_PREVIEW_WIDTH,
   hashPreviewProps,
@@ -113,28 +115,11 @@ async function loadEntryForCapture(
   slug: string,
   locale: string,
 ): Promise<Record<string, unknown> | null> {
-  const config = getContentTypeConfig(contentType, site.contentRoot);
-  if (!config) return null;
-
-  if (config.database?.slug) {
-    const items = await site.database.fetchMappedItems(contentType);
-    const localeKey = getLocaleKey(contentType, site.contentRoot) || "lang";
-    return (
-      (items.find(
-        (item) =>
-          String(item.slug ?? "") === slug &&
-          String(item[localeKey] || "en") === locale,
-      ) as Record<string, unknown> | undefined) || null
-    );
-  }
-
-  const { data, error } = site.contentIndex.loadMergedContent(
-    contentType as never,
-    slug,
-    locale,
-  );
-  if (error || !data || typeof data !== "object") return null;
-  return data as Record<string, unknown>;
+  if (!getContentTypeConfig(contentType, site.contentRoot)) return null;
+  await refreshEntrySource(site.contentIndex, contentType);
+  const loaded = loadEntry(site.contentIndex, contentType, slug, locale);
+  if (!loaded) return null;
+  return loaded.singleEntry ?? loaded.data;
 }
 
 async function runOneJob(job: InternalJob): Promise<void> {
@@ -172,6 +157,7 @@ async function runOneJob(job: InternalJob): Promise<void> {
     entry,
     contentRoot: site.contentRoot,
     db: site.database,
+    contentIndex: site.contentIndex,
     mediaGallery: site.mediaGallery,
     theme,
   });
@@ -200,9 +186,12 @@ async function runOneJob(job: InternalJob): Promise<void> {
     propsHash,
   });
 
-  const typeConfig = getContentTypeConfig(job.contentType, site.contentRoot);
-  const entryForYaml = await loadEntryForCapture(site, job.contentType, job.slug, locale);
-  if (entryForYaml && !typeConfig?.database?.slug) {
+  // Only entries with their own language file get the generated image written back.
+  const ownFile = entryLocaleFilePath(site.contentIndex, job.contentType, job.slug, locale);
+  const entryForYaml = fs.existsSync(ownFile)
+    ? await loadEntryForCapture(site, job.contentType, job.slug, locale)
+    : null;
+  if (entryForYaml) {
     await persistGeneratedOgImageToEntryYaml({
       contentType: job.contentType,
       slug: job.slug,

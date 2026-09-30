@@ -3,6 +3,7 @@
  */
 
 import * as fs from "fs";
+import { applyListingOverrides } from "./entry-layer";
 import * as path from "path";
 import {
   getAllConfigs,
@@ -87,8 +88,9 @@ function loadMonitoredDbItemsByType(
   const dbItemsByType = new Map<string, Map<string, Record<string, unknown>>>();
   for (const [contentType] of Object.entries(getAllConfigs(contentRoot))) {
     if (!isSeoMonitoringEnabled(contentType, contentRoot)) continue;
-    if (!getDatabaseName(contentType, contentRoot)) continue;
-    const items = dbm.getMappedItemsFromCacheSync(contentType);
+    const listing = dbm.getListingItems(contentType);
+    if (!listing) continue;
+    const items = applyListingOverrides({ contentRoot: root }, contentType, listing.items);
     const byKey = new Map<string, Record<string, unknown>>();
     for (const item of items) {
       const slug = slugFromDbItem(item);

@@ -30,6 +30,9 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import { evaluateVariableWrite, type VariableWriteAction } from "../variable-write-rules";
+import { api } from "../rate-limit/api";
+import { handleVariableCatalogRequest } from "../variable-catalog-route";
 import { getConversionNameUsages, bulkReplaceConversionName, partialReplaceConversionNameBySection, buildFormState, getFormStateSuggestions, getConversionNameCounts, getAllFormEntries } from "../form-state";
 import { sectionMatchesId } from "../utils/sectionIdentity";
 import { deepMerge } from "../utils/deepMerge";
@@ -199,7 +202,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -420,6 +422,21 @@ export function registerSettingsRoutes(app: Express): void {
     res.json(getVM(res).getDefinitions());
   });
 
+  // Must be registered before /api/variables/:name/* so "catalog" is not a :name.
+  api.get(app, "/api/variables/catalog", { rate: "publicRead" }, (req, res) => {
+    try {
+      const result = handleVariableCatalogRequest(req.query as Record<string, unknown>, {
+        vm: getVM(res),
+        ci: getCI(res),
+        contentRoot: getContentRoot(res),
+      });
+      res.status(result.status).json(result.body);
+    } catch (err: any) {
+      log.error({ err }, "Error building variable catalog");
+      res.status(500).json({ error: err?.message || "Failed to build variable catalog" });
+    }
+  });
+
   // Must be registered before /api/variables/:name/* so "usage-summary" is not a :name.
   app.get("/api/variables/usage-summary", (_req, res) => {
     try {
@@ -449,12 +466,35 @@ export function registerSettingsRoutes(app: Express): void {
         return res.status(400).json({ error: "action is required" });
       }
 
+      const vm = getVM(res);
+      const decision = evaluateVariableWrite({
+        name,
+        action: action as VariableWriteAction,
+        existing: def,
+        body: (body ?? {}) as Record<string, unknown>,
+        knownNames: Object.keys(vm.getDefinitions()),
+        usageCount: () => getCI(res).getVariableUsage(name).length,
+      });
+      if (!decision.ok) {
+        return res
+          .status(decision.status)
+          .json({ error: decision.error, code: decision.code, details: decision.details ?? {} });
+      }
+      if (action === "set_metadata") {
+        vm.updateMetadata(name, decision.metadataPatch ?? {});
+        return res.json({ success: true, definitions: vm.getDefinitions() });
+      }
+      const applyMeta = () => {
+        if (decision.metadataPatch) vm.applyMetadata(name, decision.metadataPatch);
+      };
+
       switch (action) {
         case "set_default": {
           const { value } = body as { value: string };
           if (value === undefined) {
             return res.status(400).json({ error: "value is required" });
           }
+          applyMeta();
           getVM(res).updateDefault(name, value);
           break;
         }
@@ -467,6 +507,7 @@ export function registerSettingsRoutes(app: Express): void {
               .status(400)
               .json({ error: "condition with query and value is required" });
           }
+          applyMeta();
           getVM(res).addCondition(name, condition);
           break;
         }
@@ -485,6 +526,7 @@ export function registerSettingsRoutes(app: Express): void {
               error: "index and condition with query and value are required",
             });
           }
+          applyMeta();
           getVM(res).updateCondition(name, index, condition);
           break;
         }
@@ -506,6 +548,7 @@ export function registerSettingsRoutes(app: Express): void {
               .status(400)
               .json({ error: "fromIndex and toIndex are required" });
           }
+          applyMeta();
           getVM(res).reorderConditions(name, fromIndex, toIndex);
           break;
         }
@@ -636,6 +679,25 @@ export function registerSettingsRoutes(app: Express): void {
           error:
             "Invalid variable name. Use letters, numbers, and underscores only.",
         });
+      }
+
+      const renameDecision = evaluateVariableWrite({
+        name: oldName,
+        action: "rename",
+        existing: defToRename,
+        body: (req.body ?? {}) as Record<string, unknown>,
+        knownNames: Object.keys(getVM(res).getDefinitions()),
+        usageCount: () => 0,
+      });
+      if (!renameDecision.ok) {
+        return res.status(renameDecision.status).json({
+          error: renameDecision.error,
+          code: renameDecision.code,
+          details: renameDecision.details ?? {},
+        });
+      }
+      if (renameDecision.metadataPatch) {
+        getVM(res).applyMetadata(oldName, renameDecision.metadataPatch);
       }
 
       const affectedFiles = getCI(res).getVariableUsage(oldName);

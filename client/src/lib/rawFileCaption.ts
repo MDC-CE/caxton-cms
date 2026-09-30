@@ -48,7 +48,7 @@ export interface RawFileCaption {
 
 const PANEL_CODE = "client/src/components/editing/RawFileEditorPanel.tsx";
 const ROUTE_CODE = "server/routes/components.ts";
-const LOADER_CODE = "server/database-single-loader.ts";
+const LOADER_CODE = "server/entry-layer.ts";
 const DRAFT_CODE = "server/draft-entry.ts";
 
 function loc(code: string): string {

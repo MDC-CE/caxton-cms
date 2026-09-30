@@ -152,6 +152,27 @@ const IDEA_CLUSTER_ENTRIES_TOOL = {
   ],
 } as const;
 
+const IDEA_SEO_TARGET_HUB_TOOL = {
+  id: "seo_target_hub",
+  tool: "list_seo_cluster_entries",
+  why: "Recommended for new-URL ideas: confirm the hub named in idea_seo_target is live, same locale, and a fit for the keyword.",
+  look_for: [
+    "hub is live and in the idea's locale; spokes do not already own the main_keyword",
+    "keyword matches the brief's search claim — not a broader head term",
+    "hub mode: members are real live pages that belong under this new hub",
+  ],
+} as const;
+
+const IDEA_SEO_TARGET_PICK_TOOL = {
+  id: "seo_target_pick_hub",
+  tool: "list_seo_clusters",
+  why: "Recommended for new-URL ideas without idea_seo_target: pick a live same-locale hub before accept (accept refuses monitored new pages without a target).",
+  look_for: [
+    "existing hub whose topic owns the keyword",
+    "no fit → hub mode (new page becomes a hub) or standalone only for fast_decay_news / broken_url",
+  ],
+} as const;
+
 const IDEA_ORGANIC_TOOL = {
   id: "idea_traffic_risk",
   tool: "get_organic_traffic",
@@ -204,6 +225,112 @@ const IDEA_EXISTING_DEMAND_EXPLAIN_TOOL = {
     "KD alone never decides",
   ],
 } as const;
+
+const FIGURE_VARIABLES_TOOL = {
+  id: "figure_facts",
+  tool: "list_variables",
+  why: "Outcome figures are on — check proposed prices, hire rates and ratings against the site facts catalog (the approved source).",
+  look_for: [
+    "token → is it the right variable for the claim (monthly vs full price, region vs sitewide)",
+    "hardcoded figure that varies by region → add_blocker asking for the token, unless it equals literal_ok for this page",
+    "number that disagrees with the catalog → add_blocker; stale catalog → author files a notes handoff, keeps the token",
+    "deprecated token → revise_entries to its replaced_by",
+  ],
+} as const;
+
+const SITE_FACTS_TOOL = {
+  id: "site_facts",
+  tool: "list_variables",
+  why: "The proposal states site facts — check them against the catalog (the site's fact database).",
+  look_for: [
+    "stat or company fact → compare with list_variables; region-varying literal → add_blocker asking for the token unless it equals literal_ok",
+    "fact disagrees with the catalog → the catalog wins; stale catalog → ask for a notes handoff to update the variable",
+  ],
+} as const;
+
+const SITE_FACTS_UNAVAILABLE_WHY =
+  "Automated fact check unavailable; showing all site facts — check every stat in the proposal against the catalog.";
+
+/** Checklists that point reviewers at the site facts catalog. */
+const SITE_FACT_CHECKLIST_IDS = new Set([
+  "verify_copy",
+  "title_description_ctr",
+  "locale_translation",
+  "new_content_brand",
+  "idea_opportunity_harm",
+]);
+
+export type VariablesDiscoveryItem = {
+  kind: "figures" | "facts";
+  args_hint: Record<string, unknown>;
+  unavailable_check?: boolean;
+};
+
+/**
+ * At most one list_variables item: figures (outcome-figures review on) wins over site facts
+ * (fact checklist active + Jev categories, fact tokens, or Jev unavailable).
+ */
+export function pickVariablesDiscoveryItem(opts: {
+  reviewContext?: ReviewContextForDiscovery | null;
+  entry?: { contentType: string; slug: string; locale?: string } | null;
+}): VariablesDiscoveryItem | null {
+  const rc = opts.reviewContext;
+  if (!rc) return null;
+  const checklists = rc.active_checklists ?? [];
+  const entryCtx =
+    opts.entry?.contentType && opts.entry.slug
+      ? {
+          context: {
+            entry: {
+              contentType: opts.entry.contentType,
+              slug: opts.entry.slug,
+              ...(opts.entry.locale ? { locale: opts.entry.locale } : {}),
+            },
+          },
+        }
+      : {};
+
+  const figuresOn = checklists.includes("selling_page_figures") || rc.damage_class === "selling_page";
+  if (figuresOn) {
+    const names = (rc.figure_variables ?? []).map((f) => f.name);
+    return names.length
+      ? { kind: "figures", args_hint: { names, ...entryCtx } }
+      : { kind: "figures", args_hint: { figures_only: true } };
+  }
+
+  if (!checklists.some((c) => SITE_FACT_CHECKLIST_IDS.has(c))) return null;
+  const names = rc.fact_variable_names ?? [];
+  const facts = rc.site_facts;
+  if (facts?.outcome === "unavailable") {
+    return {
+      kind: "facts",
+      args_hint: { facts_only: true, ...(names.length ? { names, ...entryCtx } : {}) },
+      unavailable_check: true,
+    };
+  }
+  const categories = facts?.outcome === "ok" ? facts.categories : [];
+  if (!categories.length && !names.length) return null;
+  return {
+    kind: "facts",
+    args_hint: {
+      ...(categories.length ? { category: categories } : {}),
+      ...(names.length ? { names, ...entryCtx } : {}),
+    },
+  };
+}
+
+function variablesToolItem(
+  pick: VariablesDiscoveryItem,
+  allowed: Set<string> | null,
+): DiscoveryPathToolItem {
+  const def = pick.kind === "figures" ? FIGURE_VARIABLES_TOOL : SITE_FACTS_TOOL;
+  const item = toToolItem(
+    pick.unavailable_check ? { ...def, why: SITE_FACTS_UNAVAILABLE_WHY } : def,
+    allowed,
+    pick.args_hint,
+  );
+  return item;
+}
 
 const FUNNEL_ANALYTICS_TOOL = {
   id: "journey_metrics",
@@ -302,6 +429,7 @@ export function proposalDiscoveryToolNames(): string[] {
     LIST_PRODUCTS_TOOL.tool,
     GET_PRODUCT_TOOL.tool,
     SITE_ANALYTICS_TOOL.tool,
+    FIGURE_VARIABLES_TOOL.tool,
     SEO_RESEARCH_SERP_TOOL.tool,
     SEO_RESEARCH_IDEAS_TOOL.tool,
     IDEA_EXPLAIN_TOOL.tool,
@@ -309,6 +437,7 @@ export function proposalDiscoveryToolNames(): string[] {
     LIST_VARIANTS_TOOL.tool,
     IDEA_ENTRY_SEO_TOOL.tool,
     IDEA_CLUSTER_ENTRIES_TOOL.tool,
+    IDEA_SEO_TARGET_PICK_TOOL.tool,
     IDEA_ORGANIC_TOOL.tool,
     IDEA_RUNTIME_ISSUES_TOOL.tool,
     IDEA_TEST_REDIRECT_TOOL.tool,
@@ -343,6 +472,13 @@ export type ProposalDiscoveryInput = {
     slug: string;
     locale?: string;
   }>;
+  /** Idea only: structured keyword + cluster target (null when not set yet). */
+  idea_seo_target?: {
+    main_keyword: string;
+    cluster: { mode: string; pillar_path?: string };
+  } | null;
+  /** Idea only: accepted_entry does not exist yet (new URL / new locale). */
+  idea_new_url?: boolean;
   open_blocker_count?: number;
   blockers?: unknown[];
 };
@@ -372,10 +508,14 @@ export type ReviewContextForDiscovery = {
     layout_owner?: string;
     is_shared_template?: boolean;
   }>;
+  warnings?: Array<{ code: string }>;
   agent_preview?: {
     think_items?: AgentPreviewThink[];
     warnings?: DiscoveryWarning[];
   };
+  figure_variables?: Array<{ name: string }>;
+  fact_variable_names?: string[];
+  site_facts?: { outcome: "ok" | "unavailable"; categories: string[] };
 };
 
 export type BuildProposalDiscoveryPathOpts = {
@@ -546,6 +686,8 @@ export function buildEditsDiscoveryToolItems(opts: {
   layoutCreated?: boolean;
   /** A pending entry is the shared template itself. */
   templateEntry?: boolean;
+  /** list_variables item (figures or site facts); placed before the traffic tools' analytics slot. */
+  variablesItem?: VariablesDiscoveryItem | null;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
   const {
     allowed,
@@ -640,6 +782,10 @@ export function buildEditsDiscoveryToolItems(opts: {
     items.push(toToolItem(GET_PRODUCT_TOOL, allowed));
   }
 
+  if (opts.variablesItem) {
+    items.push(variablesToolItem(opts.variablesItem, allowed));
+  }
+
   items.push(toToolItem(ORGANIC_TOOL, allowed));
 
   const hasFunnelOp = pendingFieldPaths.some((p) => p === "funnel" || p.startsWith("funnel."));
@@ -698,8 +844,11 @@ export function buildIdeaDiscoveryToolItems(opts: {
   allowed: Set<string> | null;
   related?: Array<{ contentType: string; slug: string; locale?: string }> | null;
   situations?: ReviewSituationId[] | null;
+  seoTarget?: ProposalDiscoveryInput["idea_seo_target"];
+  newUrl?: boolean;
+  variablesItem?: VariablesDiscoveryItem | null;
 }): { items: DiscoveryPathToolItem[]; anyCapped: boolean } {
-  const { allowed, related, situations } = opts;
+  const { allowed, related, situations, seoTarget, newUrl } = opts;
   const brokenUrl = (situations ?? []).includes("broken_url");
   const existingDemand = (situations ?? []).includes("existing_demand");
   const explainTool = brokenUrl
@@ -719,6 +868,19 @@ export function buildIdeaDiscoveryToolItems(opts: {
     items.push(toToolItem(IDEA_TEST_REDIRECT_TOOL, allowed, {}));
     const anyCappedBroken = items.some((i) => !i.available);
     return { items, anyCapped: anyCappedBroken };
+  }
+
+  if (seoTarget?.cluster.mode === "join" && seoTarget.cluster.pillar_path) {
+    items.push(
+      toToolItem(IDEA_SEO_TARGET_HUB_TOOL, allowed, {
+        q: seoTarget.cluster.pillar_path,
+        bucket: "clustered",
+      }),
+    );
+  } else if (seoTarget?.cluster.mode === "hub") {
+    items.push(toToolItem(IDEA_SEO_TARGET_HUB_TOOL, allowed, { q: seoTarget.main_keyword }));
+  } else if (!seoTarget && newUrl) {
+    items.push(toToolItem(IDEA_SEO_TARGET_PICK_TOOL, allowed, {}));
   }
 
   const first = related?.find((r) => r.contentType?.trim() && r.slug?.trim()) ?? null;
@@ -742,6 +904,10 @@ export function buildIdeaDiscoveryToolItems(opts: {
         mode: "paths",
       }),
     );
+  }
+
+  if (opts.variablesItem) {
+    items.push(variablesToolItem(opts.variablesItem, allowed));
   }
 
   const anyCapped = items.some((i) => !i.available);
@@ -965,6 +1131,10 @@ export function buildProposalDiscoveryPath(
       includeLayoutTools,
       layoutCreated: includeLayoutTools && layoutCreated,
       templateEntry,
+      variablesItem: pickVariablesDiscoveryItem({
+        reviewContext,
+        entry: first ? { contentType: first.contentType, slug: first.slug, locale: first.locale } : null,
+      }),
     });
     tools = built.items;
     if (built.anyCapped) {
@@ -979,6 +1149,13 @@ export function buildProposalDiscoveryPath(
       allowed,
       related: proposal.related_entries ?? null,
       situations: (reviewContext?.review_situations ?? []) as ReviewSituationId[],
+      seoTarget: proposal.idea_seo_target ?? null,
+      variablesItem: pickVariablesDiscoveryItem({ reviewContext, entry: null }),
+      newUrl:
+        proposal.idea_new_url ??
+        [...(reviewContext?.warnings ?? []), ...(reviewContext?.agent_preview?.warnings ?? [])].some(
+          (w) => w.code === "idea_seo_target_missing",
+        ),
     });
     tools = built.items;
     if (built.anyCapped) {

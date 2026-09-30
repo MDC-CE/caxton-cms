@@ -21,7 +21,7 @@ import {
   resolveEntryUpdatedAt,
   resolveUrlPatternWithMapping,
 } from "./content-types";
-import { getBaseUrl } from "./hreflang";
+import { getSiteBaseUrl } from "./site-urls";
 import { getDefaultLocale } from "./settings";
 import { queryEntries } from "./query-entries";
 import { loadRawYaml, parseRoute } from "./ssr-route";
@@ -97,7 +97,7 @@ export async function collectDatabaseRecordSchemas(
   ci: ContentIndex,
   contentRoot: string,
 ): Promise<PageSchemaCollectResult> {
-  const baseUrl = getBaseUrl();
+  const baseUrl = getSiteBaseUrl(contentRoot);
   const config = getContentTypeConfig(contentType, contentRoot);
   if (!config?.url_pattern) return emptyResult();
 
@@ -239,14 +239,15 @@ export async function collectStaticPageSchemas(
       authorsForLd = pageData.authors as Array<Record<string, unknown> | string>;
     }
 
+    const siteBaseUrl = getSiteBaseUrl(contentRoot);
     const context: SchemaComponentContext = {
       locale: route.locale,
       contentRoot,
-      baseUrl: getBaseUrl(),
+      baseUrl: siteBaseUrl,
       locationSlug: route.contentType === "location" ? route.slug : undefined,
       programSlug: route.contentType === "program" ? route.slug : undefined,
       contentType: route.contentType,
-      pageUrl: `${getBaseUrl()}${url.split("?")[0]}`,
+      pageUrl: `${siteBaseUrl}${url.split("?")[0]}`,
       title:
         (typeof metaForSchema?.page_title === "string" ? metaForSchema.page_title : undefined) ||
         (typeof pageData.title === "string" ? pageData.title : undefined),

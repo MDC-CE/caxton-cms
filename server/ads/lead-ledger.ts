@@ -1,0 +1,367 @@
+/**
+ * Server lead ledger (pipeline SQLite `lead_submissions`) + lead webhook enrichment.
+ *
+ * Every lead submission gets a `submission_id`, test/repeat flags, campaign context
+ * (from the HttpOnly `4g_ads` cookie when consent was given, else the request body)
+ * and the page version. The ledger row stores NO name / email / phone — personal
+ * data only goes to the CRM webhook. Test and repeat leads are still delivered.
+ */
+
+import crypto from "crypto";
+import type { Request, Response } from "express";
+import { getSiteSqlite } from "../db";
+import { ensurePipelineDb } from "../pipeline-db/runner";
+import { getAdsSettings } from "../settings";
+import { getDefaultContentRoot } from "../site-config";
+import { getVersioningCookie, hashUserId } from "../versioning/cookie-utils";
+import { extractToken } from "../routes/_helpers";
+import { resolveOwnedStaffSession } from "../staff-session-resolve";
+import { hasTrackingConsentCookie, readAdContext, type AdContext } from "./ad-context";
+import { pruneConsentDaily } from "./consent-store";
+import { CONSENT_COOKIE_NAME, isGrantedDecision, parseConsentCookie } from "@shared/consent";
+import { emailMatchesPattern } from "@shared/ads-settings";
+import { CLICK_ID_PARAMS, classifyTraffic, normalizeLandingPath, type ClickIdParam } from "@shared/paid-traffic";
+import type { PaidLandingRef } from "@shared/session";
+import { child } from "../logger";
+
+const log = child({ module: "ads/lead-ledger" });
+
+export const REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const LEDGER_RETENTION_MONTHS = 25;
+const PRUNE_EVERY_MS = 24 * 60 * 60 * 1000;
+const lastPruneBySite = new Map<string, number>();
+
+export type TestReason = "staff_session" | "email_pattern";
+export type ConsentState = "granted" | "denied" | "unset";
+
+export type LedgerRow = {
+  submission_id: string;
+  created_at: number;
+  form: string | null;
+  browser_hash: string | null;
+  host: string | null;
+  locale: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_content: string | null;
+  utm_term: string | null;
+  platform: string | null;
+  campaign_id: string | null;
+  adset_id: string | null;
+  ad_id: string | null;
+  click_id_type: string | null;
+  landing_path: string | null;
+  conversion_path: string | null;
+  first_paid_host: string | null;
+  first_paid_path: string | null;
+  first_paid_at: number | null;
+  last_paid_host: string | null;
+  last_paid_path: string | null;
+  last_paid_at: number | null;
+  experiment_id: string | null;
+  variant: string | null;
+  is_test: 0 | 1;
+  test_reason: string | null;
+  is_repeat: 0 | 1;
+  repeat_of: string | null;
+  consent_state: ConsentState;
+};
+
+function str(v: unknown, max = 300): string | null {
+  return typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
+}
+
+function num(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function pathOf(urlOrPath: string | null): string | null {
+  if (!urlOrPath) return null;
+  try {
+    return normalizeLandingPath(new URL(urlOrPath, "https://x.invalid").pathname);
+  } catch {
+    return null;
+  }
+}
+
+function landingFromBody(body: Record<string, unknown>, prefix: "first" | "last"): PaidLandingRef | undefined {
+  const host = str(body[`${prefix}_paid_landing_host`], 120);
+  const path = str(body[`${prefix}_paid_landing_path`]);
+  const at = num(body[`${prefix}_paid_landing_at`]);
+  if (!host || !path || at == null) return undefined;
+  return { host: host.toLowerCase(), path: normalizeLandingPath(path), at };
+}
+
+function consentStateFrom(req: Request): ConsentState {
+  const parsed = parseConsentCookie(req.cookies?.[CONSENT_COOKIE_NAME]);
+  if (!parsed) return "unset";
+  return isGrantedDecision(parsed.decision) ? "granted" : "denied";
+}
+
+/** Numeric Meta ids only (template: utm_id=campaign.id, utm_term=adset.id, utm_content=ad.id). */
+function metaId(v: string | null | undefined): string | null {
+  return v && /^\d{6,25}$/.test(v) ? v : null;
+}
+
+function resolvePageVersion(req: Request, body: Record<string, unknown>): { experiment_id: string; variant: string } | null {
+  const experimentId = str(body.page_experiment_id, 300);
+  if (!experimentId) return null;
+  const cookie = getVersioningCookie(req);
+  const match = cookie?.assignments?.find(
+    (a) => `${a.contentType}:${a.slug}:${a.locale}` === experimentId,
+  );
+  return match ? { experiment_id: experimentId, variant: match.variantSlug } : null;
+}
+
+async function staffSessionUsername(req: Request): Promise<string | null> {
+  const token = extractToken(req);
+  if (!token) return null;
+  try {
+    return (await resolveOwnedStaffSession(token))?.username ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export type PreparedLead = {
+  /** Scalars merged onto the webhook payload (always includes is_test / is_repeat). */
+  wire: Record<string, string | number | boolean>;
+  row: LedgerRow;
+};
+
+export async function prepareLead(req: Request, res: Response, body: Record<string, unknown>): Promise<PreparedLead> {
+  const now = Date.now();
+  const contentRoot = (res.locals.site as { contentRoot?: string } | undefined)?.contentRoot ?? getDefaultContentRoot();
+  const site = (res.locals.site as { contentRootName?: string } | undefined)?.contentRootName ?? null;
+
+  const consentState = consentStateFrom(req);
+  const cookieCtx: AdContext | null = hasTrackingConsentCookie(req) ? readAdContext(req) : null;
+  const pick = (key: string): string | null =>
+    str((cookieCtx?.utm as Record<string, unknown> | undefined)?.[key]) ?? str(body[key]);
+
+  const submissionId = (() => {
+    const raw = str(body.submission_id, 64);
+    return raw && /^[A-Za-z0-9-]{8,64}$/.test(raw) ? raw : crypto.randomUUID();
+  })();
+
+  const clickIds: Partial<Record<ClickIdParam, string>> = {};
+  for (const c of CLICK_ID_PARAMS) {
+    const v = pick(c);
+    if (v) clickIds[c] = v;
+  }
+  const utm = {
+    utm_source: pick("utm_source"),
+    utm_medium: pick("utm_medium"),
+    utm_campaign: pick("utm_campaign"),
+    utm_content: pick("utm_content"),
+    utm_term: pick("utm_term"),
+    utm_id: pick("utm_id"),
+  };
+  const cls = classifyTraffic({ utm_source: utm.utm_source, utm_medium: utm.utm_medium, click_ids: clickIds });
+
+  const firstPaid = cookieCtx?.first_paid ?? landingFromBody(body, "first");
+  const lastPaid = cookieCtx?.last_paid ?? landingFromBody(body, "last");
+
+  const email = str(body.email, 320);
+  const settings = getAdsSettings(contentRoot);
+  let testReason: TestReason | null = null;
+  if (await staffSessionUsername(req)) testReason = "staff_session";
+  else if (email && settings.test_email_patterns.some((p) => emailMatchesPattern(email, p))) testReason = "email_pattern";
+
+  const browserId =
+    (req.cookies?.["4g_user_id"] as string | undefined) ||
+    (req.cookies?.["4g_visitor_id"] as string | undefined) ||
+    (typeof req.headers["x-user-id"] === "string" ? req.headers["x-user-id"] : "");
+  const browserHash = browserId ? hashUserId(browserId) : null;
+  const form = str(body.conversion_name, 120);
+
+  let repeatOf: string | null = null;
+  if (site && browserHash) {
+    try {
+      ensurePipelineDb(site);
+      const prior = getSiteSqlite(site)
+        .prepare(
+          `SELECT submission_id FROM lead_submissions
+           WHERE browser_hash = ? AND IFNULL(form, '') = IFNULL(?, '') AND created_at >= ? AND is_repeat = 0
+           ORDER BY created_at ASC LIMIT 1`,
+        )
+        .get(browserHash, form, now - REPEAT_WINDOW_MS) as { submission_id: string } | undefined;
+      repeatOf = prior?.submission_id ?? null;
+    } catch (err) {
+      log.warn({ err }, "[lead-ledger] repeat lookup failed");
+    }
+  }
+
+  const version = resolvePageVersion(req, body);
+  const landingUrl = str(body.landing_url, 1000);
+  const conversionUrl = str(body.conversion_url, 1000);
+  const firstClick = CLICK_ID_PARAMS.find((c) => clickIds[c]) ?? null;
+
+  const row: LedgerRow = {
+    submission_id: submissionId,
+    created_at: now,
+    form,
+    browser_hash: browserHash,
+    host: str(req.hostname, 120),
+    locale: str(body.language, 10),
+    utm_source: utm.utm_source,
+    utm_medium: utm.utm_medium,
+    utm_campaign: utm.utm_campaign,
+    utm_content: utm.utm_content,
+    utm_term: utm.utm_term,
+    platform: cls.status === "organic" ? null : cls.platform,
+    campaign_id: cls.platform === "meta" ? metaId(utm.utm_id) : null,
+    adset_id: cls.platform === "meta" ? metaId(utm.utm_term) : null,
+    ad_id: cls.platform === "meta" ? metaId(utm.utm_content) : null,
+    click_id_type: firstClick,
+    landing_path: pathOf(landingUrl),
+    conversion_path: pathOf(conversionUrl),
+    first_paid_host: firstPaid?.host ?? null,
+    first_paid_path: firstPaid?.path ?? null,
+    first_paid_at: firstPaid?.at ?? null,
+    last_paid_host: lastPaid?.host ?? null,
+    last_paid_path: lastPaid?.path ?? null,
+    last_paid_at: lastPaid?.at ?? null,
+    experiment_id: version?.experiment_id ?? null,
+    variant: version?.variant ?? null,
+    is_test: testReason ? 1 : 0,
+    test_reason: testReason,
+    is_repeat: repeatOf ? 1 : 0,
+    repeat_of: repeatOf,
+    consent_state: consentState,
+  };
+
+  const wire: Record<string, string | number | boolean> = {
+    submission_id: submissionId,
+    is_test: !!testReason,
+    is_repeat: !!repeatOf,
+    consent_state: consentState,
+  };
+  if (testReason) wire.test_reason = testReason;
+  if (repeatOf) wire.repeat_of_submission_id = repeatOf;
+  for (const [k, v] of Object.entries(utm)) if (v) wire[k] = v;
+  for (const [k, v] of Object.entries(clickIds)) if (v) wire[k] = v;
+  const fbp = pick("fbp");
+  const fbc = pick("fbc");
+  if (fbp) wire.fbp = fbp;
+  if (fbc) wire.fbc = fbc;
+  const firstTouch = cookieCtx?.first_touch;
+  for (const key of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const) {
+    const v = str((firstTouch as Record<string, unknown> | undefined)?.[key]) ?? str(body[`first_${key}`]);
+    if (v) wire[`first_${key}`] = v;
+  }
+  if (landingUrl) wire.landing_url = landingUrl;
+  if (conversionUrl) wire.conversion_url = conversionUrl;
+  if (firstPaid) {
+    wire.first_paid_landing_url = `https://${firstPaid.host}${firstPaid.path}`;
+    wire.first_paid_landing_at = new Date(firstPaid.at).toISOString();
+  }
+  if (lastPaid) {
+    wire.last_paid_landing_url = `https://${lastPaid.host}${lastPaid.path}`;
+    wire.last_paid_landing_at = new Date(lastPaid.at).toISOString();
+  }
+  if (cls.status !== "organic" && cls.platform) wire.ad_platform = cls.platform;
+  if (version) {
+    wire.page_experiment_id = version.experiment_id;
+    wire.page_variant = version.variant;
+  }
+
+  return { wire, row };
+}
+
+/** Body keys the lead form sends only for the ledger/enrichment (never forwarded raw). */
+export const LEDGER_ONLY_BODY_KEYS = new Set([
+  "first_paid_landing_host",
+  "first_paid_landing_path",
+  "first_paid_landing_at",
+  "last_paid_landing_host",
+  "last_paid_landing_path",
+  "last_paid_landing_at",
+  "page_experiment_id",
+]);
+
+/** Incoming body + enrichment, ready for buildLeadPayload. Enrichment wins over raw body keys. */
+export function enrichLeadBody(body: Record<string, unknown>, wire: PreparedLead["wire"]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (!LEDGER_ONLY_BODY_KEYS.has(k)) out[k] = v;
+  }
+  return { ...out, ...wire };
+}
+
+export function insertLedgerRow(site: string, row: LedgerRow): void {
+  ensurePipelineDb(site);
+  const cols = Object.keys(row) as (keyof LedgerRow)[];
+  getSiteSqlite(site)
+    .prepare(
+      `INSERT OR IGNORE INTO lead_submissions (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+    )
+    .run(...cols.map((c) => row[c]));
+  maybePruneLedger(site);
+}
+
+export function pruneLedger(site: string, now: number = Date.now()): number {
+  ensurePipelineDb(site);
+  const cutoff = new Date(now);
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - LEDGER_RETENTION_MONTHS);
+  const info = getSiteSqlite(site).prepare("DELETE FROM lead_submissions WHERE created_at < ?").run(cutoff.getTime());
+  return Number(info.changes ?? 0);
+}
+
+function maybePruneLedger(site: string): void {
+  const last = lastPruneBySite.get(site) ?? 0;
+  if (Date.now() - last < PRUNE_EVERY_MS) return;
+  lastPruneBySite.set(site, Date.now());
+  try {
+    const removed = pruneLedger(site);
+    pruneConsentDaily(site);
+    if (removed > 0) log.info(`[lead-ledger] pruned ${removed} rows older than ${LEDGER_RETENTION_MONTHS} months site=${site}`);
+  } catch (err) {
+    log.warn({ err }, "[lead-ledger] prune failed");
+  }
+}
+
+/**
+ * Enrich a lead body and record the ledger row before webhook delivery.
+ * Ledger failures never block the lead.
+ */
+export async function recordLeadSubmission(
+  req: Request,
+  res: Response,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  try {
+    const prepared = await prepareLead(req, res, body);
+    const site = (res.locals.site as { contentRootName?: string } | undefined)?.contentRootName;
+    if (site) {
+      try {
+        insertLedgerRow(site, prepared.row);
+      } catch (err) {
+        log.warn({ err }, "[lead-ledger] insert failed");
+      }
+    }
+    return enrichLeadBody(body, prepared.wire);
+  } catch (err) {
+    log.warn({ err }, "[lead-ledger] enrichment failed; delivering raw lead");
+    return body;
+  }
+}
+
+export type LedgerQueryRow = LedgerRow;
+
+export function listLedgerRows(site: string, sinceMs: number): LedgerQueryRow[] {
+  ensurePipelineDb(site);
+  return getSiteSqlite(site)
+    .prepare("SELECT * FROM lead_submissions WHERE created_at >= ? ORDER BY created_at ASC")
+    .all(sinceMs) as LedgerQueryRow[];
+}
+
+export function ledgerCollectingSince(site: string): number | null {
+  ensurePipelineDb(site);
+  const row = getSiteSqlite(site).prepare("SELECT MIN(created_at) AS first FROM lead_submissions").get() as
+    | { first: number | null }
+    | undefined;
+  return row?.first ?? null;
+}

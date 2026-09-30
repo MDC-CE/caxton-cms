@@ -187,15 +187,7 @@ Use this checklist when verifying that `visitor_id` flows correctly end-to-end.
 
 ## Cookie Reference
 
-| Cookie Name      | Description                                   | Max Age  |
-|------------------|-----------------------------------------------|----------|
-| `4g_visitor_id`  | Stable user identity (client-readable UUID)   | 180 days |
-| `4g_user_id`     | Legacy user identity (fallback)               | 180 days |
-| `4g_versioning`  | A/B test variant assignments (HttpOnly)       | 30 days  |
-
-The cookie is set by `setVisitorIdCookie()` in `client/src/lib/sessionBootstrap.ts` and read by `getVisitorIdFromCookie()`, which is called inside every dataLayer push.
-
-> **Note:** The legacy cookie name `4g_user_id` is still read as a fallback for backward compatibility, but all new sessions write to `4g_visitor_id`.
+The full cookie list (names, lifetimes, consent category, what each stores) lives in [cookies.md](cookies.md). Keep it as the single source of truth.
 
 ---
 

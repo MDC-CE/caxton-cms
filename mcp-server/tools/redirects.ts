@@ -275,6 +275,12 @@ export function registerRedirectTools(mcp: McpServer, mcpToken?: string): void {
       locale: z.string().optional().describe("Optional locale for inspect / dest resolution (add)"),
       status: z.number().optional().describe("301 or 302 (add; default 301)"),
       priority: z.enum(["before", "fallback"]).optional().describe("Custom-file priority (add; default before)"),
+      removed_entry: z
+        .object({ content_type: z.string(), slug: z.string(), locale: z.string() })
+        .optional()
+        .describe(
+          "add only (SOURCE_ITEM_REMOVED): the removed page. Old addresses saved in its {locale}.yml / _common.yml meta.redirects move to the same `to` and are removed from the removed page's files.",
+        ),
       ...requiredAgentSessionIdField,
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
@@ -350,6 +356,7 @@ export function registerRedirectTools(mcp: McpServer, mcpToken?: string): void {
           if (args.status) body.status = args.status;
           if (args.priority) body.priority = args.priority;
           if (args.before_from) body.before_from = args.before_from;
+          if (args.removed_entry) body.removed_entry = args.removed_entry;
           // Never allLanguages / _common.yml in v1.
 
           const res = await fetch(
@@ -360,11 +367,37 @@ export function registerRedirectTools(mcp: McpServer, mcpToken?: string): void {
               body: JSON.stringify(body),
             },
           );
-          const data = (await res.json()) as { error?: string; code?: string; file?: string; message?: string };
+          const data = (await res.json()) as {
+            error?: string;
+            code?: string;
+            file?: string;
+            message?: string;
+            created?: string[];
+            moved_inbound?: { from: string; source: string; file: string }[];
+            not_moved?: { from: string; source: string; error: string }[];
+            warnings?: McpWarning[];
+          };
           if (!res.ok) {
             return fail(data.error || `Server error: ${res.status}`, { code: data.code, status: res.status });
           }
           const file = data.file || `${contentFolder}/custom-redirects.yml`;
+          const moved = data.moved_inbound ?? [];
+          const sideEffects = mutateSideEffects(file);
+          for (const created of data.created ?? []) {
+            sideEffects.push({
+              kind: "file_created",
+              summary: `Created ${created} (destination page had no file in this language)`,
+              paths: [created],
+            });
+          }
+          if (moved.length) {
+            const sources = [...new Set(moved.map((m) => m.source))];
+            sideEffects.push({
+              kind: "inbound_redirects_moved",
+              summary: `Moved ${moved.length} old address(es) from ${sources.join(", ")} to ${to}`,
+              paths: [...sources, ...new Set(moved.map((m) => m.file))],
+            });
+          }
           return ok(
             {
               message: data.message || `Redirect added: ${from} -> ${to}`,
@@ -372,10 +405,14 @@ export function registerRedirectTools(mcp: McpServer, mcpToken?: string): void {
               from,
               to,
               file,
+              ...(args.removed_entry ? { moved_inbound: moved, ...(data.not_moved?.length ? { not_moved: data.not_moved } : {}) } : {}),
             },
             {
-              warnings: mutateWarnings({ wroteCustom: writingCustom || isCustomRedirectSource(file), regex: isRegexFrom(from) }),
-              side_effects: mutateSideEffects(file),
+              warnings: [
+                ...mutateWarnings({ wroteCustom: writingCustom || isCustomRedirectSource(file), regex: isRegexFrom(from) }),
+                ...(data.warnings ?? []),
+              ],
+              side_effects: sideEffects,
               next_actions: [
                 {
                   tool: "test_redirect",

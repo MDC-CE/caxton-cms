@@ -47,6 +47,25 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  EMPTY_METADATA_DRAFT,
+  VariableMetadataFields,
+  metadataDraftFrom,
+  metadataDraftReady,
+  metadataDraftToBody,
+  type VariableMetadataDraft,
+} from "@/components/editing/VariableMetadataFields";
+import { variableWrite, VariableWriteError, type FigureChangeDetails } from "@/lib/variable-write";
 
 interface VariableDetailModalProps {
   open: boolean;
@@ -94,6 +113,7 @@ function ConditionForm({
   onCancel,
   saveLabel,
   localeOptions,
+  blocked = false,
 }: {
   initialQuery?: Record<string, string>;
   initialValue?: string;
@@ -101,6 +121,7 @@ function ConditionForm({
   onCancel: () => void;
   saveLabel: string;
   localeOptions: { value: string; label: string }[];
+  blocked?: boolean;
 }) {
   const [queryPairs, setQueryPairs] = useState<{ key: string; value: string }[]>(
     initialQuery
@@ -124,6 +145,7 @@ function ConditionForm({
   };
 
   const canSave =
+    !blocked &&
     queryPairs.length > 0 &&
     queryPairs.every((p) => p.key && p.value) &&
     conditionValue.trim() !== "";
@@ -264,7 +286,17 @@ export function VariableDetailModal({
   });
   const localeOptions = (localeSettingsData?.supported_locales ?? [{ code: "en", label: "English" }, { code: "es", label: "Spanish" }])
     .map(l => ({ value: l.code, label: `${l.label} (${l.code})` }));
-  const [activeTab, setActiveTab] = useState<"explain" | "edit" | "rename">("explain");
+  const [activeTab, setActiveTab] = useState<"explain" | "details" | "edit" | "rename">("explain");
+  const [metaDraft, setMetaDraft] = useState<VariableMetadataDraft>(EMPTY_METADATA_DRAFT);
+  const [createMeta, setCreateMeta] = useState<VariableMetadataDraft>(EMPTY_METADATA_DRAFT);
+  const [metaError, setMetaError] = useState<"description" | "category" | null>(null);
+  const [metaSaving, setMetaSaving] = useState(false);
+  const [figurePrompt, setFigurePrompt] = useState<{
+    details: FigureChangeDetails;
+    body: Record<string, unknown>;
+    onDone: () => void;
+    successTitle: string;
+  } | null>(null);
   const [createName, setCreateName] = useState("");
   const [createSaving, setCreateSaving] = useState(false);
   const [currentMode, setCurrentMode] = useState(mode);
@@ -344,59 +376,122 @@ export function VariableDetailModal({
     queryClient.invalidateQueries({ queryKey: ["/api/variables"] });
   };
 
-  const handleSetDefault = async (value: string) => {
+  const isReservedVar = !!definition?.isReserved;
+  const metadataMissing =
+    !!definition && !isReservedVar && (!definition.description?.trim() || !definition.category?.trim());
+  const metaReady = !metadataMissing || metadataDraftReady(metaDraft);
+
+  useEffect(() => {
+    setMetaDraft(metadataDraftFrom(definition));
+    setMetaError(null);
+    // Reset only when switching variables, not on every definitions refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveVarName, open]);
+
+  useEffect(() => {
+    if (open && mode === "create") setCreateMeta(EMPTY_METADATA_DRAFT);
+  }, [open, mode]);
+
+  const handleWriteError = (err: unknown, title: string): boolean => {
+    if (err instanceof VariableWriteError) {
+      if (err.code === "description_required" || err.code === "category_required") {
+        setMetaError(err.code === "description_required" ? "description" : "category");
+      }
+      toast({ title, description: err.message, variant: "destructive" });
+      return true;
+    }
+    toast({
+      title,
+      description: err instanceof Error ? err.message : "Unknown error",
+      variant: "destructive",
+    });
+    return true;
+  };
+
+  /** PUT a value write; attaches missing metadata and routes figure changes through the confirm dialog. */
+  const writeVariable = async (
+    body: Record<string, unknown>,
+    opts: { successTitle: string; failTitle: string; onDone: () => void },
+  ) => {
+    const payload = metadataMissing ? { ...body, metadata: metadataDraftToBody(metaDraft) } : body;
     try {
-      await apiRequest("PUT", `/api/variables/${effectiveVarName}`, {
-        action: "set_default",
-        value,
+      await variableWrite("PUT", `/api/variables/${effectiveVarName}`, payload);
+      await invalidateAndRefetch();
+      setMetaError(null);
+      opts.onDone();
+      toast({ title: opts.successTitle });
+    } catch (err) {
+      if (err instanceof VariableWriteError && err.code === "confirm_figure_change") {
+        setFigurePrompt({
+          details: err.details as unknown as FigureChangeDetails,
+          body: payload,
+          onDone: opts.onDone,
+          successTitle: opts.successTitle,
+        });
+        return;
+      }
+      handleWriteError(err, opts.failTitle);
+    }
+  };
+
+  const confirmFigureChange = async () => {
+    if (!figurePrompt) return;
+    const { body, onDone, successTitle } = figurePrompt;
+    setFigurePrompt(null);
+    try {
+      await variableWrite("PUT", `/api/variables/${effectiveVarName}`, { ...body, confirm_figure_change: true });
+      await invalidateAndRefetch();
+      onDone();
+      toast({ title: successTitle });
+    } catch (err) {
+      handleWriteError(err, "Failed to save");
+    }
+  };
+
+  const handleSaveMetadata = async () => {
+    if (!metadataDraftReady(metaDraft)) {
+      setMetaError(!metaDraft.description.trim() ? "description" : "category");
+      return;
+    }
+    setMetaSaving(true);
+    try {
+      await variableWrite("PUT", `/api/variables/${effectiveVarName}`, {
+        action: "set_metadata",
+        ...metadataDraftToBody(metaDraft),
       });
       await invalidateAndRefetch();
-      setEditingDefault(false);
-      toast({ title: "Default updated" });
+      setMetaError(null);
+      toast({ title: "Details saved" });
     } catch (err) {
-      toast({
-        title: "Failed to save",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
+      handleWriteError(err, "Failed to save details");
+    } finally {
+      setMetaSaving(false);
     }
+  };
+
+  const handleSetDefault = async (value: string) => {
+    await writeVariable(
+      { action: "set_default", value },
+      { successTitle: "Default updated", failTitle: "Failed to save", onDone: () => setEditingDefault(false) },
+    );
   };
 
   const handleAddCondition = async (query: Record<string, string>, value: string) => {
-    try {
-      await apiRequest("PUT", `/api/variables/${effectiveVarName}`, {
-        action: "add_condition",
-        condition: { query, value },
-      });
-      await invalidateAndRefetch();
-      setAddingCondition(false);
-      toast({ title: "Condition added" });
-    } catch (err) {
-      toast({
-        title: "Failed to add condition",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
+    await writeVariable(
+      { action: "add_condition", condition: { query, value } },
+      { successTitle: "Condition added", failTitle: "Failed to add condition", onDone: () => setAddingCondition(false) },
+    );
   };
 
   const handleUpdateCondition = async (index: number, query: Record<string, string>, value: string) => {
-    try {
-      await apiRequest("PUT", `/api/variables/${effectiveVarName}`, {
-        action: "update_condition",
-        index,
-        condition: { query, value },
-      });
-      await invalidateAndRefetch();
-      setEditingConditionIndex(null);
-      toast({ title: "Condition updated" });
-    } catch (err) {
-      toast({
-        title: "Failed to update condition",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
+    await writeVariable(
+      { action: "update_condition", index, condition: { query, value } },
+      {
+        successTitle: "Condition updated",
+        failTitle: "Failed to update condition",
+        onDone: () => setEditingConditionIndex(null),
+      },
+    );
   };
 
   const handleDeleteCondition = async (index: number) => {
@@ -417,19 +512,17 @@ export function VariableDetailModal({
   };
 
   const handleReorderCondition = async (fromIndex: number, toIndex: number) => {
+    if (!metaReady) return;
     try {
-      await apiRequest("PUT", `/api/variables/${effectiveVarName}`, {
+      await variableWrite("PUT", `/api/variables/${effectiveVarName}`, {
         action: "reorder_conditions",
         fromIndex,
         toIndex,
+        ...(metadataMissing ? { metadata: metadataDraftToBody(metaDraft) } : {}),
       });
       await invalidateAndRefetch();
     } catch (err) {
-      toast({
-        title: "Failed to reorder",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
+      handleWriteError(err, "Failed to reorder");
     }
   };
 
@@ -452,11 +545,21 @@ export function VariableDetailModal({
       });
       return;
     }
+    if (!metadataDraftReady(createMeta)) {
+      setMetaError(!createMeta.description.trim() ? "description" : "category");
+      toast({
+        title: "Description and category required",
+        description: "Agents rely on them to pick the right fact.",
+        variant: "destructive",
+      });
+      return;
+    }
     setCreateSaving(true);
     try {
-      await apiRequest("PUT", `/api/variables/${fullName}`, {
+      await variableWrite("PUT", `/api/variables/${fullName}`, {
         action: "set_default",
         value: inlineDefault,
+        metadata: metadataDraftToBody(createMeta),
       });
       await invalidateAndRefetch();
       const templateSyntax = `{{ ${fullName} | ${inlineDefault} }}`;
@@ -555,8 +658,11 @@ export function VariableDetailModal({
 
   const renameMutation = useMutation({
     mutationFn: async (newName: string) => {
-      const res = await apiRequest("POST", `/api/variables/${effectiveVarName}/rename`, { newName, author: getDebugUserName() });
-      return res.json();
+      return (await variableWrite("POST", `/api/variables/${effectiveVarName}/rename`, {
+        newName,
+        author: getDebugUserName(),
+        ...(metadataMissing ? { metadata: metadataDraftToBody(metaDraft) } : {}),
+      })) as unknown as { newName: string; updatedFiles: string[] };
     },
     onSuccess: (data: { newName: string; updatedFiles: string[] }) => {
       invalidateAndRefetch();
@@ -582,17 +688,13 @@ export function VariableDetailModal({
       onOpenChange(false);
     },
     onError: (err: Error) => {
-      toast({
-        title: "Failed to rename",
-        description: err.message,
-        variant: "destructive",
-      });
+      handleWriteError(err, "Failed to rename");
     },
   });
 
   const handleRename = () => {
     const normalized = renameTo.trim().replace(/\s+/g, "_").toLowerCase();
-    if (!normalized || !renameAvailable || definition?.isReserved) return;
+    if (!normalized || !renameAvailable || definition?.isReserved || !metaReady) return;
 
     if (checkEditorHasUnsavedChanges()) {
       const confirmed = window.confirm(
@@ -766,6 +868,25 @@ export function VariableDetailModal({
                 </div>
               </div>
 
+              {createSubMode === "new" && (
+                <div className="space-y-2 rounded-md border p-3" data-testid="create-variable-metadata">
+                  <p className="text-xs text-muted-foreground">
+                    Each variable is one company fact. The description tells writers and agents when to use it;
+                    the category tells reviewers how carefully to check changes.
+                  </p>
+                  <VariableMetadataFields
+                    draft={createMeta}
+                    onChange={(next) => {
+                      setCreateMeta(next);
+                      setMetaError(null);
+                    }}
+                    showOptional={false}
+                    errorField={metaError}
+                    testIdPrefix="create-variable-meta"
+                  />
+                </div>
+              )}
+
               <div className="space-y-1">
                 <p className="text-sm text-muted-foreground">
                   Based on your current session in{" "}
@@ -819,7 +940,8 @@ export function VariableDetailModal({
                     disabled={
                       createSaving ||
                       !createName.trim() ||
-                      nameAvailable === false
+                      nameAvailable === false ||
+                      !metadataDraftReady(createMeta)
                     }
                     data-testid="button-confirm-create"
                   >
@@ -867,6 +989,20 @@ export function VariableDetailModal({
               >
                 Why this value?
               </button>
+              {!isReservedVar && definition && (
+                <button
+                  className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors inline-flex items-center gap-1 ${
+                    activeTab === "details"
+                      ? "border-primary text-primary"
+                      : "border-transparent text-muted-foreground"
+                  }`}
+                  onClick={() => setActiveTab("details")}
+                  data-testid="tab-details"
+                >
+                  Details
+                  {metadataMissing && <AlertTriangle className="w-3 h-3 text-destructive" aria-label="Missing details" />}
+                </button>
+              )}
               <button
                 className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === "edit"
@@ -1056,6 +1192,52 @@ export function VariableDetailModal({
               </div>
             )}
 
+            {activeTab === "details" && definition && !isReservedVar && (
+              <div className="space-y-4" data-testid="details-tab-content">
+                <VariableMetadataFields
+                  draft={metaDraft}
+                  onChange={(next) => {
+                    setMetaDraft(next);
+                    setMetaError(null);
+                  }}
+                  replacementOptions={existingVarNames.filter(
+                    (n) => n !== effectiveVarName && n.startsWith("global.") && !definitions?.[n]?.deprecated,
+                  )}
+                  errorField={metaError}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    onClick={handleSaveMetadata}
+                    disabled={metaSaving || !metadataDraftReady(metaDraft)}
+                    data-testid="button-save-variable-details"
+                  >
+                    {metaSaving ? "Saving..." : "Save details"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {(activeTab === "edit" || activeTab === "rename") && metadataMissing && (
+              <div
+                className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 mb-4"
+                data-testid="variable-required-metadata"
+              >
+                <p className="text-sm text-foreground">
+                  Add a description and category before saving. Agents rely on them to pick the right fact.
+                </p>
+                <VariableMetadataFields
+                  draft={metaDraft}
+                  onChange={(next) => {
+                    setMetaDraft(next);
+                    setMetaError(null);
+                  }}
+                  showOptional={false}
+                  errorField={metaError}
+                  testIdPrefix="required-variable-meta"
+                />
+              </div>
+            )}
+
             {activeTab === "edit" && (
               <div className="space-y-4" data-testid="edit-tab-content">
                 {definition?.isReserved && (
@@ -1073,7 +1255,7 @@ export function VariableDetailModal({
                         className="flex-1"
                         autoFocus
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") handleSetDefault(editDefaultValue);
+                          if (e.key === "Enter" && metaReady) handleSetDefault(editDefaultValue);
                           if (e.key === "Escape") setEditingDefault(false);
                         }}
                         data-testid="input-edit-default"
@@ -1082,6 +1264,7 @@ export function VariableDetailModal({
                         size="icon"
                         variant="ghost"
                         onClick={() => handleSetDefault(editDefaultValue)}
+                        disabled={!metaReady}
                         data-testid="button-save-default"
                       >
                         <Check className="w-3.5 h-3.5 text-primary" />
@@ -1152,6 +1335,7 @@ export function VariableDetailModal({
                           onCancel={() => setEditingConditionIndex(null)}
                           saveLabel="Update"
                           localeOptions={localeOptions}
+                          blocked={!metaReady}
                         />
                       ) : (
                         <div
@@ -1174,7 +1358,7 @@ export function VariableDetailModal({
                               <Button
                                 size="icon"
                                 variant="ghost"
-                                disabled={i === 0}
+                                disabled={i === 0 || !metaReady}
                                 onClick={() => handleReorderCondition(i, i - 1)}
                                 data-testid={`button-move-up-${i}`}
                               >
@@ -1183,7 +1367,7 @@ export function VariableDetailModal({
                               <Button
                                 size="icon"
                                 variant="ghost"
-                                disabled={i === conditions.length - 1}
+                                disabled={i === conditions.length - 1 || !metaReady}
                                 onClick={() => handleReorderCondition(i, i + 1)}
                                 data-testid={`button-move-down-${i}`}
                               >
@@ -1218,6 +1402,7 @@ export function VariableDetailModal({
                       onCancel={() => setAddingCondition(false)}
                       saveLabel="Add"
                       localeOptions={localeOptions}
+                      blocked={!metaReady}
                     />
                   )}
                 </div>
@@ -1319,6 +1504,7 @@ export function VariableDetailModal({
                     onClick={handleRename}
                     disabled={
                       !!definition?.isReserved ||
+                      !metaReady ||
                       !renameTo.trim() ||
                       renameAvailable !== true ||
                       renameMutation.isPending
@@ -1333,6 +1519,44 @@ export function VariableDetailModal({
           </>
         )}
       </DialogContent>
+      <AlertDialog open={!!figurePrompt} onOpenChange={(o) => !o && setFigurePrompt(null)}>
+        <AlertDialogContent data-testid="dialog-confirm-figure-change">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Change this figure?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm">
+                <p>
+                  This value appears on {figurePrompt?.details.usage_count ?? 0} page
+                  {figurePrompt?.details.usage_count === 1 ? "" : "s"}. Visitors see the new value as soon as you save.
+                </p>
+                {figurePrompt?.details.condition && (
+                  <p className="text-xs text-muted-foreground">
+                    Applies when {formatQuery(figurePrompt.details.condition)}.
+                  </p>
+                )}
+                <div className="rounded-md border bg-muted/30 p-2 space-y-1">
+                  <p>
+                    <span className="text-muted-foreground">Old: </span>
+                    <span className="font-medium text-foreground">
+                      {figurePrompt?.details.old_value ?? "(none)"}
+                    </span>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">New: </span>
+                    <span className="font-medium text-foreground">{figurePrompt?.details.new_value}</span>
+                  </p>
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-figure-change">Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void confirmFigureChange()} data-testid="button-confirm-figure-change">
+              Save new value
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

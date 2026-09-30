@@ -13,6 +13,21 @@ import { locations, getLocationBySlug } from '../lib/locations';
 import { setSessionHeaders } from '../lib/sessionHeaders';
 import { setVisitorContext } from '../lib/tracking';
 import { clearOverlayGeoCache } from '@/hooks/useOverlays';
+import { getConsentState, hasTrackingConsent, onConsentChange } from '../lib/consent';
+import { syncAdContext } from '../lib/adContext';
+import { readRawCookie } from '../lib/sessionCookie';
+
+function browserAdCookies(): { host: string; fbp?: string; fbc?: string } {
+  return {
+    host: window.location.hostname,
+    fbp: readRawCookie('_fbp') ?? undefined,
+    fbc: readRawCookie('_fbc') ?? undefined,
+  };
+}
+
+function withTrackingState(session: Session): Session {
+  return { ...session, consent: { ...session.consent, tracking: getConsentState() } };
+}
 
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   if (lat1 === lat2 && lon1 === lon2) return 0;
@@ -74,9 +89,10 @@ export function SessionProvider({ children }: SessionProviderProps) {
 
         workerRef.current.onmessage = (event: MessageEvent<WorkerResponse>) => {
           if (event.data.type === 'SESSION_READY') {
-            const newSession = event.data.payload;
+            const newSession = withTrackingState(event.data.payload);
             setSession(newSession);
             saveSession(newSession);
+            if (hasTrackingConsent()) void syncAdContext(newSession);
             if (newSession.userId) {
               setUserIdCookie(newSession.userId);
             }
@@ -108,6 +124,7 @@ export function SessionProvider({ children }: SessionProviderProps) {
             navigator: getNavigatorInfo(),
             device: getDeviceInfo(),
             existingUserId: getUserIdFromCookie() ?? undefined,
+            ...browserAdCookies(),
           },
         };
 
@@ -123,6 +140,22 @@ export function SessionProvider({ children }: SessionProviderProps) {
     return () => {
       workerRef.current?.terminate();
     };
+  }, []);
+
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  useEffect(() => {
+    return onConsentChange((tracking) => {
+      const updated: Session = {
+        ...sessionRef.current,
+        consent: { ...sessionRef.current.consent, tracking },
+      };
+      setSession(updated);
+      const granted = tracking === 'granted';
+      saveSession(updated, granted);
+      if (granted) void syncAdContext(updated);
+    });
   }, []);
 
   const setLocation = (slug: string) => {
@@ -210,7 +243,7 @@ export function SessionProvider({ children }: SessionProviderProps) {
       const onMessage = (event: MessageEvent<WorkerResponse>) => {
         if (event.data.type !== 'SESSION_READY') return;
         cleanup();
-        const newSession = event.data.payload;
+        const newSession = withTrackingState(event.data.payload);
         setSession(newSession);
         saveSession(newSession);
         if (newSession.userId) {
@@ -247,6 +280,7 @@ export function SessionProvider({ children }: SessionProviderProps) {
           navigator: getNavigatorInfo(),
           device: getDeviceInfo(),
           existingUserId: getUserIdFromCookie() ?? undefined,
+          ...browserAdCookies(),
         },
       };
       worker.postMessage(message);

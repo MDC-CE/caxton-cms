@@ -25,6 +25,10 @@ export type DiscoveryCtx = {
   databaseId?: string;
   componentName?: string;
   seoClusterId?: string;
+  /** A page whose entry comes from a database item (stored copy). */
+  dbEntrySlug?: string;
+  dbEntryLocale?: string;
+  dbEntryContentType?: string;
 };
 
 export type ScenarioClass = "normal" | "docs";
@@ -208,6 +212,19 @@ export const SCENARIOS: Scenario[] = [
     skipIf: needLight,
   },
   {
+    id: "get_entry_content_db",
+    tool: "get_entry_content",
+    about:
+      "Full body for a page whose entry comes from a database item (stored copy + field_overrides). Same tool and shape as static pages; compare p95 vs get_entry_content.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        slug: ctx.dbEntrySlug!,
+        locale: ctx.dbEntryLocale ?? "en",
+        contentType: ctx.dbEntryContentType,
+      }),
+    skipIf: (ctx) => (ctx.dbEntrySlug ? null : "no database-backed entry with a stored copy"),
+  },
+  {
     id: "get_entry_seo",
     tool: "get_entry_seo",
     about: "SEO/meta only for the heavy page (no body). Baseline vs search-engines variant.",
@@ -317,6 +334,27 @@ export const SCENARIOS: Scenario[] = [
       }),
   },
 
+  {
+    id: "list_variables_catalog",
+    tool: "list_variables",
+    about:
+      "Site facts catalog mode: list_variables with no names — every non-deprecated variable row (name, category, description, default, varies_by). What writers call before quoting a stat.",
+    buildArgs: (ctx) => withSite(ctx, {}),
+    phase: "both",
+  },
+  {
+    id: "list_variables_detail",
+    tool: "list_variables",
+    about:
+      "Site facts detail mode: 3 names with context.entry on a landing that sets locations — resolves the page audience (location regions) and per-audience values. Heaviest list_variables path.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        names: ["global.campus_phone", "global.global_job_placement_rate", "global.global_salary_increase"],
+        context: { entry: { contentType: "landing", slug: "4geeks-others-chile", locale: "es" } },
+      }),
+    skipIf: (ctx) =>
+      ctx.site && ctx.site !== "4geeks.com" ? "fixture landing only exists on 4geeks.com" : null,
+  },
   {
     id: "list_components",
     tool: "list_components",
@@ -479,6 +517,22 @@ export const SCENARIOS: Scenario[] = [
     about:
       "GA4 BigQuery traffic_source_conversions (default session_last_click, no item_id). Soft N.C. when tracking.bigquery is unset.",
     buildArgs: (ctx) => withSite(ctx, { report: "traffic_source_conversions" }),
+  },
+  {
+    id: "get_paid_traffic_summary",
+    tool: "get_paid_traffic",
+    about:
+      "Paid traffic summary (default 28 days): joins cached Meta days + GA4 paid-landing days + lead ledger. Soft N.C. when neither Meta nor GA4 is set up. Also in burst.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "summary" }),
+    phase: "both",
+  },
+  {
+    id: "get_paid_traffic_entries_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Heaviest paid-traffic read: entries over 90 days with group=campaign and split_by_version (full campaign lists + variant rows), limit 100. Soft N.C. when not set up.",
+    buildArgs: (ctx) =>
+      withSite(ctx, { mode: "entries", days: 90, group: "campaign", split_by_version: true, limit: 100 }),
   },
   {
     id: "list_proposals",

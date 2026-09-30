@@ -98,6 +98,9 @@ const VariableModalHost = lazyWithRetry(() =>
 const OverlayRuntime = lazyWithRetry(() =>
   import("@/components/overlays/OverlayRuntime").then((m) => ({ default: m.OverlayRuntime })),
 );
+const ConsentBanner = lazyWithRetry(() =>
+  import("@/components/ConsentBanner").then((m) => ({ default: m.ConsentBanner })),
+);
 const BootstrapModal = lazyWithRetry(() =>
   import("@/components/BootstrapModal").then((m) => ({ default: m.BootstrapModal })),
 );
@@ -307,6 +310,7 @@ function App({ ssrQueryClient }: AppProps = {}) {
                 <VariableModalHostGate />
                 <Suspense fallback={null}><OverlayRuntime /></Suspense>
                 <Suspense fallback={null}><BootstrapModal /></Suspense>
+                <Suspense fallback={null}><ConsentBanner /></Suspense>
               </IdleMounted>
             </ClientOnly>
             </ImagePickerProvider>

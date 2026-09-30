@@ -94,11 +94,15 @@ function readVersioningFile(contentDir: string): VersioningFile | null {
 
 function loadLiveContent(index: ContentIndex, list: EntryKeyList): ContentFile[] {
   const files: ContentFile[] = [];
+  const staleByType = new Map(list.staleDatabases.flatMap((s) => s.contentTypes.map((ct) => [ct, s] as const)));
 
   for (const key of list.keys) {
+    const staleDb = staleByType.get(key.contentType);
     for (const locale of key.locales) {
       const result = loadEntry(index, key.contentType, key.slug, locale, list.itemsByType);
       if (!result) continue;
+      const stale =
+        result.singleEntry && staleDb ? { staleSourceAgeMs: staleDb.ageMs, staleSourceDatabase: staleDb.name } : {};
 
       files.push(
         toContentFile(
@@ -109,7 +113,7 @@ function loadLiveContent(index: ContentIndex, list: EntryKeyList): ContentFile[]
           result.data,
           result.filePath,
           result.singleEntry
-            ? { singleEntry: result.singleEntry, translationGroup: result.translationGroup }
+            ? { singleEntry: result.singleEntry, translationGroup: result.translationGroup, ...stale }
             : undefined,
         ),
       );
@@ -207,6 +211,8 @@ export type LoadedContent = {
   skippedDatabases: string[];
   /** Content types whose pages were not loaded (their database cache is empty). */
   skippedContentTypes: string[];
+  /** Databases whose pages were loaded from a copy older than the cache TTL. */
+  staleDatabases: EntryKeyList["staleDatabases"];
 };
 
 export function loadContent(ci?: typeof defaultContentIndex): LoadedContent {
@@ -220,6 +226,7 @@ export function loadContent(ci?: typeof defaultContentIndex): LoadedContent {
     ],
     skippedDatabases: list.emptyDatabases,
     skippedContentTypes: list.skippedContentTypes,
+    staleDatabases: list.staleDatabases,
   };
 }
 

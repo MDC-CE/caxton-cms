@@ -43,6 +43,41 @@ describe("buildProposalDiscoveryPath", () => {
     expect(warnings.some((w) => w.code === "proposal_escalated")).toBe(true);
   });
 
+  it("keeps content_type_fit when an idea has more than 6 think items", () => {
+    const filler = Array.from({ length: 6 }, (_, i) => ({
+      id: `filler_${i}`,
+      title: `Filler ${i}`,
+      why: "filler",
+      look_for: ["x"],
+    }));
+    const fit = {
+      id: "content_type_fit",
+      title: "Check the brief fits its page type",
+      why: "strategy",
+      look_for: ["landing purpose: Convert paid traffic"],
+    };
+    const { discovery_path } = buildProposalDiscoveryPath({
+      proposal: {
+        id: "i1",
+        status: "open",
+        kind: "idea",
+        title: "New landing",
+        summary: "Create a landing that converts paid traffic for the AI bootcamp in Miami.",
+        open_blocker_count: 0,
+        related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+      },
+      allowedTools: catalog,
+      reviewContext: {
+        summary: "Idea",
+        damage_class: "new_public",
+        agent_preview: { think_items: [filler[0], fit, ...filler.slice(1)] },
+      },
+    });
+    const thinkIds = discovery_path!.items.filter((i) => i.kind === "think").map((i) => i.id);
+    expect(thinkIds).toContain("content_type_fit");
+    expect(thinkIds.length).toBeLessThanOrEqual(6);
+  });
+
   it("returns null for finished/rejected/withdrawn", () => {
     for (const status of ["finished", "rejected", "withdrawn"] as const) {
       const { discovery_path } = buildProposalDiscoveryPath({
@@ -90,9 +125,10 @@ describe("buildProposalDiscoveryPath", () => {
     const tools = items.filter((i) => i.kind === "tool");
     expect(thinks.length).toBeGreaterThan(0);
     expect(thinks.length).toBeLessThanOrEqual(6);
-    // core 4 + organic + funnel analytics (selling_page) = 6; not the full catalog union
-    expect(tools.length).toBe(6);
+    // core 4 + figure facts + organic + funnel analytics (selling_page) = 7; not the full catalog union
+    expect(tools.length).toBe(7);
     const toolIds = tools.map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(toolIds).toContain("figure_facts");
     expect(toolIds).toContain("traffic_risk");
     expect(toolIds).toContain("journey_metrics");
     expect(toolIds).not.toContain("site_ga");
@@ -219,6 +255,37 @@ describe("buildProposalDiscoveryPath", () => {
       });
     }
     expect(warnings).toEqual([]);
+  });
+
+  it("recommends a hub check from idea_seo_target, or hub pick when missing on a new URL", () => {
+    const base = {
+      id: "i-seo",
+      status: "open",
+      kind: "idea",
+      summary: "New spoke that should rank for review ai generated code.",
+    };
+    const reviewContext = { review_situations: ["idea_opportunity_harm"] };
+    const withTarget = buildProposalDiscoveryPath({
+      proposal: {
+        ...base,
+        idea_seo_target: {
+          main_keyword: "review ai generated code",
+          cluster: { mode: "join", pillar_path: "/en/blog/ai-engineer/hub" },
+        },
+      },
+      allowedTools: catalog,
+      reviewContext,
+    });
+    const hub = withTarget.discovery_path!.items.find((i) => i.kind === "tool" && i.id === "seo_target_hub");
+    expect(hub?.kind === "tool" && hub.args_hint).toMatchObject({ q: "/en/blog/ai-engineer/hub" });
+
+    const missing = buildProposalDiscoveryPath({
+      proposal: base,
+      allowedTools: catalog,
+      reviewContext: { ...reviewContext, warnings: [{ code: "idea_seo_target_missing" }] },
+    });
+    const names = missing.discovery_path!.items.map((i) => (i.kind === "tool" ? i.tool : ""));
+    expect(names).toContain("list_seo_clusters");
   });
 
   it("builds broken_url idea path with runtime issues and no keyword research", () => {
@@ -767,5 +834,74 @@ describe("assertCatalogToolNames", () => {
       ok: false,
       unknown: ["validate_content"],
     });
+  });
+});
+
+describe("list_variables discovery items (site facts)", () => {
+  const toolItems = (rc: Record<string, unknown>, proposal: Record<string, unknown> = baseEdits, allowed: Set<string> = catalog) =>
+    (buildProposalDiscoveryPath({ proposal: proposal as never, allowedTools: allowed, reviewContext: rc as never })
+      .discovery_path?.items ?? []).filter((i) => i.kind === "tool" && i.tool === "list_variables") as Array<{
+      id: string;
+      args_hint?: Record<string, unknown>;
+      why: string;
+      available: boolean;
+    }>;
+
+  it("figures review with tokens → names + context.entry, before funnel analytics", () => {
+    const rc = {
+      damage_class: "selling_page",
+      active_checklists: ["selling_page_figures", "verify_copy"],
+      figure_variables: [{ name: "global.price_fullstack" }],
+    };
+    const items = toolItems(rc);
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe("figure_facts");
+    expect(items[0].args_hint).toEqual({
+      names: ["global.price_fullstack"],
+      context: { entry: { contentType: "landing", slug: "ai-course", locale: "en" } },
+    });
+    const all = buildProposalDiscoveryPath({ proposal: baseEdits, allowedTools: catalog, reviewContext: rc })
+      .discovery_path!.items.map((i) => (i.kind === "tool" ? i.tool : i.id));
+    expect(all.indexOf("list_variables")).toBeLessThan(all.indexOf("get_product_funnel_analytics"));
+  });
+
+  it("figures review from hardcoded numbers → figures_only", () => {
+    const items = toolItems({ damage_class: "selling_page", active_checklists: ["selling_page_figures"] });
+    expect(items[0].args_hint).toEqual({ figures_only: true });
+  });
+
+  it("absent when the figures review is off and no fact checklist is active", () => {
+    expect(toolItems({ damage_class: "existing_content", active_checklists: ["internal_links"] })).toHaveLength(0);
+  });
+
+  it("site facts: Jev categories, facts_only when unavailable, none when all no", () => {
+    const base = { damage_class: "existing_content", active_checklists: ["verify_copy"] };
+    const ok = toolItems({ ...base, site_facts: { outcome: "ok", categories: ["contact"] } });
+    expect(ok[0]).toMatchObject({ id: "site_facts", args_hint: { category: ["contact"] } });
+
+    const down = toolItems({ ...base, site_facts: { outcome: "unavailable", categories: [] } });
+    expect(down[0].args_hint).toEqual({ facts_only: true });
+    expect(down[0].why).toContain("unavailable");
+
+    expect(toolItems({ ...base, site_facts: { outcome: "ok", categories: [] } })).toHaveLength(0);
+
+    const tokens = toolItems({ ...base, site_facts: { outcome: "ok", categories: [] }, fact_variable_names: ["global.campus_phone"] });
+    expect(tokens[0].args_hint).toMatchObject({ names: ["global.campus_phone"] });
+  });
+
+  it("never duplicated alongside the figures item", () => {
+    const items = toolItems({
+      damage_class: "selling_page",
+      active_checklists: ["selling_page_figures", "verify_copy"],
+      site_facts: { outcome: "ok", categories: ["price"] },
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe("figure_facts");
+  });
+
+  it("shown with available:false when the caller lacks list_variables", () => {
+    const allowed = new Set([...catalog].filter((t) => t !== "list_variables"));
+    const items = toolItems({ damage_class: "selling_page", active_checklists: ["selling_page_figures"] }, baseEdits, allowed);
+    expect(items[0].available).toBe(false);
   });
 });

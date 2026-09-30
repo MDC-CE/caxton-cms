@@ -6,6 +6,7 @@ import { hasMultipleSites } from "./site-config";
 import {
   evaluateDatabaseHealth,
   isAuthFetchError,
+  lastGoodCacheInputs,
 } from "../scripts/validation/shared/databaseHealthChecks";
 
 export type SystemAlertSeverity = "critical" | "warning";
@@ -23,7 +24,8 @@ export type SystemAlertCode =
   | "background_jobs_stalled"
   | "sidequest_engine_down"
   | "sidequest_engine_stuck"
-  | "github_app_env_missing";
+  | "github_app_env_missing"
+  | "decision_model_unavailable";
 
 export interface SystemAlert {
   id: string;
@@ -228,8 +230,9 @@ function issuesFromCacheOrEvaluate(
     config,
     ctx.contentRoot,
     jobStates[dbName],
-    ctx.database.getCacheInfo(dbName),
+    lastGoodCacheInputs(ctx.database, dbName).cacheInfo,
     ctx.database.countTransformErrors(dbName),
+    lastGoodCacheInputs(ctx.database, dbName).staleAgeMs,
   );
   return errors;
 }
@@ -255,6 +258,50 @@ async function collectGitHubAppAlerts(isProduction: boolean): Promise<SystemAler
   ];
 }
 
+export const DECISION_MODEL_ALERT_MESSAGE =
+  "Automated fact checks are down. Reviews still work, but agents are told to check all site facts instead of only the relevant ones.";
+
+/** Missing key → critical right away; otherwise critical after repeated failed calls (clears on the next success). */
+export async function collectDecisionModelAlerts(): Promise<SystemAlert[]> {
+  const { resolveLLMApiKey } = await import("./ai/LLMService");
+  const { readDecisionHealth, isDecisionHealthCritical } = await import("./ai/decisions/health");
+  const base = {
+    id: "decision_model_unavailable",
+    severity: "critical" as const,
+    code: "decision_model_unavailable" as const,
+    title: "Automated fact checks are down",
+    actionHref: "/private/settings/ai/llms",
+    actionLabel: "Open LLM settings",
+  };
+
+  if (!resolveLLMApiKey("OPENROUTER_API_KEY")) {
+    return [
+      {
+        ...base,
+        message: `${DECISION_MODEL_ALERT_MESSAGE} Cause: the OpenRouter API key is not configured on the server.`,
+      },
+    ];
+  }
+
+  const failing: Array<{ site: string; failures: number; reason: string | null }> = [];
+  for (const ctx of getSiteContextMap().values()) {
+    const h = readDecisionHealth(ctx.contentRootName);
+    if (isDecisionHealthCritical(h)) {
+      failing.push({ site: ctx.contentRootName, failures: h.consecutive_failures, reason: h.last_fail_reason });
+    }
+  }
+  if (!failing.length) return [];
+  const worst = failing.reduce((a, b) => (b.failures > a.failures ? b : a));
+  return [
+    {
+      ...base,
+      message: `${DECISION_MODEL_ALERT_MESSAGE} Cause: ${worst.failures} failed calls in a row${
+        worst.reason ? ` (last: ${worst.reason})` : ""
+      }. Use Re-check after fixing.`,
+    },
+  ];
+}
+
 export async function collectSystemAlerts(): Promise<SystemAlert[]> {
   const alerts: SystemAlert[] = [];
   const multiSite = hasMultipleSites();
@@ -264,6 +311,11 @@ export async function collectSystemAlerts(): Promise<SystemAlert[]> {
   alerts.push(...collectMcpAuthAlerts(isProduction));
   alerts.push(...(await collectMcpAuthBlobAlerts(isProduction)));
   alerts.push(...(await collectGitHubAppAlerts(isProduction)));
+  try {
+    alerts.push(...(await collectDecisionModelAlerts()));
+  } catch {
+    /* non-fatal */
+  }
 
   try {
     const { getEngineStatus } = await import("./jobs/queue");
@@ -396,6 +448,28 @@ export async function collectSystemAlerts(): Promise<SystemAlert[]> {
   );
 }
 
+export interface DecisionModelRecheckResult {
+  resolved: boolean;
+  model?: string;
+  message: string;
+}
+
+/** Probe the decision model once and record the result for every site (the key is global). */
+export async function recheckDecisionModel(contentRoot?: string): Promise<DecisionModelRecheckResult> {
+  const { probeDecisionModel } = await import("./ai/decisions");
+  const { recordDecisionOutcome } = await import("./ai/decisions/health");
+  const probe = await probeDecisionModel({ contentRoot });
+  for (const ctx of getSiteContextMap().values()) {
+    recordDecisionOutcome(
+      ctx.contentRootName,
+      probe.ok ? { status: "ok", model: probe.model } : { status: "unavailable", reason: "error", message: probe.error },
+    );
+  }
+  return probe.ok
+    ? { resolved: true, model: probe.model, message: `Re-check passed — ${probe.model} answered. The alert has been cleared.` }
+    : { resolved: false, model: probe.model, message: `Re-check failed: ${probe.error}` };
+}
+
 export interface DatabaseRecheckResult {
   found: boolean;
   resolved: boolean;
@@ -439,8 +513,9 @@ export async function recheckDatabaseHealth(
       entry.config,
       ctx.contentRoot,
       jobStates[dbName],
-      ctx.database.getCacheInfo(dbName),
+      lastGoodCacheInputs(ctx.database, dbName).cacheInfo,
       ctx.database.countTransformErrors(dbName),
+      lastGoodCacheInputs(ctx.database, dbName).staleAgeMs,
     );
 
     ctx.validationCache.setByDatabase(dbName, {

@@ -24,8 +24,25 @@ export interface UTMParams {
   utm_url?: string;
   utm_placement?: string;
   utm_plan?: string;
+  /** Campaign id from the Meta URL template (`utm_id={{campaign.id}}`). */
+  utm_id?: string;
   // Normalized PPC tracking ID (captures gclid, fbclid, msclkid, ttclid, etc.)
   ppc_tracking_id?: string;
+  // Per-platform click ids (first one found also fills ppc_tracking_id)
+  gclid?: string;
+  gbraid?: string;
+  wbraid?: string;
+  dclid?: string;
+  fbclid?: string;
+  msclkid?: string;
+  ttclid?: string;
+  li_fat_id?: string;
+  twclid?: string;
+  sclid?: string;
+  epik?: string;
+  /** Meta browser id (`_fbp` cookie) and click id (`_fbc`, or derived from fbclid). */
+  fbp?: string;
+  fbc?: string;
   // Referral tracking
   ref?: string;
   referral?: string;
@@ -69,10 +86,65 @@ export interface Session {
   landing_page?: string;
   /** Pathname of the latest successful conversion. */
   conversion_page?: string;
+  /** Write-once first campaign set seen in this browser. */
+  first_touch?: UTMParams;
+  /** First (write-once) and most recent paid landing in this browser. */
+  paid_landing?: {
+    first?: PaidLandingRef;
+    last?: PaidLandingRef;
+  };
   consent: {
     geolocation: boolean | null;
+    /** Tracking banner choice mirrored from the `4g_consent` cookie. */
+    tracking?: 'granted' | 'denied' | 'unset';
   };
   timestamp: number;
+}
+
+export interface PaidLandingRef {
+  host: string;
+  path: string;
+  /** Epoch milliseconds. */
+  at: number;
+  platform?: string | null;
+}
+
+/**
+ * Keys in `utm` that are marketing data (gated by tracking consent). Referral and
+ * coupon keys are functional (they change price/offer) and are always kept.
+ */
+export const MARKETING_UTM_KEYS: readonly (keyof UTMParams)[] = [
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'utm_url',
+  'utm_placement',
+  'utm_plan',
+  'utm_id',
+  'ppc_tracking_id',
+  'gclid',
+  'gbraid',
+  'wbraid',
+  'dclid',
+  'fbclid',
+  'msclkid',
+  'ttclid',
+  'li_fat_id',
+  'twclid',
+  'sclid',
+  'epik',
+  'fbp',
+  'fbc',
+];
+
+/** Copy of the session without marketing fields — what may be stored in `4g_ctx` before consent. */
+export function stripMarketingFields(session: Session): Session {
+  const utm: UTMParams = { ...session.utm };
+  for (const key of MARKETING_UTM_KEYS) delete utm[key];
+  const { first_touch: _ft, paid_landing: _pl, landing_page: _lp, conversion_page: _cp, ...rest } = session;
+  return { ...rest, utm };
 }
 
 /** @deprecated Legacy localStorage key; consumer session now lives in cookie `4g_ctx`. */
@@ -107,6 +179,9 @@ export interface WorkerMessage {
     navigator: string;
     device: string; // JSON stringified device info from main thread
     existingUserId?: string; // 4g_user_id cookie value read by main thread
+    host?: string; // window.location.hostname (for paid landing host)
+    fbp?: string; // `_fbp` cookie read by main thread
+    fbc?: string; // `_fbc` cookie read by main thread
   };
 }
 

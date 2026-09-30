@@ -4,11 +4,13 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   hasStaticSharedLayoutEntryLocale,
-  loadMergedSinglePage,
+  mergeEntryOwnedPage,
   mergeSingleTemplate,
-  resolveDetachedEntryLocalePath,
 } from "./database-single-loader";
 import { resetRegistry, resolveEntryUpdatedAt } from "./content-types";
+import { ContentIndex } from "./content-index";
+import { DatabaseManager } from "./database";
+import { loadMergedSinglePage } from "./entry-delivery";
 
 const ORIGINAL_CWD = process.cwd();
 let tempDir: string;
@@ -99,37 +101,34 @@ describe("hasStaticSharedLayoutEntryLocale", () => {
   });
 });
 
-describe("resolveDetachedEntryLocalePath", () => {
-  it("prefers {variant}.{locale}.yml when previewing a draft-only entry", () => {
+describe("mergeEntryOwnedPage (entry owns its layout)", () => {
+  it("uses {variant}.{locale}.yml as the whole page when previewing a draft-only entry", () => {
     const entryDir = path.join(contentRoot, "blog", "deletemenow");
     fs.mkdirSync(entryDir, { recursive: true });
-    fs.writeFileSync(path.join(entryDir, "draft.en.yml"), "title: Draft\n", "utf-8");
+    fs.writeFileSync(path.join(entryDir, "_common.yml"), "detached: true\n", "utf-8");
+    fs.writeFileSync(path.join(entryDir, "draft.en.yml"), "title: Draft\nsections: []\n", "utf-8");
 
-    expect(resolveDetachedEntryLocalePath(entryDir, "en")).toBeNull();
-    expect(resolveDetachedEntryLocalePath(entryDir, "en", "draft")).toBe(
-      path.join(entryDir, "draft.en.yml"),
-    );
+    expect(mergeEntryOwnedPage("blog", "deletemenow", "en", contentRoot)).toBeNull();
+    const draft = mergeEntryOwnedPage("blog", "deletemenow", "en", contentRoot, "draft");
+    expect(draft?.title).toBe("Draft");
+    expect(draft?.detached).toBeUndefined();
   });
 
-  it("falls back to live {locale}.yml when the variant file is missing", () => {
+  it("returns null when the variant file is missing (never falls back to live)", () => {
     const entryDir = path.join(contentRoot, "blog", "live-post");
     fs.mkdirSync(entryDir, { recursive: true });
     fs.writeFileSync(path.join(entryDir, "en.yml"), "title: Live\n", "utf-8");
 
-    expect(resolveDetachedEntryLocalePath(entryDir, "en", "draft")).toBe(
-      path.join(entryDir, "en.yml"),
-    );
+    expect(mergeEntryOwnedPage("blog", "live-post", "en", contentRoot, "draft")).toBeNull();
+    expect(mergeEntryOwnedPage("blog", "live-post", "en", contentRoot)?.title).toBe("Live");
   });
 });
 
 describe("loadMergedSinglePage static shared-layout", () => {
+  const ci = () => new ContentIndex("site_test", new DatabaseManager(contentRoot));
+
   it("returns null for a missing slug (no empty single.*.yml shell)", async () => {
-    const page = await loadMergedSinglePage(
-      "blog",
-      "mejores-agentes-de-codigo8",
-      "es",
-      contentRoot,
-    );
+    const page = await loadMergedSinglePage(ci(), "blog", "mejores-agentes-de-codigo8", "es");
     expect(page).toBeNull();
   });
 
@@ -147,7 +146,7 @@ describe("loadMergedSinglePage static shared-layout", () => {
       "utf-8",
     );
 
-    const page = await loadMergedSinglePage("blog", "real-post", "es", contentRoot);
+    const page = await loadMergedSinglePage(ci(), "blog", "real-post", "es");
     expect(page).not.toBeNull();
     expect(page?.sections?.some((s) => (s as { type?: string }).type === "article")).toBe(
       true,

@@ -23,6 +23,7 @@ import { getMenuChromeHeights } from "@/lib/menuChrome";
 import { normalizeFunnelBlock } from "@shared/funnel";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
+import { usePageVersionExposure } from "@/hooks/usePageVersionExposure";
 
 const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditorPanel"));
 
@@ -69,6 +70,7 @@ export default function Page() {
     },
     enabled: !!slug,
   });
+  usePageVersionExposure(page, { skip: !!forceVariant || isStaff });
 
   const { data: rawFileCheck } = useQuery<{ exists: boolean }>({
     queryKey: ["/api/content/raw-file", "page", slug, locale],

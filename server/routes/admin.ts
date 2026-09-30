@@ -43,7 +43,7 @@ import { resolveProcessStatsDetailRequest, resolveProcessStatsRequest } from "..
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
-import { collectSystemAlerts, recheckDatabaseHealth } from "../system-alerts";
+import { collectSystemAlerts, recheckDatabaseHealth, recheckDecisionModel } from "../system-alerts";
 import { listEvents, listEventAuthors, clearAllEvents, listAgentSessions, getAgentSessionDetail, emitEvent, getLatestWriteGeneration, getOldestUnpublishedAgeMs, getUnpublishedCount, getUnpublishedEvents, findOpenAgentSession, resolveUsableAgentSession } from "../events/event-store";
 import { singleAttribution, EVENT_TYPES, type EventType } from "../events/types";
 import { isExactAgentModel, normalizeMcpClientName, sessionConflictPayload } from "../../shared/agent-identity";
@@ -218,7 +218,6 @@ import {
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
 import { queryEntries } from "../query-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -270,7 +269,9 @@ import {
 import { child } from "../logger";
 import { sqlite } from "../db";
 import { errorLogFingerprint } from "../utils/error-log-fingerprint";
-import { resolveDatabaseBackedRedirectDestination } from "../debug-redirect-db-dest";
+import { writeRedirectOnDestinationPage } from "../redirect-destination";
+import { listInboundRedirects, parseRemovedEntry, removeInboundRedirects } from "../removed-item-redirect";
+import { findEntryPresence } from "../entry-layer";
 import { api } from "../rate-limit/api.js";
 const log = child({ module: "routes/admin" });
 
@@ -1326,6 +1327,13 @@ export function registerAdminRoutes(app: Express): void {
     res.json({ ...result, alerts: await collectSystemAlerts() });
   });
 
+  api.post(app, "/api/admin/decision-model-recheck", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    const result = await recheckDecisionModel(getContentRoot(res));
+    res.json({ ...result, alerts: await collectSystemAlerts() });
+  });
+
   // ─── Server controls (staff-only) ─────────────────────────────────────────
   // Richer status than /health, for the Settings → Server tab status card.
   app.get("/api/admin/server/status", async (req, res) => {
@@ -1702,178 +1710,125 @@ export function registerAdminRoutes(app: Express): void {
           ? (req.body.before_from as string).trim()
           : undefined;
 
-      if (isCustomDestination) {
-        const written = appendCustomRedirect({
-          contentRoot: getContentRoot(res),
-          contentRootName: getContentRootName(res),
-          from: normalizedFrom,
-          to: destUrl,
-          statusCode,
-          priority,
-          authorName,
-          beforeFrom,
-        });
-        if (!written.ok) {
-          res.status(written.status).json({ error: written.error, code: written.code });
-          return;
-        }
-
-        afterRedirectWrite(res, written.file);
-
-        res.json({
-          success: true,
-          message: `Custom redirect added: ${normalizedFrom} -> ${destUrl}`,
-          file: written.file,
-        });
-        return;
-      }
-
-      // Parse destination URL to find the content entry
-      const parsed = getCI(res).parseContentUrl(destUrl);
-      if (!parsed) {
-        res.status(400).json({
-          error: "Could not determine content type from destination URL",
-        });
-        return;
-      }
-
-      const { contentType, locale } = parsed;
-      const resolvedSlug = getCI(res).resolveBaseSlug(
-        parsed.slug,
-        contentType,
-      );
-      const entries = getCI(res).findBySlug(resolvedSlug, { contentType });
-
-      // DB-backed types (how-to, lesson, …) have no per-slug YAML folder for meta.redirects.
-      // Fall back to custom-redirects.yml when the sitemap/URL exists but findBySlug is empty.
-      // YAML override folders under the same type still take the meta.redirects path below.
-      if (entries.length === 0 && getCI(res).isDatabaseBacked(contentType)) {
-        const builtUrl = getCI(res).buildUrl(contentType, locale, parsed.slug);
-        const alternateUrls = getCI(res).getAlternateUrls(
-          parsed.slug,
-          contentType,
-        );
-        const resolvedDest = resolveDatabaseBackedRedirectDestination({
-          destUrl,
-          allLanguages: !!allLanguages,
-          builtUrl,
-          alternateUrls,
-          isKnownUrl: (url) => getCI(res).isKnownUrl(url),
-        });
-
-        if (!resolvedDest.ok) {
-          res.status(404).json({
-            error: `No content found for slug "${parsed.slug}" in ${contentType}`,
+      const ci = getCI(res);
+      if (beforeFrom && !isCustomDestination) {
+        const parsedDest = ci.parseContentUrl(destUrl);
+        if (parsedDest && findEntryPresence(ci, parsedDest.contentType, parsedDest.slug)) {
+          res.status(400).json({
+            code: "before_from_page_yaml",
+            error:
+              "before_from is only valid for custom-redirects.yml. Page meta.redirects cannot be reordered with move/before_from.",
           });
           return;
         }
+      }
 
-        const written = appendCustomRedirect({
-          contentRoot: getContentRoot(res),
-          contentRootName: getContentRootName(res),
-          from: normalizedFrom,
-          to: resolvedDest.to,
-          statusCode,
-          priority,
-          authorName,
-          beforeFrom,
-        });
-        if (!written.ok) {
-          res.status(written.status).json({ error: written.error, code: written.code });
-          return;
+      type WriteOutcome =
+        | { ok: true; file: string; created: string[]; skippedLocales: string[] }
+        | { ok: false; status: number; body: Record<string, unknown> };
+      const writeOne = (fromPath: string, code: number, allLangs: boolean, before?: string): WriteOutcome => {
+        const toCustom = (): WriteOutcome => {
+          const written = appendCustomRedirect({
+            contentRoot: getContentRoot(res),
+            contentRootName: getContentRootName(res),
+            from: fromPath,
+            to: destUrl,
+            statusCode: code,
+            priority,
+            authorName,
+            beforeFrom: before,
+          });
+          return written.ok
+            ? { ok: true, file: written.file, created: [], skippedLocales: [] }
+            : { ok: false, status: written.status, body: { error: written.error, code: written.code } };
+        };
+        if (isCustomDestination) return toCustom();
+        if (before) {
+          return ci.isKnownUrl(destUrl)
+            ? toCustom()
+            : { ok: false, status: 404, body: { error: `No page found at ${destUrl}` } };
         }
-
-        afterRedirectWrite(res, written.file);
-
-        const toLabel =
-          typeof resolvedDest.to === "string"
-            ? resolvedDest.to
-            : Object.values(resolvedDest.to).join(", ");
-        res.json({
-          success: true,
-          message: `Redirect added: ${normalizedFrom} -> ${toLabel}`,
-          file: written.file,
+        const onPage = writeRedirectOnDestinationPage({
+          ci,
+          destUrl,
+          from: fromPath,
+          statusCode: code,
+          allLanguages: allLangs,
+          onWrite: (abs) => markFileAsModified(abs, authorName, undefined, getContentRoot(res)),
         });
-        return;
-      }
-
-      if (entries.length === 0) {
-        res.status(404).json({
-          error: `No content found for slug "${parsed.slug}" in ${contentType}`,
-        });
-        return;
-      }
-
-      if (beforeFrom) {
-        res.status(400).json({
-          code: "before_from_page_yaml",
-          error:
-            "before_from is only valid for custom-redirects.yml. Page meta.redirects cannot be reordered with move/before_from.",
-        });
-        return;
-      }
-
-      const entry = entries[0];
-      const basePath = path.join(process.cwd(), entry.directory);
-
-      let targetFile: string;
-      if (allLanguages) {
-        targetFile = "_common.yml";
-      } else {
-        targetFile = `${locale}.yml`;
-      }
-
-      const filePath = path.join(basePath, targetFile);
-
-      let yamlData: Record<string, unknown> = {};
-      if (fs.existsSync(filePath)) {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        yamlData = (safeYamlLoad(raw) as Record<string, unknown>) || {};
-      }
-
-      if (!yamlData.meta || typeof yamlData.meta !== "object") {
-        yamlData.meta = {};
-      }
-      const meta = yamlData.meta as Record<string, unknown>;
-      if (!Array.isArray(meta.redirects)) {
-        meta.redirects = [];
-      }
-      const redirects = meta.redirects as unknown[];
-
-      const existingPath = (r: unknown) => {
-        if (typeof r === "string") return r.toLowerCase();
-        if (typeof r === "object" && r !== null && "path" in r)
-          return (r as { path: string }).path.toLowerCase();
-        return "";
+        if (onPage.kind === "error") {
+          return { ok: false, status: onPage.status, body: { error: onPage.error, ...(onPage.code ? { code: onPage.code } : {}) } };
+        }
+        if (onPage.kind === "page") {
+          return { ok: true, file: onPage.files[0], created: onPage.created, skippedLocales: onPage.skippedLocales };
+        }
+        // Not a page on this site (listing without an entry, other known URL): site-wide list.
+        if (!ci.isKnownUrl(destUrl)) {
+          return { ok: false, status: 404, body: { error: `No page found at ${destUrl}` } };
+        }
+        return toCustom();
       };
 
-      if (redirects.some((r) => existingPath(r) === normalizedFrom)) {
-        res.status(409).json({
-          error: `Redirect "${normalizedFrom}" already exists in ${targetFile}`,
-        });
+      const removed = parseRemovedEntry(req.body.removed_entry);
+      const inbound = removed
+        ? listInboundRedirects(ci, removed.contentType, removed.slug, removed.locale).filter(
+            (r) => r.from.toLowerCase() !== normalizedFrom,
+          )
+        : [];
+
+      const main = writeOne(normalizedFrom, statusCode, !!allLanguages, beforeFrom);
+      if (!main.ok) {
+        res.status(main.status).json(main.body);
         return;
       }
 
-      if (statusCode !== 301) {
-        redirects.push({ path: normalizedFrom, status: statusCode });
-      } else {
-        redirects.push(normalizedFrom);
+      const created = [...main.created];
+      const moved: { from: string; source: string; file: string }[] = [];
+      const notMoved: { from: string; source: string; error: string }[] = [];
+      for (const r of inbound) {
+        const out = writeOne(r.from.toLowerCase(), r.status, false);
+        if (out.ok) {
+          moved.push({ from: r.from, source: r.source, file: out.file });
+          created.push(...out.created);
+        } else {
+          notMoved.push({ from: r.from, source: r.source, error: String(out.body.error ?? "write failed") });
+        }
+      }
+      if (removed && moved.length > 0) {
+        const changed = removeInboundRedirects(
+          ci,
+          removed.contentType,
+          removed.slug,
+          removed.locale,
+          moved.map((m) => m.from),
+        );
+        for (const abs of changed) markFileAsModified(abs, authorName, undefined, getContentRoot(res));
       }
 
-      const yamlContent = safeYamlDump(yamlData, {
-        lineWidth: -1,
-        noRefs: true,
-      });
-      fs.writeFileSync(filePath, yamlContent, "utf-8");
-      markFileAsModified(filePath, authorName, undefined, getContentRoot(res));
+      if (created.length > 0 || moved.length > 0) ci.refresh();
+      afterRedirectWrite(res, main.file);
 
-      const writtenFile = `${entry.directory}/${targetFile}`;
-      afterRedirectWrite(res, writtenFile);
-
+      const warnings: Record<string, unknown>[] = [];
+      if (main.skippedLocales.length > 0) {
+        warnings.push({
+          code: "redirect_languages_skipped",
+          message: `Skipped ${main.skippedLocales.join(", ")}: the destination page does not exist in those languages.`,
+          locales: main.skippedLocales,
+        });
+      }
+      if (notMoved.length > 0) {
+        warnings.push({
+          code: "inbound_redirects_not_moved",
+          message: `${notMoved.length} old address(es) stayed on the removed page; see not_moved.`,
+        });
+      }
       res.json({
         success: true,
         message: `Redirect added: ${normalizedFrom} -> ${destUrl}`,
-        file: writtenFile,
+        file: main.file,
+        ...(created.length > 0 ? { created } : {}),
+        ...(removed ? { moved_inbound: moved, ...(notMoved.length > 0 ? { not_moved: notMoved } : {}) } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
       });
     } catch (err) {
       log.error({ err: err }, "[Debug] Failed to add redirect:");
@@ -3132,6 +3087,13 @@ export function registerAdminRoutes(app: Express): void {
         contentRoot,
         model: modelObj?.decision?.trim() || undefined,
       });
+      const { recordDecisionOutcome } = await import("../ai/decisions/health");
+      recordDecisionOutcome(
+        getContentRootName(res),
+        decisionProbe.ok
+          ? { status: "ok", model: decisionProbe.model }
+          : { status: "unavailable", reason: "error", message: decisionProbe.error },
+      );
 
       if (!decisionProbe.ok) {
         return res.status(400).json({

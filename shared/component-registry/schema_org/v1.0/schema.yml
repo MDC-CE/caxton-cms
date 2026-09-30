@@ -31,7 +31,10 @@ props:
     required: true
     description: >-
       YAML object of schema.org properties (snake_case keys). Use provider/parent_organization: "@organization" to
-      reference the site Organization template. Nested locales: { es: { name: ... } } apply per locale.
+      reference the site Organization template. Nested locales: { es: { name: ... } } apply per locale. For page types
+      (WebPage, AboutPage, ContactPage, CollectionPage, ProfilePage, ItemPage) and Person, omit url / @id: they are
+      filled from the page address. Never build them from a URL pattern; a typed url for another page on this site
+      blocks publish/promote.
   section_id:
     type: string
     required: false

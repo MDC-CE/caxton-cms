@@ -12,7 +12,7 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 
 | Tool | Caps | Job |
 |---|---|---|
-| `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Optional `related_entries` (idea context; slug need not exist). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
+| `propose_change` | `proposals_create` | Create. `entries[]` → edits; `kind:"idea"` → idea brief; omit → notes. Ideas: name the target page type in `related_entries` (content type key; slug need not exist; unknown types refuse). Notes default `no_auto_retry`. Soft-blocks on recent entry writes. |
 | `list_proposals` | `content_view` \| `proposals_create` \| `proposals_review` | **Stats-first** (`by_attention`, **`by_kind_status`**, `stalled_ideas`, `needs_review_edits`). Filter with `query` / `issue_id` / `status` / `kind` / `proposer_username` / `proposer_actor` / `agent_session_id` / `escalated` / `outcome_review` / `attention` / `stalled` / `needs_review` → **summary** rows (`entry_count`, `field_paths`, `attention`, blocker counts; no ops/values). Scoped default **`sort=attention`** (role-aware) + open\|partial when status omitted (unless stalled); pass `sort: updated_at` for chronology. `needs_review: true` → open\|partial edits in awaiting_rereview or no_feedback. Opt-in **`kpi_history`** (+ `kpi_granularity` / `kpi_from` / `kpi_to`) → per-bucket **flow** series (each bucket restarts at 0; `open` = created, finished/rejected = closed in bucket; hour / day ×28 / Monday-week ×12, plus the in-progress bucket marked `partial: true`). `proposal_id` → **full** detail; open\|partial also returns live `review_context` + `discovery_path`. |
 
 **KPI strip ↔ `list_proposals`:** Unscoped calls return **live** Ideas/Edits/Notes × Open/Done/Rej via `proposal_stats.by_kind_status` (same as the staff strip big numbers; open includes partial; withdrawn omitted; empty site → all nine buckets as `0`). Sparkline history is **opt-in only** (`kpi_history: true`) — never attached by default. It is flow per period (trend), not the pile — the big numbers come from `by_kind_status`, not the last spark point. Event Webhooks are **not** proposal stats and never appear on this tool. Filtered (scoped) calls still return **site-wide** `by_kind_status` (warning `proposal_stats_site_wide`); do not treat those counts as the size of the filtered page.
@@ -20,6 +20,16 @@ Agentic swarm role connectors may write **drafts** freely, may write **live** on
 See also **`explain_site` `topic: "proposals"` `subtopic: "reading"`**: damage/undo axes, checklist IDs, create refuses, apply block when target missing.
 
 **Review situations:** optional `review_situations` on **edits** — hub `topic: "proposals"` with subtopics **`situations`**, **`internal-links`**, **`serp-title-description`**, **`funnel-classification`**, **`translations`**. Empty → infer from ops. Ideas always get default-on **`idea_opportunity_harm`** (`subtopic: "idea-opportunity-harm"`) and may declare **one** demand label: **`anticipated_demand`**, **`existing_demand`** (`subtopic: "existing-demand"`), **`fast_decay_news`**, or **`broken_url`** (`subtopic: "broken-url"`). Authors who file `broken_url` must call `get_runtime_issues` first. **New-URL ideas** also need structured **`idea_funnel`** `{ stage, products }` before accept (`set_idea_funnel`; `"all"` only with awareness).
+
+**SEO target (new-URL ideas on SEO-monitored types):** `idea_seo_target` `{ main_keyword, cluster }` — set on create or via `set_idea_seo_target` (open ideas; proposer or staff). Soft warning `idea_seo_target_missing` on create; accept refuses until set (`idea_seo_target_required`). Non-monitored types and already-accepted ideas are unaffected.
+
+- `cluster.mode: "join"` + `pillar_path` — hub must be live, same locale as `accepted_entry`, and `is_pillar` at accept (`idea_seo_target_hub_not_live`).
+- `cluster.mode: "hub"` + `members[]` — the new page becomes a hub; members must be live, monitored, same-locale (`idea_seo_target_hub_members_required`). After the first go-live, apply returns `idea_seo_hub_members_follow_up` with one `propose_change` next_action per member (members already in another hub are flagged).
+- `cluster.mode: "standalone"` + `reason` (min 40) — only for `fast_decay_news` / `broken_url` ideas (`idea_seo_target_standalone_not_allowed`).
+- Accept refuses when a live page (`seo-index.json`) or another accepted, unpublished idea already holds the exact keyword (`idea_seo_target_keyword_taken`; `seo_index_unavailable` fails closed).
+- The target **freezes at accept** (`idea_seo_target_frozen`) and is **seeded** into the implementing edit's new `draft.{locale}.yml` `seo:` block. Edits may differ only with `seo_target_override.reason` (min 40; `idea_seo_target_conflict`) — review shows locked vs proposed. Renamed hub → followed with warning; deleted hub → apply fails (`idea_seo_target_hub_gone`).
+- No new publish gate for the idea's own page. A **second locale** of a monitored page needs its own keyword + same-locale hub at go-live (`locale_seo_target_required`; see `topic: "seo"`).
+- Agents cannot opt an idea-born page out of clustering (`seo.pillar_path: null`) unless the idea is news / broken-URL and a reason is given (`seo_optout_idea_born`).
 
 | `update_proposal` | `proposals_create` and/or `proposals_review` (actions filtered) | See action allowlists below. |
 | `get_entry_activity` | same as list | Read recent writes (14 days). Use before `confirm_recent_activity`. |
@@ -40,8 +50,8 @@ Approve (apply) may change **live or draft** content that was already proposed. 
 
 | Caps | Allowed | Denied |
 |---|---|---|
-| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, revert |
-| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, revert | apply, reject, accept, close, blockers |
+| `proposals_review` only | claim, release, apply, reject, accept, close, acknowledge, blockers | withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, set_idea_funnel, set_related_entries, revert |
+| `proposals_create` only | claim, release, withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, set_idea_funnel, set_related_entries, revert | apply, reject, accept, close, blockers |
 | both | full set | — |
 
 ## Kinds
@@ -71,7 +81,11 @@ After **`revise_entries`**, trust Proposed changes / ops over an older summary i
 - **Live review:** default-on situation `idea_opportunity_harm` + checklist `idea_opportunity_harm` (Goal → Evidence → Fit → Brand → dilution) stacked with `idea_accept` (lock/`next_step`). Optional demand label stacks `anticipated_demand` | `existing_demand` | `fast_decay_news` | `broken_url` (Evidence follows the label). Playbooks: `subtopic: "idea-opportunity-harm"` / `"existing-demand"` / `"broken-url"`. Incomplete brief → `add_blocker`; wrong vehicle → close/refile edits. Discovery tools optional.
 - **accept:** four-eyes (human+role); open blockers block; `next_step` min 20; **`accepted_entry`** `{ contentType, slug, locale }` required (locks that page+locale); → `finished` + `accepted`. **No YAML.** Refuse if another accepted idea already holds that entry (`accepted_entry_taken`).
 - **close** park: `wont_fix` \| `tracked_elsewhere` \| `other` (not four-eyes). Do not use close for “yes.”
-- Optional `related_entries`: context only; targets may not exist yet (prefills accept UI when present).
+- **Target page type:** name it in `related_entries: [{ contentType, slug, locale }]` — `contentType` is a **content-types.yml key** (e.g. `landing`, not the folder `landings`); slug may not exist yet (prefills accept UI). Read `get_content_type_info(contentType).strategy` (purpose + constraints) **before** writing the brief. Do **not** encode the type as tags (`surface:landing`); tags are kept but carry no meaning to review.
+  - Create refuses unknown types: **`unknown_content_type`** (`details.unknown`, `details.valid_types`; nothing saved).
+  - Fix after create: `update_proposal` **`set_related_entries`** (open/partial ideas, proposer; full replacement; empty clears; same unknown-type + `mixed_risk_bundle` checks; refused after accept — accept's `accepted_entry` is the lock).
+  - Soft warnings (never block create/accept): `idea_content_type_missing` (no type named; reviewer `add_blocker` only for ideas filed on/after 2026-09-30 — older rows are reminder-only), `idea_content_type_unknown` (legacy row with a non-key type), `idea_multiple_content_types` (more than one known type — one idea should target one type; split), `content_type_strategy_missing` (type has no strategy; staff sets it on the content type's Strategy tab).
+  - Review: think item **`content_type_fit`** lists each type's purpose/constraints (max 3 types) — does the brief's goal match the page type? Accepted ideas show the accepted type first; when it differs from the pitched type, both strategies appear (`role: accepted | pitched`). `list_proposals(proposal_id)` returns `content_type_strategies` for any idea status.
 - **Follow-up edits:** pass `implements_proposal_id` to the accepted idea. Required when creating edits for a reserved entry. At most one **open/partial** implements child (`idea_already_in_progress`). Entry must match `accepted_entry`. Brand / selling-figure ship gates run on that edits proposal (`new_content_brand` / `selling_page_figures`), not on the idea.
 - **Stalled:** accepted idea with a locked entry and **no** implements child in `open`/`partial`/`finished`. Rejected/withdrawn children resurface stalled. List with `stalled: true`; stats include `stalled_ideas`. Legacy accepts without `accepted_entry` are not stalled.
 

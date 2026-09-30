@@ -58,6 +58,7 @@ interface SchemaYml {
   variant_props?: Record<string, Record<string, PropDef>>;
   image_sizes?: Record<string, string>;
   section_defaults?: unknown;
+  text_limits?: unknown;
 }
 
 export interface DriftIssue {
@@ -434,6 +435,7 @@ async function processComponent(
       ...(existing?.section_defaults !== undefined
         ? { section_defaults: existing.section_defaults }
         : {}),
+      ...(existing?.text_limits !== undefined ? { text_limits: existing.text_limits } : {}),
     };
 
     if (Object.keys(variantSchemas).length > 0) {

@@ -74,6 +74,9 @@ export function buildDecisionDebug(opts: BuildDecisionDebugOpts): ProposalDecisi
           active_checklists: reviewContext.active_checklists,
           entries: reviewContext.entries,
           agent_preview: reviewContext.agent_preview,
+          figure_variables: reviewContext.figure_variables,
+          fact_variable_names: reviewContext.fact_variable_names,
+          site_facts: reviewContext.site_facts,
         }
       : null,
     recentActivity: opts.recentActivity ?? null,

@@ -8,6 +8,10 @@ import {
   isDbBacked,
   isSharedLayoutConfig,
   resolveContentType,
+  entryLocales,
+  entryNotFoundNote,
+  staleSourceWarning,
+  translateSourceItemGate,
   loadPage,
   loadVariantPage,
   safeLoad,
@@ -67,6 +71,8 @@ import {
   deprecatedTemplateRefWarnings,
   isDeprecatedFieldInfo,
 } from "../lib/deprecated-field-mcp.js";
+import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
+import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
 import {
   DEPRECATED_FIELD_CODE,
   deprecatedSystemHint,
@@ -114,6 +120,7 @@ import {
   isWeakKeywordMetricsForResearch,
 } from "../lib/entry-seo-research-hints.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
+import { mappedFieldsStorageFor } from "../../server/mapped-fields-storage.js";
 import {
   buildAvailableFieldsCatalog,
   filterFieldsByRequest,
@@ -423,6 +430,7 @@ async function callEditSectionsApi(
     why?: string;
     highlights?: string[];
     agent_session_id?: string;
+    seo_optout_reason?: string;
   },
   mcpToken?: string,
   domain?: string,
@@ -442,11 +450,40 @@ async function callEditSectionsApi(
         ...(params.report ? { report: params.report } : {}),
         ...(params.why ? { why: params.why } : {}),
         ...(params.highlights?.length ? { highlights: params.highlights } : {}),
+        ...(params.seo_optout_reason ? { seo_optout_reason: params.seo_optout_reason } : {}),
       }),
     });
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok) {
       const errMsg = (data.error as string) || `Server error: ${res.status}`;
+      if (data.code === "seo_optout_idea_born") {
+        return {
+          error: fail(errMsg, {
+            code: "seo_optout_idea_born",
+            details: data.details ?? {},
+            warnings: [
+              {
+                code: "seo_optout_idea_born",
+                message:
+                  "Idea-born pages stay clustered. Agents may set seo.pillar_path: null (or include_in_clustering: false) only when the origin idea is fast_decay_news or broken_url AND seo_optout_reason (min 40 chars) is passed. Staff can still turn monitoring off in the UI.",
+              },
+            ],
+            next_actions: [
+              {
+                tool: "list_seo_clusters",
+                reason: "Find a live hub in this locale for the page instead of opting out.",
+                priority: "recommended",
+              },
+              {
+                tool: "update_fields",
+                reason: "Fix the cluster: seo.pillar_path to a live same-locale hub, or seo.is_pillar: true.",
+                priority: "recommended",
+                args_hint: { slug: params.slug, locale: params.locale, contentType: params.contentType },
+              },
+            ],
+          }),
+        };
+      }
       if (data.code === "report_quality" || data.code === "report_required" || data.code === "report_too_short") {
         return {
           error: actionRequired(
@@ -1781,6 +1818,8 @@ export function registerPageTools(
     locales: string[];
     urls?: Record<string, string>;
     data: Record<string, unknown>;
+    /** The entry's source item came from a database copy this old (ms). */
+    staleSourceAgeMs?: number;
   };
 
   type PagePayloadError = { content: [{ type: "text"; text: string }]; isError: true };
@@ -1794,44 +1833,16 @@ export function registerPageTools(
       return { content: [{ type: "text", text: (e as Error).message }], isError: true };
     }
     const resolved = resolveContentType(slug, contentType, contentPath);
-    // #region agent log
-    fetch("http://127.0.0.1:7585/ingest/7dd1bcc0-ea77-4f87-be7d-1ea690313598", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "574959" },
-      body: JSON.stringify({
-        sessionId: "574959",
-        hypothesisId: "C",
-        location: "mcp-server/tools/pages.ts:resolvePagePayload",
-        message: "resolvePagePayload YAML folder lookup",
-        data: {
-          slug,
-          locale,
-          contentTypeHint: contentType ?? null,
-          resolved: resolved
-            ? {
-                contentType: resolved.contentType,
-                dbSlug: (resolved.config as { database?: { slug?: string } })?.database?.slug ?? null,
-                directory: (resolved.config as { directory?: string })?.directory ?? null,
-              }
-            : null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (!resolved) {
-      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}` }], isError: true };
+      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}` }], isError: true };
     }
     const result = loadPage(resolved.contentType, slug, locale, contentPath);
     if (!result) {
-      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType})` }], isError: true };
+      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType}).${entryNotFoundNote(resolved.contentType, contentPath)}` }], isError: true };
     }
 
     const pageDir = path.join(contentPath, getDirectory(resolved.contentType, resolved.config), slug);
-    const dirFiles = fs.existsSync(pageDir) ? fs.readdirSync(pageDir) : [];
-    const locales = dirFiles
-      .map((f: string) => f.replace(/\.(yml|yaml)$/, ""))
-      .filter((n: string) => /^[a-z]{2}(-[a-z]{2})?$/.test(n));
+    const locales = entryLocales(resolved.contentType, slug, contentPath);
 
     const urlPattern = resolved.config.url_pattern;
     let urls: Record<string, string> | undefined;
@@ -1854,22 +1865,23 @@ export function registerPageTools(
         }
       }
       const resolvedUrls: Record<string, string> = {};
-      if (urlPattern["default"]) {
-        for (const l of locales) {
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern["default"].replace(":slug", localeSlug);
-        }
-      } else {
-        for (const l of locales) {
-          if (!urlPattern[l]) continue;
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern[l].replace(":slug", localeSlug);
-        }
+      for (const l of locales) {
+        const pattern = urlPattern[l] || urlPattern["default"];
+        if (!pattern) continue;
+        resolvedUrls[l] = pattern.replace(":slug", localeSlugByLocale[l] || slug);
       }
       if (Object.keys(resolvedUrls).length > 0) urls = resolvedUrls;
     }
 
-    return { contentType: resolved.contentType, slug, locale, locales, ...(urls ? { urls } : {}), data: result.data as Record<string, unknown> };
+    return {
+      contentType: resolved.contentType,
+      slug,
+      locale,
+      locales,
+      ...(urls ? { urls } : {}),
+      data: result.data as Record<string, unknown>,
+      ...(result.staleSourceAgeMs !== undefined ? { staleSourceAgeMs: result.staleSourceAgeMs } : {}),
+    };
   }
 
   // get_entry_content
@@ -1952,7 +1964,8 @@ export function registerPageTools(
       const deprecated_fields_present = deprecatedFieldsPresent(liveConfig, merged);
       const { layoutInfoForEntry } = await import("../../server/layout-owner.js");
       const layout = layoutInfoForEntry(payload.contentType, payload.slug, contentPath);
-      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending }, null, 2) }] };
+      const warnings = payload.staleSourceAgeMs !== undefined ? [staleSourceWarning(payload.staleSourceAgeMs)] : [];
+      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending, ...(warnings.length ? { warnings } : {}) }, null, 2) }] };
     }
   );
 
@@ -2192,6 +2205,7 @@ export function registerPageTools(
       };
 
       const kmWarnings: Array<{ code: string; message: string }> = [];
+      if (payload.staleSourceAgeMs !== undefined) kmWarnings.push(staleSourceWarning(payload.staleSourceAgeMs));
       if (keyword_metrics.source === "yaml_fallback") {
         kmWarnings.push({
           code: "keyword_metrics_yaml_fallback",
@@ -3219,6 +3233,9 @@ export function registerPageTools(
       confirm_cluster_resolution: z.boolean().optional().describe(
         "Required when becoming a pillar (seo.is_pillar:true) or opting out of clustering while ORPHAN_PAGE / PARTIALLY_SET_CLUSTER is still open. Prefer joining a hub with seo.pillar_path instead.",
       ),
+      seo_optout_reason: z.string().optional().describe(
+        "Idea-born pages only: why this page leaves every cluster (min 40 chars). Allowed only when the origin idea is fast_decay_news or broken_url; otherwise seo_optout_idea_born.",
+      ),
       seo_research_source: z
         .string()
         .optional()
@@ -3236,7 +3253,7 @@ export function registerPageTools(
         .describe("Required. From agent_session start — groups this write for staff monitoring."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
+    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_optout_reason, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { contentPath, contentFolder, domain } = siteResult;
@@ -4024,6 +4041,7 @@ export function registerPageTools(
             why: whyText,
             highlights: highlightList,
             agent_session_id,
+            ...(seo_optout_reason ? { seo_optout_reason } : {}),
           },
           mcpToken,
           domain,
@@ -4032,6 +4050,7 @@ export function registerPageTools(
         boundUpdates = apiResult.data.boundUpdates;
         appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         warnings.push(...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs));
+        warnings.push(...textLimitWarnings(apiResult.data.text_limit_warnings));
         results.push(`${localeEntries.length} field(s) → ${pathInfo.relativeHint}`);
       }
 
@@ -4636,7 +4655,7 @@ export function registerPageTools(
       const ct = resolved.contentType;
       const ctDir = getDirectory(ct, resolved.config);
       const dbSlug = resolved.config.database?.slug as string | undefined;
-      const isStatic = !dbSlug;
+      const defaultStorage = mappedFieldsStorageFor(ct, siteResult.contentPath);
       const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const getHint = {
         tool: "get_entry_fields",
@@ -4671,57 +4690,50 @@ export function registerPageTools(
           };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           const writtenPath = data.path || ctPath;
-          const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
-          if (isStatic) {
-            return ok(
-              {
-                message: data.noop
-                  ? `No-op reset for ${ct}/${slug}.${field} (key not on layer; may live only on _common.yml)`
-                  : `Reset static ${ct}/${slug}.${field} on ${writtenPath}`,
-                storage,
-                path: writtenPath,
-                noop: !!data.noop,
-              },
-              {
-                warnings: [
-                  {
-                    code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
-                    message: data.noop
-                      ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
-                      : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
-                  },
-                ],
-                side_effects: data.noop
-                  ? [{ kind: "other", summary: `storage=${storage}; noop` }]
-                  : [
-                      { kind: "wrote_file", summary: `${writtenPath}#${field}` },
-                      { kind: "other", summary: `storage=${storage}` },
-                    ],
-                next_actions: [getHint],
-              },
-            );
-          }
-          return ok(
-            { message: `Reset ${ct}/${slug}.${field} → cleared ${dbPath} + ${writtenPath}#field_overrides` },
-            {
+          const storage = data.storage || defaultStorage;
+          const resetNextActions = [{ ...getHint, reason: "Confirm provenance is original after reset" }];
+          const payload = {
+            message: data.noop
+              ? `No-op reset for ${ct}/${slug}.${field} (key not on this layer)`
+              : `Reset ${ct}/${slug}.${field} on ${writtenPath}`,
+            storage,
+            path: writtenPath,
+            noop: !!data.noop,
+          };
+          if (storage === "root_key") {
+            return ok(payload, {
               warnings: [
                 {
-                  code: "reset_clears_both_layers",
-                  message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+                  code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
+                  message: data.noop
+                    ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
+                    : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
                 },
               ],
-              side_effects: [
-                { kind: "wrote_file", summary: dbPath },
-                { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
-                { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
-                { kind: "other", summary: `storage=${storage}` },
-              ],
-              next_actions: [{
-                ...getHint,
-                reason: "Confirm provenance is original after reset",
-              }],
-            },
-          );
+              side_effects: data.noop
+                ? [{ kind: "other", summary: `storage=${storage}; noop` }]
+                : [
+                    { kind: "wrote_file", summary: `${writtenPath}#${field}` },
+                    { kind: "other", summary: `storage=${storage}` },
+                  ],
+              next_actions: resetNextActions,
+            });
+          }
+          return ok(payload, {
+            warnings: [
+              {
+                code: "reset_clears_both_layers",
+                message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+              },
+            ],
+            side_effects: [
+              { kind: "wrote_file", summary: dbPath },
+              { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
+              { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
+              { kind: "other", summary: `storage=${storage}` },
+            ],
+            next_actions: resetNextActions,
+          });
         }
 
         if (level === "database") {
@@ -4735,7 +4747,11 @@ export function registerPageTools(
           const data = await res.json() as { error?: string };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           return ok(
-            { message: `Database override set for ${ct}/${slug}.${field} → ${relPath}` },
+            {
+              message: `Database override set for ${ct}/${slug}.${field} → ${relPath}`,
+              storage: "db_override",
+              path: relPath,
+            },
             {
               warnings: [
                 {
@@ -4844,7 +4860,7 @@ export function registerPageTools(
                   : [],
           });
         }
-        const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
+        const storage = data.storage || defaultStorage;
         const writtenPath = data.path || relPathFallback;
         const isPublishedAt = field === "published_at";
         return ok(
@@ -5667,6 +5683,15 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -5765,6 +5790,12 @@ export function registerPageTools(
         .optional()
         .describe("Publish a translation whose source locale changed after translating. Ask the user first."),
       dry_run: z.boolean().optional().describe("Run every check and return published_diff without writing."),
+      seo_standalone_reason: z
+        .string()
+        .optional()
+        .describe(
+          "New language on an SEO-monitored page whose draft sets seo.pillar_path: null: why it stays out of every cluster (min 40 chars). Idea-born pages also need a fast_decay_news/broken_url origin idea.",
+        ),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5781,6 +5812,7 @@ export function registerPageTools(
       confirm_overwrite_newer_live,
       confirm_source_changed,
       dry_run,
+      seo_standalone_reason,
       report,
       agent_session_id,
       site,
@@ -5846,6 +5878,7 @@ export function registerPageTools(
             ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
             ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
             ...(dry_run ? { dry_run: true } : {}),
+            ...(seo_standalone_reason ? { seo_standalone_reason } : {}),
           }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -5854,6 +5887,46 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === "locale_seo_target_required") {
+            return fail(errMsg, {
+              code: serverCode,
+              details: details ?? {},
+              warnings: [
+                {
+                  code: "locale_seo_target_required",
+                  message:
+                    "Each language of an SEO-monitored page needs its own seo.main_keyword plus a live hub in the same language (seo.pillar_path) or seo.is_pillar: true, set on the draft. Standalone (pillar_path: null) needs seo_standalone_reason; idea-born pages only for news/broken-URL ideas.",
+                },
+              ],
+              next_actions: [
+                {
+                  tool: "get_or_refresh_seo_research",
+                  reason: `Pick the ${locale} keyword for this language.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "list_seo_clusters",
+                  reason: `Find a live ${locale} hub.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "update_fields",
+                  reason: "Set seo.main_keyword and seo.pillar_path (or seo.is_pillar) on the draft, then retry promote_variant.",
+                  priority: "required",
+                  args_hint: { slug, locale, contentType, variant: variantSlug },
+                },
+              ],
+            });
+          }
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -6887,6 +6960,22 @@ const ghWarning = githubCommitWarning(commitResult);
         site,
       });
 
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const cache = new Map();
+        for (const [loc, localeContent] of Object.entries(normalizedLocales)) {
+          const violations = evaluatePageTextLimitsForSite(
+            { sections: localeContent.sections },
+            { contentRoot: contentPath, cache },
+          );
+          for (const w of textLimitWarnings(violations)) {
+            warnings.push({ code: w.code, message: `[${loc}] ${w.message}` });
+          }
+        }
+      } catch {
+        /* text limits are advisory on create */
+      }
+
       const title =
         (normalizedLocales[primaryLocale]?.fields?.title as string | undefined) ||
         (typeof common.title === "string" ? common.title : undefined);
@@ -7106,6 +7195,7 @@ const ghWarning = githubCommitWarning(commitResult);
         ...variantWarningsIfNeeded(variant),
         ...schemaOrgPageOverrideWarnings(sectionToAdd),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7754,6 +7844,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         UPDATED_AT_STAMP_WARNING,
         ...variantWarningsIfNeeded(variant),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7893,7 +7984,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
 
       const resolved = resolveContentType(slug, contentType, contentPath);
       if (!resolved) {
-        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}`);
+        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}`);
       }
 
       if (mcpToken) {
@@ -7901,6 +7992,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           return denyWriteSuggestPropose("content_edit_text", resolved.contentType);
         }
       }
+
+      const itemGate = translateSourceItemGate(resolved.contentType, slug, target_locale, contentPath, site);
+      if (itemGate) return fail(itemGate.message, itemGate.details);
 
       const variantCheck = validateTranslateVariantSlug(
         typeof variantArg === "string" && variantArg.trim()
@@ -8355,6 +8449,15 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       }
       pushSlugLocaleMismatchWarning(warnings, localeUrlSlug, target_locale);
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const merged = { ...common, ...localeData } as Record<string, unknown>;
+        warnings.push(
+          ...textLimitWarnings(evaluatePageTextLimitsForSite(merged, { contentRoot: contentPath })),
+        );
+      } catch {
+        /* text limits are advisory on translate */
+      }
       {
         const missing = draftMissingRequiredWarnings(resolved.config, common, localeData);
         if (missing.length > 0) {

@@ -20,6 +20,7 @@ import { getApiPath } from "@shared/api-paths";
 import { useMenuConfig } from "@/hooks/useMenuConfig";
 import { getMenuChromeHeights } from "@/lib/menuChrome";
 import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
+import { usePageVersionExposure } from "@/hooks/usePageVersionExposure";
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -61,6 +62,7 @@ export default function ContentTypeDetail({ type, slug, locale, urlPattern }: Co
     },
     enabled: !!slug,
   });
+  usePageVersionExposure(data, { skip: !!forceVariant });
 
   const effectiveLocale = (isNonLocalized && data?.locale)
     ? String(data.locale)

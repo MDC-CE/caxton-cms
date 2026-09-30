@@ -64,7 +64,9 @@ A gate is the server asking for a decision. Passing a `confirm_*` flag is you an
 
 ## 4. Never invent
 
-Do not make up anything the site will publish or rely on: keyword volume/difficulty, rankings, prices, dates, product facts, testimonials, CRM tags, conversion events, image URLs. Use the MCP (catalogs in `explain_site`, `get_or_refresh_seo_research`, `list_media`, `get_product`), a source the human gave you, or ask. No reliable source → leave it out and say so.
+Do not make up anything the site will publish or rely on: keyword volume/difficulty, rankings, prices, dates, product facts, testimonials, CRM tags, conversion events, image URLs. Use the MCP (catalogs in `explain_site`, `get_or_refresh_seo_research`, `list_media`, `get_product`, `list_variables`), a source the human gave you, or ask. No reliable source → leave it out and say so.
+
+1. **Site facts** (prices, hire rates, ratings, phones, company facts): `list_variables` is the site's fact database. List before writing a number, paste its token (values differ by region), and when reviewing judge stats against it — the catalog wins; a stale fact is a `kind: "notes"` handoff, never a literal.
 
 ## 5. Talking to the human
 
@@ -192,7 +194,7 @@ Your job is to stop harm — invented claims, lost query fit, false scope, unjus
 
 | `layout_owner` | Examples | Draft contains | New language | Apply writes |
 |---|---|---|---|---|
-| `shared_template` | attached blog post, attached database-backed entry | fields only (sections → `attached_sections_refused`) | field edits only | `{locale}.yml` fields with `sections: []` (or field overrides for database-backed); template untouched |
+| `shared_template` | attached blog post, attached database-backed entry | fields only (sections → `attached_sections_refused`) | field edits only | `{locale}.yml` fields with `sections: []` (or field overrides for database-backed — the draft's overrides sit over the item and live overrides, and `{locale}.yml` is created on publish if missing); template untouched |
 | `entry` | landing, downloadable, program page, any detached entry | fields + the full layout: one `{ field_path: "sections", value: [...] }`, or `sections[i].x` on an existing locale | full translated `sections` (else `sections_required`, `details.new_locale`) | the whole page |
 | `is_shared_template: true` | slug `template` of a shared-layout type | the shared layout itself | full `sections` | `template.{locale}.yml` → every attached entry in that language (`confirm_affected_entries: N`); detached entries unaffected |
 
@@ -207,7 +209,7 @@ Every full `sections` array is shape-checked against the component registry (`in
 
 ## 9. SEO habits
 
-- Cluster `seo.*` only on live (or a draft before any live locale exists). Never on A/B variants; after promote, edit live (promote keeps live `seo:`).
+- Cluster `seo.*` on live or any 0%-traffic draft; never on running experiments (`seo_variant_forbidden`). Promote applies the draft's `seo:` (a draft without `seo:` keeps live's). A new locale on a monitored page needs its own keyword + same-locale hub before go-live (`locale_seo_target_required`).
 - Keyword metrics: research on → `get_or_refresh_seo_research` `action: keyword_metrics`; never write `seo.kw_monthly_volume` / `seo.kw_difficulty`. Research off → write both only with `seo_research_source: staff_provided` or `external:<tool_name>`. No source → do not claim `SEO_KEYWORD_RESEARCH_INCOMPLETE`.
 - Measured clicks = `get_organic_traffic`. Planning = `get_or_refresh_seo_research` (`keyword_metrics` | `serp` | `keyword_ideas` | `competitors` | `keyword_gaps` — gaps needs `competitors` first). Cache-first, with session and daily budgets.
 - Set `seo.refresh_tier` (`fast` | `medium` | `evergreen` = how fast the facts go stale, not traffic) when clustering or classifying a page; revisit when the angle changes (explainer → yearly "best of" is `fast`). Per locale; translate does not copy it; cannot be cleared. Unsure → `get_entry_fields` `fields: ["seo.refresh_tier"]` for `fill_intent`.

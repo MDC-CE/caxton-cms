@@ -25,4 +25,7 @@ export const SCHEMA_COMPLETENESS_ISSUE_CODES: Record<string, IssueCodeDefinition
   SCHEMA_RENDER_ERROR: {
     title: "Schema Render Error",
   },
+  SCHEMA_ORG_PAGE_URL_MISMATCH: {
+    title: "Schema.org page URL points to a different page",
+  },
 };

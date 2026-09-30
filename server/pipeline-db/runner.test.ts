@@ -1012,6 +1012,139 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds idea SEO target columns when upgrading from v26-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v26-idea-seo-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 26);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        idea_funnel_json TEXT,
+        system_version TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at, idea_funnel_json)
+      VALUES ('idea-1', 'site_test', 'finished', 1, '{"stage":"awareness","products":"all"}');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(
+        `SELECT idea_funnel_json, idea_seo_target_json, seo_target_override_json FROM content_proposals WHERE id = 'idea-1'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(row.idea_funnel_json).toBe('{"stage":"awareness","products":"all"}');
+    expect(row.idea_seo_target_json).toBeNull();
+    expect(row.seo_target_override_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds lead_submissions and consent_daily when upgrading from v27-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v27-leads-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 27);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        idea_seo_target_json TEXT,
+        seo_target_override_json TEXT,
+        system_version TEXT
+      );
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const leadCols = (db.prepare("PRAGMA table_info(lead_submissions)").all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    );
+    expect(leadCols).toEqual(
+      expect.arrayContaining([
+        "submission_id",
+        "created_at",
+        "browser_hash",
+        "form",
+        "campaign_id",
+        "ad_id",
+        "landing_path",
+        "experiment_id",
+        "variant",
+        "is_test",
+        "is_repeat",
+        "repeat_of",
+        "consent_state",
+      ]),
+    );
+    expect(leadCols).not.toContain("email");
+    const consentCols = (db.prepare("PRAGMA table_info(consent_daily)").all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    );
+    expect(consentCols).toEqual(
+      expect.arrayContaining(["date", "country", "mode", "shown", "granted_explicit", "granted_implied", "denied"]),
+    );
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds site_facts_check_json when upgrading from v28-shaped DB", () => {
+    const site = `${TEST_PREFIX}-v28-site-facts-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 28);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        idea_seo_target_json TEXT,
+        seo_target_override_json TEXT,
+        system_version TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at)
+      VALUES ('p-1', 'site_test', 'open', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(`SELECT status, site_facts_check_json FROM content_proposals WHERE id = 'p-1'`)
+      .get() as Record<string, unknown>;
+    expect(row.status).toBe("open");
+    expect(row.site_facts_check_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

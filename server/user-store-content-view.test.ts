@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ensureAdsSettingsOnSeoSettingsRoles,
   ensureContentViewOnEditorRoles,
   ensureDeleteVariantOnCreateVariantRoles,
   ensureDatabasesEditDataOnAllContentEditors,
@@ -161,6 +162,19 @@ describe("migrateSeoEditSplit", () => {
       },
     };
     expect(migrateSeoEditSplit(roles)).toBe(false);
+  });
+});
+
+describe("ensureAdsSettingsOnSeoSettingsRoles", () => {
+  it("adds ads_settings to custom roles that manage SEO settings", () => {
+    const roles: Record<string, RoleDefinition> = {
+      seo_manager: { label: "SEO", capabilities: [{ name: "seo_settings" }] },
+      editor: { label: "Editor", capabilities: [{ name: "content_edit_text" }] },
+    };
+    expect(ensureAdsSettingsOnSeoSettingsRoles(roles)).toBe(true);
+    expect(roles.seo_manager.capabilities.map((g) => g.name)).toEqual(["seo_settings", "ads_settings"]);
+    expect(roles.editor.capabilities.map((g) => g.name)).toEqual(["content_edit_text"]);
+    expect(ensureAdsSettingsOnSeoSettingsRoles(roles)).toBe(false);
   });
 });
 

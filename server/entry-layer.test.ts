@@ -7,6 +7,7 @@ import { resetRegistry } from "./content-types";
 import { listEntryKeys, loadEntry } from "./entry-layer";
 import { resolveEntryMeta } from "./resolve-entry-meta";
 import { resetVariableManagerCache } from "./variable-manager";
+import { mockDatabase } from "./test-helpers/mock-database";
 
 const ORIGINAL_CWD = process.cwd();
 let tempDir: string;
@@ -24,9 +25,9 @@ function buildIndex() {
   resetRegistry(contentRoot);
   ci = new ContentIndex(contentRoot);
   ci.scanFast();
-  vi.spyOn(ci, "getDatabase").mockReturnValue({
-    getMappedItems: (name: string) => (name === "exercises" ? cachedItems : null),
-  } as unknown as ReturnType<ContentIndex["getDatabase"]>);
+  vi.spyOn(ci, "getDatabase").mockReturnValue(
+    mockDatabase((name) => (name === "exercises" ? cachedItems : null)),
+  );
 }
 
 beforeEach(() => {

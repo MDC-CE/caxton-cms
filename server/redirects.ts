@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { listTypePages } from "./entry-layer";
 import yaml from "js-yaml";
 import { escapeTemplateVars, unescapeObjectVars } from "@shared/templateVars";
 import { contentIndex, type RedirectEntry } from "./content-index";
@@ -563,22 +564,15 @@ export function findCanonicalSoftMatch(
     let canonicalUrl: string | null = null;
     let matched = false;
 
-    if (typeConfig.database?.slug) {
-      const items = databaseManager.getMappedItems(typeConfig.database.slug);
-      if (!items) continue;
-      const record = items.find(
-        (item) => String(item.slug || "").toLowerCase() === lastSegmentLower,
-      );
-      if (!record) continue;
+    const listed = listTypePages(ci, typeName);
+    if (listed) {
+      const page =
+        listed.pages.find((p) => p.slug.toLowerCase() === lastSegmentLower && p.locale === locale) ??
+        listed.pages.find((p) => p.slug.toLowerCase() === lastSegmentLower);
+      if (!page) continue;
       matched = true;
-      const localeField = getLocaleKey(typeName);
-      const rawLocale =
-        (localeField && record[localeField]) ||
-        record["language"] ||
-        record["lang"] ||
-        record["locale"];
-      const recordLocale = rawLocale ? String(rawLocale) : locale;
-      const canonicalLocale = typeConfig.url_pattern[recordLocale] ? recordLocale : locale;
+      const record = page.item;
+      const canonicalLocale = typeConfig.url_pattern[page.locale] ? page.locale : locale;
       const urlPattern =
         typeConfig.url_pattern[canonicalLocale] ??
         typeConfig.url_pattern["en"] ??

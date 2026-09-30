@@ -156,3 +156,13 @@ export function shellBasenameCandidates(
 export function commonTemplateBasenameCandidates(): string[] {
   return [COMMON_TEMPLATE_BASENAME, LEGACY_COMMON_SINGLE_BASENAME];
 }
+
+/**
+ * True when the type's entries fill a shared template (`template.{locale}.yml`).
+ * Database-backed types always use one, even when `single_template` is not set.
+ */
+export function typeUsesSharedTemplate(
+  config: { single_template?: boolean; database?: { slug?: string } | null } | null | undefined,
+): boolean {
+  return !!(config?.database?.slug || config?.single_template);
+}

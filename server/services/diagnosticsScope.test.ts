@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContentIndex } from "../content-index";
 import { resetRegistry } from "../content-types";
 import { resetVariableManagerCache } from "../variable-manager";
+import { mockDatabase } from "../test-helpers/mock-database";
 import { resolveUrlTargets } from "../../scripts/validation/runDiagnosticsJob";
 import { DiagnosticsScopeError, startDiagnosticsJob } from "./diagnosticsJobService";
 import { ValidationCacheService } from "./validationCacheService";
@@ -23,9 +24,9 @@ function buildIndex(): ContentIndex {
   resetRegistry(contentRoot);
   const ci = new ContentIndex(contentRoot);
   ci.scanFast();
-  vi.spyOn(ci, "getDatabase").mockReturnValue({
-    getMappedItems: (name: string) => (name === "exercises" ? cachedItems : null),
-  } as unknown as ReturnType<ContentIndex["getDatabase"]>);
+  vi.spyOn(ci, "getDatabase").mockReturnValue(
+    mockDatabase((name) => (name === "exercises" ? cachedItems : null)),
+  );
   return ci;
 }
 

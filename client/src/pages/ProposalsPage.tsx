@@ -10,6 +10,7 @@ import {
   IconCircleCheck,
   IconCircleX,
   IconCloudDownload,
+  IconCopy,
   IconExternalLink,
   IconFilter,
   IconInbox,
@@ -111,6 +112,10 @@ import {
 } from "@/components/agents/ProposalOutcomeReview";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import {
+  IdeaPageTypeStrategy,
+  type IdeaContentTypeStrategyPayload,
+} from "@/components/agents/IdeaPageTypeStrategy";
+import {
   ProposalKindBadge,
   ProposalProgressLabel,
   ProposalStatusLabel,
@@ -121,6 +126,9 @@ import { AskActivityGateCopy } from "@/components/DebugBubble/SolveWithAiAgentDr
 import { ValidationIssueDetailModal } from "@/components/diagnostics/ValidationIssueDetailModal";
 import { buildEntryKey } from "@/lib/entryKeyToPageUrl";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
+import { TEXT_LIMITS_EXCEEDED_CODE, type TextLimitViolation } from "@shared/component-text-limits";
+import { TextLimitsIssue } from "@/components/TextLimitsIssue";
+import { IdeaSeoTargetPanel, type IdeaSeoTarget } from "@/components/agents/IdeaSeoTargetPanel";
 import { apiFetch, apiRequestWithAuth } from "@/lib/queryClient";
 import { Checkbox } from "@/components/ui/checkbox";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
@@ -288,6 +296,8 @@ type Proposal = {
     stage: string;
     products: "all" | Array<{ product: string; persona?: string }>;
   } | null;
+  idea_seo_target?: IdeaSeoTarget | null;
+  seo_target_override?: { reason: string } | null;
   implements_proposal_id?: string | null;
   proposer_username: string;
   proposer_actor?: Record<string, unknown>;
@@ -880,7 +890,7 @@ export function ProposalListPanel() {
           />
           <Input
             className="pl-9"
-            placeholder="Search proposals"
+            placeholder="Search by title, author, or ID"
             value={qInput}
             onChange={(e) => setQInput(e.target.value)}
             data-testid="input-proposal-search"
@@ -1161,8 +1171,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [resolveNotes, setResolveNotes] = useState<Record<number, string>>({});
   const [confirmExperiment, setConfirmExperiment] = useState(false);
   const [confirmBaseUnknown, setConfirmBaseUnknown] = useState(false);
+  const [textLimitViolations, setTextLimitViolations] = useState<TextLimitViolation[] | null>(null);
   const [, setDetailLocation] = useLocation();
   const [advanced, setAdvanced] = useState(false);
+  const [copiedImplementsId, setCopiedImplementsId] = useState(false);
   const [claimOpen, setClaimOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [activityAck, setActivityAck] = useState(false);
@@ -1217,6 +1229,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       return res.json() as Promise<{
         proposal: Proposal;
         review_context?: ReviewContextPayload | null;
+        content_type_strategies?: IdeaContentTypeStrategyPayload[];
         deleted_refs?: string[];
       }>;
     },
@@ -1288,6 +1301,26 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         not_applied: "Only applied proposals can be reverted.",
         confirm_affected_entries:
           "The number of pages this template change reaches has changed. Reload and confirm again.",
+        text_limits_exceeded:
+          "Some text is longer than this section allows. Nothing was published — review it and shorten it, or publish anyway.",
+        idea_seo_target_required:
+          "This new page needs an SEO target (keyword and topic hub) before it can be accepted.",
+        idea_seo_target_frozen: "The SEO target locked when the idea was accepted.",
+        idea_seo_target_standalone_not_allowed:
+          "“No hub” is only for news or broken-URL ideas. Pick a hub, or make this page a hub.",
+        idea_seo_target_hub_not_live:
+          "That hub is not live, is in another language, or is not a hub. Pick a live hub in the same language.",
+        idea_seo_target_hub_members_required:
+          "Name at least one live post in the same language that will join this hub.",
+        idea_seo_target_keyword_taken:
+          "Another live page or accepted idea already targets this keyword. Pick a different keyword or improve that page.",
+        idea_seo_target_conflict:
+          "These edits change the idea's keyword or hub. Match the idea, or give a reason for the change.",
+        idea_seo_target_hub_gone:
+          "The idea's hub was deleted. Nothing was published — pick another live hub and give a reason.",
+        locale_seo_target_required:
+          "This new language needs its own keyword and a hub in the same language before it goes live.",
+        seo_index_unavailable: "The SEO index could not be read. Nothing changed — try again shortly.",
       };
       const emptyPage = e.message.includes("EMPTY_PAGE") ? plainByCode.empty_page : undefined;
       toast({
@@ -1304,6 +1337,18 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       }
       if (e.data?.code === "draft_base_unknown") {
         setConfirmBaseUnknown(true);
+        setApplyOpen(true);
+      }
+      if (e.data?.code === TEXT_LIMITS_EXCEEDED_CODE) {
+        const entries = (e.data.details as { entries?: Array<{ locale?: string; violations?: TextLimitViolation[] }> } | undefined)
+          ?.entries ?? [];
+        setTextLimitViolations(
+          entries.flatMap((entry) =>
+            (entry.violations ?? []).map((v) =>
+              entries.length > 1 && entry.locale ? { ...v, label: `${v.label} (${entry.locale})` } : v,
+            ),
+          ),
+        );
         setApplyOpen(true);
       }
     },
@@ -1816,6 +1861,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     ))}
                   </div>
                 ) : null}
+                {p.kind === "idea" && (data?.content_type_strategies?.length ?? 0) > 0 ? (
+                  <IdeaPageTypeStrategy strategies={data!.content_type_strategies!} />
+                ) : null}
                 {p.kind === "idea" && p.accepted_entry ? (
                   <div
                     className="flex flex-wrap items-center gap-1.5"
@@ -1960,6 +2008,28 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     ) : null}
                   </div>
                 ) : null}
+                {p.kind === "idea" ? (
+                  <IdeaSeoTargetPanel
+                    target={p.idea_seo_target}
+                    editable={p.status === "open"}
+                    locked={p.status === "finished" && p.close_reason === "accepted"}
+                    reviewSituations={p.review_situations}
+                    locale={p.accepted_entry?.locale ?? p.related_entries?.[0]?.locale ?? null}
+                    pending={mut.isPending}
+                    onSave={(target) =>
+                      mut.mutate({ action: "set_idea_seo_target", body: { idea_seo_target: target } })
+                    }
+                  />
+                ) : null}
+                {p.kind === "edits" && p.seo_target_override ? (
+                  <div
+                    className="rounded-md border border-card-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+                    data-testid="proposal-seo-target-override"
+                  >
+                    <span className="font-medium text-foreground">Changes the idea's SEO target.</span>{" "}
+                    Reason: {p.seo_target_override.reason}
+                  </div>
+                ) : null}
                 {p.kind === "edits" && p.implements_proposal_id ? (
                   <div
                     className="flex flex-wrap items-center gap-1.5"
@@ -1976,13 +2046,57 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         Deleted proposal
                       </Badge>
                     ) : (
-                      <Badge
-                        variant="outline"
-                        className="font-mono font-normal"
-                        data-testid="badge-implements-proposal"
-                      >
-                        {p.implements_proposal_id.slice(0, 8)}…
-                      </Badge>
+                      <>
+                        <Badge
+                          variant="outline"
+                          className="font-mono font-normal"
+                          title={p.implements_proposal_id}
+                          data-testid="badge-implements-proposal"
+                        >
+                          {p.implements_proposal_id.slice(0, 8)}…
+                        </Badge>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-muted-foreground"
+                          title="Copy idea id"
+                          aria-label="Copy idea id"
+                          data-testid="button-copy-implements-proposal"
+                          onClick={() => {
+                            const ideaId = p.implements_proposal_id!;
+                            void navigator.clipboard.writeText(ideaId).then(
+                              () => {
+                                setCopiedImplementsId(true);
+                                toast({ title: "Copied idea id" });
+                                setTimeout(() => setCopiedImplementsId(false), 2000);
+                              },
+                              () => toast({ title: "Copy failed", variant: "destructive" }),
+                            );
+                          }}
+                        >
+                          {copiedImplementsId ? (
+                            <IconCheck className="h-3.5 w-3.5" aria-hidden />
+                          ) : (
+                            <IconCopy className="h-3.5 w-3.5" aria-hidden />
+                          )}
+                        </Button>
+                        <Button
+                          asChild
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-muted-foreground"
+                        >
+                          <Link
+                            href={`${AGENTS_PROPOSALS_BASE}/${p.implements_proposal_id}`}
+                            title="Open idea"
+                            aria-label="Open idea"
+                            data-testid="link-implements-proposal"
+                          >
+                            <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
+                          </Link>
+                        </Button>
+                      </>
                     )}
                   </div>
                 ) : null}
@@ -2745,6 +2859,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                             and may undo those changes.
                           </p>
                         ) : null}
+                        {textLimitViolations ? (
+                          <TextLimitsIssue
+                            message="Some text is longer than this section allows. Long text crowds the page, especially on phones."
+                            violations={textLimitViolations}
+                            footer="Ask the author to shorten it, or publish anyway."
+                          />
+                        ) : null}
                         {confirmExperiment ? (
                           <p className="text-destructive">
                             Other versions still have traffic. Confirming will remove those
@@ -2834,6 +2955,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     if (confirmExperiment) body.confirm_end_experiment = true;
                     if (needsActivityAck) body.confirm_recent_activity = true;
                     if (confirmBaseUnknown) body.confirm_base_unknown = true;
+                    if (textLimitViolations) body.confirm_text_limits = true;
                     if (p.affected_entries) body.confirm_affected_entries = p.affected_entries.count;
                     mut.mutate(
                       {
@@ -2845,6 +2967,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           setApplyOpen(false);
                           setActivityAck(false);
                           setConfirmBaseUnknown(false);
+                          setTextLimitViolations(null);
                         },
                       },
                     );
@@ -2852,7 +2975,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   data-testid="button-confirm-apply-proposal"
                 >
                   <IconCheck className="h-4 w-4" aria-hidden />
-                  {primaryActionLabel}
+                  {textLimitViolations ? "Publish anyway" : primaryActionLabel}
                 </Button>
               </AlertDialogFooter>
             </AlertDialogContent>

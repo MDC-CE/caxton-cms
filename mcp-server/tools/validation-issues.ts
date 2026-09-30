@@ -12,6 +12,7 @@ import {
   clampIssuesLimit,
   clampIssuesOffset,
   isValidationIssuesScoped,
+  issueSourceGuidance,
   issuesNextOffset,
   openStatsFromCacheTotals,
   paginateRows,
@@ -102,6 +103,11 @@ function mapOpenIssue(
     suggestion: row.suggestion,
     file: row.file,
   };
+  if (typeof row.staleSourceAgeMs === "number") {
+    base.stale_source_age_ms = row.staleSourceAgeMs;
+    if (row.staleSourceDatabase) base.stale_source_database = row.staleSourceDatabase;
+  }
+  if (row.redirectSuggestion) base.redirect_suggestion = row.redirectSuggestion;
   if (opts?.includeLastFullRunAt && row.lastFullRunAt != null) {
     base.lastFullRunAt = row.lastFullRunAt;
   }
@@ -377,6 +383,8 @@ export function registerValidationIssuesTools(
         });
         const total = projected.length;
         const page = paginateRows(projected, offset, limit);
+        const guidance = issueSourceGuidance(page, rawArgs.site ? { site: rawArgs.site } : {});
+        warnings.push(...guidance.warnings);
         return ok(
           {
             open_stats,
@@ -390,7 +398,7 @@ export function registerValidationIssuesTools(
             sort,
             sort_dir,
           },
-          { warnings },
+          { warnings, ...(guidance.next_actions.length ? { next_actions: guidance.next_actions } : {}) },
         );
       } catch (e) {
         warnings.push({ code: "open_rows_unavailable", message: (e as Error).message });

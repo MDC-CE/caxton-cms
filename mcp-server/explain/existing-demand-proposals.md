@@ -54,6 +54,8 @@ Open blockers block accept. Soft create warning `existing_demand_undeclared` whe
 
 **New-URL ideas:** also set structured `idea_funnel` `{ stage, products }` before accept (`products: "all"` only with `awareness`). Soft warning `idea_funnel_missing` on create; reviewer `add_blocker` if missing; accept refuses until complete. See proposals hub / idea accept checklist.
 
+**SEO target:** on SEO-monitored types also set `idea_seo_target` — `main_keyword` = the exact query this brief's SERP evidence is about; `cluster.mode: "join"` with a live same-locale hub, or `"hub"` with named live members. Standalone is **not** allowed for `existing_demand` (news / broken-URL only). Accept refuses when the keyword is already held by a live page or another accepted idea — refresh that page instead.
+
 ---
 
 ## Discovery (reviewer)

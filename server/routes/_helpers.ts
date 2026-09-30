@@ -171,7 +171,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { coerceProgramSlug } from "@shared/safe-href";
 import { resolveEffectiveCanonical } from "../resolve-effective-canonical";
 import * as userStore from "../user-store";
@@ -802,6 +801,10 @@ export function resolveAssignedVariantSlug(
   );
 
   if (!assignedVariant) return null;
+  // Only assign variants that exist in this language; otherwise visitors get the live page.
+  if (!versioningManager.getVariantContentResult(contentType, versioningSlug, assignedVariant, locale).ok) {
+    return null;
+  }
 
   const updatedAssignments = [
     ...existingAssignments.filter(
@@ -810,8 +813,41 @@ export function resolveAssignedVariantSlug(
     { contentType, slug: versioningSlug, locale, variantSlug: assignedVariant, assignedAt: Date.now() },
   ];
   setVersioningCookie(res, userId, updatedAssignments);
+  markServedPageVersion(res, contentType, versioningSlug, locale, assignedVariant);
 
   return assignedVariant;
+}
+
+export type ServedPageVersion = { experiment_id: string; variant: string };
+
+/**
+ * Remember which page version this response serves so the JSON body can carry
+ * `_page_version` (client pushes `experiment_exposure`; see attachPageVersionToJson).
+ */
+export function markServedPageVersion(
+  res: Response,
+  contentType: string,
+  slug: string,
+  locale: string,
+  variant: string,
+): void {
+  res.locals.pageVersion = {
+    experiment_id: `${contentType}:${slug}:${locale}`,
+    variant,
+  } satisfies ServedPageVersion;
+}
+
+/** Express middleware: add `_page_version` to object JSON bodies when a version was assigned. */
+export function attachPageVersionToJson(_req: Request, res: Response, next: () => void): void {
+  const original = res.json.bind(res);
+  res.json = ((body: unknown) => {
+    const pv = res.locals.pageVersion as ServedPageVersion | undefined;
+    if (pv && body && typeof body === "object" && !Array.isArray(body)) {
+      return original({ ...(body as Record<string, unknown>), _page_version: pv });
+    }
+    return original(body);
+  }) as typeof res.json;
+  next();
 }
 
 /**
@@ -869,6 +905,7 @@ export function resolveVariantAssignment(
     { contentType, slug: versioningSlug, locale, variantSlug: assignedVariant, assignedAt: Date.now() },
   ];
   setVersioningCookie(res, userId, updatedAssignments);
+  markServedPageVersion(res, contentType, versioningSlug, locale, assignedVariant);
 
   return variantContent;
 }

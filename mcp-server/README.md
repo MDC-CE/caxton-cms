@@ -62,8 +62,10 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `create_or_update_database` | Create bank (empty local items) or deep-patch config (`confirm:true`). Cap: `databases_manage` |
 | `reindex_database` | Vector reindex after item writes or vector_search definition patches (`databases_manage`) |
 | `list_products` / `get_product` / `create_or_update_product` | Product inventory, sidecar read/create/patch (confirm). Audience: `content_edit_structure`. Sellable flags: `product_manage`. Removed hidden unless `include_removed`. |
+| `list_variables` | Site facts catalog (`variables.yml`): catalog by default; `names` → conditions, token, usage, `context` / `context.entry` (page audience, `literal_ok`). Read-only; `content_view`. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Product conversion journey (read-only; `update_product_funnel` retired) |
 | `get_analytics_report` | Named GA4 BigQuery reports (`metrics_view`): site_summary / top_pages / page_detail / events_by_name / traffic_sources / traffic_source_conversions |
+| `get_paid_traffic` | Paid traffic (`metrics_view`, read-only): summary / campaigns / entries / destinations / diagnostics — Meta spend + GA4 paid visits + site lead ledger |
 | `get_organic_traffic` | GSC organic clicks/impressions (`metrics_view` or `seo_edit`) |
 | `test_redirect` | Inspect one URL: first-match winner + conflicts (`read_redirects`) |
 | `update_redirect` | Add / delete / move one CMS redirect (`edit_redirects`; call `test_redirect` first) |

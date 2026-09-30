@@ -39,6 +39,7 @@ import {
   resolveCacheTtlMinutes,
   ttlCachePayload,
   ttlUiFromCache,
+  type DbCacheTtlConfig,
   type TtlUiUnit,
 } from "@shared/db-cache-ttl";
 import {
@@ -109,7 +110,7 @@ interface DatabaseDetail {
         results_path?: string;
       };
     };
-    cache?: { ttl_minutes?: number; ttl_hours?: number };
+    cache?: DbCacheTtlConfig;
     field_mapping?: Record<string, string>;
     filter_by_locale?: boolean;
     editor?: Record<string, { type?: string; options?: (string | { value: string; label: string })[]; populate_options?: boolean; allow_custom_values?: boolean; split_comma_values?: boolean; cache_images?: boolean; description?: string }>;
@@ -1689,7 +1690,7 @@ function DatabaseConfigEditor({
         name: config.name,
         description: config.description || undefined,
         source: buildSourceConfig(),
-        cache: ttlCachePayload(ttlValue, ttlUnit),
+        cache: { ...(config.cache || {}), ...ttlCachePayload(ttlValue, ttlUnit), ttl_hours: undefined },
         field_mapping: config.field_mapping || undefined,
         ...(filterByLocale ? {} : { filter_by_locale: false }),
       };

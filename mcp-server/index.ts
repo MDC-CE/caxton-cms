@@ -21,7 +21,9 @@ import { registerProposalTools } from "./tools/proposals.js";
 import { registerValidationIssuesTools } from "./tools/validation-issues.js";
 import { registerOrganicTrafficTools } from "./tools/organic-traffic.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
+import { registerPaidTrafficTools } from "./tools/paid-traffic.js";
 import { registerRuntimeIssuesTools } from "./tools/runtime-issues.js";
+import { registerVariableTools } from "./tools/variables.js";
 import {
   registerClient,
   lookupClient,
@@ -413,6 +415,7 @@ async function createMcpServer(
   });
   registerExplainTools(mcp, mcpToken, grants);
   registerProductTools(mcp, mcpToken, grants);
+  registerVariableTools(mcp, mcpToken, grants);
   registerDatabaseTools(mcp, mcpToken);
   registerRedirectTools(mcp, mcpToken);
   registerMediaTools(mcp, mcpToken, grants);
@@ -420,6 +423,7 @@ async function createMcpServer(
   registerValidationIssuesTools(mcp, mcpToken, grants);
   registerOrganicTrafficTools(mcp, mcpToken, grants);
   registerAnalyticsTools(mcp, mcpToken, grants);
+  registerPaidTrafficTools(mcp, mcpToken, grants);
   registerRuntimeIssuesTools(mcp, mcpToken, grants);
   return mcp;
 }

@@ -16,4 +16,7 @@ export const DATABASE_HEALTH_ISSUE_CODES: Record<string, IssueCodeDefinition> = 
   DATABASE_PAGES_NOT_CHECKED: {
     title: "Database Pages Not Checked",
   },
+  DATABASE_CACHE_STALE: {
+    title: "Database Copy Is Out Of Date",
+  },
 };

@@ -235,6 +235,34 @@ describe("collectSectionSchemas", () => {
     });
   });
 
+  it("fills WebPage url/@id from pageUrl when blank and keeps a typed url", () => {
+    const pageUrl = "https://example.com/landing/foo";
+    const [filled, typed] = collectSectionSchemas(
+      [
+        { type: "schema_org", section_id: "a", schema_type: "WebPage", properties: { name: "Foo" } },
+        {
+          type: "schema_org",
+          section_id: "b",
+          schema_type: "WebPage",
+          properties: { name: "Bar", url: "https://example.com/typed" },
+        },
+      ],
+      { ...context, contentType: "landing", pageUrl },
+    );
+    expect(filled.url).toBe(pageUrl);
+    expect(filled["@id"]).toBe(pageUrl);
+    expect(typed.url).toBe("https://example.com/typed");
+    expect(typed["@id"]).toBe("https://example.com/typed");
+  });
+
+  it("does not fill url on Organization sections", () => {
+    const [org] = collectSectionSchemas(
+      [{ type: "schema_org", section_id: "o", schema_type: "Organization", properties: { name: "Acme" } }],
+      { ...context, pageUrl: "https://example.com/landing/foo" },
+    );
+    expect(org.url).toBeUndefined();
+  });
+
   it("emits Person from schema_org on authors hub; text_block bio does not emit Article", () => {
     const pageUrl = "https://example.com/en/authors/ada-lovelace";
     const schemas = collectSectionSchemas(

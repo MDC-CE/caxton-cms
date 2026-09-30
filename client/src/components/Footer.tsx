@@ -6,6 +6,7 @@ import { useInternalNav } from "@/hooks/useInternalNav";
 
 import { useImageRegistry } from "@/components/UniversalImage";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
+import { openConsentBanner } from "@/lib/consent";
 import fldoeLogo from "@/assets/fldoe-logo.png";
 
 const LOGO_ID = "4geeks-devs-logo-1763162063433";
@@ -256,6 +257,14 @@ export default function Footer({ menuId = "main-footer" }: FooterProps) {
                   </a>
                 );
               })}
+              <button
+                type="button"
+                onClick={openConsentBanner}
+                className="text-sm text-foreground/60 hover:text-foreground transition-colors"
+                data-testid="button-privacy-choices"
+              >
+                {locale.startsWith("es") ? "Opciones de privacidad" : "Privacy choices"}
+              </button>
             </div>
           </div>
         </div>

@@ -220,6 +220,52 @@ describe("schemaCompletenessValidator PAGE_NO_SCHEMA", () => {
     expect(result.warnings.filter((w) => w.code === "PAGE_NO_SCHEMA")).toEqual([]);
   });
 
+  it("warns SCHEMA_ORG_PAGE_URL_MISMATCH when a WebPage url names another path", async () => {
+    const { dir, cleanup } = tempDir();
+    cleanups.push(cleanup);
+    const filePath = join(dir, "en.yml");
+    writeFileSync(filePath, "sections: []\n");
+
+    const collector = await import("../../../server/page-schema-collect");
+    vi.spyOn(collector, "resolvePageSchemaDocuments").mockResolvedValue({ documents: [], preview: [] });
+    __resetResolvePageSchemaDocumentsForTests();
+
+    const webPage = (url: string) => ({
+      type: "schema_org",
+      section_id: "schema_org-1",
+      schema_type: "WebPage",
+      properties: { name: "Foo", url },
+    });
+
+    const bad = await schemaCompletenessValidator.run(
+      context(
+        baseFile({
+          slug: "foo",
+          type: "landing",
+          url: "/landing/foo",
+          filePath,
+          entryFields: { sections: [webPage("https://4geeks.com/en/landing/foo")] },
+        }),
+      ),
+    );
+    const hits = bad.warnings.filter((w) => w.code === "SCHEMA_ORG_PAGE_URL_MISMATCH");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].message).toContain("/landing/foo");
+
+    const good = await schemaCompletenessValidator.run(
+      context(
+        baseFile({
+          slug: "foo",
+          type: "landing",
+          url: "/landing/foo",
+          filePath,
+          entryFields: { sections: [webPage("https://www.4geeks.com/landing/foo/")] },
+        }),
+      ),
+    );
+    expect(good.warnings.filter((w) => w.code === "SCHEMA_ORG_PAGE_URL_MISMATCH")).toEqual([]);
+  });
+
   it("still flags pages with no schema contributors", async () => {
     const { dir, cleanup } = tempDir();
     cleanups.push(cleanup);
