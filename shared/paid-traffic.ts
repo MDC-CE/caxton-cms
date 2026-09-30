@@ -82,6 +82,7 @@ const SOURCE_PLATFORM: Record<string, AdPlatform> = {
   ig: "meta",
   meta: "meta",
   messenger: "meta",
+  msg: "meta",
   an: "meta",
   audience_network: "meta",
   threads: "meta",
@@ -113,6 +114,49 @@ export function platformFromSource(source: string | null | undefined): AdPlatfor
   if (s.includes("tiktok")) return "tiktok";
   if (s.includes("linkedin")) return "linkedin";
   return null;
+}
+
+/** Where a Meta ad ran (`publisher_platform`); `other` covers placements we don't break out (e.g. Threads). */
+export type MetaPlacement = "facebook" | "instagram" | "messenger" | "audience_network" | "other";
+/** Placement row in the Facebook vs Instagram breakdown; `not_split` = ads / visits without per-platform tags. */
+export type MetaPlacementRow = MetaPlacement | "not_split";
+
+export const META_PLACEMENT_LABELS: Record<MetaPlacementRow, string> = {
+  facebook: "Facebook",
+  instagram: "Instagram",
+  messenger: "Messenger",
+  audience_network: "Audience Network",
+  other: "Other placements",
+  not_split: "Not split (older tag)",
+};
+
+/** Values Meta writes for `{{site_source_name}}`. */
+const SITE_SOURCE_PLACEMENT: Record<string, MetaPlacement> = {
+  fb: "facebook",
+  ig: "instagram",
+  msg: "messenger",
+  an: "audience_network",
+};
+
+/** Placement from a visit's / lead's utm_source; anything but fb/ig/msg/an (legacy `facebook`, hand tags) is not split. */
+export function metaPlatformFromSource(source: string | null | undefined): MetaPlacementRow {
+  return SITE_SOURCE_PLACEMENT[(source ?? "").trim().toLowerCase()] ?? "not_split";
+}
+
+/** Meta `publisher_platform` → placement. */
+export function metaPlacementFromPublisher(platform: string | null | undefined): MetaPlacement {
+  const p = (platform ?? "").trim().toLowerCase();
+  return p === "facebook" || p === "instagram" || p === "messenger" || p === "audience_network" ? p : "other";
+}
+
+/**
+ * Whether an ad's URL parameters tag visits per platform (`utm_source={{site_source_name}}`
+ * or a literal fb/ig/msg/an). Missing / unread setups count as not split.
+ */
+export function adSourceTagState(params: Record<string, string> | null | undefined): "split" | "not_split" {
+  const source = (params?.utm_source ?? "").trim().toLowerCase();
+  if (source.replace(/\s+/g, "") === "{{site_source_name}}") return "split";
+  return SITE_SOURCE_PLACEMENT[source] ? "split" : "not_split";
 }
 
 export type TrafficSignals = {

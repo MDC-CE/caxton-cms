@@ -1,6 +1,6 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { LedgerRow } from "./lead-ledger";
-import type { MetaAdDayRow } from "./meta-client";
+import type { MetaAdDayRow, MetaAdPlatformDayRow } from "./meta-client";
 import type { PaidLandingCandidateRow, PaidLandingDayFile } from "./paid-detection";
 import { DEFAULT_ADS_SETTINGS } from "@shared/ads-settings";
 import type { ContentIndex } from "../content-index";
@@ -191,8 +191,9 @@ vi.mock("./meta-ads-days", async (orig) => {
     ...actual,
     loadMetaRows: (_site: string, start: string) => (start === "0000-01-01" ? [...fixture.metaRows, ...(fixture.olderMetaRows ?? [])] : fixture.metaRows),
     listMetaDayDates: () => fixture.metaDates ?? ALL_META_DATES,
-    loadMetaState: () => ({ accounts: {}, consecutive_failures: 0, last_success_at: NOW.toISOString() }),
+    loadMetaState: () => fixture.metaState ?? { accounts: {}, consecutive_failures: 0, last_success_at: NOW.toISOString() },
     loadMetaCreatives: () => ({ ads: fixture.creatives }),
+    loadMetaPlatformRows: () => fixture.platformRows ?? [],
   };
 });
 const ALL_META_DATES: string[] = [];
@@ -206,6 +207,8 @@ const fixture: {
   paidDays: PaidLandingDayFile[];
   ledgerRows: LedgerRow[];
   collectingSince: number | null;
+  platformRows?: MetaAdPlatformDayRow[];
+  metaState?: Record<string, unknown>;
 } = {
   metaRows,
   creatives: BASE_CREATIVES,
@@ -726,5 +729,97 @@ describe("buildAdsReport date range + data gaps", () => {
     const w = r.warnings.find((x) => x.code === "data_gaps")!;
     expect(w.message).toContain("Meta (2 day(s): 2026-09-10..2026-09-11)");
     expect(w.message).toContain("GA4 (8 day(s): 2026-09-10..2026-09-14, 2026-09-16..2026-09-18)");
+  });
+});
+
+describe("buildAdsReport meta_platforms", () => {
+  const SPLIT_TAGS = "utm_source={{site_source_name}}&utm_medium=paid_social&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
+  function platformRow(ad_id: string, campaign_id: string, platform: MetaAdPlatformDayRow["platform"], spend: number): MetaAdPlatformDayRow {
+    return { date: DAY, account_id: "111111", currency: "USD", campaign_id, adset_id: `s-${campaign_id}`, ad_id, platform, spend, impressions: 100, link_clicks: 5, pixel_leads: 0 };
+  }
+  const build = (over: Partial<Parameters<typeof buildAdsReport>[0]> = {}) =>
+    buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex, ...over });
+  const row = (r: ReturnType<typeof build>, p: string) => r.meta_platforms?.rows.find((x) => x.platform === p);
+
+  beforeAll(() => {
+    fixture.creatives = {
+      ...BASE_CREATIVES,
+      ad3: { links: [`https://${HOST}/en/coding-bootcamp`], url_tags: SPLIT_TAGS, instant_form: false },
+    };
+    fixture.platformRows = [
+      platformRow("ad3", "c3", "facebook", 30),
+      platformRow("ad3", "c3", "instagram", 20),
+      platformRow("ad1", "c1", "facebook", 60),
+      platformRow("ad1", "c1", "instagram", 40),
+      platformRow("ad2", "c2", "instagram", 40),
+    ];
+    fixture.paidDays = [
+      {
+        ...paidDay,
+        candidates: [
+          candidate({ source: "fb", utm_id: "c3", utm_term: "s-c3", utm_content: "ad3", sessions: 20 }),
+          candidate({ source: "ig", utm_id: "c3", utm_term: "s-c3", utm_content: "ad3", sessions: 10 }),
+          candidate({}),
+        ],
+      },
+    ];
+    const c3 = { campaign_id: "c3", adset_id: "s-c3", ad_id: "ad3" };
+    fixture.ledgerRows = [
+      lead({ submission_id: "a" }),
+      lead({ submission_id: "b", browser_hash: "b2" }),
+      lead({ submission_id: "c", is_repeat: 1, repeat_of: "a" }),
+      lead({ submission_id: "f", browser_hash: "b3", utm_source: "fb", ...c3 }),
+      lead({ submission_id: "i", browser_hash: "b4", utm_source: "ig", ...c3 }),
+    ];
+    fixture.metaState = {
+      consecutive_failures: 0,
+      last_success_at: NOW.toISOString(),
+      accounts: { "111111": { name: "A", currency: "USD", account_status: 1, platform_history_loaded_at: NOW.toISOString(), platform_history_since: "2026-07-01" } },
+    };
+  });
+
+  afterAll(() => {
+    fixture.creatives = BASE_CREATIVES;
+    fixture.platformRows = undefined;
+    fixture.paidDays = [paidDay];
+    fixture.ledgerRows = ledgerRows;
+    fixture.metaState = undefined;
+  });
+
+  it("splits site-ad spend, visits and leads by placement; older-tag ads go to not_split", () => {
+    const r = build();
+    expect(r.meta_platforms?.rows.map((x) => x.platform)).toEqual(["facebook", "instagram", "not_split"]);
+    expect(row(r, "facebook")).toMatchObject({ spend: { USD: 30 }, paid_visits: 20, unique_leads: 1, cost_per_lead: { USD: 30 } });
+    expect(row(r, "instagram")).toMatchObject({ spend: { USD: 20 }, paid_visits: 10, unique_leads: 1, cost_per_lead: { USD: 20 } });
+    expect(row(r, "not_split")).toMatchObject({ spend: { USD: 100 }, paid_visits: 50, unique_leads: 2, cost_per_lead: { USD: 50 } });
+    expect(r.meta_platforms?.excluded_spend).toEqual({ instant_form: { USD: 40 }, off_site: {}, unknown: {} });
+    expect(r.meta_platforms?.not_split_share).toBe(0.625);
+    expect(r.meta_platforms?.spend_partial).toBe(false);
+    expect(r.warnings.map((w) => w.code)).toContain("meta_platform_not_split");
+    expect(r.totals.spend).toEqual({ USD: 140 });
+  });
+
+  it("narrows placement spend with campaign filters", () => {
+    const r = build({ campaign_ids: ["c3"] });
+    expect(r.meta_platforms?.rows.map((x) => x.platform)).toEqual(["facebook", "instagram"]);
+    expect(row(r, "facebook")?.spend).toEqual({ USD: 30 });
+    expect(r.meta_platforms?.excluded_spend.instant_form).toEqual({});
+  });
+
+  it("flags partial placement spend while history is still loading", () => {
+    const saved = fixture.metaState;
+    fixture.metaState = { consecutive_failures: 0, accounts: { "111111": { name: "A", currency: "USD", account_status: 1 } } };
+    try {
+      const r = build();
+      expect(r.meta_platforms?.spend_since).toBeNull();
+      expect(r.meta_platforms?.spend_partial).toBe(true);
+      expect(r.warnings.map((w) => w.code)).toContain("meta_platform_spend_partial");
+    } finally {
+      fixture.metaState = saved;
+    }
+  });
+
+  it("is omitted when turned off", () => {
+    expect(build({ includeMetaPlatforms: false }).meta_platforms).toBeUndefined();
   });
 });

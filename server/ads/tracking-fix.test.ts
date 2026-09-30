@@ -88,7 +88,7 @@ describe("mergeMissingTags", () => {
   it("replaces empty params instead of repeating the key", () => {
     const { tags } = mergeMissingTags("utm_source=&utm_medium=paid_social", undefined);
     expect(tags.match(/utm_source=/g)).toHaveLength(1);
-    expect(tags).toContain("utm_source=facebook");
+    expect(tags).toContain("utm_source={{site_source_name}}");
   });
 });
 
@@ -113,11 +113,12 @@ describe("planAdFix", () => {
     expect(p.status).toBe("fixable");
     expect(p.before).toBe("utm_source=facebook");
     expect(p.after?.startsWith("utm_source=facebook&utm_medium=paid_social")).toBe(true);
+    expect(p.added).not.toContain("utm_source");
   });
 });
 
 describe("previewTrackingFix", () => {
-  it("returns no ads when the write token is missing", async () => {
+  it("returns no ads when the Meta token is missing", async () => {
     const d = deps([live("a1")], { writeConfigured: () => false });
     const p = await previewTrackingFix(issue(["a1"]), d);
     expect(p.write_configured).toBe(false);

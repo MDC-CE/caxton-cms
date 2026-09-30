@@ -1,7 +1,8 @@
 /**
  * Per-day Meta ad insights cache on persistent `.cache/{site}/meta-ads-days/`.
  * Refresh re-fetches the last 10 days (7-day click attribution + processing),
- * first connect backfills 90 days, retention is 13 months.
+ * first connect backfills 90 days, retention is 13 months. Per-placement rows
+ * (Facebook / Instagram / …) live apart in `meta-ads-platform-days/` so main totals never change.
  */
 
 import fs from "fs";
@@ -13,11 +14,13 @@ import {
   fetchAccountInfo,
   fetchAdCreatives,
   fetchAdInsights,
+  fetchAdPlatformInsights,
   isMetaTokenConfigured,
   MetaApiError,
   type MetaAccountInfo,
   type MetaAdCreativeInfo,
   type MetaAdDayRow,
+  type MetaAdPlatformDayRow,
 } from "./meta-client";
 
 const log = child({ module: "ads/meta-ads-days" });
@@ -32,6 +35,12 @@ export type MetaAdsDayFile = {
   date: string;
   fetched_at: string;
   rows: MetaAdDayRow[];
+};
+
+export type MetaAdsPlatformDayFile = {
+  date: string;
+  fetched_at: string;
+  rows: MetaAdPlatformDayRow[];
 };
 
 export type MetaAdsSyncState = {
@@ -57,6 +66,12 @@ export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "a
   history_loaded_at?: string;
   /** Why this account was skipped in the last sync (other accounts still saved); cleared on success. */
   sync_error?: string;
+  /** Set when a 90-day per-placement load finished; missing means the next sync reads 90 days of placements. */
+  platform_history_loaded_at?: string;
+  /** Earliest date with per-placement rows for this account. */
+  platform_history_since?: string;
+  /** Why the last per-placement read failed (main rows still saved); cleared on success. */
+  platform_error?: string;
 };
 
 export type MetaAdsCreatives = {
@@ -81,6 +96,14 @@ function dir(site: string): string {
 
 function dayPath(site: string, date: string): string {
   return path.join(dir(site), `${date}.json`);
+}
+
+function platformDir(site: string): string {
+  return path.join(CACHE_DIR, site, "meta-ads-platform-days");
+}
+
+function platformDayPath(site: string, date: string): string {
+  return path.join(platformDir(site), `${date}.json`);
 }
 
 function statePath(site: string): string {
@@ -124,13 +147,7 @@ export function dateRange(since: string, until: string): string[] {
 }
 
 export function listMetaDayDates(site: string): string[] {
-  const d = dir(site);
-  if (!fs.existsSync(d)) return [];
-  return fs
-    .readdirSync(d)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
-    .map((f) => f.slice(0, 10))
-    .sort();
+  return listDates(dir(site));
 }
 
 export function loadMetaDay(site: string, date: string): MetaAdsDayFile | null {
@@ -167,16 +184,52 @@ export function loadMetaRows(site: string, since: string, until: string, account
   return out;
 }
 
+function listDates(d: string): string[] {
+  if (!fs.existsSync(d)) return [];
+  return fs
+    .readdirSync(d)
+    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
+    .map((f) => f.slice(0, 10))
+    .sort();
+}
+
+export function listMetaPlatformDayDates(site: string): string[] {
+  return listDates(platformDir(site));
+}
+
+export function loadMetaPlatformDay(site: string, date: string): MetaAdsPlatformDayFile | null {
+  const f = readJson<MetaAdsPlatformDayFile>(platformDayPath(site, date));
+  return f && f.date === date && Array.isArray(f.rows) ? f : null;
+}
+
+/** Per-placement rows for configured accounts only, inclusive window. */
+export function loadMetaPlatformRows(site: string, since: string, until: string, accountIds?: string[]): MetaAdPlatformDayRow[] {
+  const allow = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
+  const out: MetaAdPlatformDayRow[] = [];
+  for (const date of listMetaPlatformDayDates(site)) {
+    if (date < since || date > until) continue;
+    const file = loadMetaPlatformDay(site, date);
+    if (!file) continue;
+    for (const r of file.rows) if (!allow || allow.has(r.account_id)) out.push(r);
+  }
+  return out;
+}
+
 export function pruneMetaDays(site: string, now = new Date()): number {
   const cutoff = addDays(utcDate(now), -META_RETENTION_DAYS);
   let removed = 0;
-  for (const d of listMetaDayDates(site)) {
-    if (d >= cutoff) break;
-    try {
-      fs.unlinkSync(dayPath(site, d));
-      removed++;
-    } catch {
-      /* ignore */
+  for (const [dates, file] of [
+    [listMetaDayDates(site), (d: string) => dayPath(site, d)],
+    [listMetaPlatformDayDates(site), (d: string) => platformDayPath(site, d)],
+  ] as const) {
+    for (const d of dates) {
+      if (d >= cutoff) break;
+      try {
+        fs.unlinkSync(file(d));
+        removed++;
+      } catch {
+        /* ignore */
+      }
     }
   }
   return removed;
@@ -221,10 +274,64 @@ function fetchChunkCount(window: { since: string; until: string }): number {
   return Math.ceil(dateRange(window.since, window.until).length / FETCH_CHUNK_DAYS);
 }
 
-/** Steps `syncMetaAds` will report: per account (lookup + insight chunks + creatives), then one save. */
-export function metaSyncStepCount(accountCount: number, window: { since: string; until: string } | null): number {
+/** Inclusive [start, end] pairs of up to FETCH_CHUNK_DAYS days. */
+function chunks(window: { since: string; until: string }): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (let start = window.since; start <= window.until; start = addDays(start, FETCH_CHUNK_DAYS)) {
+    const endCandidate = addDays(start, FETCH_CHUNK_DAYS - 1);
+    out.push([start, endCandidate > window.until ? window.until : endCandidate]);
+  }
+  return out;
+}
+
+/**
+ * Rewrite placement day files touched by this sync. Accounts not re-read for a date
+ * (placement read failed, account skipped, date outside its window) keep their saved rows.
+ */
+function savePlatformDays(
+  site: string,
+  read: Map<string, { window: { since: string; until: string }; rows: MetaAdPlatformDayRow[] }>,
+  accountIds: string[],
+  fetchedAt: string,
+): void {
+  const byDate = new Map<string, MetaAdPlatformDayRow[]>();
+  for (const { window: w, rows } of Array.from(read.values())) {
+    for (const d of dateRange(w.since, w.until)) if (!byDate.has(d)) byDate.set(d, []);
+    for (const r of rows) byDate.get(r.date)?.push(r);
+  }
+  const configured = new Set(accountIds);
+  for (const [date, fresh] of Array.from(byDate.entries())) {
+    const kept = (loadMetaPlatformDay(site, date)?.rows ?? []).filter((r) => {
+      if (!configured.has(r.account_id)) return false;
+      const w = read.get(r.account_id)?.window;
+      return !w || date < w.since || date > w.until;
+    });
+    writeJson(platformDayPath(site, date), { date, fetched_at: fetchedAt, rows: [...kept, ...fresh] });
+  }
+}
+
+type DateWindow = { since: string; until: string };
+
+/**
+ * Steps `syncMetaAds` will report: per account (lookup + insight chunks + placement chunks + creatives),
+ * then one save. `platformWindows` defaults to the main window for every account.
+ */
+export function metaSyncStepCount(accountCount: number, window: DateWindow | null, platformWindows?: DateWindow[]): number {
   if (!window || accountCount <= 0) return 0;
-  return accountCount * (fetchChunkCount(window) + 2) + 1;
+  const platformChunks = (platformWindows ?? Array.from({ length: accountCount }, () => window)).reduce((n, w) => n + fetchChunkCount(w), 0);
+  return accountCount * (fetchChunkCount(window) + 2) + platformChunks + 1;
+}
+
+/** Placement read window: the main window, widened to 90 days until the account has a full placement history. */
+export function platformWindowFor(
+  mode: MetaSyncMode,
+  window: DateWindow,
+  account: MetaAccountSyncInfo | undefined,
+  now = new Date(),
+): DateWindow {
+  if (mode === "older" || account?.platform_history_loaded_at) return window;
+  const since = addDays(utcDate(now), -(META_BACKFILL_DAYS - 1));
+  return { since: since < window.since ? since : window.since, until: window.until };
 }
 
 /** A refresh becomes a 90-day backfill while any configured account has never finished one. */
@@ -237,8 +344,12 @@ export function effectiveMetaSyncMode(mode: MetaSyncMode, accountIds: string[], 
 export function planMetaSyncSteps(site: string, contentRoot: string | undefined, mode: MetaSyncMode = "refresh", now?: Date): number {
   const settings = getAdsSettings(contentRoot).meta;
   if (!settings.enabled || settings.ad_account_ids.length === 0 || !isMetaTokenConfigured()) return 0;
-  const effective = effectiveMetaSyncMode(mode, settings.ad_account_ids, loadMetaState(site));
-  return metaSyncStepCount(settings.ad_account_ids.length, datesForMode(effective, listMetaDayDates(site), now));
+  const state = loadMetaState(site);
+  const effective = effectiveMetaSyncMode(mode, settings.ad_account_ids, state);
+  const window = datesForMode(effective, listMetaDayDates(site), now);
+  if (!window) return 0;
+  const platformWindows = settings.ad_account_ids.map((id) => platformWindowFor(effective, window, state.accounts[id], now));
+  return metaSyncStepCount(settings.ad_account_ids.length, window, platformWindows);
 }
 
 const MONTH_DAY = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
@@ -291,14 +402,17 @@ export async function syncMetaAds(opts: {
     const creatives = loadMetaCreatives(opts.site);
     const accountCount = settings.ad_account_ids.length;
     const failed = new Map<string, unknown>();
+    const platformRead = new Map<string, { window: DateWindow; rows: MetaAdPlatformDayRow[] }>();
     for (let i = 0; i < accountCount; i++) {
       const accountId = settings.ad_account_ids[i];
       const account = `account ${i + 1} of ${accountCount}`;
       const prev = state.accounts[accountId];
       opts.onStep?.(`Meta: looking up ${account}`);
       const fetched: MetaAdDayRow[] = [];
+      let currency = "";
       try {
         const info = await fetchAccountInfo(accountId);
+        currency = info.currency;
         state.accounts[accountId] = {
           name: info.name,
           currency: info.currency,
@@ -306,10 +420,11 @@ export async function syncMetaAds(opts: {
           setup_read_at: prev?.setup_read_at,
           setup_error: prev?.setup_error,
           history_loaded_at: prev?.history_loaded_at,
+          platform_history_loaded_at: prev?.platform_history_loaded_at,
+          platform_history_since: prev?.platform_history_since,
+          platform_error: prev?.platform_error,
         };
-        for (let start = window.since; start <= window.until; start = addDays(start, FETCH_CHUNK_DAYS)) {
-          const endCandidate = addDays(start, FETCH_CHUNK_DAYS - 1);
-          const end = endCandidate > window.until ? window.until : endCandidate;
+        for (const [start, end] of chunks(window)) {
           opts.onStep?.(`Meta: ${account}, ${shortDateRange(start, end)}`);
           fetched.push(...(await fetchAdInsights(accountId, start, end, info.currency)));
         }
@@ -323,6 +438,19 @@ export async function syncMetaAds(opts: {
         continue;
       }
       for (const r of fetched) byDate.get(r.date)?.push(r);
+      const pWindow = platformWindowFor(mode, window, prev, opts.now);
+      try {
+        const rows: MetaAdPlatformDayRow[] = [];
+        for (const [start, end] of chunks(pWindow)) {
+          opts.onStep?.(`Meta: ${account}, platforms ${shortDateRange(start, end)}`);
+          rows.push(...(await fetchAdPlatformInsights(accountId, start, end, currency)));
+        }
+        platformRead.set(accountId, { window: pWindow, rows });
+        state.accounts[accountId].platform_error = undefined;
+      } catch (err) {
+        state.accounts[accountId].platform_error = err instanceof Error ? err.message : String(err);
+        log.warn({ err, accountId }, "[meta] per-placement read failed (non-fatal)");
+      }
       opts.onStep?.(`Meta: ${account}, ad creatives`);
       try {
         for (const c of await fetchAdCreatives(accountId)) creatives.ads[c.ad_id] = { ...c, account_id: accountId };
@@ -346,6 +474,12 @@ export async function syncMetaAds(opts: {
       }
       saveMetaDay(opts.site, { date, fetched_at: fetchedAt, rows });
       total += rows.length;
+    }
+    savePlatformDays(opts.site, platformRead, settings.ad_account_ids, fetchedAt);
+    for (const [id, { window: w }] of Array.from(platformRead.entries())) {
+      const acct = state.accounts[id];
+      if (!acct.platform_history_since || w.since < acct.platform_history_since) acct.platform_history_since = w.since;
+      if (mode !== "older" && dateRange(w.since, w.until).length >= META_BACKFILL_DAYS) acct.platform_history_loaded_at = fetchedAt;
     }
     if (settings.ad_account_ids.every((id) => !state.accounts[id]?.setup_error && !state.accounts[id]?.sync_error)) {
       creatives.fetched_at = fetchedAt;

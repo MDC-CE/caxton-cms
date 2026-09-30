@@ -61,7 +61,7 @@ import {
   trimIssueAds,
   type AdsDiagnosticsSnapshot,
 } from "../ads/ads-diagnostics-snapshots";
-import { fetchAdsForFix, isMetaWriteConfigured, replaceAdUrlTags } from "../ads/meta-write";
+import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
 import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
 import { TRACKING_FIX_MAX_ADS } from "@shared/ads-tracking-fix";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
@@ -114,7 +114,6 @@ function settingsPayload(res: Response) {
   return {
     ads,
     token_configured: isMetaTokenConfigured(),
-    write_token_configured: isMetaWriteConfigured(),
     api_version: META_GRAPH_VERSION,
     utm_template: META_UTM_TEMPLATE,
     tracking_params: trackingParams,
@@ -345,6 +344,7 @@ export function registerAdsRoutes(app: Express): void {
         contentRoot: getContentRoot(res),
         ...q,
         content_type: req.params.type,
+        includeMetaPlatforms: false,
       });
       const locale = typeof req.query.locale === "string" && req.query.locale.trim() ? req.query.locale.trim() : null;
       const search = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
@@ -440,7 +440,7 @@ export function registerAdsRoutes(app: Express): void {
   });
 
   const trackingFixDeps = (site: string, contentRoot: string): TrackingFixDeps => ({
-    writeConfigured: isMetaWriteConfigured,
+    writeConfigured: isMetaTokenConfigured,
     fetchAds: fetchAdsForFix,
     replace: replaceAdUrlTags,
     requestRefresh: async () => isRefreshActive(await requestAdsRefresh(site, contentRoot, "refresh", { manual: true })),
@@ -474,8 +474,8 @@ export function registerAdsRoutes(app: Express): void {
     if (!auth.authorized) return;
     const parsed = trackingFixApplySchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
-    if (!isMetaWriteConfigured()) {
-      return res.status(409).json({ error: "Live-ad edits are not set up on the server. Ask an admin to add the Meta write token." });
+    if (!isMetaTokenConfigured()) {
+      return res.status(409).json({ error: "Meta isn't connected on this server. Ask an admin to add the Meta access token." });
     }
     try {
       const site = getSite(res);

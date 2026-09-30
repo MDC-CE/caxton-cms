@@ -190,6 +190,7 @@ type Report = {
   destinations: PageRow[];
   campaigns: unknown[];
   thresholds: unknown;
+  meta_platforms?: unknown;
   warnings: Warning[];
 };
 
@@ -253,6 +254,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
       "refresh: true (any mode, needs ads_settings) queues a Meta read first; without the grant → refresh_not_allowed warning and the cached read proceeds. " +
       "Filters: campaign_ids / adset_ids / ad_ids (≤20 each; OR within a level, AND across levels) narrow spend, GA4 visits (matched by link tags; parents filled from synced ads) and leads (by last-clicked ad); untagged visits are left out (untagged_visits_excluded = floor). " +
       "since / until (YYYY-MM-DD, ≤90 days, within ~13 months) replace days; gaps → data_gaps warning (missing, not zero). diagnostics: id filters keep issues touching those ads; since/until ignored. " +
+      "summary / diagnostics carry meta_platforms (Facebook vs Instagram: spend, visits, site leads per placement; see explain topic ads). " +
       "Read-only — not GSC (get_organic_traffic), not general GA4 reports (get_analytics_report). " +
       MULTI_SITE_TOOL_BLURB,
     {
@@ -546,6 +548,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               destinations_total: data.destinations.length,
               campaigns_total: data.campaigns.length,
               top_pages: top,
+              ...(data.meta_platforms ? { meta_platforms: data.meta_platforms } : {}),
             },
             meta,
           );

@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 
 type Handler = (req: Request, res: Response) => unknown;
 const routes = new Map<string, Handler>();
-const state = vi.hoisted(() => ({ grants: new Set<string>(), loopback: false, writeConfigured: true }));
+const state = vi.hoisted(() => ({ grants: new Set<string>(), loopback: false, tokenConfigured: true }));
 
 vi.mock("../rate-limit/api", () => {
   const reg = (method: string) => (_app: unknown, path: string, _opts: unknown, handler: Handler) => routes.set(`${method} ${path}`, handler);
@@ -19,8 +19,12 @@ vi.mock("./_helpers", () => ({
   },
 }));
 
+vi.mock("../ads/meta-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ads/meta-client")>()),
+  isMetaTokenConfigured: () => state.tokenConfigured,
+}));
+
 vi.mock("../ads/meta-write", () => ({
-  isMetaWriteConfigured: () => state.writeConfigured,
   fetchAdsForFix: vi.fn(async () => new Map()),
   replaceAdUrlTags: vi.fn(),
 }));
@@ -61,7 +65,7 @@ async function call(key: string, body: unknown = {}) {
 beforeEach(() => {
   state.grants = new Set();
   state.loopback = false;
-  state.writeConfigured = true;
+  state.tokenConfigured = true;
 });
 
 describe("tracking-fix routes", () => {
@@ -88,9 +92,9 @@ describe("tracking-fix routes", () => {
     expect((await call("POST /api/ads/meta/tracking-fix/apply", { ...body, ad_ids: many })).statusCode).toBe(400);
   });
 
-  it("apply returns 409 when the write token is missing", async () => {
+  it("apply returns 409 when the Meta token is missing", async () => {
     state.grants = new Set(["ads_edit"]);
-    state.writeConfigured = false;
+    state.tokenConfigured = false;
     expect((await call("POST /api/ads/meta/tracking-fix/apply", body)).statusCode).toBe(409);
   });
 });

@@ -16,11 +16,22 @@ vi.mock("./meta-client", () => ({
   isMetaTokenConfigured: () => h.tokenConfigured,
   fetchAccountInfo: vi.fn(async () => ({ name: "Acct", currency: "USD", account_status: 1 })),
   fetchAdInsights: vi.fn(async () => []),
+  fetchAdPlatformInsights: vi.fn(async () => []),
   fetchAdCreatives: vi.fn(async () => []),
   MetaApiError: class MetaApiError extends Error {},
 }));
 
-const { metaSyncStepCount, planMetaSyncSteps, shortDateRange, syncMetaAds, loadMetaState, loadMetaCreatives } = await import("./meta-ads-days");
+const {
+  metaSyncStepCount,
+  planMetaSyncSteps,
+  platformWindowFor,
+  shortDateRange,
+  syncMetaAds,
+  loadMetaState,
+  loadMetaCreatives,
+  loadMetaPlatformDay,
+  loadMetaPlatformRows,
+} = await import("./meta-ads-days");
 const metaClient = await import("./meta-client");
 
 const SITE = "site_test";
@@ -36,9 +47,18 @@ function readDay(date: string): { rows: Array<{ account_id: string; ad_id: strin
   return JSON.parse(fs.readFileSync(path.join(h.cacheDir, SITE, "meta-ads-days", `${date}.json`), "utf-8"));
 }
 
-function seedLoaded(ids: string[]) {
+function seedLoaded(ids: string[], platformLoaded = true) {
   const accounts = Object.fromEntries(
-    ids.map((id) => [id, { name: `Acct ${id}`, currency: "USD", account_status: 1, history_loaded_at: "2026-09-01T00:00:00.000Z" }]),
+    ids.map((id) => [
+      id,
+      {
+        name: `Acct ${id}`,
+        currency: "USD",
+        account_status: 1,
+        history_loaded_at: "2026-09-01T00:00:00.000Z",
+        ...(platformLoaded ? { platform_history_loaded_at: "2026-09-01T00:00:00.000Z", platform_history_since: "2026-07-01" } : {}),
+      },
+    ]),
   );
   fs.mkdirSync(path.join(h.cacheDir, SITE), { recursive: true });
   fs.writeFileSync(path.join(h.cacheDir, SITE, "meta-ads-state.json"), JSON.stringify({ consecutive_failures: 0, accounts }), "utf-8");
@@ -59,9 +79,15 @@ afterAll(() => {
 });
 
 describe("metaSyncStepCount", () => {
-  it("counts lookup + 15-day chunks + creatives per account, plus one save", () => {
-    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(4);
-    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 2) + 1);
+  it("counts lookup + insight chunks + placement chunks + creatives per account, plus one save", () => {
+    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(5);
+    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 6 + 2) + 1);
+  });
+
+  it("uses per-account placement windows when given", () => {
+    const refresh = { since: "2026-09-20", until: "2026-09-29" };
+    const firstFill = { since: "2026-07-02", until: "2026-09-29" };
+    expect(metaSyncStepCount(2, refresh, [refresh, firstFill])).toBe(2 * (1 + 2) + 1 + 6 + 1);
   });
 
   it("is 0 with no window or no accounts", () => {
@@ -70,28 +96,46 @@ describe("metaSyncStepCount", () => {
   });
 });
 
+describe("platformWindowFor", () => {
+  const refresh = { since: "2026-09-20", until: "2026-09-29" };
+  it("widens to 90 days until placement history is loaded", () => {
+    expect(platformWindowFor("refresh", refresh, undefined, NOW)).toEqual({ since: "2026-07-02", until: "2026-09-29" });
+    expect(platformWindowFor("refresh", refresh, { name: "", currency: "", account_status: 1, platform_history_loaded_at: "x" }, NOW)).toEqual(refresh);
+  });
+  it("keeps older-history windows as they are", () => {
+    const older = { since: "2026-04-03", until: "2026-07-01" };
+    expect(platformWindowFor("older", older, undefined, NOW)).toEqual(older);
+  });
+});
+
 describe("planMetaSyncSteps", () => {
   it("plans the 90-day first load when no days are cached", () => {
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(17);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
   });
 
   it("plans the 10-day refresh once days are cached and history is loaded", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(4);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(5);
+  });
+
+  it("plans a 90-day placement fill when only placement history is missing", () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"], false);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(1 + 1 + 6 + 1 + 1);
   });
 
   it("plans a 90-day backfill when an account never loaded history", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(17);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
   });
 
   it("plans 90 older days before the earliest cached day", () => {
     seedDay("2026-09-01");
-    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 2 + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 6 + 2 + 1);
   });
 
   it("is 0 when the sync would skip", () => {
@@ -212,7 +256,53 @@ describe("syncMetaAds history loading", () => {
     expect(loadMetaState(SITE).accounts["222"]).toBeUndefined();
 
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(17);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
+  });
+});
+
+describe("syncMetaAds placement read", () => {
+  function platformRow(account_id: string, date: string, ad_id: string, platform = "instagram") {
+    return { account_id, date, ad_id, campaign_id: "c", adset_id: "s", currency: "USD", platform, spend: 5, impressions: 10, link_clicks: 1, pixel_leads: 0 };
+  }
+
+  it("saves placement rows, fills 90 days on first sync and marks the history", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"], false);
+    vi.mocked(metaClient.fetchAdPlatformInsights).mockImplementation(async (_a: string, since: string) =>
+      since === "2026-09-15" ? ([platformRow("111", "2026-09-29", "a1")] as never) : [],
+    );
+    try {
+      const res = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+      expect(res.ok).toBe(true);
+      expect(res.dates).toHaveLength(10);
+      expect(loadMetaPlatformDay(SITE, "2026-07-02")).not.toBeNull();
+      expect(loadMetaPlatformRows(SITE, "2026-09-29", "2026-09-29").map((r) => r.ad_id)).toEqual(["a1"]);
+      const acct = loadMetaState(SITE).accounts["111"];
+      expect(acct.platform_history_loaded_at).toBeTruthy();
+      expect(acct.platform_history_since).toBe("2026-07-02");
+      expect(acct.platform_error).toBeUndefined();
+    } finally {
+      vi.mocked(metaClient.fetchAdPlatformInsights).mockImplementation(async () => []);
+    }
+  });
+
+  it("keeps main rows and old placement rows when the placement read fails", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"]);
+    const dir = path.join(h.cacheDir, SITE, "meta-ads-platform-days");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "2026-09-29.json"),
+      JSON.stringify({ date: "2026-09-29", fetched_at: "", rows: [platformRow("111", "2026-09-29", "old")] }),
+      "utf-8",
+    );
+    vi.mocked(metaClient.fetchAdInsights).mockResolvedValueOnce([insightRow("111", "2026-09-29")] as never);
+    vi.mocked(metaClient.fetchAdPlatformInsights).mockRejectedValueOnce(new Error("rate limited"));
+    const res = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(res.ok).toBe(true);
+    expect(readDay("2026-09-29").rows.map((r) => r.ad_id)).toEqual(["ad-111"]);
+    expect(loadMetaPlatformRows(SITE, "2026-09-29", "2026-09-29").map((r) => r.ad_id)).toEqual(["old"]);
+    expect(loadMetaState(SITE).accounts["111"].platform_error).toBe("rate limited");
   });
 });
 

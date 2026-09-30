@@ -42,6 +42,7 @@ import {
   buildAdsReport,
   getAdsReport,
   makeDestinationResolver,
+  type AdsMetaPlatforms,
   type AdsReport,
   type AdsUnrecognizedCampaigns,
   type DestinationResolver,
@@ -98,6 +99,8 @@ export type AdsDiagnostics = {
     consent_accept_pct: number | null;
   };
   missing_floor_currencies: string[];
+  /** Facebook vs Instagram over the KPI window; null when Meta is not connected or the build skipped it (issue follow-ups). */
+  meta_platforms: AdsMetaPlatforms | null;
   issues: AdsIssue[];
   resolved: Array<{ id: string; title: string; severity: AdsIssue["severity"]; resolved_at: string }>;
   utm_template: string;
@@ -581,16 +584,25 @@ export async function buildAdsDiagnostics(opts: {
   const { kpiDays, issueDays } = resolveAdsDiagnosticsWindows(opts.days);
   const settings = getAdsSettings(opts.contentRoot);
   const t = settings.meta.alert_thresholds;
-  const report = await getAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: issueDays, platform: "meta", includeGa4Ads: true, now });
-  const kpiReport =
-    kpiDays === issueDays || opts.issuesOnly
-      ? report
-      : buildAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "meta", noRefresh: true, now });
+  const reuseIssueReport = kpiDays === issueDays || !!opts.issuesOnly;
+  const report = await getAdsReport({
+    site: opts.site,
+    contentRoot: opts.contentRoot,
+    days: issueDays,
+    platform: "meta",
+    includeGa4Ads: true,
+    includeMetaPlatforms: reuseIssueReport && !opts.issuesOnly,
+    now,
+  });
+  const kpiReport = reuseIssueReport
+    ? report
+    : buildAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "meta", noRefresh: true, now });
   const baseline = buildAdsReport({
     site: opts.site,
     contentRoot: opts.contentRoot,
     days: 28,
     platform: "meta",
+    includeMetaPlatforms: false,
     noRefresh: true,
     now: new Date(Date.parse(`${report.window.start}T12:00:00.000Z`)),
   });
@@ -994,6 +1006,7 @@ export async function buildAdsDiagnostics(opts: {
       consent_accept_pct: consentTotals(consentWindow.current).accept_pct,
     },
     missing_floor_currencies: currenciesMissingFloor(totalSpend, t),
+    meta_platforms: kpiReport.meta_platforms ?? null,
     issues,
     resolved: state.resolved,
     utm_template: META_UTM_TEMPLATE,

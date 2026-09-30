@@ -6,6 +6,32 @@ window_days: 6
 
 entries:
   - date: "2026-09-30"
+    summary: "get_paid_traffic: Facebook vs Instagram breakdown (meta_platforms) in summary + diagnostics; Meta template now utm_source={{site_source_name}}"
+    agent_impact:
+      - "Recommended Meta UTM template (Settings → Ads, utm_template, Fix via Meta) now uses utm_source={{site_source_name}} (Meta fills fb / ig / msg / an). Existing ads keep utm_source=facebook until staff edit them; Fix via Meta never rewrites an existing utm_source."
+      - "New meta_platforms block: rows facebook / instagram / messenger / audience_network / other / not_split with spend, clicks, meta_leads, paid_visits, unique_leads, cost_per_lead, conversion_rate, low_sample; plus excluded_spend { instant_form, off_site, unknown }, spend_since, spend_partial, not_split_share. Spend = site-landing ads only, from a separate per-ad × publisher_platform read; older-tag ads land in not_split. Main totals unchanged — never sum with them. Id / account / currency filters apply."
+      - "New warnings meta_platform_not_split (≥50% of placement visits from older-tag ads) and meta_platform_spend_partial (placement spend a floor). Explain topic ads → Facebook vs Instagram."
+    tools_changed: false
+    paths:
+      - shared/paid-traffic.ts
+      - shared/ads-settings.ts
+      - server/ads/meta-client.ts
+      - server/ads/meta-ads-days.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
+    summary: "Fix via Meta now uses META_ADS_ACCESS_TOKEN; META_ADS_WRITE_ACCESS_TOKEN removed"
+    agent_impact:
+      - "Staff live-ad edits (missing_tracking_params → Fix via Meta) use the same META_ADS_ACCESS_TOKEN as syncs; that token needs ads_management on top of ads_read. Without the scope syncs still work and preview/apply fail with a Meta permission error — tell staff to add ads_management, not a second token."
+      - "Settings → Ads no longer reports a separate live-ad edit token status. Agents still cannot run the fix (routes refuse MCP loopback)."
+    tools_changed: false
+    paths:
+      - server/ads/meta-write.ts
+      - server/routes/ads.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
     summary: "New built-in role ads_manager; new caps ads_edit (staff Fix via Meta) and consent_settings (split from ads_settings)"
     agent_impact:
       - "New MCP role /mcp/role/ads_manager: metrics_view, content_view:*, ads_settings, ads_edit, proposals_create — paid-traffic reads, refresh: true, and proposals; no SEO/redirect/content/consent writes. platform_steward also gains ads_edit + consent_settings."

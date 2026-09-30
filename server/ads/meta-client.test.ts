@@ -4,9 +4,47 @@ import {
   MetaApiError,
   parseAdAccount,
   parseCreative,
+  parseAdPlatformRow,
   parseInsightRow,
   resetMetaAdAccountCache,
 } from "./meta-client";
+
+describe("parseAdPlatformRow", () => {
+  it("maps the placement, spend and clicks per ad", () => {
+    expect(
+      parseAdPlatformRow({
+        date_start: "2026-09-01",
+        account_id: "act_123",
+        account_currency: "usd",
+        campaign_id: "c1",
+        adset_id: "s1",
+        ad_id: "a1",
+        publisher_platform: "instagram",
+        spend: "4.5",
+        impressions: "300",
+        inline_link_clicks: "12",
+        actions: [{ action_type: "offsite_conversion.fb_pixel_lead", value: "1" }],
+      }),
+    ).toEqual({
+      date: "2026-09-01",
+      account_id: "123",
+      currency: "USD",
+      campaign_id: "c1",
+      adset_id: "s1",
+      ad_id: "a1",
+      platform: "instagram",
+      spend: 4.5,
+      impressions: 300,
+      link_clicks: 12,
+      pixel_leads: 1,
+    });
+  });
+
+  it("buckets unknown placements as other and drops rows without date or ad", () => {
+    expect(parseAdPlatformRow({ date_start: "2026-09-01", ad_id: "a1", publisher_platform: "threads" })?.platform).toBe("other");
+    expect(parseAdPlatformRow({ ad_id: "a1" })).toBeNull();
+  });
+});
 import { datesForMode, META_BACKFILL_DAYS } from "./meta-ads-days";
 
 describe("parseInsightRow", () => {

@@ -51,7 +51,6 @@ import {
 type SettingsResponse = {
   ads: AdsSettings;
   token_configured: boolean;
-  write_token_configured?: boolean;
   api_version: string;
   utm_template: string;
   tracking_params: TrackingParamsCoverage | null;
@@ -330,14 +329,6 @@ export function MetaAdsTab() {
                   <IconCopy className="h-3.5 w-3.5" />
                 </button>
               </p>
-              <p className="mt-1 text-xs text-muted-foreground" data-testid="text-meta-write-token-status">
-                Live-ad edits (Fix via Meta):{" "}
-                {data.write_token_configured ? (
-                  <span className="text-chart-3">token set on the server</span>
-                ) : (
-                  <span>not set up — tracking fixes stay manual in Meta Ads Manager</span>
-                )}
-              </p>
             </div>
             <Button
               type="button"
@@ -414,9 +405,8 @@ export function MetaAdsTab() {
                   Key: <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (env only; System User token with <code className="font-mono">ads_read</code>).
                 </p>
                 <p>
-                  Live-ad edits: <code className="font-mono">META_ADS_WRITE_ACCESS_TOKEN</code> (env only; System User token with{" "}
-                  <code className="font-mono">ads_management</code> on the same accounts). Used only by Fix via Meta, which needs the{" "}
-                  <code className="font-mono">ads_edit</code> permission.
+                  Live-ad edits (Fix via Meta) use the same key and also need <code className="font-mono">ads_management</code> on those accounts.
+                  Only staff with the <code className="font-mono">ads_edit</code> permission can run them.
                 </p>
                 <p>
                   Non-secret config: <code className="font-mono">settings.yml → ads.meta</code> (per site).

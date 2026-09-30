@@ -1,6 +1,6 @@
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AttributionModel } from "@shared/paid-attribution";
-import type { AdPlatform } from "@shared/paid-traffic";
+import type { AdPlatform, MetaPlacementRow } from "@shared/paid-traffic";
 import type { AdsRefreshStatus } from "@shared/ads-refresh-status";
 
 export type MoneyByCurrency = Record<string, number>;
@@ -134,6 +134,26 @@ export type AdsEntriesResponse = Pick<
   "window" | "platform" | "attribution" | "meta" | "ga4" | "refreshing" | "refresh" | "covered_days" | "consent" | "thresholds" | "warnings"
 > & { entries: AdsPageRow[] };
 
+export type AdsMetaPlatformRow = {
+  platform: MetaPlacementRow;
+  spend: MoneyByCurrency;
+  clicks: number;
+  meta_leads: number;
+  paid_visits: number;
+  unique_leads: number;
+  cost_per_lead: MoneyByCurrency | null;
+  conversion_rate: number | null;
+  low_sample: boolean;
+};
+
+export type AdsMetaPlatforms = {
+  rows: AdsMetaPlatformRow[];
+  excluded_spend: { instant_form: MoneyByCurrency; off_site: MoneyByCurrency; unknown: MoneyByCurrency };
+  spend_since: string | null;
+  spend_partial: boolean;
+  not_split_share: number | null;
+};
+
 export type AdsDiagnostics = {
   generated_at: string;
   window_days: number;
@@ -160,6 +180,8 @@ export type AdsDiagnostics = {
     consent_accept_pct: number | null;
   };
   missing_floor_currencies: string[];
+  /** Missing on snapshots built before the placement split shipped. */
+  meta_platforms?: AdsMetaPlatforms | null;
   issues: AdsIssue[];
   resolved: Array<{ id: string; title: string; severity: AdsIssue["severity"]; resolved_at: string }>;
   utm_template: string;

@@ -1,32 +1,23 @@
 /**
  * Meta Marketing API writes for staff-confirmed live-ad fixes (Diagnostics → Ads).
- * Token: META_ADS_WRITE_ACCESS_TOKEN (System User with `ads_management`), kept separate
- * from the read-only META_ADS_ACCESS_TOKEN used by syncs.
+ * Token: META_ADS_ACCESS_TOKEN (same System User token as syncs); writes need `ads_management`
+ * on top of `ads_read`, otherwise Meta answers with a permission error.
  */
 
-import { classifyError, META_GRAPH_VERSION, MetaApiError, parseCreative } from "./meta-client";
+import { classifyError, getMetaAccessToken, META_GRAPH_VERSION, MetaApiError, parseCreative } from "./meta-client";
 
 const GRAPH_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const REQUEST_TIMEOUT_MS = 30_000;
-/** Graph `?ids=` accepts at most 50 ids per call. */
-const IDS_PER_READ = 50;
-
-export function getMetaWriteAccessToken(): string | null {
-  const raw = (process.env.META_ADS_WRITE_ACCESS_TOKEN || "").trim();
-  return raw || null;
-}
-
-export function isMetaWriteConfigured(): boolean {
-  return !!getMetaWriteAccessToken();
-}
+/** Graph rejects the multi-id `?ids=` read on v26+, so ads are read one GET each. */
+const READ_CONCURRENCY = 5;
 
 async function graphRequest(
   method: "GET" | "POST",
   path: string,
   params: Record<string, string>,
 ): Promise<Record<string, unknown>> {
-  const token = getMetaWriteAccessToken();
-  if (!token) throw new MetaApiError("META_ADS_WRITE_ACCESS_TOKEN is not set", 0, undefined, "auth");
+  const token = getMetaAccessToken();
+  if (!token) throw new MetaApiError("META_ADS_ACCESS_TOKEN is not set", 0, undefined, "auth");
   const url = new URL(`${GRAPH_BASE}/${path.replace(/^\//, "")}`);
   const body = new URLSearchParams({ ...params, access_token: token });
   let init: RequestInit;
@@ -93,16 +84,26 @@ export function parseAdForFix(raw: Record<string, unknown>): MetaAdForFix | null
   };
 }
 
-/** Current creative setup for each ad id (missing / inaccessible ads are omitted). */
+/**
+ * Current creative setup for each ad id. Deleted / unknown ads are omitted;
+ * token, permission and rate-limit errors abort the whole read.
+ */
 export async function fetchAdsForFix(adIds: string[]): Promise<Map<string, MetaAdForFix>> {
   const out = new Map<string, MetaAdForFix>();
-  for (let i = 0; i < adIds.length; i += IDS_PER_READ) {
-    const chunk = adIds.slice(i, i + IDS_PER_READ);
-    const body = await graphRequest("GET", "", { ids: chunk.join(","), fields: FIX_FIELDS });
-    for (const value of Object.values(body)) {
-      const parsed = value && typeof value === "object" ? parseAdForFix(value as Record<string, unknown>) : null;
-      if (parsed) out.set(parsed.ad_id, parsed);
-    }
+  const ids = Array.from(new Set(adIds));
+  for (let i = 0; i < ids.length; i += READ_CONCURRENCY) {
+    const chunk = ids.slice(i, i + READ_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          return parseAdForFix(await graphRequest("GET", id, { fields: FIX_FIELDS }));
+        } catch (err) {
+          if (err instanceof MetaApiError && err.kind === "other") return null;
+          throw err;
+        }
+      }),
+    );
+    for (const parsed of results) if (parsed) out.set(parsed.ad_id, parsed);
   }
   return out;
 }

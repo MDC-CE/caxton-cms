@@ -12,7 +12,14 @@ import { getSiteContextMap } from "../site-manager";
 import { createPublicUrlResolver } from "../redirects";
 import { parseRoute } from "../ssr-route";
 import { child } from "../logger";
-import { classifyTraffic, normalizeLandingPath, type AdPlatform } from "@shared/paid-traffic";
+import {
+  adSourceTagState,
+  classifyTraffic,
+  metaPlatformFromSource,
+  normalizeLandingPath,
+  type AdPlatform,
+  type MetaPlacementRow,
+} from "@shared/paid-traffic";
 import {
   creditLead,
   coveredDays,
@@ -36,12 +43,13 @@ import {
   dateRange,
   listMetaDayDates,
   loadMetaCreatives,
+  loadMetaPlatformRows,
   loadMetaRows,
   loadMetaState,
   META_RETENTION_DAYS,
   utcDate,
 } from "./meta-ads-days";
-import type { MetaAdDayRow } from "./meta-client";
+import type { MetaAdCreativeInfo, MetaAdDayRow } from "./meta-client";
 import {
   isGa4Configured,
   lastCompleteGa4Date,
@@ -80,6 +88,8 @@ export type AdsReportOpts = AdsIdFilters & {
   noRefresh?: boolean;
   /** Keep the top GA4 campaign/ad-set/ad tags per row (`ga4_ads`) — diagnostics only. */
   includeGa4Ads?: boolean;
+  /** Build the Facebook vs Instagram breakdown (`meta_platforms`); default true. */
+  includeMetaPlatforms?: boolean;
   now?: Date;
 };
 
@@ -174,6 +184,32 @@ export type AdsCampaignGroup = {
 
 export type AdsWarning = { code: string; message: string };
 
+/** One placement in the Facebook vs Instagram breakdown (site ads only). */
+export type AdsMetaPlatformRow = {
+  platform: MetaPlacementRow;
+  spend: MoneyByCurrency;
+  clicks: number;
+  meta_leads: number;
+  paid_visits: number;
+  unique_leads: number;
+  cost_per_lead: MoneyByCurrency | null;
+  conversion_rate: number | null;
+  low_sample: boolean;
+};
+
+export type AdsMetaPlatforms = {
+  /** Placements with any activity, Facebook first, `not_split` last. */
+  rows: AdsMetaPlatformRow[];
+  /** Spend on ads that don't land on this site, kept out of the rows. */
+  excluded_spend: { instant_form: MoneyByCurrency; off_site: MoneyByCurrency; unknown: MoneyByCurrency };
+  /** Earliest date every account in scope has placement spend; null until each finished its 90-day placement load. */
+  spend_since: string | null;
+  /** Placement spend is missing for part of the window (history still loading, or last placement read failed). */
+  spend_partial: boolean;
+  /** Share of paid Meta visits without per-platform tags (0–1). */
+  not_split_share: number | null;
+};
+
 export type AdsReport = {
   window: { start: string; end: string; days: number };
   platform: AdPlatform | "all";
@@ -236,6 +272,8 @@ export type AdsReport = {
   pages: AdsPageRow[];
   destinations: AdsPageRow[];
   campaigns: AdsCampaignGroup[];
+  /** Facebook vs Instagram (Meta placements); omitted when Meta is out of scope or `includeMetaPlatforms` is false. */
+  meta_platforms?: AdsMetaPlatforms;
   /** Only with `includeGa4Ads` and Meta connected: campaigns sending paid Meta visits that no connected account knows. */
   unrecognized_campaigns?: AdsUnrecognizedCampaigns;
   thresholds: AdsAlertThresholds;
@@ -777,6 +815,17 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     test_submissions: 0,
   };
 
+  type PlacementAgg = { spend: MoneyByCurrency; clicks: number; meta_leads: number; paid_visits: number; unique_leads: number };
+  const placements = new Map<MetaPlacementRow, PlacementAgg>();
+  const placement = (p: MetaPlacementRow): PlacementAgg => {
+    let agg = placements.get(p);
+    if (!agg) {
+      agg = { spend: {}, clicks: 0, meta_leads: 0, paid_visits: 0, unique_leads: 0 };
+      placements.set(p, agg);
+    }
+    return agg;
+  };
+
   // ── Meta spend → destination ─────────────────────────────────────────────
   const metaConnected = isMetaConnected(opts.contentRoot);
   const metaState = loadMetaState(opts.site);
@@ -866,6 +915,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       a.row.ga4_leads += c.sessions_with_lead;
       totals.paid_visits += c.sessions;
       totals.ga4_leads += c.sessions_with_lead;
+      if (cls.platform === "meta") placement(metaPlatformFromSource(c.source)).paid_visits += c.sessions;
       if (cls.matched) {
         a.row.matched_visits += c.sessions;
         totals.matched_visits += c.sessions;
@@ -922,8 +972,32 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     }
   }
 
+  let creativesCache: Record<string, MetaAdCreativeInfo> | null = null;
+  const creatives = (): Record<string, MetaAdCreativeInfo> => (creativesCache ??= loadMetaCreatives(opts.site).ads);
+  const destinationCache = new Map<string, Resolved>();
+  /** Where an ad sends people: its creative link, else the page most of its GA4 visits landed on. */
+  const destinationOf = (adId: string, hasInstantFormLeads: boolean): Resolved => {
+    const cacheKey = `${adId}|${hasInstantFormLeads ? 1 : 0}`;
+    const hit = destinationCache.get(cacheKey);
+    if (hit) return hit;
+    const creative = creatives()[adId];
+    let r: Resolved;
+    if (creative?.instant_form || (hasInstantFormLeads && !creative?.links.length)) {
+      r = { kind: "instant_form", key: "dest:instant_form", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
+    } else {
+      const link = creative?.links[0] ? parseUrl(creative.links[0]) : null;
+      const votes = adLandingVotes.get(adId);
+      const voted = votes ? Array.from(votes.entries()).sort((x, y) => y[1] - x[1])[0]?.[0] : undefined;
+      const target = link ?? (voted ? { host: voted.split("|")[0]!, path: voted.split("|")[1]! } : null);
+      r = target
+        ? resolve(target.host, target.path)
+        : { kind: "unknown_destination", key: "dest:unknown", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
+    }
+    destinationCache.set(cacheKey, r);
+    return r;
+  };
+
   if (includeMeta && metaRows.length > 0) {
-    const creatives = loadMetaCreatives(opts.site).ads;
     for (const m of metaRows) {
       totals.clicks += m.link_clicks;
       totals.landing_page_views += m.landing_page_views;
@@ -931,19 +1005,8 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       totals.instant_form_leads += m.instant_form_leads;
       addMoney(totals.spend, m.currency, m.spend);
 
-      const creative = creatives[m.ad_id];
-      let r: Resolved;
-      if (creative?.instant_form || (m.instant_form_leads > 0 && !creative?.links.length)) {
-        r = { kind: "instant_form", key: "dest:instant_form", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
-      } else {
-        const link = creative?.links[0] ? parseUrl(creative.links[0]) : null;
-        const votes = adLandingVotes.get(m.ad_id);
-        const voted = votes ? Array.from(votes.entries()).sort((x, y) => y[1] - x[1])[0]?.[0] : undefined;
-        const target = link ?? (voted ? { host: voted.split("|")[0]!, path: voted.split("|")[1]! } : null);
-        r = target
-          ? resolve(target.host, target.path)
-          : { kind: "unknown_destination", key: "dest:unknown", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
-      }
+      const creative = creatives()[m.ad_id];
+      const r = destinationOf(m.ad_id, m.instant_form_leads > 0);
       if (opts.content_type && r.content_type !== opts.content_type) continue;
       const a = aggFor(r);
       a.platforms.add("meta");
@@ -968,6 +1031,42 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       g.clicks += m.link_clicks;
       g.meta_leads += m.pixel_leads;
       groupPage(g, a, 0);
+    }
+  }
+
+  // ── Meta spend per placement (site ads only) ─────────────────────────────
+  const buildPlacements = includeMeta && metaConnected && opts.includeMetaPlatforms !== false;
+  const excludedSpend: AdsMetaPlatforms["excluded_spend"] = { instant_form: {}, off_site: {}, unknown: {} };
+  if (buildPlacements) {
+    const instantFormAds = new Set(metaRowsAll.filter((m) => m.instant_form_leads > 0).map((m) => m.ad_id));
+    const tagStateCache = new Map<string, "split" | "not_split">();
+    const tagState = (adId: string) => {
+      let s = tagStateCache.get(adId);
+      if (!s) {
+        const creative = creatives()[adId];
+        s = adSourceTagState(creative ? { ...parseTrackingParams(creative.links[0]), ...parseTrackingParams(creative.url_tags) } : null);
+        tagStateCache.set(adId, s);
+      }
+      return s;
+    };
+    for (const m of loadMetaPlatformRows(opts.site, start, end, settings.meta.ad_account_ids)) {
+      if (opts.account && m.account_id !== opts.account) continue;
+      if (opts.currency && m.currency !== opts.currency) continue;
+      if (idFilter && !idsMatch({ campaign: m.campaign_id || null, adset: m.adset_id || null, ad: m.ad_id || null }, idFilter)) continue;
+      const r = destinationOf(m.ad_id, instantFormAds.has(m.ad_id));
+      if (opts.content_type && r.content_type !== opts.content_type) continue;
+      if (r.kind === "entry" || r.kind === "missing_page") {
+        const p = placement(tagState(m.ad_id) === "split" ? m.platform : "not_split");
+        addMoney(p.spend, m.currency, m.spend);
+        p.clicks += m.link_clicks;
+        p.meta_leads += m.pixel_leads;
+      } else if (r.kind === "instant_form") {
+        addMoney(excludedSpend.instant_form, m.currency, m.spend);
+      } else if (r.kind === "unknown_destination") {
+        addMoney(excludedSpend.unknown, m.currency, m.spend);
+      } else {
+        addMoney(excludedSpend.off_site, m.currency, m.spend);
+      }
     }
   }
 
@@ -1012,6 +1111,13 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     totals.unique_leads += t.unique_leads;
     totals.submissions += t.submissions;
     totals.repeat_submissions += t.repeat_submissions;
+  }
+  if (buildPlacements) {
+    for (const { lead, credit } of credits) {
+      if (credit.reason !== "credited" || credit.is_repeat || lead.platform !== "meta" || !credit.host || !credit.path) continue;
+      if (opts.content_type && resolve(credit.host, credit.path).content_type !== opts.content_type) continue;
+      placement(metaPlatformFromSource(lead.utm_source)).unique_leads += 1;
+    }
   }
   leadGapCompare.days = leadGapDays.size;
   for (const { lead, credit } of credits) {
@@ -1202,6 +1308,30 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     warnings.push({ code: "visits_not_tied_to_account", message: parts.join(" ") });
   }
 
+  let metaPlatforms: AdsMetaPlatforms | undefined;
+  if (buildPlacements) {
+    metaPlatforms = finalizePlacements(placements, excludedSpend, minVisits, {
+      start,
+      accounts: (opts.account ? [opts.account] : settings.meta.ad_account_ids).map((id) => metaState.accounts[id]),
+    });
+    const metaVisits = metaPlatforms.rows.reduce((n, r) => n + r.paid_visits, 0);
+    if (metaPlatforms.not_split_share != null && metaPlatforms.not_split_share >= 0.5) {
+      const pct = Math.round(metaPlatforms.not_split_share * 100);
+      warnings.push({
+        code: "meta_platform_not_split",
+        message: `${pct}% of paid Meta visits (${metaVisits}) came from ads without utm_source={{site_source_name}}, so they can't be split into Facebook vs Instagram and show as not_split (with those ads' spend). Update those ads' URL parameters in Meta to split them.`,
+      });
+    }
+    if (metaPlatforms.spend_partial && (metaVisits > 0 || metaPlatforms.rows.some((r) => Object.keys(r.spend).length > 0))) {
+      warnings.push({
+        code: "meta_platform_spend_partial",
+        message: metaPlatforms.spend_since
+          ? `Placement spend (Facebook vs Instagram) is only available from ${metaPlatforms.spend_since}, or the last placement read failed for an account; placement spend and cost per lead are a floor for ${start}..${end}. Main spend totals are unaffected.`
+          : "Placement spend (Facebook vs Instagram) is still loading or the last placement read failed; placement spend and cost per lead are a floor until the next sync. Main spend totals are unaffected.",
+      });
+    }
+  }
+
   const refresh = getAdsRefreshStatus(opts.site);
   const refreshing = isRefreshActive(refresh);
   warnings.push(...refreshWarnings(refresh));
@@ -1241,9 +1371,44 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     pages,
     destinations,
     campaigns: Array.from(campaignGroups.values()).sort((x, y) => spendSum(y.spend) - spendSum(x.spend) || y.paid_visits - x.paid_visits),
+    ...(metaPlatforms ? { meta_platforms: metaPlatforms } : {}),
     ...(opts.includeGa4Ads ? { unrecognized_campaigns: unrecognized?.result() ?? { paid_meta_visits: 0, campaigns: [] } } : {}),
     thresholds,
     warnings,
+  };
+}
+
+const PLACEMENT_ORDER: MetaPlacementRow[] = ["facebook", "instagram", "messenger", "audience_network", "other", "not_split"];
+
+function finalizePlacements(
+  placements: Map<MetaPlacementRow, { spend: MoneyByCurrency; clicks: number; meta_leads: number; paid_visits: number; unique_leads: number }>,
+  excluded: AdsMetaPlatforms["excluded_spend"],
+  minVisits: number,
+  scope: { start: string; accounts: Array<{ platform_history_loaded_at?: string; platform_history_since?: string; platform_error?: string } | undefined> },
+): AdsMetaPlatforms {
+  const rows: AdsMetaPlatformRow[] = [];
+  let visits = 0;
+  for (const platform of PLACEMENT_ORDER) {
+    const p = placements.get(platform);
+    if (!p || (p.paid_visits + p.unique_leads + p.clicks + p.meta_leads === 0 && Object.keys(p.spend).length === 0)) continue;
+    visits += p.paid_visits;
+    rows.push({
+      platform,
+      ...p,
+      cost_per_lead: p.unique_leads > 0 && Object.keys(p.spend).length > 0 ? divMoney(p.spend, p.unique_leads) : null,
+      conversion_rate: p.paid_visits > 0 ? p.unique_leads / p.paid_visits : null,
+      low_sample: isLowSample(p.paid_visits, minVisits),
+    });
+  }
+  const notSplit = placements.get("not_split")?.paid_visits ?? 0;
+  const loaded = scope.accounts.length > 0 && scope.accounts.every((a) => a?.platform_history_loaded_at && a.platform_history_since);
+  const spendSince = loaded ? scope.accounts.map((a) => a!.platform_history_since!).sort().at(-1)! : null;
+  return {
+    rows,
+    excluded_spend: excluded,
+    spend_since: spendSince,
+    spend_partial: !loaded || scope.accounts.some((a) => a?.platform_error) || (spendSince != null && spendSince > scope.start),
+    not_split_share: visits > 0 ? Math.round((notSplit / visits) * 1000) / 1000 : null,
   };
 }
 

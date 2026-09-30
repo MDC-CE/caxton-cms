@@ -1,10 +1,11 @@
 /**
  * Read-only Meta Marketing API client (Graph insights + creatives + account info).
  * Token: META_ADS_ACCESS_TOKEN (System User, `ads_read`). Never writes to Meta
- * (live-ad edits live in ./meta-write.ts with a separate token).
+ * (staff-confirmed live-ad edits live in ./meta-write.ts and reuse this token).
  */
 
 import { child } from "../logger";
+import { metaPlacementFromPublisher, type MetaPlacement } from "@shared/paid-traffic";
 
 const log = child({ module: "ads/meta-client" });
 
@@ -51,6 +52,21 @@ export type MetaAdDayRow = {
   pixel_leads: number;
   /** Instant Form leads (`lead` / `onsite_conversion.lead_grouped`). */
   instant_form_leads: number;
+};
+
+/** One ad's day on one placement (`breakdowns=publisher_platform`); kept apart from `MetaAdDayRow`. */
+export type MetaAdPlatformDayRow = {
+  date: string;
+  account_id: string;
+  currency: string;
+  campaign_id: string;
+  adset_id: string;
+  ad_id: string;
+  platform: MetaPlacement;
+  spend: number;
+  impressions: number;
+  link_clicks: number;
+  pixel_leads: number;
 };
 
 export type MetaAccountInfo = {
@@ -179,6 +195,26 @@ export function parseInsightRow(raw: Record<string, unknown>, fallbackCurrency =
   };
 }
 
+/** Parse one ad-level insights row broken down by `publisher_platform`. */
+export function parseAdPlatformRow(raw: Record<string, unknown>, fallbackCurrency = ""): MetaAdPlatformDayRow | null {
+  const date = typeof raw.date_start === "string" ? raw.date_start : "";
+  const adId = raw.ad_id != null ? String(raw.ad_id) : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !adId) return null;
+  return {
+    date,
+    account_id: String(raw.account_id ?? "").replace(/^act_/, ""),
+    currency: String(raw.account_currency || fallbackCurrency || "").toUpperCase(),
+    campaign_id: String(raw.campaign_id ?? ""),
+    adset_id: String(raw.adset_id ?? ""),
+    ad_id: adId,
+    platform: metaPlacementFromPublisher(typeof raw.publisher_platform === "string" ? raw.publisher_platform : ""),
+    spend: toNum(raw.spend),
+    impressions: Math.round(toNum(raw.impressions)),
+    link_clicks: Math.round(toNum(raw.inline_link_clicks)),
+    pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
+  };
+}
+
 /** Collect destination URLs + url_tags + Instant Form flag from a creative object. */
 export function parseCreative(ad: Record<string, unknown>): MetaAdCreativeInfo | null {
   const adId = ad.id != null ? String(ad.id) : "";
@@ -255,6 +291,30 @@ export async function fetchAdInsights(
   const rows: MetaAdDayRow[] = [];
   for (const r of raw) {
     const parsed = parseInsightRow(r, currency);
+    if (parsed) rows.push({ ...parsed, account_id: parsed.account_id || accountId });
+  }
+  return rows;
+}
+
+/** Daily ad-level spend per placement (Facebook, Instagram, …) for an inclusive date range. */
+export async function fetchAdPlatformInsights(
+  accountId: string,
+  since: string,
+  until: string,
+  currency = "",
+): Promise<MetaAdPlatformDayRow[]> {
+  const raw = await graphGetAll(`act_${accountId}/insights`, {
+    level: "ad",
+    time_increment: "1",
+    time_range: JSON.stringify({ since, until }),
+    breakdowns: "publisher_platform",
+    fields: "date_start,account_id,account_currency,campaign_id,adset_id,ad_id,spend,impressions,inline_link_clicks,actions",
+    action_attribution_windows: JSON.stringify(["7d_click", "1d_view"]),
+    limit: "500",
+  });
+  const rows: MetaAdPlatformDayRow[] = [];
+  for (const r of raw) {
+    const parsed = parseAdPlatformRow(r, currency);
     if (parsed) rows.push({ ...parsed, account_id: parsed.account_id || accountId });
   }
   return rows;

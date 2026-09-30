@@ -194,4 +194,4 @@ export function emailMatchesPattern(email: string, pattern: string): boolean {
 
 /** Meta URL parameters template staff paste into every ad (ids enable matching). */
 export const META_UTM_TEMPLATE =
-  "utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
+  "utm_source={{site_source_name}}&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";

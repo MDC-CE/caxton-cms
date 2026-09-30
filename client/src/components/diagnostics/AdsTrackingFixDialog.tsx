@@ -178,8 +178,8 @@ export function AdsTrackingFixDialog({
 
         {preview.data && !preview.data.write_configured && (
           <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground" data-testid="tracking-fix-not-configured">
-            Live-ad edits aren't set up on this server yet. Ask an admin to add a Meta token that can manage ads, or paste the template into each
-            ad in Meta Ads Manager.
+            Meta isn't connected on this server yet. Ask an admin to add the Meta access token, or paste the template into each ad in Meta Ads
+            Manager.
           </div>
         )}
 
@@ -256,7 +256,8 @@ export function AdsTrackingFixDialog({
                 </p>
                 <p>
                   After a successful run we re-read ad setups from Meta so this issue can clear. Uses the server's{" "}
-                  <code className="font-mono">META_ADS_WRITE_ACCESS_TOKEN</code>; each change is logged with your account.
+                  <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (needs <code className="font-mono">ads_management</code>); each change is
+                  logged with your account.
                 </p>
               </CollapsibleContent>
             </Collapsible>

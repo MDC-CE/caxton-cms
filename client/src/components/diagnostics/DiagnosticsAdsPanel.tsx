@@ -20,6 +20,7 @@ import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
+import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
 import { TabCountBadge } from "@/components/DebugBubble/components/PageErrorsModal";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
@@ -772,6 +773,8 @@ export function DiagnosticsAdsPanel() {
           testId="unclear"
         />
       </div>
+
+      {data.status !== "not_connected" && data.meta_platforms && <AdsMetaPlatformsCard data={data.meta_platforms} days={data.window_days} />}
 
       {(issues.length > 0 || infos.length > 0 || data.resolved.length > 0) && (
         <Collapsible open={issuesOpen} onOpenChange={toggleIssuesOpen} asChild>

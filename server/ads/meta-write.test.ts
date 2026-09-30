@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchAdsForFix, isMetaWriteConfigured, parseAdForFix, replaceAdUrlTags } from "./meta-write";
+import { fetchAdsForFix, parseAdForFix, replaceAdUrlTags } from "./meta-write";
 import { MetaApiError } from "./meta-client";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -38,27 +38,43 @@ describe("parseAdForFix", () => {
 describe("meta-write requests", () => {
   const fetchMock = vi.fn();
   beforeEach(() => {
-    process.env.META_ADS_WRITE_ACCESS_TOKEN = "write-token";
+    process.env.META_ADS_ACCESS_TOKEN = "meta-token";
     vi.stubGlobal("fetch", fetchMock);
     fetchMock.mockReset();
   });
   afterEach(() => {
-    delete process.env.META_ADS_WRITE_ACCESS_TOKEN;
+    delete process.env.META_ADS_ACCESS_TOKEN;
     vi.unstubAllGlobals();
   });
 
-  it("is off without the write token", () => {
-    delete process.env.META_ADS_WRITE_ACCESS_TOKEN;
-    expect(isMetaWriteConfigured()).toBe(false);
+  it("fails as an auth error without the Meta token", async () => {
+    delete process.env.META_ADS_ACCESS_TOKEN;
+    const err = await fetchAdsForFix(["a1"]).catch((e) => e);
+    expect((err as MetaApiError).kind).toBe("auth");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("batch-reads ads by id with the write token", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ a1: { id: "a1", creative: { effective_object_story_id: "p1" } } }));
+  it("reads each ad by id with the shared Meta token (no ?ids=)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: "a1", creative: { effective_object_story_id: "p1" } }));
     const ads = await fetchAdsForFix(["a1"]);
     const url = new URL(fetchMock.mock.calls[0][0] as URL);
-    expect(url.searchParams.get("ids")).toBe("a1");
-    expect(url.searchParams.get("access_token")).toBe("write-token");
+    expect(url.pathname).toMatch(/\/a1$/);
+    expect(url.searchParams.has("ids")).toBe(false);
+    expect(url.searchParams.get("access_token")).toBe("meta-token");
     expect(ads.get("a1")?.story_id).toBe("p1");
+  });
+
+  it("omits deleted ads but stops on permission errors", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ id: "a1", creative: { effective_object_story_id: "p1" } }))
+      .mockResolvedValueOnce(jsonResponse({ error: { message: "Unsupported get request", code: 100 } }, 400));
+    const ads = await fetchAdsForFix(["a1", "gone"]);
+    expect([...ads.keys()]).toEqual(["a1"]);
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: "no perms", code: 200 } }, 403));
+    const err = await fetchAdsForFix(["a1"]).catch((e) => e);
+    expect((err as MetaApiError).kind).toBe("permission");
   });
 
   it("creates a creative from the same post, then points the ad at it", async () => {

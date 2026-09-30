@@ -69,7 +69,20 @@ Meta-reported leads and site leads are **separate columns** — never add them. 
 
 - Paid = paid medium (`cpc`, `paid_social`, …) **or** a platform click ID that implies paid (`gclid` alone = Google paid).
 - Meta needs a paid medium **or** a matching Meta ID (`utm_id` campaign / `utm_content` ad). `fbclid` alone = **Meta: unclear** (organic Facebook shares carry it too).
-- UTM template for every Meta ad (shown in Settings → Ads): `utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}`.
+- UTM template for every Meta ad (shown in Settings → Ads): `utm_source={{site_source_name}}&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}`. Meta fills `{{site_source_name}}` with `fb` / `ig` / `msg` / `an`; ads set up earlier with `utm_source=facebook` still count as paid Meta (see Facebook vs Instagram).
+
+## Facebook vs Instagram (`meta_platforms`)
+
+Returned by `summary` and `diagnostics` (KPI window, follows `days`) when Meta is connected; absent otherwise. Rows in order `facebook`, `instagram`, `messenger`, `audience_network`, `other`, `not_split`; rows with nothing are dropped. Each row: `spend`, `clicks`, `meta_leads` (pixel), `paid_visits`, `unique_leads`, `cost_per_lead` (spend / site leads, `null` with none), `conversion_rate` (site leads / paid visits), `low_sample`.
+
+- **Visits:** paid Meta GA4 sessions by `utm_source`: `fb` → facebook, `ig` → instagram, `msg` → messenger, `an` → audience_network. Anything else (legacy `facebook`, blank, custom) → `not_split`.
+- **Leads:** credited, non-repeat, non-test site leads with platform Meta, bucketed by the **lead's own** `utm_source` (its latest campaign tags) — same for `last_paid` and `first_paid`.
+- **Spend:** separate Meta read per ad × `publisher_platform` (`.cache/{site}/meta-ads-platform-days/`; Meta `others` / unknown → `other`). Only ads landing on this site (`entry` / `missing_page`) count. Ads whose URL parameters use `{{site_source_name}}` (or a literal `fb`/`ig`/`msg`/`an`) go to their placement row; ads on an older tag put spend in `not_split`, so spend, visits and leads line up per row.
+- **`excluded_spend`** `{ instant_form, off_site, unknown }`: spend not in any row (Instant Form, `off_site` / `other_site`, `unknown_destination`). Never in `cost_per_lead`.
+- **`spend_since`**: first day placement spend exists for every account in scope (`null` while any account's 90-day placement history is still loading). **`spend_partial`**: `spend_since` after the window start, history not loaded, or the last placement read failed for an account (`meta.accounts` state `platform_error`) — spend and `cost_per_lead` are a floor.
+- **`not_split_share`**: `not_split` visits / all placement visits (3 decimals).
+- Filters: `account`, `currency`, `campaign_ids` / `adset_ids` / `ad_ids`, `content_type` narrow placement spend like the main report.
+- Non-effects: main `totals.spend` and page rows keep using the regular Meta read (no placement breakdown) — never sum `meta_platforms` spend with them. No Meta ads are changed; existing `utm_source=facebook` tags stay until staff update the ads (Fix via Meta only adds missing params, it does not rewrite `utm_source`). A failed placement read never fails the sync.
 
 ## Clicks → visits
 
@@ -124,6 +137,8 @@ Same traffic on both sides, so it measures clicks lost between Meta and the site
 | `diagnostics_filtered` | Diagnostics issues narrowed by id filters; KPIs and counts stay whole-site |
 | `issue_filtered_out` | `issue_ids` entry open but outside the id filters |
 | `range_ignored_in_diagnostics` | `since` / `until` passed to diagnostics — ignored |
+| `meta_platform_not_split` | ≥50% of placement visits come from ads on an older `utm_source` tag — Facebook vs Instagram comparison is incomplete until staff update those ads' URL parameters to the template |
+| `meta_platform_spend_partial` | Placement spend starts after the window start, is still loading, or the last placement read failed — `meta_platforms` spend / cost per lead are a floor; main totals unaffected |
 
 `status: "not_configured"` when neither Meta nor GA4 is set up.
 
@@ -131,14 +146,14 @@ Same traffic on both sides, so it measures clicks lost between Meta and the site
 
 - Reads may enqueue one background refresh (`meta_ads_sync` job) when data is older than 24h; the response does not wait for it. After a failed refresh, reads wait before retrying (1h, 2h, 4h, then 6h max; `refresh.retry_after`) and never run the refresh in the web server when the worker is down.
 - Every mode returns `refresh`: `{ state: idle|queued|running|failed|worker_down, requested_at, started_at, finished_at, error, retry_after, progress }` (state file `.cache/{site}/ads-refresh-state.json`).
-- `refresh.progress` is `{ done, total, label }` only while `running` (else `null`; also `null` if the run reports no steps). `total` is counted before the run starts: per Meta account one lookup + one per 15-day insight chunk + creatives, one save, then one per GA4 day (max 30; none for `older`). Steps vary in length — don't infer time remaining. Staff see it as a bar in Settings → Ads → Meta → Sync only.
+- `refresh.progress` is `{ done, total, label }` only while `running` (else `null`; also `null` if the run reports no steps). `total` is counted before the run starts: per Meta account one lookup + one per 15-day insight chunk + one per 15-day placement chunk (90 days on an account's first placement load) + creatives, one save, then one per GA4 day (max 30; none for `older`). Steps vary in length — don't infer time remaining. Staff see it as a bar in Settings → Ads → Meta → Sync only.
 - `diagnostics` probes up to 10 top ad landing URLs (cached 6h), records Issues/Resolved in `.cache/{site}/ads-issues.json` and saves a snapshot in `.cache/{site}/ads-diagnostics-snapshots/`. Reading an unexpired `snapshot_id` builds nothing and probes nothing.
-- `refresh: true` → side effect `meta_sync_enqueued` (writes `.cache/{site}/meta-ads-days/`, `meta-ads-creatives.json`, `meta-ads-state.json` when the job runs).
+- `refresh: true` → side effect `meta_sync_enqueued` (writes `.cache/{site}/meta-ads-days/`, `meta-ads-platform-days/`, `meta-ads-creatives.json`, `meta-ads-state.json` when the job runs).
 - Never changes Meta campaigns, ads, budgets, settings, consent, or lead delivery — `refresh` only reads from Meta. Settings edits are staff-only (`ads_settings`, UI); the consent window is `consent_settings` (staff UI).
 
 ## Staff fix for missing tracking parameters (no MCP tool)
 
-- `missing_tracking_params` issues show **Fix via Meta** in Diagnostics → Ads for staff with `ads_edit` ("Edit live ads"; built-in roles `ads_manager`, `platform_steward`). Needs env `META_ADS_WRITE_ACCESS_TOKEN` (`ads_management`). The HTTP routes refuse MCP loopback — agents cannot run it; point staff to the issue drawer instead.
+- `missing_tracking_params` issues show **Fix via Meta** in Diagnostics → Ads for staff with `ads_edit` ("Edit live ads"; built-in roles `ads_manager`, `platform_steward`). Uses the same env `META_ADS_ACCESS_TOKEN` as syncs, which must also have `ads_management` (missing scope → Meta permission error at preview/apply). The HTTP routes refuse MCP loopback — agents cannot run it; point staff to the issue drawer instead.
 - Effect per ad: new creative from the **same page post** (likes/comments kept) with `url_tags` = existing tags + only the template params the ad lacks (link or URL parameters); the ad is pointed at it. Max 50 ads per confirm; stops on token / permission / rate-limit errors; re-reads ad setups afterwards so the issue can clear.
 - Side effects: changed ads go back to Meta review (may pause briefly); the ad set may re-enter learning. Non-effects: budgets, audiences, ad copy/media, non-paid `utm_medium` values, other campaigns.
 - Skipped (staff fix in Meta Ads Manager): dynamic / Advantage+ creative, catalog ad, Instant Form, no reusable page post, deleted/archived, already tagged, not found. Routes: `POST /api/ads/meta/tracking-fix/preview|apply` (`server/ads/tracking-fix.ts`, `server/ads/meta-write.ts`).
@@ -147,7 +162,7 @@ Same traffic on both sides, so it measures clicks lost between Meta and the site
 
 - Server: `server/ads/` (`meta-client.ts`, `meta-ads-days.ts`, `paid-detection.ts`, `ads-report.ts`, `ads-diagnostics.ts`, `ads-diagnostics-snapshots.ts`, `lead-ledger.ts`, `ads-refresh.ts`), routes `server/routes/ads.ts`
 - Shared rules: `shared/paid-traffic.ts`, `shared/paid-attribution.ts`, `shared/ads-diagnostics-rules.ts`, `shared/ads-settings.ts`
-- Settings: `ads:` block in `site_<name>/settings.yml`; token env `META_ADS_ACCESS_TOKEN` (read) and optional `META_ADS_WRITE_ACCESS_TOKEN` (staff Fix via Meta)
+- Settings: `ads:` block in `site_<name>/settings.yml`; token env `META_ADS_ACCESS_TOKEN` (`ads_read` for syncs; add `ads_management` for staff Fix via Meta)
 - Staff UI: Diagnostics → Ads (`/private/diagnostics/ads`), Diagnostics → Legal (`/private/diagnostics/legal`, consent breakdown), Ads perspective on each content type list, Settings → Ads
 - Consent diagnostics: `server/legal/legal-diagnostics.ts`, route `GET /api/diagnostics/legal` in `server/routes/consent.ts`
 - Cookies & consent: `docs/cookies.md`
