@@ -19,7 +19,9 @@
  * If the event loop is blocked, the tick does not run and windows do not pile
  * up in memory. When the thread unblocks there is one object, with intervalMs
  * and eventLoopMaxMs covering the whole stall. A call is counted in the window
- * where it finishes, not where it started.
+ * where it finishes, not where it started. Requests still open at the cut for
+ * 500ms or more are stored on that process row as openCalls. maxMs there is
+ * time already open, not the final duration.
  *
  * The 720-object cap (6 hours) is a waiting room for when web is not reading.
  * Database retention is separate: 7 days, pruned on startup and every hour.
@@ -40,20 +42,25 @@ import { child } from "./logger";
 
 const log = child({ module: "process-stats" });
 
-/** Histogram bounds, in code (not settings.yml). The last durationCounts slot is "≥ 5000 ms". */
-export const DURATION_BUCKETS_MS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+/** Histogram bounds, in code (not settings.yml). The last durationCounts slot is "≥ 5000 ms". Calls under 50 ms share the first slot. */
+export const DURATION_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000];
 /** Max JSON objects per jsonl file. 720 × 30s = 6 hours. */
 export const MAX_FILE_OBJECTS = 720;
 /** Tick interval. A row's intervalMs is the real time since the previous close, not always this value. */
 export const TICK_MS = 30_000;
-/** Ranges up to this long return every 30s window, including route rows. */
-const RAW_RANGE_MS = 6 * 60 * 60 * 1000;
+/** Ranges up to this long stay on the 30s tick. */
+const TWO_HOUR_RANGE_MS = 2 * 60 * 60 * 1000;
+/** Ranges up to this long use one point per 90 seconds. A day is 5 minutes. A week is 30 minutes. */
+const SIX_HOUR_RANGE_MS = 6 * 60 * 60 * 1000;
 /** Ranges up to this long return one point per 5 minutes. Longer ranges use 30 minutes. */
 const DAY_RANGE_MS = 24 * 60 * 60 * 1000;
+const STEP_90_SEC_MS = 90 * 1000;
 const STEP_5_MIN_MS = 5 * 60 * 1000;
 const STEP_30_MIN_MS = 30 * 60 * 1000;
 /** How long rows stay in SQLite. Separate from the 6-hour file cap. */
 export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** An open request is listed on the closing window only after this long. */
+const OPEN_CALL_MIN_MS = 500;
 
 /** One column of a sheet table. json marks values stored as text and parsed back on read. */
 type SqlColumn = {
@@ -90,6 +97,7 @@ const PROCESS_SHEET: SheetTable = {
     { name: "inFlightMaxRequests", sql: "INTEGER NOT NULL" },
     { name: "openFds", sql: "INTEGER" },
     { name: "openFdsLimit", sql: "INTEGER" },
+    { name: "openCalls", sql: "TEXT", json: "array" },
   ],
 };
 
@@ -133,6 +141,9 @@ const PAGE_SHEET: SheetTable = {
 /** Who reports. Two workers with the same name are separated by pid, not by this string. */
 export type ProcessName = "web" | "sidequest" | "mcp" | "diagnostics-worker";
 
+/** Names the staff GET accepts in `?process=`. */
+export const PROCESS_NAMES: readonly ProcessName[] = ["web", "sidequest", "mcp", "diagnostics-worker"];
+
 type DurationRow = {
   count: number;
   sumMs: number;
@@ -160,6 +171,15 @@ type ApiRow = DurationRow & {
  * heapUsedMb is the V8 heap; rssMb is this process's RAM. Neither is droplet RAM.
  * openFds is null outside Linux.
  */
+/** Requests of one route still open at the cut, and already open for at least 500ms. */
+export type OpenCallRow = {
+  method: string;
+  route: string;
+  count: number;
+  /** Longest time already open at the cut. Not the duration when it later finishes. */
+  maxMs: number;
+};
+
 export type ProcessSample = {
   timestamp: number;
   processName: ProcessName;
@@ -179,6 +199,8 @@ export type ProcessSample = {
   inFlightMaxRequests: number;
   openFds: number | null;
   openFdsLimit: number | null;
+  /** Null when nothing had been open for 500ms. Old rows are null too. */
+  openCalls: OpenCallRow[] | null;
 };
 
 /**
@@ -227,7 +249,7 @@ let ingestStatements: string[] = [];
 // --- Collection ---
 // Open window, in memory. note while a request finishes, take when the tick
 // closes it. Callers outside this file use beginRequest, noteApi, and notePage.
-// durationBuckets reads the in-memory cutoffs (10, 25, 50, … ms). It opens
+// durationBuckets reads the in-memory cutoffs (50, 100, 250, … ms). It opens
 // SQLite only when that array is missing.
 
 /**
@@ -346,7 +368,7 @@ function readOpenFds(): { openFds: number | null; openFdsLimit: number | null } 
 }
 
 /**
- * Millisecond cutoffs for the duration histogram (10, 25, 50, …). In production
+ * Millisecond cutoffs for the duration histogram (50, 100, 250, …). In production
  * this is the in-memory array and does not touch SQLite — not once per tick,
  * and not once per request beyond reading a variable. The query below runs
  * only when that array was not provided (tests, or a build that dropped the constant).
@@ -432,7 +454,7 @@ const processLive = {
    * does not raise it. The in-flight peak floor for the next window is however
    * many requests are still open. Machine CPU is not here; web reads that on `machine`.
    */
-  take(intervalMs: number): Omit<ProcessSample, "timestamp" | "processName" | "processId" | "processStartId" | "intervalMs" | "cpuMachinePercent"> {
+  take(intervalMs: number): Omit<ProcessSample, "timestamp" | "processName" | "processId" | "processStartId" | "intervalMs" | "cpuMachinePercent" | "openCalls"> {
     let eventLoopP50Ms = 0;
     let eventLoopP99Ms = 0;
     let eventLoopMaxMs = 0;
@@ -595,13 +617,64 @@ const pages = {
   },
 };
 
-/** The index.ts middleware calls this for every request, including HTML. */
-export function beginRequest(): void {
-  processLive.noteStart();
+type OpenRequest = {
+  method?: string;
+  path?: string;
+  baseUrl?: string;
+  route?: { path?: string | RegExp };
+};
+
+/**
+ * Still-open requests, keyed by the request object. Removed on finish and on
+ * connection close. A Map so endRequest is a lookup, not a scan of every open call.
+ */
+const trackedRequests = new Map<OpenRequest, number>();
+
+/** Express template when one exists. Otherwise the path that arrived, not "unmatched". */
+function routeForOpenCall(req: OpenRequest): string {
+  const templated = resolveApiRoute({ ...req, path: req.path ?? "" });
+  if (templated !== "unmatched") return templated;
+  return req.path && req.path.length > 0 ? req.path : "unmatched";
 }
 
-/** Lowers the current in-flight count. The peak stays until the next take(). */
-export function endRequest(): void {
+/** Group requests open for at least 500ms. Two of the same route share one row. */
+function snapshotOpenCalls(now: number): OpenCallRow[] | null {
+  const groups = new Map<string, OpenCallRow>();
+  for (const [req, startedAt] of trackedRequests) {
+    const elapsed = now - startedAt;
+    if (elapsed < OPEN_CALL_MIN_MS) continue;
+    const method = (req.method || "GET").toUpperCase();
+    const route = routeForOpenCall(req);
+    const key = `${method} ${route}`;
+    const maxMs = Math.round(elapsed);
+    const prev = groups.get(key);
+    if (!prev) {
+      groups.set(key, { method, route, count: 1, maxMs });
+      continue;
+    }
+    prev.count += 1;
+    if (maxMs > prev.maxMs) prev.maxMs = maxMs;
+  }
+  if (groups.size === 0) return null;
+  return [...groups.values()].sort((a, b) => b.maxMs - a.maxMs || b.count - a.count);
+}
+
+/**
+ * Raises the in-flight count. Pass the request to remember it until endRequest
+ * with the same object. startedAt is the clock for tests; production omits it.
+ */
+export function beginRequest(req?: OpenRequest, startedAt = Date.now()): void {
+  processLive.noteStart();
+  if (!req) return;
+  trackedRequests.set(req, startedAt);
+}
+
+/**
+ * Lowers the in-flight count. With a request, a second call does nothing, so
+ * finish and close can both invoke it. The peak stays until the next take().
+ */
+export function endRequest(req?: OpenRequest): void {
+  if (req && !trackedRequests.delete(req)) return;
   processLive.noteFinish();
 }
 
@@ -682,6 +755,7 @@ function publishWindow(now = Date.now()): void {
       intervalMs,
       ...processLive.take(intervalMs),
       cpuMachinePercent: processName === "web" ? machine.take() : null,
+      openCalls: snapshotOpenCalls(now),
     };
   } catch (err) {
     log.warn({ err }, "process gauges failed");
@@ -759,6 +833,7 @@ export function stopTick(): void {
   machine.reset();
   api.reset();
   pages.reset();
+  trackedRequests.clear();
   try {
     db?.close();
   } catch {
@@ -812,6 +887,9 @@ function openDatabase(): Sqlite {
     CREATE INDEX IF NOT EXISTS api_samples_ts ON api_samples (timestamp);
     CREATE INDEX IF NOT EXISTS document_samples_ts ON document_samples (timestamp);
   `);
+  ensureColumns(opened, PROCESS_SHEET);
+  ensureColumns(opened, API_SHEET);
+  ensureColumns(opened, PAGE_SHEET);
   db = opened;
   const bounds = boundsMs && boundsMs.length > 0 ? boundsMs : null;
   if (bounds) {
@@ -934,11 +1012,29 @@ function readAndDropBrokenLines(file: string): ParsedLine[] {
 }
 
 /** Copy one sheet into a DB row. Columns marked json are stored as text. */
+function ensureColumns(opened: Sqlite, table: SheetTable): void {
+  const have = new Set(
+    (opened.prepare(`PRAGMA table_info(${table.name})`).all() as Array<{ name: string }>).map((col) => col.name),
+  );
+  for (const col of table.columns) {
+    if (have.has(col.name)) continue;
+    opened.exec(`ALTER TABLE ${table.name} ADD COLUMN ${col.name} ${col.sql}`);
+  }
+}
+
 function dbRow(table: SheetTable, source: Record<string, unknown>): Record<string, unknown> {
   const row: Record<string, unknown> = {};
   for (const col of table.columns) {
     const value = source[col.name];
-    row[col.name] = col.json ? JSON.stringify(value ?? (col.json === "array" ? [] : {})) : value ?? null;
+    if (col.json) {
+      if (value == null) {
+        row[col.name] = col.sql.includes("NOT NULL") ? JSON.stringify(col.json === "array" ? [] : {}) : null;
+      } else {
+        row[col.name] = JSON.stringify(value);
+      }
+      continue;
+    }
+    row[col.name] = value ?? null;
   }
   return row;
 }
@@ -1023,64 +1119,81 @@ export function ingestStatsFiles(dir = statsDir): void {
 }
 
 // --- Staff read ---
-// Joins the three tables by pid + timestamp. Does not write.
+// One windows list per process name. Route rows stay on the detail read.
+
+const P50_MIN_COUNT = 5;
+const P95_MIN_COUNT = 20;
+const P99_MIN_COUNT = 100;
 
 type DbProcess = ProcessSample;
-type DbApi = {
-  timestamp: number;
-  pid: number;
-  bootId: string;
-  method: string;
-  route: string;
-  count: number;
-  sumMs: number;
-  maxMs: number;
-  durationBoundsId: string;
-  durationCounts: string;
-  statusCounts: string;
-};
-type DbPage = DbApi & { ssrCounts: string; slowestPath: string | null; route: string };
 
-/** One chart point: process row plus the API and page rows of the same pid and timestamp. Any sheet may be missing. */
+type TrafficLatency = {
+  count: number;
+  avgMs: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+  maxMs: number;
+};
+
+/** One chart point. api and pages are null when that bucket had no calls. */
 export type StatsWindow = {
   timestamp: number;
-  process: ProcessSample | null;
-  api: Array<Omit<DbApi, "durationCounts" | "statusCounts"> & { durationCounts: number[]; statusCounts: Record<string, number> }>;
-  pages: Array<Omit<DbPage, "durationCounts" | "statusCounts" | "ssrCounts"> & {
-    durationCounts: number[];
-    statusCounts: Record<string, number>;
-    ssrCounts: Record<string, number>;
-  }>;
+  intervalMs: number;
+  cpuProcessPercent: number | null;
+  heapUsedMb: number | null;
+  rssMb: number | null;
+  garbageCollectionPauseMs: number | null;
+  garbageCollectionMaxPauseMs: number | null;
+  inFlightMaxRequests: number | null;
+  openFds: number | null;
+  openFdsLimit: number | null;
+  eventLoop: { p50Ms: number; p99Ms: number; maxMs: number } | null;
+  api: TrafficLatency | null;
+  pages: TrafficLatency | null;
+  /** Open calls of this point. On a 5 or 30 minute point, only the 30s slice with the worst event loop. */
+  openCalls: OpenCallRow[] | null;
 };
 
-/**
- * One process lifetime, grouped by pid. processName comes from a process row of
- * that pid. It stays null when every window in range has routes only.
- */
-export type StatsSeries = {
-  processName: string | null;
-  processId: number;
+export type ChartStats = {
+  startingAt: number;
+  endingAt: number;
+  stepMs: number;
+  boundsMs: number[];
+  restarts?: Array<{ timestamp: number }>;
   windows: StatsWindow[];
 };
 
-/** Turn JSON text columns back into arrays and objects, using the sheet's column list. */
-function restoreJson<T extends Record<string, unknown>>(table: SheetTable, row: T): T {
-  const out: Record<string, unknown> = { ...row };
-  for (const col of table.columns) {
-    if (!col.json) continue;
-    const fallback = col.json === "array" ? [] : {};
-    try {
-      out[col.name] = JSON.parse(String(row[col.name] ?? ""));
-    } catch {
-      out[col.name] = fallback;
-    }
-  }
-  return out as T;
-}
+export type DetailRoute = {
+  kind: "api" | "pages";
+  method: string;
+  route: string;
+  count: number;
+  avgMs: number;
+  maxMs: number;
+  statusCounts: Record<string, number>;
+  durationCounts: number[];
+  ssrCounts?: Record<string, number>;
+  path?: string | null;
+};
 
-/** Chart step for a range. Short ranges stay raw. A day is 5 minutes. A week is 30 minutes. */
+export type DetailStats = {
+  startingAt: number;
+  endingAt: number;
+  boundsMs: number[];
+  counts: number[];
+  count: number;
+  statusCounts: Record<string, number>;
+  ssrCounts?: Record<string, number>;
+  mixedBounds: boolean;
+  peak: { method: string; route: string; maxMs: number; path?: string | null; kind: "api" | "pages" } | null;
+  routes: DetailRoute[];
+};
+
+/** Chart step for a range. Up to 2 hours stays on the 30s tick. Up to 6 hours is 90 seconds. A day is 5 minutes. A week is 30 minutes. */
 export function stepForRange(rangeMs: number): number {
-  if (rangeMs <= RAW_RANGE_MS) return TICK_MS;
+  if (rangeMs <= TWO_HOUR_RANGE_MS) return TICK_MS;
+  if (rangeMs <= SIX_HOUR_RANGE_MS) return STEP_90_SEC_MS;
   if (rangeMs <= DAY_RANGE_MS) return STEP_5_MIN_MS;
   return STEP_30_MIN_MS;
 }
@@ -1091,144 +1204,502 @@ function maxOrNull(a: number | null, b: number | null): number | null {
   return Math.max(a, b);
 }
 
-/** One point per step. Gauges are the worst value in the bucket. Route rows are dropped. */
-function summarizeWindows(windows: StatsWindow[], stepMs: number): StatsWindow[] {
-  const buckets = new Map<number, ProcessSample>();
-  for (const win of windows) {
-    const sample = win.process;
-    if (!sample) continue;
-    const start = Math.floor(win.timestamp / stepMs) * stepMs;
-    const prev = buckets.get(start);
+/** Linear interpolation inside one histogram bucket. Rank is q * total count. */
+export function histogramQuantile(q: number, counts: readonly number[], bounds: readonly number[]): number | null {
+  const total = counts.reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
+  if (total <= 0 || !(q > 0) || q > 1 || bounds.length === 0) return null;
+  const rank = q * total;
+  let cum = 0;
+  for (let i = 0; i < counts.length; i++) {
+    const prev = cum;
+    cum += counts[i] ?? 0;
+    if (cum < rank && i < counts.length - 1) continue;
+    const lower = i === 0 ? 0 : (bounds[i - 1] ?? bounds[bounds.length - 1] ?? 0);
+    if (i >= bounds.length) return bounds[bounds.length - 1] ?? lower;
+    const upper = bounds[i] ?? lower;
+    const inBucket = counts[i] ?? 0;
+    if (inBucket <= 0) return lower;
+    const fraction = Math.min(1, Math.max(0, (rank - prev) / inBucket));
+    return lower + (upper - lower) * fraction;
+  }
+  return bounds[bounds.length - 1] ?? null;
+}
+
+function percentileOrNull(count: number, min: number, q: number, counts: number[], bounds: number[]): number | null {
+  if (count < min) return null;
+  const histTotal = counts.reduce((sum, n) => sum + n, 0);
+  if (histTotal <= 0) return null;
+  const value = histogramQuantile(q, counts, bounds);
+  return value == null ? null : Math.round(value);
+}
+
+function latencyFromHist(
+  count: number,
+  sumMs: number,
+  maxMs: number,
+  counts: number[],
+  bounds: number[],
+  mixed: boolean,
+): TrafficLatency {
+  return {
+    count,
+    avgMs: count > 0 ? Math.round(sumMs / count) : 0,
+    p50Ms: mixed ? null : percentileOrNull(count, P50_MIN_COUNT, 0.5, counts, bounds),
+    p95Ms: mixed ? null : percentileOrNull(count, P95_MIN_COUNT, 0.95, counts, bounds),
+    p99Ms: mixed ? null : percentileOrNull(count, P99_MIN_COUNT, 0.99, counts, bounds),
+    maxMs,
+  };
+}
+
+type HistRow = {
+  timestamp: number;
+  count: number;
+  sumMs: number;
+  maxMs: number;
+  durationBoundsId: string;
+  durationCounts: number[];
+  method?: string;
+  route: string;
+  statusCounts: Record<string, number>;
+  ssrCounts?: Record<string, number>;
+  slowestPath?: string | null;
+  kind: "api" | "pages";
+};
+
+function parseOpenCalls(raw: unknown): OpenCallRow[] | null {
+  let parsed = raw;
+  if (typeof raw === "string") {
+    if (!raw) return null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const out: OpenCallRow[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const method = typeof row.method === "string" ? row.method : "";
+    const route = typeof row.route === "string" ? row.route : "";
+    const count = Number(row.count);
+    const maxMs = Number(row.maxMs);
+    if (!method || !route || !Number.isFinite(count) || count <= 0 || !Number.isFinite(maxMs)) continue;
+    out.push({ method, route, count, maxMs });
+  }
+  return out.length > 0 ? out : null;
+}
+
+function parseCounts(raw: string): number[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((n) => Number(n) || 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseRecord(raw: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const n = Number(value);
+      if (Number.isFinite(n)) out[key] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function addRecord(into: Record<string, number>, extra: Record<string, number>): void {
+  for (const [key, value] of Object.entries(extra)) into[key] = (into[key] ?? 0) + value;
+}
+
+function addCounts(into: number[], extra: number[]): void {
+  for (let i = 0; i < extra.length; i++) into[i] = (into[i] ?? 0) + extra[i];
+}
+
+function clampRange(opts: { from?: number; to?: number; now?: number }): { from: number; to: number; stepMs: number } {
+  const now = opts.now ?? Date.now();
+  let to = opts.to ?? now;
+  let from = opts.from ?? to - 24 * 60 * 60 * 1000;
+  if (to < from) {
+    return { from: to - 24 * 60 * 60 * 1000, to, stepMs: stepForRange(24 * 60 * 60 * 1000) };
+  }
+  if (to - from > RETENTION_MS) from = to - RETENTION_MS;
+  return { from, to, stepMs: stepForRange(to - from) };
+}
+
+function queryInt(value: unknown): number | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  if (value === "") return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined;
+  return n;
+}
+
+function loadBounds(opened: Sqlite, ids: string[]): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  if (ids.length === 0) return out;
+  const rows = opened.prepare(
+    `SELECT id, boundsMs FROM duration_bounds WHERE id IN (${ids.map(() => "?").join(",")})`,
+  ).all(...ids) as Array<{ id: string; boundsMs: string }>;
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.boundsMs);
+      if (Array.isArray(parsed)) out.set(row.id, parsed.map((n) => Number(n)));
+    } catch {
+      /* skip */
+    }
+  }
+  return out;
+}
+
+function pidFilter(pids: number[]): { sql: string; params: number[] } {
+  if (pids.length === 0) return { sql: " AND 1 = 0", params: [] };
+  return { sql: ` AND pid IN (${pids.map(() => "?").join(",")})`, params: pids };
+}
+
+/** One legend when every window in the range used it. A mix falls back to the current cuts. */
+function sharedBounds(groups: Array<Map<number, { bounds: number[] | null; mixed: boolean }>>): number[] {
+  const keys = new Set<string>();
+  let found: number[] | null = null;
+  for (const group of groups) {
+    for (const acc of group.values()) {
+      if (!acc.bounds || acc.mixed) continue;
+      keys.add(acc.bounds.join(","));
+      found = acc.bounds;
+    }
+  }
+  if (keys.size === 1 && found) return [...found];
+  return [...DURATION_BUCKETS_MS];
+}
+
+/**
+ * Chart read. One window per bucket, pids of the same name already merged.
+ * Gauges are the worst 30s value in the bucket. API and page percentiles come
+ * from the summed histogram. Does not backfill empty timestamps.
+ */
+export function readProcessStats(opts: { from?: number; to?: number; now?: number; processName?: ProcessName } = {}): ChartStats {
+  const { from, to, stepMs } = clampRange(opts);
+  const opened = openDatabase();
+  const nameFilter = opts.processName;
+  const processes = (nameFilter
+    ? opened.prepare(
+      `SELECT * FROM process_samples WHERE timestamp >= ? AND timestamp <= ? AND processName = ? ORDER BY timestamp ASC`,
+    ).all(from, to, nameFilter)
+    : opened.prepare(
+      `SELECT * FROM process_samples WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC`,
+    ).all(from, to)) as Array<Record<string, unknown>>;
+  const samples = processes.map((row) => ({
+    ...(row as unknown as ProcessSample),
+    openCalls: parseOpenCalls(row.openCalls),
+  }));
+
+  const includeTraffic = nameFilter == null || nameFilter === "web";
+  const pids = [...new Set(samples.map((row) => row.processId))];
+  const filter = includeTraffic ? pidFilter(pids) : { sql: " AND 1 = 0", params: [] };
+  const routeParams = [from, to, ...filter.params];
+  const apiRows = includeTraffic && pids.length > 0
+    ? opened.prepare(
+      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM api_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
+    ).all(...routeParams) as Array<Record<string, unknown>>
+    : [];
+  const pageRows = includeTraffic && pids.length > 0
+    ? opened.prepare(
+      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
+    ).all(...routeParams) as Array<Record<string, unknown>>
+    : [];
+
+  const boundsById = loadBounds(opened, [...new Set(
+    [...apiRows, ...pageRows].map((row) => String(row.durationBoundsId ?? "")).filter(Boolean),
+  )]);
+
+  const seenStarts = new Set<string>();
+  const restarts: Array<{ timestamp: number }> = [];
+  for (const row of samples) {
+    if (seenStarts.has(row.processStartId)) continue;
+    if (seenStarts.size > 0) restarts.push({ timestamp: row.timestamp });
+    seenStarts.add(row.processStartId);
+  }
+
+  type Gauge = ProcessSample;
+  const gauges = new Map<number, Gauge>();
+  for (const sample of samples) {
+    const start = stepMs === TICK_MS ? sample.timestamp : Math.floor(sample.timestamp / stepMs) * stepMs;
+    const prev = gauges.get(start);
     if (!prev) {
-      buckets.set(start, { ...sample, timestamp: start, intervalMs: stepMs });
+      gauges.set(start, { ...sample, timestamp: start });
       continue;
     }
-    buckets.set(start, {
+    const incomingIsWorse = sample.eventLoopMaxMs > prev.eventLoopMaxMs;
+    gauges.set(start, {
       ...prev,
+      intervalMs: Math.max(prev.intervalMs, sample.intervalMs),
       eventLoopP50Ms: Math.max(prev.eventLoopP50Ms, sample.eventLoopP50Ms),
       eventLoopP99Ms: Math.max(prev.eventLoopP99Ms, sample.eventLoopP99Ms),
       eventLoopMaxMs: Math.max(prev.eventLoopMaxMs, sample.eventLoopMaxMs),
       heapUsedMb: Math.max(prev.heapUsedMb, sample.heapUsedMb),
       rssMb: Math.max(prev.rssMb, sample.rssMb),
       cpuProcessPercent: Math.max(prev.cpuProcessPercent, sample.cpuProcessPercent),
-      cpuMachinePercent: maxOrNull(prev.cpuMachinePercent, sample.cpuMachinePercent),
       garbageCollectionPauseMs: Math.max(prev.garbageCollectionPauseMs, sample.garbageCollectionPauseMs),
       garbageCollectionMaxPauseMs: Math.max(prev.garbageCollectionMaxPauseMs, sample.garbageCollectionMaxPauseMs),
       inFlightMaxRequests: Math.max(prev.inFlightMaxRequests, sample.inFlightMaxRequests),
       openFds: maxOrNull(prev.openFds, sample.openFds),
       openFdsLimit: prev.openFdsLimit ?? sample.openFdsLimit,
+      openCalls: incomingIsWorse ? sample.openCalls : prev.openCalls,
     });
   }
-  return [...buckets.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([timestamp, process]) => ({ timestamp, process, api: [], pages: [] }));
+
+  type Acc = { count: number; sumMs: number; maxMs: number; counts: number[]; bounds: number[] | null; mixed: boolean };
+  const fold = (rows: Array<Record<string, unknown>>) => {
+    const byBucket = new Map<number, Acc>();
+    for (const row of rows) {
+      const timestamp = Number(row.timestamp);
+      const start = stepMs === TICK_MS ? timestamp : Math.floor(timestamp / stepMs) * stepMs;
+      const bounds = boundsById.get(String(row.durationBoundsId ?? "")) ?? DURATION_BUCKETS_MS;
+      const counts = parseCounts(String(row.durationCounts ?? "[]"));
+      let acc = byBucket.get(start);
+      if (!acc) {
+        acc = { count: 0, sumMs: 0, maxMs: 0, counts: [], bounds, mixed: false };
+        byBucket.set(start, acc);
+      }
+      if (acc.bounds && bounds.join(",") !== acc.bounds.join(",")) acc.mixed = true;
+      acc.count += Number(row.count) || 0;
+      acc.sumMs += Number(row.sumMs) || 0;
+      acc.maxMs = Math.max(acc.maxMs, Number(row.maxMs) || 0);
+      if (!acc.mixed) addCounts(acc.counts, counts);
+    }
+    return byBucket;
+  };
+  const apiByBucket = fold(apiRows);
+  const pageByBucket = fold(pageRows);
+
+  const stamps = new Set<number>([...gauges.keys(), ...apiByBucket.keys(), ...pageByBucket.keys()]);
+  const windows: StatsWindow[] = [...stamps].sort((a, b) => a - b).map((timestamp) => {
+    const gauge = gauges.get(timestamp);
+    const apiAcc = apiByBucket.get(timestamp);
+    const pageAcc = pageByBucket.get(timestamp);
+    const toLatency = (acc: Acc | undefined): TrafficLatency | null => {
+      if (!acc || acc.count <= 0) return null;
+      return latencyFromHist(acc.count, acc.sumMs, acc.maxMs, acc.counts, acc.bounds ?? DURATION_BUCKETS_MS, acc.mixed);
+    };
+    return {
+      timestamp,
+      intervalMs: gauge?.intervalMs ?? stepMs,
+      cpuProcessPercent: gauge?.cpuProcessPercent ?? null,
+      heapUsedMb: gauge?.heapUsedMb ?? null,
+      rssMb: gauge?.rssMb ?? null,
+      garbageCollectionPauseMs: gauge?.garbageCollectionPauseMs ?? null,
+      garbageCollectionMaxPauseMs: gauge?.garbageCollectionMaxPauseMs ?? null,
+      inFlightMaxRequests: gauge?.inFlightMaxRequests ?? null,
+      openFds: gauge?.openFds ?? null,
+      openFdsLimit: gauge?.openFdsLimit ?? null,
+      eventLoop: gauge
+        ? { p50Ms: gauge.eventLoopP50Ms, p99Ms: gauge.eventLoopP99Ms, maxMs: gauge.eventLoopMaxMs }
+        : null,
+      api: includeTraffic ? toLatency(apiAcc) : null,
+      pages: includeTraffic ? toLatency(pageAcc) : null,
+      openCalls: gauge?.openCalls ?? null,
+    };
+  });
+
+  const stats: ChartStats = {
+    startingAt: from,
+    endingAt: to,
+    stepMs,
+    boundsMs: sharedBounds([apiByBucket, pageByBucket]),
+    windows,
+  };
+  if (nameFilter !== "diagnostics-worker") stats.restarts = restarts;
+  return stats;
 }
 
 /**
- * Staff read. Default last 24 hours, clamped to 7 days. Joins sheets by
- * pid + timestamp. One process per pid: route rows of that pid join it, and
- * the name comes from whichever window has a process row. Up to 6 hours returns
- * every window and its routes. Longer ranges return one point per 5 or 30
- * minutes, gauges only, each value the worst in that bucket. durationBounds
- * lists each bounds array used by route rows in range. Does not backfill gaps.
+ * Routes, duration bars, and the peak for one process and one slice.
+ * Both kinds come back. The page filters API vs pages.
  */
-export function readProcessStats(opts: { from?: number; to?: number; now?: number } = {}): {
-  from: number;
-  to: number;
-  stepMs: number;
-  durationBounds: Array<{ id: string; boundsMs: number[] }>;
-  processes: StatsSeries[];
-} {
-  const now = opts.now ?? Date.now();
-  let to = opts.to ?? now;
-  let from = opts.from ?? to - 24 * 60 * 60 * 1000;
-  if (to < from) [from, to] = [to, from];
-  if (to - from > RETENTION_MS) from = to - RETENTION_MS;
-  const stepMs = stepForRange(to - from);
-  const raw = stepMs === TICK_MS;
-
+export function readProcessStatsDetail(opts: { from?: number; to?: number; now?: number; processName: ProcessName }): DetailStats {
+  const { from, to } = clampRange(opts);
   const opened = openDatabase();
   const processes = opened.prepare(
-    `SELECT * FROM process_samples WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC`,
-  ).all(from, to) as DbProcess[];
-  const apis = raw
-    ? opened.prepare(
-      `SELECT * FROM api_samples WHERE timestamp >= ? AND timestamp <= ?`,
-    ).all(from, to) as DbApi[]
-    : [];
-  const pages = raw
-    ? opened.prepare(
-      `SELECT * FROM document_samples WHERE timestamp >= ? AND timestamp <= ?`,
-    ).all(from, to) as DbPage[]
-    : [];
+    `SELECT processId FROM process_samples WHERE timestamp >= ? AND timestamp <= ? AND processName = ?`,
+  ).all(from, to, opts.processName) as Array<{ processId: number }>;
+  const pids = [...new Set(processes.map((row) => row.processId))];
+  const filter = pidFilter(pids);
+  const empty: DetailStats = {
+    startingAt: from,
+    endingAt: to,
+    boundsMs: [...DURATION_BUCKETS_MS],
+    counts: [],
+    count: 0,
+    statusCounts: {},
+    mixedBounds: false,
+    peak: null,
+    routes: [],
+  };
+  if (opts.processName !== "web" || pids.length === 0) return empty;
 
-  const legendIds = new Set<string>();
-  const byKey = new Map<string, StatsWindow>();
-  const keyOf = (pid: number, timestamp: number) => `${pid}:${timestamp}`;
+  const params = [from, to, ...filter.params];
+  const apiRows = opened.prepare(
+    `SELECT method, route, count, sumMs, maxMs, durationBoundsId, durationCounts, statusCounts FROM api_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
+  ).all(...params) as Array<Record<string, unknown>>;
+  const pageRows = opened.prepare(
+    `SELECT route, count, sumMs, maxMs, durationBoundsId, durationCounts, statusCounts, ssrCounts, slowestPath FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
+  ).all(...params) as Array<Record<string, unknown>>;
 
-  for (const proc of processes) {
-    const key = keyOf(proc.processId, proc.timestamp);
-    byKey.set(key, { timestamp: proc.timestamp, process: proc, api: [], pages: [] });
-  }
-  for (const api of apis) {
-    legendIds.add(api.durationBoundsId);
-    const key = keyOf(api.pid, api.timestamp);
-    const win = byKey.get(key) ?? { timestamp: api.timestamp, process: null, api: [], pages: [] };
-    win.api.push(restoreJson(API_SHEET, api));
-    byKey.set(key, win);
-  }
-  for (const page of pages) {
-    legendIds.add(page.durationBoundsId);
-    const key = keyOf(page.pid, page.timestamp);
-    const win = byKey.get(key) ?? { timestamp: page.timestamp, process: null, api: [], pages: [] };
-    win.pages.push(restoreJson(PAGE_SHEET, page));
-    byKey.set(key, win);
-  }
+  const boundsIds = [...new Set([...apiRows, ...pageRows].map((row) => String(row.durationBoundsId ?? "")).filter(Boolean))];
+  const boundsById = loadBounds(opened, boundsIds);
+  const boundSets = new Set([...boundsById.values()].map((bounds) => bounds.join(",")));
+  const mixedBounds = boundSets.size > 1;
 
-  const byPid = new Map<number, StatsSeries>();
-  for (const win of byKey.values()) {
-    const processId = win.process?.processId ?? win.api[0]?.pid ?? win.pages[0]?.pid ?? 0;
-    let group = byPid.get(processId);
-    if (!group) {
-      group = { processName: win.process?.processName ?? null, processId, windows: [] };
-      byPid.set(processId, group);
-    } else if (group.processName == null && win.process?.processName) {
-      group.processName = win.process.processName;
+  type RouteAcc = DetailRoute & { sumMs: number };
+  const byKey = new Map<string, RouteAcc>();
+  const absorb = (kind: "api" | "pages", row: Record<string, unknown>) => {
+    const method = kind === "api" ? String(row.method ?? "GET") : "GET";
+    const route = String(row.route ?? "");
+    const key = `${kind}:${method}:${route}`;
+    const count = Number(row.count) || 0;
+    const sumMs = Number(row.sumMs) || 0;
+    const maxMs = Number(row.maxMs) || 0;
+    const statusCounts = parseRecord(String(row.statusCounts ?? "{}"));
+    const durationCounts = parseCounts(String(row.durationCounts ?? "[]"));
+    const ssrCounts = kind === "pages" ? parseRecord(String(row.ssrCounts ?? "{}")) : undefined;
+    const slowestPath = kind === "pages" ? (row.slowestPath == null ? null : String(row.slowestPath)) : undefined;
+    let acc = byKey.get(key);
+    if (!acc) {
+      acc = {
+        kind,
+        method,
+        route,
+        count: 0,
+        sumMs: 0,
+        avgMs: 0,
+        maxMs: 0,
+        statusCounts: {},
+        durationCounts: [],
+        ssrCounts: kind === "pages" ? {} : undefined,
+        path: null,
+      };
+      byKey.set(key, acc);
     }
-    group.windows.push(win);
-  }
-  for (const group of byPid.values()) {
-    group.windows.sort((a, b) => a.timestamp - b.timestamp);
-    if (!raw) group.windows = summarizeWindows(group.windows, stepMs);
-  }
+    acc.count += count;
+    acc.sumMs += sumMs;
+    if (maxMs >= acc.maxMs) {
+      acc.maxMs = maxMs;
+      if (kind === "pages") acc.path = slowestPath ?? acc.path;
+    }
+    addRecord(acc.statusCounts, statusCounts);
+    if (!mixedBounds) addCounts(acc.durationCounts, durationCounts);
+    if (acc.ssrCounts && ssrCounts) addRecord(acc.ssrCounts, ssrCounts);
+  };
+  for (const row of apiRows) absorb("api", row);
+  for (const row of pageRows) absorb("pages", row);
 
-  const durationBounds: Array<{ id: string; boundsMs: number[] }> = [];
-  if (legendIds.size > 0) {
-    const ids = [...legendIds];
-    const rows = opened.prepare(
-      `SELECT id, boundsMs FROM duration_bounds WHERE id IN (${ids.map(() => "?").join(",")})`,
-    ).all(...ids) as Array<{ id: string; boundsMs: string }>;
-    for (const row of rows) {
-      let boundsMs: number[] = [];
-      try {
-        boundsMs = JSON.parse(row.boundsMs);
-      } catch {
-        boundsMs = [];
-      }
-      durationBounds.push({ id: row.id, boundsMs });
+  const routes: DetailRoute[] = [...byKey.values()].map((acc) => {
+    const route: DetailRoute = {
+      kind: acc.kind,
+      method: acc.method,
+      route: acc.route,
+      count: acc.count,
+      avgMs: acc.count > 0 ? Math.round(acc.sumMs / acc.count) : 0,
+      maxMs: acc.maxMs,
+      statusCounts: acc.statusCounts,
+      durationCounts: acc.durationCounts,
+    };
+    if (acc.kind === "pages") {
+      route.ssrCounts = acc.ssrCounts ?? {};
+      route.path = acc.path ?? null;
+    }
+    return route;
+  }).sort((a, b) => b.maxMs - a.maxMs || b.count - a.count);
+
+  const counts: number[] = [];
+  const statusCounts: Record<string, number> = {};
+  const ssrCounts: Record<string, number> = {};
+  let count = 0;
+  let peak: DetailStats["peak"] = null;
+  for (const route of routes) {
+    count += route.count;
+    addRecord(statusCounts, route.statusCounts);
+    if (route.ssrCounts) addRecord(ssrCounts, route.ssrCounts);
+    if (!mixedBounds) addCounts(counts, route.durationCounts);
+    if (!peak || route.maxMs > peak.maxMs) {
+      peak = { method: route.method, route: route.route, maxMs: route.maxMs, kind: route.kind };
+      if (route.kind === "pages") peak.path = route.path ?? null;
     }
   }
 
+  const detail: DetailStats = {
+    startingAt: from,
+    endingAt: to,
+    boundsMs: boundSets.size === 1 ? [...boundsById.values()][0] : [...DURATION_BUCKETS_MS],
+    counts,
+    count,
+    statusCounts,
+    mixedBounds,
+    peak,
+    routes,
+  };
+  if (pageRows.length > 0) detail.ssrCounts = ssrCounts;
+  return detail;
+}
+
+/**
+ * Staff GET. Requires one process name. starting_at and ending_at are an
+ * inclusive pair of integer epoch milliseconds. A partial or inverted pair
+ * is ignored and the read falls back to the last 24 hours.
+ */
+export function resolveProcessStatsRequest(
+  query: { process?: unknown; starting_at?: unknown; ending_at?: unknown },
+  now?: number,
+): { ok: false; error: string } | { ok: true; stats: ChartStats } {
+  const rawName = query.process;
+  const processName = typeof rawName === "string" && (PROCESS_NAMES as readonly string[]).includes(rawName)
+    ? (rawName as ProcessName)
+    : null;
+  if (!processName) {
+    return { ok: false, error: `process is required: ${PROCESS_NAMES.join(" | ")}` };
+  }
+  const startingAt = queryInt(query.starting_at);
+  const endingAt = queryInt(query.ending_at);
+  const pair = startingAt != null && endingAt != null && startingAt <= endingAt;
   return {
-    from,
-    to,
-    stepMs,
-    durationBounds,
-    processes: [...byPid.values()].sort((a, b) => {
-      const an = a.processName ?? "";
-      const bn = b.processName ?? "";
-      if (an !== bn) return an < bn ? -1 : 1;
-      return a.processId - b.processId;
+    ok: true,
+    stats: readProcessStats({
+      from: pair ? startingAt : undefined,
+      to: pair ? endingAt : undefined,
+      now,
+      processName,
+    }),
+  };
+}
+
+export function resolveProcessStatsDetailRequest(
+  query: { process?: unknown; starting_at?: unknown; ending_at?: unknown },
+  now?: number,
+): { ok: false; error: string } | { ok: true; stats: DetailStats } {
+  const rawName = query.process;
+  const processName = typeof rawName === "string" && (PROCESS_NAMES as readonly string[]).includes(rawName)
+    ? (rawName as ProcessName)
+    : null;
+  if (!processName) {
+    return { ok: false, error: `process is required: ${PROCESS_NAMES.join(" | ")}` };
+  }
+  const startingAt = queryInt(query.starting_at);
+  const endingAt = queryInt(query.ending_at);
+  const pair = startingAt != null && endingAt != null && startingAt <= endingAt;
+  return {
+    ok: true,
+    stats: readProcessStatsDetail({
+      from: pair ? startingAt : undefined,
+      to: pair ? endingAt : undefined,
+      now,
+      processName,
     }),
   };
 }

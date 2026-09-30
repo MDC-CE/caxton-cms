@@ -238,7 +238,7 @@ function formatApiResponseForLog(path: string, body: Record<string, unknown>): s
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  beginRequest();
+  beginRequest(req);
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
@@ -247,9 +247,16 @@ app.use((req, res, next) => {
     return originalResJson.apply(res, [bodyJson, ...args]);
   };
 
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    endRequest(req);
+  };
+
   res.on("finish", () => {
     const duration = Date.now() - start;
-    endRequest();
+    settle();
     if (path.startsWith("/api")) {
       noteApi(req.method, resolveApiRoute(req), duration, res.statusCode);
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
@@ -272,6 +279,7 @@ app.use((req, res, next) => {
       }
     }
   });
+  res.on("close", settle);
 
   next();
 });
