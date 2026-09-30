@@ -7,15 +7,15 @@ export const PERFORMANCE_SEARCH_KEYS = {
   zoomFrom: "zoom_from",
   zoomTo: "zoom_to",
   tab: "tab",
-  section: "section",
+  route: "route",
+  method: "method",
 } as const;
 
 export const PROCESS_NAMES = ["web", "sidequest", "mcp", "diagnostics-worker"] as const;
 export type ProcessName = (typeof PROCESS_NAMES)[number];
 export const RANGE_PRESETS = ["1h", "6h", "24h", "7d"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number];
-export type PerfTab = "process" | "traffic";
-export type PerfSection = "api" | "pages";
+export type PerfTab = "process" | "api" | "pages";
 
 export const RANGE_MS: Record<RangePreset, number> = {
   "1h": 60 * 60 * 1000,
@@ -34,7 +34,10 @@ export interface PerformanceView {
   zoomFrom: number | null;
   zoomTo: number | null;
   tab: PerfTab;
-  section: PerfSection;
+  /** Route drawn on the current traffic tab. Not kept in the URL across tab changes. */
+  route: string | null;
+  /** Set for an API route. Pages leave this null. */
+  method: string | null;
 }
 
 export const PERFORMANCE_VIEW_DEFAULTS: PerformanceView = {
@@ -46,7 +49,8 @@ export const PERFORMANCE_VIEW_DEFAULTS: PerformanceView = {
   zoomFrom: null,
   zoomTo: null,
   tab: "process",
-  section: "api",
+  route: null,
+  method: null,
 };
 
 function parseEpochMs(raw: string | null): number | null {
@@ -78,11 +82,14 @@ export function parsePerformanceSearch(search: string): PerformanceView {
     : null;
   const zoomWindow = zoomFlag ? (explicitZoom ?? legacyZoom) : null;
   const process = oneOf(params.get(PERFORMANCE_SEARCH_KEYS.process), PROCESS_NAMES, "web");
-  let tab = oneOf(params.get(PERFORMANCE_SEARCH_KEYS.tab), ["process", "traffic"] as const, "process");
+  const rawTab = params.get(PERFORMANCE_SEARCH_KEYS.tab);
+  const legacyPages = params.get("section") === "pages";
+  let tab: PerfTab = "process";
+  if (rawTab === "api" || rawTab === "pages" || rawTab === "process") tab = rawTab;
+  else if (rawTab === "traffic") tab = legacyPages ? "pages" : "api";
   if (process !== "web") tab = "process";
-  const section = process === "web"
-    ? oneOf(params.get(PERFORMANCE_SEARCH_KEYS.section), ["api", "pages"] as const, "api")
-    : "api";
+  const routeRaw = tab === "process" ? null : params.get(PERFORMANCE_SEARCH_KEYS.route);
+  const methodRaw = tab === "api" ? params.get(PERFORMANCE_SEARCH_KEYS.method) : null;
   return {
     process,
     range: oneOf(params.get(PERFORMANCE_SEARCH_KEYS.range), RANGE_PRESETS, "6h"),
@@ -91,7 +98,8 @@ export function parsePerformanceSearch(search: string): PerformanceView {
     zoomFrom: zoomWindow?.zoomFrom ?? null,
     zoomTo: zoomWindow?.zoomTo ?? null,
     tab,
-    section,
+    route: routeRaw && routeRaw.trim() ? routeRaw.trim() : null,
+    method: methodRaw && methodRaw.trim() ? methodRaw.trim() : null,
   };
 }
 
@@ -129,9 +137,24 @@ export function serializePerformanceSearch(view: PerformanceView, existingSearch
   setOmitDefault(params, PERFORMANCE_SEARCH_KEYS.process, view.process, "web");
   const tab = view.process === "web" ? view.tab : "process";
   setOmitDefault(params, PERFORMANCE_SEARCH_KEYS.tab, tab, "process");
-  if (view.process === "web" && view.section === "pages") params.set(PERFORMANCE_SEARCH_KEYS.section, "pages");
-  else params.delete(PERFORMANCE_SEARCH_KEYS.section);
+  params.delete("section");
+  if (view.process === "web" && tab !== "process" && view.route) {
+    params.set(PERFORMANCE_SEARCH_KEYS.route, view.route);
+    if (tab === "api" && view.method) params.set(PERFORMANCE_SEARCH_KEYS.method, view.method);
+    else params.delete(PERFORMANCE_SEARCH_KEYS.method);
+  } else {
+    params.delete(PERFORMANCE_SEARCH_KEYS.route);
+    params.delete(PERFORMANCE_SEARCH_KEYS.method);
+  }
+  params.delete("api_route");
+  params.delete("api_method");
+  params.delete("page_route");
   return params.toString();
+}
+
+/** The selected span still meets this chart window. A point on the edge counts. */
+export function selectionOverlaps(startingAt: number | null, endingAt: number | null, from: number, to: number): boolean {
+  return startingAt != null && endingAt != null && startingAt <= to && endingAt >= from;
 }
 
 export function chartBounds(view: PerformanceView, now: number): { from: number; to: number } {

@@ -24,8 +24,10 @@ import {
   planInsertChunks,
   readProcessStats,
   readProcessStatsDetail,
+  readRouteSeries,
   resolveProcessStatsDetailRequest,
   resolveProcessStatsRequest,
+  resolveRouteSeriesRequest,
   resetProcessStatsForTests,
   resolveApiRoute,
   stopTick,
@@ -148,18 +150,18 @@ describe("counters", () => {
   });
 
   it("keeps the exact slowest duration in maxMs and one histogram slot", () => {
-    noteApi("POST", "/api/validation/diagnostics-jobs", 31_000, 200);
+    noteApi("POST", "/api/validation/diagnostics-jobs", 61_000, 200);
     for (let i = 0; i < 98; i++) noteApi("GET", "/api/content/:contentType/:slug", 20, 200);
     const closedAt = Date.now();
     flushTick(closedAt);
     const routes = detail(closedAt - 1, closedAt + 1).routes;
     const slow = routes.find((row) => row.route.endsWith("diagnostics-jobs"));
     const reads = routes.find((row) => row.route.includes(":slug"));
-    expect(slow).toMatchObject({ count: 1, maxMs: 31_000, avgMs: 31_000 });
+    expect(slow).toMatchObject({ count: 1, maxMs: 61_000, avgMs: 61_000 });
     expect(slow?.durationCounts[DURATION_BUCKETS_MS.length]).toBe(1);
     expect(slow?.durationCounts).toHaveLength(DURATION_BUCKETS_MS.length + 1);
     expect(reads).toMatchObject({ count: 98, maxMs: 20, avgMs: 20 });
-    expect(reads?.durationCounts[0]).toBe(98);
+    expect(reads?.durationCounts[DURATION_BUCKETS_MS.findIndex((bound) => bound > 20)]).toBe(98);
   });
 
   it("uses the Express template and unmatched when there is none", () => {
@@ -186,7 +188,7 @@ describe("counters", () => {
     notePage("/en/blog/:slug", "/en/blog/mi-post?x=1", 80, 200, "ssr_ok");
     notePage("/en/blog/:slug", "/en/blog/otro", 70, 200, "ssr_ok");
     notePage("/en/:slug", "/en/home", 2_000, 200, "ssr_empty_fallback");
-    notePage("/es/:slug", "/es/lento", 5_000, 200, "ssr_ok");
+    notePage("/es/:slug", "/es/lento", 60_000, 200, "ssr_ok");
     notePage("unmatched", "/solo", 100, 200, "client_fallback");
     const closedAt = Date.now();
     flushTick(closedAt);
@@ -195,10 +197,10 @@ describe("counters", () => {
     const home = pages.find((row) => row.route === "/en/:slug");
     const slow = pages.find((row) => row.route === "/es/:slug");
     expect(blog).toMatchObject({ count: 2, maxMs: 80, path: null, ssrCounts: { ssr_ok: 2 } });
-    expect(blog?.durationCounts[1]).toBe(2);
+    expect(blog?.durationCounts[DURATION_BUCKETS_MS.findIndex((bound) => bound > 80)]).toBe(2);
     expect(home).toMatchObject({ count: 1, maxMs: 2_000, path: null, ssrCounts: { ssr_empty_fallback: 1 } });
-    expect(home?.durationCounts[5]).toBe(1);
-    expect(slow).toMatchObject({ count: 1, maxMs: 5_000, path: "/es/lento", ssrCounts: { ssr_ok: 1 } });
+    expect(home?.durationCounts[DURATION_BUCKETS_MS.findIndex((bound) => bound > 2_000)]).toBe(1);
+    expect(slow).toMatchObject({ count: 1, maxMs: 60_000, path: "/es/lento", ssrCounts: { ssr_ok: 1 } });
     expect(slow?.durationCounts[DURATION_BUCKETS_MS.length]).toBe(1);
     expect(pages.find((row) => row.route === "unmatched")?.path).toBeNull();
   });
@@ -883,6 +885,64 @@ describe("GET /api/admin/process-stats", () => {
     expect(swapped.ok && swapped.stats.startingAt).not.toBe(20);
     const both = resolveProcessStatsDetailRequest({ process: "web", starting_at: ts - 1, ending_at: ts + 1 }, ts + 1);
     expect(both.ok && both.stats.routes.every((row) => row.kind === "api")).toBe(true);
+  });
+});
+
+describe("GET /api/admin/process-stats/route", () => {
+  it("keeps one API method apart from the others, and ignores method on pages", () => {
+    const closedAt = 1_700_000_000_000;
+    noteApi("GET", "/api/x", 100, 200);
+    noteApi("GET", "/api/x", 400, 200);
+    noteApi("POST", "/api/x", 900, 200);
+    noteApi("GET", "/api/other", 50, 200);
+    notePage("/en/:slug", "/en/home", 30, 200, "ssr_ok");
+    notePage("/en/:slug", "/en/home", 80, 200, "ssr_ok");
+    flushTick(closedAt);
+    const from = closedAt - 1;
+    const to = closedAt + 1;
+    const getOnly = readRouteSeries({
+      from, to, now: to, processName: "web", kind: "api", route: "/api/x", method: "GET",
+    });
+    expect(getOnly.stepMs).toBe(30_000);
+    expect(getOnly.method).toBe("GET");
+    expect(getOnly.windows).toEqual([{ timestamp: closedAt, count: 2, avgMs: 250, maxMs: 400 }]);
+    const both = readRouteSeries({
+      from, to, now: to, processName: "web", kind: "api", route: "/api/x",
+    });
+    expect(both.method).toBeNull();
+    expect(both.windows).toEqual([{ timestamp: closedAt, count: 3, avgMs: 467, maxMs: 900 }]);
+    const pages = readRouteSeries({
+      from, to, now: to, processName: "web", kind: "pages", route: "/en/:slug", method: "GET",
+    });
+    expect(pages.method).toBeNull();
+    expect(pages.windows).toEqual([{ timestamp: closedAt, count: 2, avgMs: 55, maxMs: 80 }]);
+  });
+
+  it("requires kind and route, and returns no windows for a process other than web", () => {
+    expect(resolveRouteSeriesRequest({ process: "web", route: "/api/x" })).toEqual({
+      ok: false,
+      error: "kind is required: api | pages",
+    });
+    expect(resolveRouteSeriesRequest({ process: "web", kind: "api", route: "  " })).toEqual({
+      ok: false,
+      error: "route is required",
+    });
+    expect(resolveRouteSeriesRequest({})).toEqual({
+      ok: false,
+      error: "process is required: web | sidequest | mcp | diagnostics-worker",
+    });
+    const side = resolveRouteSeriesRequest({
+      process: "sidequest",
+      kind: "api",
+      route: "/api/x",
+      starting_at: 1,
+      ending_at: 2,
+    });
+    expect(side.ok).toBe(true);
+    if (!side.ok) return;
+    expect(side.stats.windows).toEqual([]);
+    expect(side.stats.kind).toBe("api");
+    expect(side.stats.route).toBe("/api/x");
   });
 });
 
