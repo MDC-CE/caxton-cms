@@ -83,8 +83,9 @@ describe("buildProposalDiscoveryPath", () => {
     const tools = items.filter((i) => i.kind === "tool");
     expect(thinks.length).toBeGreaterThan(0);
     expect(thinks.length).toBeLessThanOrEqual(6);
-    expect(tools.length).toBe(6);
+    expect(tools.length).toBe(7);
     const toolIds = tools.map((t) => (t.kind === "tool" ? t.id : ""));
+    expect(toolIds).toContain("figure_facts");
     expect(toolIds).toContain("traffic_risk");
     expect(toolIds).toContain("journey_metrics");
     expect(toolIds).not.toContain("site_ga");

@@ -12,3 +12,4 @@ export { SeoIndexRefreshJob } from "./server/jobs/definitions/seo-index-refresh"
 export { EventWebhookDeliveryJob } from "./server/jobs/definitions/event-webhook-delivery";
 export { EntryDeleteCleanupJob } from "./server/jobs/definitions/entry-delete-cleanup";
 export { AiImageGcJob } from "./server/jobs/definitions/ai-image-gc";
+export { MetaAdsSyncJob } from "./server/jobs/definitions/meta-ads-sync";

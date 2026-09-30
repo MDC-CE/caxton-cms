@@ -21,7 +21,8 @@ import {
 import { useSession, useLocation as useSessionLocation, useUTM } from "@/contexts/SessionContext";
 import { useSectionContext } from "@/contexts/SectionContext";
 import { useLocation } from "wouter";
-import { apiRequest, apiFetch, queryClient } from "@/lib/queryClient";
+import { apiRequest, apiRequestWithAuth, apiFetch, queryClient } from "@/lib/queryClient";
+import { buildLeadAdContext, newSubmissionId, staffLeadHeaders } from "@/lib/leadAdContext";
 import { getApiPath } from "@shared/api-paths";
 import type { Country } from "react-phone-number-input";
 import { trackFormSubmission, trackConversion, resolveWebhook, hashEmail, getEcommerceProductLookup, type ConversionName, type TrackingSettingsResponse } from "@/lib/tracking";
@@ -1545,6 +1546,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           isNonEmptyLeadFormWireScalar(value),
         ),
       );
+      const submissionId = newSubmissionId();
       const payload = {
         ...restValues,
         ...fieldScalars,
@@ -1578,6 +1580,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         automations: effective.automations,
         conversion_name: effective.conversion_name,
         token: turnstileToken,
+        ...buildLeadAdContext(session, submissionId),
       };
 
       // Token written during this submit (signup) — cookie may lag React state; prefer this.
@@ -1720,7 +1723,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         };
         response = await fetch("/api/leads/webhook-delivery", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...staffLeadHeaders() },
           body: JSON.stringify(body),
           credentials: "same-origin",
         });
@@ -1731,7 +1734,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
       } else if (globalWebhook) {
         response = await fetch("/api/leads/webhook-delivery", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...staffLeadHeaders() },
           body: JSON.stringify({ payload }),
           credentials: "same-origin",
         });
@@ -1740,12 +1743,12 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
           throw new Error(`${response.status}: ${errText || response.statusText}`);
         }
       } else {
-        response = await apiRequest("POST", "/api/leads", payload);
+        response = await apiRequestWithAuth("POST", "/api/leads", payload);
       }
 
-      return { response, fields, effective, resolveTemplatedUrl };
+      return { response, fields, effective, resolveTemplatedUrl, submissionId };
     },
-    onSuccess: async ({ fields, effective, resolveTemplatedUrl }, variables) => {
+    onSuccess: async ({ fields, effective, resolveTemplatedUrl, submissionId }, variables) => {
       setSubmitError(null);
       setConversionPage(window.location.pathname);
       // Track conversion if conversion_name is defined (skip auth events — fired on signup/login)
@@ -1820,6 +1823,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
                 isNonEmptyLeadFormWireScalar(value),
               ),
             ),
+            submission_id: submissionId,
           }
         );
 

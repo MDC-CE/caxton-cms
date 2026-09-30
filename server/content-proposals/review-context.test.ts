@@ -1189,6 +1189,53 @@ describe("classifyProposalReview", () => {
     });
     expect(withFunnel.agent_preview.warnings.some((w) => w.code === "idea_funnel_missing")).toBe(false);
   });
+
+  it("warns idea_content_type_missing on ideas with no related_entries", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "Reshape the AI hub",
+        summary: "Restructure the AI hub so spokes are easier to find for beginners. ".repeat(2),
+      }),
+      knownContentTypes: ["blog", "landing"],
+    });
+    expect(ctx.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(true);
+  });
+
+  it("adds content_type_fit think item and exposes content_type_strategies for ideas", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({
+        kind: "idea",
+        title: "New landing for AI bootcamp",
+        summary: "Create a landing that converts paid traffic for the AI bootcamp in Miami. ".repeat(2),
+        related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+      }),
+      lookups: [
+        { contentType: "landing", slug: "ai-miami", locale: "en", existence: "missing", draftExists: false },
+      ],
+      knownContentTypes: ["blog", "landing"],
+      contentTypeStrategies: [
+        { contentType: "landing", role: "pitched", purpose: "Convert paid traffic", constraints: ["One CTA"] },
+      ],
+    });
+    expect(ctx.content_type_strategies?.[0].contentType).toBe("landing");
+    const ids = ctx.agent_preview.think_items.map((t) => t.id);
+    expect(ids.indexOf("content_type_fit")).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf("content_type_fit")).toBeLessThanOrEqual(1);
+    expect(ctx.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(false);
+  });
+
+  it("does not add content-type warnings to edits proposals", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits" }),
+      knownContentTypes: ["blog"],
+      contentTypeStrategies: [{ contentType: "blog", role: "pitched", purpose: "Teach" }],
+    });
+    const codes = ctx.agent_preview.warnings.map((w) => w.code);
+    expect(codes).not.toContain("idea_content_type_missing");
+    expect(ctx.content_type_strategies).toBeUndefined();
+    expect(ctx.agent_preview.think_items.some((t) => t.id === "content_type_fit")).toBe(false);
+  });
 });
 
 describe("layout_owner review signals", () => {
@@ -1388,5 +1435,85 @@ describe("layout_owner review signals", () => {
       lookups: [liveLookup({ layout_owner: "shared_template" })],
     });
     expect(legacy.agent_preview.warnings.map((w) => w.code)).not.toContain("layout_owner_changed");
+  });
+});
+
+describe("site facts: figure variable tokens and site-facts check", () => {
+  const DEFS = {
+    "global.price_fullstack": { description: "Full price", category: "price", default: "16,999" },
+    "global.campus_phone": { description: "Phone", category: "contact", default: "+1 555" },
+    "global.tagline": { description: "Tagline", category: "copy", default: "Hi" },
+  };
+  const entry = (value: string, field_path = "content") => ({
+    id: 1,
+    proposal_id: "p1",
+    entry_key: "landing/x",
+    locale: "en",
+    variant: null,
+    variant_fingerprint: null,
+    status: "pending" as const,
+    ops: [{ field_path, value }],
+    baseline_context: { values: {} },
+    last_error: null,
+    applied_at: null,
+    applied_by: null,
+    contentType: "landing",
+    slug: "x",
+  });
+  const lookups = [{ contentType: "landing", slug: "x", locale: "en", existence: "exists" as const }];
+
+  it("figure-category token turns on outcome figures with figure_variables + warning", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [entry("Only {{ global.price_fullstack | 16,999 }} today")] }),
+      lookups,
+      variableDefinitions: DEFS,
+    });
+    expect(ctx.active_checklists).toContain("selling_page_figures");
+    expect(ctx.figure_variables).toEqual([
+      { name: "global.price_fullstack", category: "price", default: "16,999", varies_by: [], deprecated: false },
+    ]);
+    expect(ctx.agent_preview.warnings.map((w) => w.code)).toContain("figure_variable_tokens");
+  });
+
+  it("tokens in any field path count; non-figure tokens do not turn figures on", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [entry("{{ global.tagline }} {{ global.campus_phone }}", "cta.label")] }),
+      lookups,
+      variableDefinitions: DEFS,
+    });
+    expect(ctx.figure_variables).toBeUndefined();
+    expect(ctx.active_checklists).not.toContain("selling_page_figures");
+    expect(ctx.fact_variable_names).toEqual(["global.campus_phone"]);
+  });
+
+  it("without variableDefinitions no token checks run", () => {
+    const ctx = classifyProposalReview({
+      proposal: baseProposal({ kind: "edits", entries: [entry("{{ global.price_fullstack }}")] }),
+      lookups,
+    });
+    expect(ctx.figure_variables).toBeUndefined();
+  });
+
+  it("asks for a site-facts check when a fact checklist is active, then carries the result", () => {
+    const proposal = baseProposal({ kind: "edits", entries: [entry("We have 3 campuses")] });
+    const first = classifyProposalReview({ proposal, lookups, variableDefinitions: DEFS });
+    expect(first.active_checklists).toContain("verify_copy");
+    expect(first.needs_site_facts_check).toBe(true);
+
+    const ok = classifyProposalReview({
+      proposal,
+      lookups,
+      variableDefinitions: DEFS,
+      siteFactsCheck: { outcome: "ok", categories: ["company_fact"] },
+    });
+    expect(ok.needs_site_facts_check).toBeUndefined();
+    expect(ok.site_facts).toEqual({ outcome: "ok", categories: ["company_fact"] });
+
+    const down = classifyProposalReview({
+      proposal,
+      lookups,
+      siteFactsCheck: { outcome: "unavailable", categories: [] },
+    });
+    expect(down.agent_preview.warnings.map((w) => w.code)).toContain("jev_unavailable");
   });
 });

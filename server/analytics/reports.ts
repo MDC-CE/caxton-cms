@@ -97,7 +97,7 @@ function priorWindowBounds(
 }
 
 /** Prefer GA4 page_path; else path from page_location. */
-function bqNormalizedPagePathSql(): string {
+export function bqNormalizedPagePathSql(): string {
   return `REGEXP_REPLACE(
             COALESCE(
               NULLIF(
@@ -695,7 +695,7 @@ function bqFirstUserChannelSql(): { source: string; medium: string; campaign: st
  * Session last-click with collected → traffic_source fallback.
  * Prefer session_traffic_source_last_click when the export has it.
  */
-function bqSessionLastClickChannelSql(opts: {
+export function bqSessionLastClickChannelSql(opts: {
   includeSessionLastClick: boolean;
 }): { source: string; medium: string; campaign: string; usedFallback: string } {
   const sessionSource = opts.includeSessionLastClick

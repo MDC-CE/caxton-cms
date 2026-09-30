@@ -15,7 +15,8 @@ export type SystemAlertCode =
   | "background_jobs_stalled"
   | "sidequest_engine_down"
   | "sidequest_engine_stuck"
-  | "github_app_env_missing";
+  | "github_app_env_missing"
+  | "decision_model_unavailable";
 
 export interface SystemAlert {
   id: string;
@@ -65,6 +66,8 @@ export function useSystemAlerts() {
   const [dbRecheckMessages, setDbRecheckMessages] = useState<Record<string, string>>({});
   const [recheckingSidequest, setRecheckingSidequest] = useState(false);
   const [sidequestRecheckMessage, setSidequestRecheckMessage] = useState<string | null>(null);
+  const [recheckingDecisionModel, setRecheckingDecisionModel] = useState(false);
+  const [decisionModelRecheckMessage, setDecisionModelRecheckMessage] = useState<string | null>(null);
 
   const { data, isLoading, isFetching } = useQuery<SystemAlertsResponse>({
     queryKey: ["/api/admin/system-alerts"],
@@ -140,6 +143,27 @@ export function useSystemAlerts() {
     }
   }, [queryClient]);
 
+  const recheckDecisionModel = useCallback(async () => {
+    setRecheckingDecisionModel(true);
+    setDecisionModelRecheckMessage(null);
+    try {
+      const res = await fetch("/api/admin/decision-model-recheck", {
+        method: "POST",
+        headers: { ...getSessionHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error("Failed to re-check the decision model");
+      const body = (await res.json()) as { message?: string };
+      setDecisionModelRecheckMessage(body.message ?? "Re-check complete.");
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/system-alerts"] });
+      return body;
+    } catch (err) {
+      setDecisionModelRecheckMessage(err instanceof Error ? err.message : "Re-check failed.");
+    } finally {
+      setRecheckingDecisionModel(false);
+    }
+  }, [queryClient]);
+
   const alerts = data?.alerts ?? [];
   const criticalAlerts = alerts.filter((a) => a.severity === "critical");
   const warningAlerts = alerts.filter((a) => a.severity === "warning");
@@ -160,5 +184,8 @@ export function useSystemAlerts() {
     recheckSidequest,
     recheckingSidequest,
     sidequestRecheckMessage,
+    recheckDecisionModel,
+    recheckingDecisionModel,
+    decisionModelRecheckMessage,
   };
 }

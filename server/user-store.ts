@@ -190,7 +190,7 @@ const BUILT_IN_USER_ADMIN_ROLE: RoleDefinition = {
 const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
   label: "Platform Steward",
   description:
-    "Site health: diagnostics, runtime issues, redirects, SEO settings, content-type schema, private database definitions, and full proposal create/review (bulk proposal delete is staff UI only, never via MCP). Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
+    "Site health: diagnostics, runtime issues, redirects, SEO and Ads settings (incl. cookie consent window), content-type schema, private database definitions, and full proposal create/review (bulk proposal delete is staff UI only, never via MCP). Use /mcp/role/platform_steward for update_content_type, create_or_update_database, and reindex_database as well as SEO and redirect writes — not for row CRUD (needs Edit database data), user admin, or infrastructure.",
   capabilities: [
     { name: "metrics_view" },
     { name: "content_view", contentTypes: "*" },
@@ -199,6 +199,7 @@ const BUILT_IN_PLATFORM_STEWARD_ROLE: RoleDefinition = {
     { name: "edit_redirects" },
     { name: "overlays_configure" },
     { name: "seo_settings" },
+    { name: "ads_settings" },
     { name: "components_manage" },
     { name: "content_types_manage" },
     { name: "databases_manage" },
@@ -554,6 +555,25 @@ export function ensureProposalsCreateOnContentEditors(
   return changed;
 }
 
+/**
+ * Soft-migrate custom roles: site-wide SEO settings managers also get ads_settings
+ * (Meta Ads connection + cookie consent window) so the new surfaces are not orphaned.
+ */
+export function ensureAdsSettingsOnSeoSettingsRoles(
+  roles: Record<string, RoleDefinition>,
+): boolean {
+  let changed = false;
+  for (const [roleId, role] of Object.entries(roles)) {
+    if (isBuiltInRole(roleId) || role?.agentic || isAgenticSwarmRoleId(roleId)) continue;
+    if (!role?.capabilities) continue;
+    if (role.capabilities.some((g) => g.name === "ads_settings")) continue;
+    if (!role.capabilities.some((g) => g.name === "seo_settings")) continue;
+    role.capabilities = [...role.capabilities, { name: "ads_settings" }];
+    changed = true;
+  }
+  return changed;
+}
+
 /** True when grants include a mutating cap (not only metrics_view / content_view). */
 export function grantsCanMutateMetrics(caps: CapabilityGrant[]): boolean {
   return caps.some((g) => !VIEW_ONLY_CAPABILITIES.has(g.name));
@@ -580,6 +600,9 @@ function finishLoad(persist: "local" | "all"): void {
   }
   if (ensureProposalsCreateOnContentEditors(state.roles)) {
     log.info("[UserStore] Migrated custom roles: added proposals_create from content_edit_text|seo_edit");
+  }
+  if (ensureAdsSettingsOnSeoSettingsRoles(state.roles)) {
+    log.info("[UserStore] Migrated custom roles: added ads_settings from seo_settings");
   }
   if (ensureAgenticSwarmRoles(state.roles)) {
     log.info("[UserStore] Seeded agentic swarm roles");

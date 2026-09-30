@@ -17,7 +17,7 @@ export const MANAGE_LIST_SEARCH_KEYS = {
   status: "status",
 } as const;
 
-export type ManageListPerspective = "default" | "seo" | "funnel" | "organic";
+export type ManageListPerspective = "default" | "seo" | "funnel" | "organic" | "ads";
 export type ManageListViewMode = "static" | "db";
 export type ManageListDateSortDir = "asc" | "desc" | null;
 export type ManageListOrganicSortField =
@@ -78,6 +78,7 @@ const PERSPECTIVES = new Set<ManageListPerspective>([
   "seo",
   "funnel",
   "organic",
+  "ads",
 ]);
 
 const ORGANIC_SORTS = new Set<ManageListOrganicSortField>([

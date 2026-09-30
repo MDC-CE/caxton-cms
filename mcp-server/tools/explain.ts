@@ -42,6 +42,7 @@ const VALID_TOPICS = [
   "redirects",
   "proposals",
   "analytics",
+  "ads",
 ] as const;
 type Topic = (typeof VALID_TOPICS)[number];
 
@@ -76,6 +77,7 @@ const TOPIC_DESC: Record<string, string> = {
     "Entry proposals hub — omit subtopic for index; subtopics: overview, reading, situations, internal-links, serp-title-description, funnel-classification, idea-opportunity-harm, existing-demand, broken-url, translations",
   analytics:
     "GA4 BigQuery reports via get_analytics_report; vs get_organic_traffic (GSC) and get_product_funnel_analytics (journey)",
+  ads: "Paid traffic via get_paid_traffic: Meta spend, paid landing pages, lead credit, consent limits, ad tracking diagnostics",
 };
 
 /** Topics that support optional subtopic (hubs). */
@@ -436,7 +438,7 @@ export function registerExplainTools(
       "Live catalogs (conversion_events, CRM tags, locales, content types, image presets) are loaded from that site's content folder (sites.yml content_folder, e.g. site_example-com/). " +
       "Valid topics: 'overview' (start here), 'content_system', 'routing', 'images', 'sections', 'semantic_search', " +
       "'local_databases', 'component-behaviors', 'seo', 'funnel', 'ecommerce'/'product', 'shared-layout', 'relation-fields', " +
-      "'lead-forms', 'redirects', 'proposals' (hub — optional subtopic), 'analytics'. " +
+      "'lead-forms', 'redirects', 'proposals' (hub — optional subtopic), 'analytics', 'ads'. " +
       "For proposals: omit subtopic for a light index of playbooks; pass subtopic " +
       "(overview|reading|situations|internal-links|serp-title-description|funnel-classification|idea-opportunity-harm|existing-demand|broken-url|translations) for a pack. " +
       "Legacy flat ids (e.g. internal-links-proposals) still resolve with a deprecation warning. " +
@@ -446,7 +448,7 @@ export function registerExplainTools(
       topic: z
         .string()
         .describe(
-          "Architectural topic. Advertised: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, analytics. Legacy proposal playbook ids still resolve as aliases.",
+          "Architectural topic. Advertised: overview, content_system, routing, images, sections, semantic_search, local_databases, component-behaviors, seo, funnel, product, ecommerce, shared-layout, relation-fields, lead-forms, redirects, proposals, analytics, ads. Legacy proposal playbook ids still resolve as aliases.",
         ),
       subtopic: z
         .string()

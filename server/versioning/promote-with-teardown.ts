@@ -56,6 +56,13 @@ import { stripFunnelFromAllLocaleYamls } from "../funnel-fields";
 import { urlParamsForContentType } from "../field-scope-config";
 import type { ValidationCacheService } from "../services/validationCacheService";
 import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
+import { isSeoMonitoringEnabled } from "../seo-monitoring";
+import { checkLocaleSeoTarget } from "../content-proposals/locale-seo-gate";
+import { evaluatePageTextLimitsForSite } from "../text-limits";
+import {
+  TEXT_LIMITS_EXCEEDED_CODE,
+  summarizeTextLimitViolations,
+} from "@shared/component-text-limits";
 
 export { hashVariantFileContents };
 
@@ -107,10 +114,16 @@ export type PromoteWithTeardownArgs = {
   viaProposalApply?: boolean;
   /** Caller holds an agentic swarm role: direct publish is not allowed. */
   callerIsSwarm?: boolean;
+  /** Caller is an MCP agent: text-limit violations always block (no confirm). */
+  callerIsMcp?: boolean;
+  /** Staff confirmed publishing text over the component text_limits. */
+  confirmTextLimits?: boolean;
   /** Open proposal owning this draft (local DB); `_draft.proposal` is checked first. */
   findOpenProposalForDraft?: (ref: DraftRef) => OpenProposalLink | null;
   /** Run every check, write nothing. */
   dryRun?: boolean;
+  /** New locale with `seo.pillar_path: null`: why it stays out of every cluster. */
+  seoStandaloneReason?: string | null;
 };
 
 export type PromoteWarning = { code: string; message: string; fields?: string[] };
@@ -436,6 +449,28 @@ export async function promoteVariantWithOptionalTeardown(
   const wasUnpublished = !templateMode && !hasAnyLiveLocale(contentDir, templateMode);
   const deletedSiblings: TrafficSibling[] = [];
 
+  // --- New language on a monitored page: the draft must carry its own keyword + hub ---
+  if (
+    (args.viaProposalApply || args.callerIsMcp) &&
+    !templateMode &&
+    !wasUnpublished &&
+    !fs.existsSync(defaultFilePath) &&
+    isSeoMonitoringEnabled(contentType, contentRoot)
+  ) {
+    const draftParsed = safeLoadYaml(fs.readFileSync(variantFilePath, "utf-8"));
+    const draftSeo = isPlainObject(draftParsed?.seo) ? (draftParsed!.seo as Record<string, unknown>) : null;
+    const gate = checkLocaleSeoTarget({
+      site: contentRootName,
+      contentType,
+      slug,
+      locale,
+      ci,
+      draftSeo,
+      standaloneReason: args.seoStandaloneReason,
+    });
+    if (!gate.ok) return { ok: false, code: gate.code, error: gate.error, details: gate.details };
+  }
+
   try {
     const variantContent = stripDraftMetaFromRaw(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8"));
     const identityErr = validateYamlIdentity(variantContent, {
@@ -495,6 +530,33 @@ export async function promoteVariantWithOptionalTeardown(
     }
 
     const liveContent = fs.existsSync(defaultFilePath) ? fs.readFileSync(defaultFilePath, "utf-8") : null;
+
+    // Component text limits (schema.yml text_limits). Only text that differs
+    // from live counts; agents cannot override, staff can confirm.
+    const liveForGate = liveContent
+      ? (deepMerge(commonForGate, (ci.safeYamlLoad(liveContent) as Record<string, unknown>) || {}) as Record<string, unknown>)
+      : null;
+    const textLimitViolations = evaluatePageTextLimitsForSite(mergedForGate, {
+      before: liveForGate,
+      contentRoot,
+    });
+    if (textLimitViolations.length > 0) {
+      if (args.callerIsMcp || !args.confirmTextLimits) {
+        return {
+          ok: false,
+          code: TEXT_LIMITS_EXCEEDED_CODE,
+          error: `Cannot promote: text too long for this section — ${summarizeTextLimitViolations(textLimitViolations)}.${
+            args.callerIsMcp ? " Shorten it on the draft and retry." : " Shorten it, or confirm to publish anyway."
+          }`,
+          details: { violations: textLimitViolations },
+        };
+      }
+      warnings.push({
+        code: "text_limits_confirmed",
+        message: `Published with text over the component limits (confirmed): ${summarizeTextLimitViolations(textLimitViolations)}`,
+        fields: textLimitViolations.flatMap((v) => v.fields.map((f) => `${v.section_path}.${f}`)),
+      });
+    }
     const commonBefore = !templateMode && fs.existsSync(commonFilePath) ? fs.readFileSync(commonFilePath, "utf-8") : null;
     const routed = templateMode
       ? { localeRaw: variantContent, commonRaw: commonBefore, commonChanged: false, paths: [] as string[], draftCommon: {} as Record<string, unknown> }

@@ -579,6 +579,25 @@ function applyOperation(
 }
 
 
+/**
+ * The page as it would look after `operations`, applied to a copy of the
+ * merged view (the indices callers send). Null when an operation cannot
+ * apply — the real edit reports that error itself.
+ */
+export function simulateEditOperations(
+  content: Record<string, unknown>,
+  operations: EditOperation[],
+  opts?: { contentRoot?: string; locale?: string },
+): Record<string, unknown> | null {
+  const draft = cloneYamlData(content);
+  try {
+    for (const op of operations) applyOperation(draft, op, opts);
+    return draft;
+  } catch {
+    return null;
+  }
+}
+
 /** CT editor + optional DB editor (DB first, CT overrides). */
 function resolveEditorHintsForJsonValidation(
   contentType: string,

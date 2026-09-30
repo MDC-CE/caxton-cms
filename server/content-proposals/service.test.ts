@@ -3156,6 +3156,89 @@ describe("attached entry from an accepted idea", () => {
     if (!frozen.ok) expect(frozen.code).toBe("idea_funnel_frozen");
   });
 
+  it("idea content types: refuse unknown on create; set_related_entries for proposer only while open", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      knownContentTypes: () => ["blog", "landing"],
+      strategyForContentType: (ct) => (ct === "landing" ? { purpose: "Convert paid traffic" } : null),
+    });
+    const summary =
+      "New landing pitch for an AI bootcamp page that converts paid search visitors in Miami. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: { type: "mcp" as const, role: "copy_editor", model: "claude/sonnet", client: "Cursor" },
+    };
+    const bob = {
+      username: "bob",
+      actor: { type: "mcp" as const, role: "seo_specialist", model: "claude/sonnet", client: "Cursor" },
+    };
+
+    const refused = await svc.create(
+      {
+        kind: "idea",
+        title: "New landing: AI Miami",
+        summary,
+        related_entries: [{ contentType: "landings", slug: "ai-miami", locale: "en" }],
+      },
+      alice,
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.code).toBe("unknown_content_type");
+      expect((refused as { details?: { valid_types?: string[] } }).details?.valid_types).toEqual(["blog", "landing"]);
+    }
+
+    const created = await svc.create({ kind: "idea", title: "New landing: AI Miami", summary }, alice);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const before = await svc.classifyLive(created.proposal);
+    expect(before?.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(true);
+
+    const unknown = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [{ contentType: "landings", slug: "ai-miami", locale: "en" }],
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.code).toBe("unknown_content_type");
+
+    const notProposer = await svc.update(created.proposal.id, "set_related_entries", {
+      ...bob,
+      related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+    });
+    expect(notProposer.ok).toBe(false);
+    if (!notProposer.ok) expect(notProposer.code).toBe("not_proposer");
+
+    const set = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+    });
+    expect(set.ok).toBe(true);
+    if (!set.ok) return;
+    expect(set.proposal.related_entries).toEqual([{ contentType: "landing", slug: "ai-miami", locale: "en" }]);
+    expect(svc.contentTypeStrategiesFor(set.proposal)).toEqual([
+      { contentType: "landing", role: "pitched", purpose: "Convert paid traffic" },
+    ]);
+    const after = await svc.classifyLive(set.proposal);
+    expect(after?.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(false);
+    expect(after?.agent_preview.think_items.some((t) => t.id === "content_type_fit")).toBe(true);
+
+    const withdrawn = await svc.update(created.proposal.id, "withdraw", {
+      ...alice,
+      close_note: "Superseded by a broader campaign brief.",
+    });
+    expect(withdrawn.ok).toBe(true);
+    const closed = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [],
+    });
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.code).toBe("closed");
+  });
+
   it("proposal_idea_funnel_set: fires on create with funnel, skips unchanged saves, carries actor", async () => {
     const svc = createProposalService({
       site: SITE,
@@ -3357,5 +3440,75 @@ describe("attached entry from an accepted idea", () => {
     if (!applied.ok) return;
     expect(seededFunnel).toEqual({ stage: "awareness", products: "all" });
     expect(applied.proposal.entries[0]?.status).toBe("done");
+  });
+
+  it("legacy creates_entry apply seeds the idea SEO target as seo.* ops", async () => {
+    const appliedOps: Array<Array<{ field_path: string; value?: unknown }>> = [];
+    const HUB = "/en/blog/ai/hub-ai";
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async (entry) => {
+        appliedOps.push(entry.ops);
+        return { ok: true };
+      },
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      inspectMissingTarget: () => ({ shape: "attached_file", requiredFields: ["title"] }),
+      prepareCreatesEntry: async () => ({ ok: true, seeded: true }),
+      discardSeededEntry: () => {},
+      stampPublishedAt: () => ({ ok: true }),
+      seoTarget: {
+        isMonitored: () => true,
+        resolveHub: (p) => ({ path: p, live: true, locale: "en", is_hub: true }),
+        keywordOwner: () => null,
+        selfPath: () => null,
+        memberInfo: () => ({ live: true, monitored: true, pillar_path: null }),
+      },
+    });
+    const summary = "New article pitch for an SEO seed test covering basics for beginners who search. ".repeat(2);
+    const alice = { username: "alice", actor: { type: "mcp" as const, role: "copy_editor", model: "m", client: "c" } };
+    const bob = { username: "bob", actor: { type: "mcp" as const, role: "seo_specialist", model: "m", client: "c" } };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New article SEO seed",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "seo-seed-post", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+        idea_seo_target: { main_keyword: "seo seed", cluster: { mode: "join", pillar_path: HUB } },
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Create the attached post with implements_proposal_id next.",
+      accepted_entry: { contentType: "blog", slug: "seo-seed-post", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    const create = await svc.create(
+      {
+        title: "Seed create",
+        summary: "Implement accepted idea and let apply seed the frozen SEO target. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [{ contentType: "blog", slug: "seo-seed-post", locale: "en", updates: [{ field_path: "title", value: "Seed" }] }],
+      },
+      alice,
+    );
+    expect(create.ok).toBe(true);
+    if (!create.ok) return;
+    const applied = await svc.update(create.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.proposal.entries[0]?.status).toBe("done");
+    expect(appliedOps[0]).toEqual([
+      { field_path: "seo.main_keyword", value: "seo seed" },
+      { field_path: "seo.pillar_path", value: HUB },
+      { field_path: "seo.is_pillar", value: false },
+      { field_path: "title", value: "Seed" },
+    ]);
   });
 });

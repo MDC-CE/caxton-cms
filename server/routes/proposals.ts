@@ -76,6 +76,8 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "set_idea_seo_target",
+  "set_related_entries",
   "escalate",
   "deescalate",
   "review_outcome",
@@ -101,6 +103,8 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "set_idea_seo_target",
+  "set_related_entries",
   "escalate",
   "deescalate",
   "review_outcome",
@@ -312,6 +316,7 @@ export function registerProposalRoutes(app: Express): void {
       // Refresh list row snapshot fields after lazy fill
       const refreshed = svc.get(p.id);
       if (refreshed) proposals = [refreshed];
+      const content_type_strategies = svc.contentTypeStrategiesFor(proposals[0]!);
       res.json({
         proposals,
         total,
@@ -322,6 +327,7 @@ export function registerProposalRoutes(app: Express): void {
         attention_perspective,
         proposals_view: "full",
         ...(review_context ? { review_context } : {}),
+        ...(content_type_strategies ? { content_type_strategies } : {}),
       });
       return;
     }
@@ -397,7 +403,13 @@ export function registerProposalRoutes(app: Express): void {
     }
     const review_context = await svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
     const fresh = svc.get(req.params.id) ?? proposal;
-    res.json({ proposal: fresh, review_context, deleted_refs: svc.missingReferencedIds(fresh) });
+    const content_type_strategies = svc.contentTypeStrategiesFor(fresh);
+    res.json({
+      proposal: fresh,
+      review_context,
+      ...(content_type_strategies ? { content_type_strategies } : {}),
+      deleted_refs: svc.missingReferencedIds(fresh),
+    });
   });
 
   api.post(app, "/api/admin/proposals/bulk-delete", { rate: "staffWrite" }, async (req, res) => {
@@ -552,7 +564,7 @@ export function registerProposalRoutes(app: Express): void {
       // Staff UI may retag; MCP authors must be proposer (enforced in service).
       asStaff = actor?.type !== "mcp";
     }
-    if (action === "set_idea_funnel") {
+    if (action === "set_idea_funnel" || action === "set_idea_seo_target" || action === "set_related_entries") {
       asStaff = actor?.type !== "mcp";
     }
     if (action === "escalate" || action === "deescalate" || OUTCOME_ACTIONS.has(action)) {
@@ -643,6 +655,8 @@ export function registerProposalRoutes(app: Express): void {
       variant: typeof req.body?.variant === "string" ? req.body.variant : undefined,
       confirm_end_experiment: req.body?.confirm_end_experiment === true,
       confirm_base_unknown: req.body?.confirm_base_unknown === true,
+      confirm_text_limits: req.body?.confirm_text_limits === true,
+      caller_is_mcp: typeof req.headers["x-mcp-author"] === "string",
       confirm_affected_entries:
         typeof req.body?.confirm_affected_entries === "number" ? req.body.confirm_affected_entries : undefined,
       dry_run: req.body?.dry_run === true,
@@ -670,6 +684,12 @@ export function registerProposalRoutes(app: Express): void {
         req.body?.idea_funnel && typeof req.body.idea_funnel === "object"
           ? req.body.idea_funnel
           : undefined,
+      idea_seo_target:
+        req.body?.idea_seo_target && typeof req.body.idea_seo_target === "object"
+          ? req.body.idea_seo_target
+          : undefined,
+      seo_target_override: req.body?.seo_target_override ?? undefined,
+      related_entries: Array.isArray(req.body?.related_entries) ? req.body.related_entries : undefined,
       escalated_note:
         typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
       outcome_review:
@@ -719,7 +739,9 @@ export function registerProposalRoutes(app: Express): void {
                 result.code === "confirm_affected_entries" ||
                 result.code === "revert_conflicts"
               ? 409
-              : 400;
+              : result.code === "text_limits_exceeded"
+                ? 422
+                : 400;
       res.status(status).json(result);
       return;
     }

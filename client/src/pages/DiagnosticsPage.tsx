@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
+import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Megaphone, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link, useLocation, useSearch } from "wouter";
@@ -108,6 +108,7 @@ import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import LeadsTab from "@/components/diagnostics/LeadsTab";
 import RuntimeIssuesTab from "@/components/diagnostics/RuntimeIssuesTab";
 import { DiagnosticsSeoPanel, DiagnosticsGeoPanel, DiagnosticsFunnelPanel } from "@/components/diagnostics/DiagnosticsSeoGeoPanels";
+import { AdsGlobalRollupCard, DiagnosticsAdsPanel } from "@/components/diagnostics/DiagnosticsAdsPanel";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import {
   RedirectConflictResolverModal,
@@ -1790,6 +1791,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
 
   return (
     <div className="space-y-6">
+      <AdsGlobalRollupCard />
       {jobPanel && (
         <div
           className="rounded-lg border border-border overflow-hidden"
@@ -3037,7 +3039,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
 
 
 const DIAGNOSTICS_TABS: {
-  id: "global-health" | "leads" | "runtime-issues" | "seo" | "geo" | "funnel";
+  id: DiagnosticsTabId;
   label: string;
   href: string;
   Icon: LucideIcon;
@@ -3048,6 +3050,7 @@ const DIAGNOSTICS_TABS: {
   { id: "seo", label: "SEO", href: "/private/diagnostics/seo", Icon: Crosshair },
   { id: "geo", label: "GEO", href: "/private/diagnostics/geo", Icon: Brain },
   { id: "funnel", label: "Funnel", href: "/private/diagnostics/funnel", Icon: Filter },
+  { id: "ads", label: "Ads", href: "/private/diagnostics/ads", Icon: Megaphone },
 ];
 
 function tabHref(id: DiagnosticsTabId): string {
@@ -3126,6 +3129,9 @@ export default function DiagnosticsPage() {
             </TabsContent>
             <TabsContent value="funnel">
               <DiagnosticsFunnelPanel />
+            </TabsContent>
+            <TabsContent value="ads">
+              <DiagnosticsAdsPanel />
             </TabsContent>
           </Tabs>
         </div>

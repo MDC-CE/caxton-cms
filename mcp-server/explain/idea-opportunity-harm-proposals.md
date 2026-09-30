@@ -8,6 +8,8 @@ Default-on review situation for every `kind: idea` proposal. Situation id: `idea
 
 **New-URL ideas:** set structured `idea_funnel` `{ stage, products }` before accept (`products: "all"` only with stage `awareness`). Soft warning on create; `add_blocker` if reviewing without it; accept refuses until complete; funnel freezes at accept and seeds/matches on create.
 
+**SEO target (SEO-monitored types):** also set `idea_seo_target` `{ main_keyword, cluster: join | hub | standalone }` before accept (`set_idea_seo_target`). Score it: keyword matches the brief's search claim (not a broader head term); join hub is live, same locale, and on-topic (`list_seo_clusters` / `list_seo_cluster_entries`); hub-mode members are real live posts; standalone only for `fast_decay_news` / `broken_url` with a credible reason. Weak fit → `add_blocker` naming the better hub. Freezes at accept; seeded into the new draft. Refusal codes: proposals hub (`explain_site` topic `proposals`, no subtopic).
+
 If this page ships and gets almost no visits for 90 days, what did we break?  
 If the honest answer is “hub links, crawl, freshness SLA, and another thin URL,” do not accept.
 
@@ -21,7 +23,7 @@ Score **Goal → Evidence → Fit → Brand**, then the dilution question.
 |---|---|---|
 | Goal | 90-day outcome is cite, rank, or assist a real program | Cluster poetry / “fill a hole” only |
 | Evidence | Follow demand label when present. No label: score the summary — keyword/GSC/SERP only when the brief claims search win; launch or 404 cues without a label → `add_blocker` naming the label | Invented volume; “people will want this” with no label and no non-search reason |
-| Fit | Not a dupe; locale justified; idea is the right vehicle | Third URL for the same angle; funnel/SERP/links-only work |
+| Fit | Not a dupe; locale justified; idea is the right vehicle; brief matches the target page type's `strategy` purpose/constraints (think item `content_type_fit`) | Third URL for the same angle; funnel/SERP/links-only work; brief fights its page type (e.g. deep tutorial pitched as a landing) |
 | Brand | Educational angle, checkable facts, real program CTA | Invented cards, “best of” with no source |
 
 Then: if the page can be mediocre and still tax the site, do not accept. Dilution *improvement* alone (e.g. delete a hub) is not a pass without visit/redirect evidence.
@@ -101,6 +103,7 @@ Cannibal + retrieval split. Notes to merge, not a fourth idea.
 
 ## Author checklist (rationale)
 
+- [ ] Target page type named in `related_entries` (content type key, not a tag); its `get_content_type_info` strategy read and the brief fits it
 - [ ] One-sentence 90-day goal (cite / rank / assist)
 - [ ] Evidence for the job (search proof, or demand label + its proof, or non-search reason in the summary)
 - [ ] Named siblings and why this is not them

@@ -48,6 +48,14 @@ import {
   ideaFunnelComplete,
   ideaRequiresStructuredFunnel,
 } from "./idea-funnel";
+import { reviewIdeaContentTypes, type IdeaContentTypeStrategy } from "./idea-content-type";
+import {
+  IDEA_SEO_TARGET_MISSING_WARN,
+  describeIdeaSeoTarget,
+  ideaSeoTargetComplete,
+  seoTargetDiff,
+  type IdeaSeoTarget,
+} from "./idea-seo-target";
 import {
   collectClaimCueTextFromOps,
   evaluateClaimCues,
@@ -58,6 +66,15 @@ import {
   DECISION_ID_TOUCHES_OUTCOME_FIGURES,
   type TouchesOutcomeFiguresOutcome,
 } from "../ai/decisions";
+import type { VariableDefinition } from "../variable-manager";
+import {
+  collectPendingOpValueText,
+  findFactVariableTokens,
+  findFigureVariableTokens,
+  summarizeFigureVariables,
+  type FigureVariableSummary,
+  type VariableTokenHit,
+} from "./figure-variable-tokens";
 
 export type ReviewWarning = { code: string; message: string };
 
@@ -129,6 +146,16 @@ export type ReviewContext = {
   claim_cue_text?: string;
   /** Soft Count-as-lead form caution (never alone attaches figures). */
   counts_as_lead_hint?: boolean;
+  /** Ideas: target page types with their content-types.yml strategy (pitched / accepted). */
+  content_type_strategies?: IdeaContentTypeStrategy[];
+  /** Figure-category variable tokens in the proposed values (turn on outcome figures). */
+  figure_variables?: FigureVariableSummary[];
+  /** Fact-category variable tokens in the proposed values (site-facts discovery names). */
+  fact_variable_names?: string[];
+  /** A fact-sensitive checklist is active and no site-facts check was passed — caller asks Jev and re-classifies. */
+  needs_site_facts_check?: boolean;
+  /** Jev site-facts check result (categories the proposal touches). */
+  site_facts?: SiteFactsCheck;
   /** Persisted when Jev enrichment ran. */
   jev?: {
     called: true;
@@ -137,6 +164,34 @@ export type ReviewContext = {
     at: string;
   };
 };
+
+export type SiteFactsCheck = {
+  outcome: "ok" | "unavailable";
+  categories: string[];
+};
+
+/** Checklists that ask reviewers to catch wrong stats — they get the site-facts discovery item. */
+export const SITE_FACT_CHECKLISTS: ReadonlySet<ChecklistId> = new Set<ChecklistId>([
+  "verify_copy",
+  "title_description_ctr",
+  "locale_translation",
+  "new_content_brand",
+  "idea_opportunity_harm",
+]);
+
+/** Text the site-facts Jev check reads: pending op values (edits) or the brief (ideas). */
+export function siteFactsInputText(
+  proposal: Pick<ProposalRecord, "kind" | "entries" | "title" | "summary">,
+  promoteDraftText?: string | null,
+): string {
+  if (proposal.kind === "idea") {
+    return [proposal.title, proposal.summary].filter((s) => typeof s === "string" && s.trim()).join("\n");
+  }
+  if (proposal.kind !== "edits") return "";
+  const work = proposal.entries.filter((e) => !e.status || e.status === "pending" || e.status === "failed");
+  const opText = collectPendingOpValueText(work.length ? work : proposal.entries);
+  return [opText, promoteDraftText ?? ""].filter((s) => s.trim()).join("\n");
+}
 
 export type EntryExistenceLookup = {
   contentType: string;
@@ -173,10 +228,17 @@ export type ClassifyProposalReviewOpts = {
     system_version?: ProposalRecord["system_version"];
     accepted_entry?: ProposalRecord["accepted_entry"];
     idea_funnel?: ProposalRecord["idea_funnel"];
+    idea_seo_target?: ProposalRecord["idea_seo_target"];
+    seo_target_override?: ProposalRecord["seo_target_override"];
     affected_entries?: ProposalRecord["affected_entries"];
+    created_at?: ProposalRecord["created_at"];
   };
   /** Per entry / related target existence. */
   lookups: EntryExistenceLookup[];
+  /** Content type has SEO monitoring on. Absent → no idea_seo_target_missing warning. */
+  ideaSeoTargetMonitored?: (contentType: string) => boolean;
+  /** Edits implementing an idea: that idea's locked keyword + cluster. */
+  implementedIdeaSeoTarget?: IdeaSeoTarget | null;
   relatedOpen?: RelatedOpenProposal[];
   /** Snapshot from DB for change detection. */
   snapshot?: { damage_class?: string } | null;
@@ -192,9 +254,27 @@ export type ClassifyProposalReviewOpts = {
   claimCueJevOutcome?: TouchesOutcomeFiguresOutcome | null;
   /** Best-effort: page has a Count-as-lead conversion form (soft hint only). */
   countsAsLeadForm?: boolean;
+  /** Ideas: resolved page-type strategies. Absent → no content_type_fit think item. */
+  contentTypeStrategies?: IdeaContentTypeStrategy[] | null;
+  /** Ideas: content-types.yml keys. Absent → related types are not checked. */
+  knownContentTypes?: string[] | null;
+  /** Site variables — enables figure/fact token detection. Absent (tests) → no token checks. */
+  variableDefinitions?: Record<string, VariableDefinition> | null;
+  /** Jev site-facts check result. Omit on first pass — sets needs_site_facts_check instead. */
+  siteFactsCheck?: SiteFactsCheck | null;
 };
 
 const MAX_THINK = 6;
+
+type ThinkItem = ReviewContext["agent_preview"]["think_items"][number];
+
+/** Second slot so discovery_path (first 6 think items) always keeps it. */
+function withContentTypeFitThink(items: ThinkItem[], fit: ThinkItem | null): ThinkItem[] {
+  if (!fit) return items;
+  const out = [...items];
+  out.splice(Math.min(1, out.length), 0, fit);
+  return out;
+}
 
 /** Prefer situation packs + disposition over adjacent when over the think cap. */
 function selectThinkTemplates(checklists: Set<ChecklistId>): ThinkTemplate[] {
@@ -262,6 +342,8 @@ export function resolveOutcomeFiguresAttachment(opts: {
   reviewSituations?: string[] | null;
   promoteDraftText?: string | null;
   claimCueJevOutcome?: TouchesOutcomeFiguresOutcome | null;
+  /** Figure-category variable tokens in the new values — any hit turns figures on. */
+  figureVariables?: VariableTokenHit[] | null;
 }): {
   figuresActive: boolean;
   needsJev: boolean;
@@ -277,7 +359,7 @@ export function resolveOutcomeFiguresAttachment(opts: {
     hasClaimRelevantPendingOps(opts.entries) ||
     Boolean(promote.trim());
 
-  if (declared) {
+  if (declared || (opts.figureVariables?.length ?? 0) > 0) {
     return {
       figuresActive: true,
       needsJev: false,
@@ -400,6 +482,10 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   let needs_jev_claim_check = false;
   let claim_cue_text: string | undefined;
   let figuresActive = false;
+  let figureHits: VariableTokenHit[] = [];
+  let factHits: VariableTokenHit[] = [];
+  const defs = opts.variableDefinitions ?? null;
+  let contentTypeFitThink: { id: string; title: string; why: string; look_for: string[] } | null = null;
 
   const review_mode_operative = proposal.kind === "edits";
   let undo_cost = undoCostFor(proposal.kind, proposal.review_mode);
@@ -441,6 +527,27 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     );
     const toClassify = workEntries.length ? workEntries : proposal.entries;
     allFieldsOnly = toClassify.length > 0;
+
+    const locked = opts.implementedIdeaSeoTarget;
+    if (locked) {
+      const diff = seoTargetDiff(
+        toClassify.flatMap((e) => e.ops ?? []),
+        locked,
+      );
+      if (diff.differs) {
+        warnings.push({
+          code: "idea_seo_target_override",
+          message:
+            `Locked SEO target: ${describeIdeaSeoTarget(locked)}. These edits change the ${diff.fields.join(" and ")}` +
+            ` (proposed: ${JSON.stringify(diff.proposed)}). Override reason: ${proposal.seo_target_override?.reason ?? "(none)"}. Reviewer: is the reason credible?`,
+        });
+      } else {
+        warnings.push({
+          code: "idea_seo_target_locked",
+          message: `Implements an idea with locked SEO target ${describeIdeaSeoTarget(locked)}; the new page's draft is seeded with it.`,
+        });
+      }
+    }
 
     for (const e of toClassify) {
       const lu = findLookup(lookups, e.contentType, e.slug, e.locale, e.variant);
@@ -533,11 +640,19 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     }
     if (layoutStructural) checklists.add("layout_structure");
 
+    if (defs) {
+      const valueText = [collectPendingOpValueText(toClassify), promoteDraftText ?? ""]
+        .filter((t) => t.trim())
+        .join("\n");
+      figureHits = findFigureVariableTokens(valueText, defs);
+      factHits = findFactVariableTokens(valueText, defs);
+    }
     const figures = resolveOutcomeFiguresAttachment({
       entries: toClassify,
       reviewSituations: proposal.review_situations,
       promoteDraftText,
       claimCueJevOutcome,
+      figureVariables: figureHits,
     });
     claim_cue_text = figures.claimCueText || undefined;
     needs_jev_claim_check = figures.needsJev;
@@ -555,6 +670,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       }
     }
     if (damage_class === "new_public_content") checklists.add("new_content_brand");
+
+    if (figureHits.length) {
+      warnings.push({
+        code: "figure_variable_tokens",
+        message: `Outcome figures turned on by variable tokens: ${figureHits.map((h) => h.name).join(", ")}. Check each is the right fact with list_variables.`,
+      });
+    }
 
     if (needs_jev_claim_check) {
       warnings.push({
@@ -704,6 +826,37 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           "New-URL idea is missing structured idea_funnel (stage + products). Create still succeeds — set via set_idea_funnel before accept. Reviewer: add_blocker until the author fills it. products \"all\" only with stage awareness.",
       });
     }
+    const seoMonitored = opts.ideaSeoTargetMonitored;
+    const targetTypes = proposal.accepted_entry
+      ? [proposal.accepted_entry.contentType]
+      : relatedWithEx.filter((r) => r.existence === "missing").map((r) => r.contentType);
+    if (
+      needsIdeaFunnel &&
+      seoMonitored &&
+      targetTypes.some((ct) => seoMonitored(ct)) &&
+      !ideaSeoTargetComplete(proposal.idea_seo_target)
+    ) {
+      warnings.push({
+        code: IDEA_SEO_TARGET_MISSING_WARN,
+        message:
+          "New-URL idea on an SEO-monitored type is missing idea_seo_target (main_keyword + cluster: join a live hub, become a hub with named members, or standalone for news/broken-URL only). Create still succeeds — set via set_idea_seo_target before accept.",
+      });
+    }
+    if (proposal.idea_seo_target) {
+      warnings.push({
+        code: "idea_seo_target",
+        message: `SEO target: ${describeIdeaSeoTarget(proposal.idea_seo_target)}. Reviewer: keyword matches the brief, hub fits the topic, members are real posts, standalone reason is credible.`,
+      });
+    }
+
+    const typeReview = reviewIdeaContentTypes({
+      related,
+      known: opts.knownContentTypes ?? null,
+      strategies: opts.contentTypeStrategies ?? null,
+      createdAt: proposal.created_at ?? null,
+    });
+    warnings.push(...typeReview.warnings);
+    contentTypeFitThink = typeReview.think;
 
     if (related.length === 0) {
       damage_class = "none";
@@ -758,6 +911,18 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   }
 
   const orderedIds = selectThinkTemplates(checklists);
+
+  const factChecklistActive = orderedIds.some((t) => SITE_FACT_CHECKLISTS.has(t.id));
+  const siteFactsCheck = factChecklistActive ? opts.siteFactsCheck ?? null : null;
+  const needs_site_facts_check =
+    factChecklistActive && !siteFactsCheck && siteFactsInputText(proposal, promoteDraftText).trim() !== "";
+  if (siteFactsCheck?.outcome === "unavailable") {
+    warnings.push({
+      code: "jev_unavailable",
+      message:
+        "Automated fact check unavailable; discovery shows all site facts (list_variables facts_only). Check every stat against the catalog.",
+    });
+  }
 
   const meta = DAMAGE_CLASS_META[damage_class];
   let relatedStaff: string | undefined;
@@ -913,8 +1078,11 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       undo: UNDO_COPY[undo_cost],
       ...(relatedStaff ? { related: relatedStaff } : {}),
     },
+    ...(proposal.kind === "idea" && opts.contentTypeStrategies
+      ? { content_type_strategies: opts.contentTypeStrategies }
+      : {}),
     agent_preview: {
-      think_items: orderedIds.map((t) => ({
+      think_items: withContentTypeFitThink(orderedIds.map((t) => ({
         id: t.id,
         title: t.title,
         why: t.why,
@@ -940,7 +1108,7 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           }
           return base;
         })(),
-      })),
+      })), contentTypeFitThink),
       warnings,
     },
     block_apply,
@@ -949,6 +1117,10 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
       : {}),
     ...(needs_jev_claim_check ? { needs_jev_claim_check: true } : {}),
     ...(claim_cue_text ? { claim_cue_text } : {}),
+    ...(figureHits.length && defs ? { figure_variables: summarizeFigureVariables(figureHits, defs) } : {}),
+    ...(factHits.length ? { fact_variable_names: factHits.map((h) => h.name) } : {}),
+    ...(needs_site_facts_check ? { needs_site_facts_check: true } : {}),
+    ...(siteFactsCheck ? { site_facts: siteFactsCheck } : {}),
     ...(countsAsLeadForm ? { counts_as_lead_hint: true } : {}),
     ...(claimCueJevOutcome
       ? {

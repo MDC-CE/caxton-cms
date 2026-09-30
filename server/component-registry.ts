@@ -16,6 +16,7 @@ import {
   type RegistryOrigin,
 } from "../shared/registry-resolve";
 import { resolveComponentBehaviors } from "@shared/component-behaviors";
+import type { TextLimitsByVariant } from "@shared/component-text-limits";
 import { getPackageRoot, getProjectRoot } from "@shared/paths";
 import { child } from "./logger";
 const log = child({ module: "component-registry" });
@@ -107,6 +108,12 @@ export interface ComponentSchema {
   };
   props: Record<string, unknown>;
   variants?: Record<string, { description?: string; best_for?: string }>;
+  variant_props?: Record<string, Record<string, unknown>>;
+  /**
+   * Visible-character limits per section variant (`"*"` = every variant).
+   * Evaluated by shared/component-text-limits.ts on draft save (warn), live edit and publish.
+   */
+  text_limits?: TextLimitsByVariant;
 }
 
 export interface ComponentExample {
@@ -247,6 +254,16 @@ function resolveSchemaFolderForSection(componentType: string, sectionVersion: un
   }
   const versions = listVersions(componentType, contentFolder);
   return versions.length > 0 ? versions[0]! : null;
+}
+
+/** Schema for a section's type at its declared version (falls back to the newest version). */
+export function loadSchemaForSection(
+  componentType: string,
+  sectionVersion: unknown,
+  contentFolder?: string,
+): ComponentSchema | null {
+  const folder = resolveSchemaFolderForSection(componentType, sectionVersion, contentFolder);
+  return folder ? loadSchema(componentType, folder, contentFolder) : null;
 }
 
 function getNestedFromRoot(root: unknown, dottedPath: string): unknown {

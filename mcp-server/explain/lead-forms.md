@@ -187,8 +187,33 @@ conversion_name: event_order
 - Extra keys are **not** rendered yet (UI slots stay hardcoded). Use `visible: false` + `default` for Learn-style `event_*` payload keys. `{{ entry.* }}` is resolved by section `resolveDeep` before the form mounts — submit copies those values onto the lead body and dataLayer. Resolved defaults may be **string, number, or boolean** (e.g. numeric `entry.id` → `event_id`); empty strings are skipped.
 - Do **not** put `fields` on `form_overrides` for phase differences — change `conversion_name` / webhook / success instead.
 
+## Campaign context + ledger fields (added by code, not YAML)
+
+Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server-side before `buildLeadPayload`:
+
+| Key | When | Meaning |
+|---|---|---|
+| `submission_id` | always | Per-submit id (client UUID, server fallback). Not the authored `event_id`. Also on the GTM conversion push. |
+| `is_test` | always (boolean) | Staff session (`X-Debug-Token`) or email matching `settings.yml` → `ads.test_email_patterns`. Still delivered; excluded from Ads reports. |
+| `test_reason` | only when `is_test` | `staff_session` \| `email_pattern` |
+| `is_repeat` | always (boolean) | Same browser + same `conversion_name` within 24h. Still delivered; counted as a submission, not a lead. |
+| `repeat_of_submission_id` | only when `is_repeat` | First submission in the window. |
+| `gclid` `fbclid` `msclkid` `ttclid` `li_fat_id` … | when present | Per-platform click ids (`ppc_tracking_id` kept for back-compat). |
+| `utm_id` `fbp` `fbc` | when present | Meta campaign id (URL template), Meta browser / click ids. |
+| `first_utm_*` | when present | Write-once first campaign set in this browser. |
+| `landing_url` / `conversion_url` | always | First page in this browser / page where the form was sent. |
+| `first_paid_landing_*` / `last_paid_landing_*` | when a paid visit was seen (≤30 days) | URL + ISO time. |
+| `ad_platform` | paid/unclear visits | `meta` \| `google` \| … |
+| `page_experiment_id` / `page_variant` | page has an active version test | Variant from the versioning cookie. |
+| `consent_state` | always | `granted` \| `denied` \| `unset` (tracking banner). |
+
+- Source precedence: HttpOnly `4g_ads` cookie (only after tracking consent) → in-memory session in the request body (same-visit leads before consent).
+- The server ledger (`lead_submissions` in pipeline SQLite) stores **no** name / email / phone; 25-month retention. CRM owns personal data.
+- Non-effects: YAML `fields.*` defaults with the same key win only when enrichment has no value (enrichment keys override raw body keys).
+
 ## Paths
 
+- Ledger / enrichment: `server/ads/lead-ledger.ts`, `server/ads/ad-context.ts`, client `client/src/lib/leadAdContext.ts`
 - Parse: `shared/parseFormFieldSource.ts`
 - Catalog API: `server/query-options.ts`
 - Index: `server/ecommerce/ecommerce-index.ts`

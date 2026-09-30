@@ -5,6 +5,112 @@
 window_days: 6
 
 entries:
+  - date: "2026-09-29"
+    summary: "New get_paid_traffic tool: Meta spend, paid landing pages, lead credit, and ad tracking health (read-only)"
+    agent_impact:
+      - "New read-only tool get_paid_traffic (metrics_view). Exclusive mode: summary (totals + top 5 pages by spend) | campaigns | entries (managed pages; group=campaign keeps full campaign list; split_by_version adds per-variant rows from experiment_exposure) | destinations (spend not landing on a managed page: instant_form / off_site / other_site / missing_page / unknown_destination — totals reconcile with Meta) | diagnostics (issues with severity + spend_affected + how_to_fix, KPIs, consent rates by region; days ≤7 → 7 else 28). days 1–90 ending yesterday (default 28); limit 25 (max 100) + offset; filters platform, currency, account, content_type; sort spend | paid_visits | unique_leads | conversion_rate | cost_per_lead."
+      - "Three sources, never summed: Meta Marketing API (spend, clicks, Meta leads), GA4 BigQuery export (paid visits, engagement), site lead ledger (unique vs repeat leads, test excluded). Money stays per currency (mixed_currency warning). Credit: one lead → one landing page, model last_paid (default) | first_paid, 30-day lookback, no split, form page never credited. Journeys are per browser (attribution.basis browser_observed)."
+      - "Paid classification: paid medium or platform click ID; Meta needs paid medium or a matching Meta ID — fbclid alone is Meta: unclear. State consent limits: consent.ask_region_reject_pct non-null → numbers include Consent Mode estimates; covered_days / ledger_collecting → site leads partial; low_sample under thresholds.min_paid_visits_for_rates."
+      - "Warnings: meta_refresh_in_progress (re-call per next_actions), meta_not_connected, ga4_not_configured, mixed_currency, ledger_collecting, consent_estimates. status not_configured when neither Meta nor GA4 is set up. Reads may enqueue one background meta_ads_sync refresh when data is >24h old; diagnostics probes ≤10 landing URLs (6h cache) and records .cache/{site}/ads-issues.json. Never changes Meta, settings, consent, or lead delivery."
+      - "Lead webhook payloads now also carry submission_id, utm_id, click IDs (gclid/fbclid/msclkid/ttclid/li_fat_id), fbp/fbc, first_utm_*, landing_url, conversion_url, last_paid_landing_url/at, ad_platform, page_experiment_id/page_variant, is_test, is_repeat, consent_state (explain lead-forms). New explain topic ads. Reconnect MCP to see get_paid_traffic."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/overview.md
+      - server/routes/ads.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - shared/paid-attribution.ts
+      - shared/ads-diagnostics-rules.ts
+
+  - date: "2026-09-29"
+    summary: "New list_variables tool: variables are the site's fact database; fact reviews point at it"
+    agent_impact:
+      - "New read-only tool list_variables (content_view). No names → catalog rows {name, description, category, unit, default, varies_by, read_only, deprecated, missing_description} + counts_by_category; filters category (one/many), figures_only (price/outcome_claim/social_proof), facts_only (+ product_fact/company_fact/contact), query (names + descriptions), include_deprecated. names (≤20) → conditions in match order, by_* maps, paste-ready token, usage_count; deprecated names always returned with deprecated_variable warning + replaced_by; unknown names listed with close matches."
+      - "context {region|location|locale} (detail only) adds resolved {value, source}; unknown values → action_required unknown_context_value with valid_regions/valid_locations/valid_locales. context.entry {contentType, slug, locale} returns audience {regions, locations, source: region|locations|none} from hand-set region / locations fields only, plus per variable audience_values and literal_ok (null when unset/mixed audience and the fact varies by region). entry + region/location → context_conflict; missing entry → entry_not_found."
+      - "Tokens resolve per visitor, not per page: paste the token instead of typing figures; a literal is allowed only when it equals literal_ok. Catalog wins over proposals — stale fact → propose_change kind notes (update global.x to Y, source …), keep the token. Values/metadata change only at /private/variables; each site has its own variables.yml; brand/reserved/consent are Settings-managed."
+      - "Outcome-figures review also turns on for figure-category tokens in edited values: review_context.figure_variables + warning figure_variable_tokens; discovery_path adds list_variables (names + context.entry, or figures_only when no tokens); selling_page_figures look_for covers wrong variable, region-varying literal (add_blocker unless literal_ok), catalog disagreement, deprecated token → replaced_by."
+      - "verify_copy, title_description_ctr, locale_translation, new_content_brand and idea_opportunity_harm get a list_variables discovery item with the fact categories a Jev check picked (cached per proposal text), or facts_only + warning jev_unavailable when the decision model is down. Only one list_variables item per path (figures item wins). review_context.site_facts {outcome, categories}."
+      - "Diagnostics: VARIABLE_MISSING_DESCRIPTION / VARIABLE_MISSING_CATEGORY are coding_agent_only — do not claim; check list_proposals for an open handoff with the issue id, else file one propose_change kind notes with related_issue_ids listing site + variable names. Warnings for unit mismatch, deprecated in use, broken replaced_by, near-duplicate names."
+      - "Explain: content_system Template variables adds site facts + page audience; conventions v37 adds the site-facts habit. Reconnect MCP to see list_variables."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/variables.ts
+      - server/variable-catalog.ts
+      - server/variable-catalog-route.ts
+      - server/page-audience.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/ai/decisions/catalog.ts
+      - scripts/validation/validators/variables-metadata.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/agent-conventions.md
+
+  - date: "2026-09-29"
+    summary: "Ideas carry a structured SEO target (keyword + cluster); idea-born pages keep it through publish"
+    agent_impact:
+      - "New-URL ideas on SEO-monitored types: idea_seo_target { main_keyword, cluster: {mode: join, pillar_path} | {mode: hub, members[{contentType, slug}]} | {mode: standalone, reason} } on propose_change or update_proposal action set_idea_seo_target (open ideas, proposer/staff). Soft warning idea_seo_target_missing on create; accept refuses without it (idea_seo_target_required). Non-monitored types and ideas accepted before today are unaffected."
+      - "Accept checks: join hub live + same locale + is_pillar (idea_seo_target_hub_not_live); hub members live, monitored, same locale (idea_seo_target_hub_members_required); standalone only for fast_decay_news / broken_url with reason min 40 (idea_seo_target_standalone_not_allowed); keyword not held by a live page or another accepted unpublished idea (idea_seo_target_keyword_taken; seo_index_unavailable fails closed). Target freezes at accept (idea_seo_target_frozen)."
+      - "Implementing edits: the locked target is seeded into the new draft.{locale}.yml seo: block. seo.main_keyword / seo.pillar_path ops that differ need seo_target_override { reason } (min 40) on propose_change / revise_entries (idea_seo_target_conflict); review shows locked vs proposed. Renamed hub is followed (warning idea_seo_target_hub_renamed); deleted hub fails (idea_seo_target_hub_gone). Hub mode: apply of first go-live returns warning idea_seo_hub_members_follow_up + one propose_change next_action per member (members already in another hub flagged)."
+      - "Second locale: proposal apply and promote_variant refuse the first go-live of a locale on a monitored page without seo.main_keyword plus a same-locale live hub or seo.is_pillar (locale_seo_target_required). Standalone (pillar_path null) needs promote_variant seo_standalone_reason (min 40); idea-born pages also need a news / broken-URL idea. Staff UI promote not gated."
+      - "Opt-out: agents cannot set seo.pillar_path: null on an idea-born page (seo_optout_idea_born) unless the idea is fast_decay_news / broken_url and a reason (min 40) is given — update_fields seo_optout_reason; proposals seo_target_override.reason. Staff UI gets a warning dialog only. /api/seo/entry returns idea_origin {id, title, demand_label}."
+      - "Idea discovery_path recommends list_seo_cluster_entries on the target hub (or list_seo_clusters when the target is missing). Docs: explain_site topic seo no longer says draft-while-live seo: is forbidden — drafts may carry seo:, promote applies it."
+    tools_changed: false
+    paths:
+      - server/content-proposals/idea-seo-target.ts
+      - server/content-proposals/idea-origin.ts
+      - server/content-proposals/locale-seo-gate.ts
+      - server/content-proposals/service.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/routes/sections.ts
+      - server/routes/seo.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/seo.md
+
+  - date: "2026-09-29"
+    summary: "Ideas name their target page type in related_entries; the type's strategy guides author, reviewer, and staff"
+    agent_impact:
+      - "Ideas: put the target page type in related_entries [{contentType, slug, locale}] (contentType = content-types.yml key, e.g. landing — not the folder landings, not tags like surface:landing; tags are kept but ignored by review). Read get_content_type_info(contentType).strategy (purpose + constraints) before writing the brief."
+      - "propose_change kind idea refuses unknown types: code unknown_content_type with details.unknown + details.valid_types (nothing saved)."
+      - "New update_proposal action set_related_entries (open/partial ideas, proposer; full replacement, empty clears; same unknown-type + mixed_risk_bundle checks; refused after accept — accepted_entry is the lock). Reviewer-only callers are denied."
+      - "Soft warnings (never block create/accept): idea_content_type_missing (reviewer add_blocker only for ideas filed on/after 2026-09-30; older = reminder), idea_content_type_unknown (legacy non-key type), idea_multiple_content_types (split — one idea, one type), content_type_strategy_missing (staff sets it on the Strategy tab)."
+      - "Review: think item content_type_fit lists each type's purpose/constraints (max 3 types). list_proposals(proposal_id) returns content_type_strategies [{contentType, role: accepted|pitched, purpose?, constraints?, missing?}] for any idea status; accepted type first when it differs from the pitched type."
+    tools_changed: false
+    paths:
+      - server/content-proposals/idea-content-type.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+
+  - date: "2026-09-29"
+    summary: "Component text limits (schema.yml text_limits): warn on drafts, block agents at publish — first used on hero productShowcase"
+    agent_impact:
+      - "Component schemas may declare text_limits per variant (visible characters: HTML tags/comments stripped, entities decoded, whitespace collapsed; rules can sum several fields or cap list items). get_component_schema shows them. hero productShowcase: welcome_text 40, H1 (brand_mark.prefix+highlight+suffix) 70, H2 (title) 60, H1+H2 90, subtitle 80, description 180, bullets max 4 items × 120. Only text that changed versus the saved/live version is checked; untouched over-limit copy never blocks."
+      - "Draft writes never block: update_fields / add_section / replace_entry_sections / create_entry / translate_entry return warning text_limit_exceeded (field_path + actual/max). A live (non-draft) edit by an agent that lengthens limited text fails with code text_limits_exceeded (nothing written) — staff live edits only warn."
+      - "publish_draft / promote_variant / proposal apply fail with code text_limits_exceeded (violations[], property_paths, next_actions update_fields on the draft). Agents cannot override; staff can 'Publish anyway' (confirm_text_limits, rejected from MCP). New site validator text-limits reports existing pages as warning TEXT_LIMIT_EXCEEDED."
+    tools_changed: false
+    paths:
+      - shared/component-text-limits.ts
+      - shared/component-registry/hero/v1.0/schema.yml
+      - server/text-limits.ts
+      - server/text-limits-edit.ts
+      - server/routes/sections.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/content-proposals/service.ts
+      - mcp-server/lib/text-limits-mcp.ts
+      - mcp-server/tools/pages.ts
+      - scripts/validation/validators/text-limits.ts
+
   - date: "2026-09-25"
     summary: "Database entries are delivered like static entries; their drafts follow layout_owner"
     agent_impact:

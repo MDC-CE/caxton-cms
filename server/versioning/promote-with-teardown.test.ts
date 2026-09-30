@@ -20,6 +20,16 @@ vi.mock("../published-at", () => ({ ensurePublishedAtOnce: () => {} }));
 vi.mock("../product/funnel-audience-gates", () => ({
   assertFunnelAudienceGates: () => ({ ok: true, warnings: [] }),
 }));
+const textLimitsMock = vi.hoisted(() => ({
+  violations: [] as Array<Record<string, unknown>>,
+  calls: [] as Array<{ before: unknown }>,
+}));
+vi.mock("../text-limits", () => ({
+  evaluatePageTextLimitsForSite: (_page: unknown, opts: { before?: unknown }) => {
+    textLimitsMock.calls.push({ before: opts.before });
+    return textLimitsMock.violations;
+  },
+}));
 
 import { resetRegistry } from "../content-types";
 import { markFileAsModified } from "../sync-state";
@@ -279,6 +289,59 @@ describe("promoteVariantWithOptionalTeardown", () => {
     vi.restoreAllMocks();
     expect(read("_common.yml")).toBe(commonBefore);
     expect(fs.existsSync(path.join(entryDir, "draft.en.yml"))).toBe(true);
+  });
+
+  describe("text limits", () => {
+    const violation = {
+      label: "H1",
+      fields: ["brand_mark.prefix", "brand_mark.highlight", "brand_mark.suffix"],
+      section_path: "sections[0]",
+      kind: "length",
+      actual: 94,
+      max: 70,
+      text: "x".repeat(94),
+      message: "H1 has 94 visible characters (max 70) at sections[0]",
+    };
+    beforeEach(() => {
+      write("draft.en.yml", "slug: post-a\ntitle: Draft\nsections: []\n");
+      recordDraftBase({ contentType: "blog", slug: "post-a", locale: "en", variant: "draft", contentRoot });
+      textLimitsMock.violations = [violation];
+      textLimitsMock.calls = [];
+    });
+    afterEach(() => {
+      textLimitsMock.violations = [];
+    });
+
+    it("compares against live and blocks staff until confirmed", async () => {
+      const res = await promote();
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("text_limits_exceeded");
+        expect(res.error).toContain("confirm to publish anyway");
+        expect(res.details).toEqual({ violations: [violation] });
+      }
+      expect(textLimitsMock.calls[0]!.before).toMatchObject({ title: "Live title" });
+      expect(load("en.yml").title).toBe("Live title");
+
+      const confirmed = await promote({ confirmTextLimits: true });
+      expect(confirmed.ok).toBe(true);
+      if (confirmed.ok) expect(confirmed.warnings.map((w) => w.code)).toContain("text_limits_confirmed");
+      expect(load("en.yml").title).toBe("Draft");
+    });
+
+    it("agents (MCP) stay blocked even with the confirmation", async () => {
+      const res = await promote({ callerIsMcp: true, confirmTextLimits: true });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("text_limits_exceeded");
+        expect(res.error).toContain("Shorten it on the draft");
+      }
+    });
+
+    it("passes when nothing is over the limit", async () => {
+      textLimitsMock.violations = [];
+      expect((await promote({ callerIsMcp: true })).ok).toBe(true);
+    });
   });
 
   it("rejects attached drafts that carry structure", async () => {

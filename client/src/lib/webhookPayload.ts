@@ -150,6 +150,22 @@ export function buildWebhookSamplePayload(
   if (session.utm?.referral) sessionOverrides.referral = session.utm.referral;
   if (session.utm?.referral_key) sessionOverrides.referral_key = session.utm.referral_key;
   if (session.utm?.coupon) sessionOverrides.coupon = session.utm.coupon;
+  if (session.utm?.utm_id) sessionOverrides.utm_id = session.utm.utm_id;
+  for (const clickId of ["gclid", "fbclid", "msclkid", "ttclid", "li_fat_id"] as const) {
+    const v = session.utm?.[clickId];
+    if (v) sessionOverrides[clickId] = v;
+  }
+  if (session.utm?.fbp) sessionOverrides.fbp = session.utm.fbp;
+  if (session.utm?.fbc) sessionOverrides.fbc = session.utm.fbc;
+  if (session.first_touch?.utm_source) sessionOverrides.first_utm_source = session.first_touch.utm_source;
+  if (session.first_touch?.utm_medium) sessionOverrides.first_utm_medium = session.first_touch.utm_medium;
+  if (session.first_touch?.utm_campaign) sessionOverrides.first_utm_campaign = session.first_touch.utm_campaign;
+  if (session.landing_page) sessionOverrides.landing_url = session.landing_page;
+  const lastPaid = session.paid_landing?.last;
+  if (lastPaid) {
+    sessionOverrides.last_paid_landing_url = `https://${lastPaid.host}${lastPaid.path}`;
+    sessionOverrides.last_paid_landing_at = new Date(lastPaid.at).toISOString();
+  }
 
   return buildSamplePayload({ ...formSettingsOverrides, ...sessionOverrides });
 }

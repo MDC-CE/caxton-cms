@@ -177,6 +177,14 @@ const REGISTRY = [
       "Change site-wide SEO config: Schema.org, brand, Search Console, OG/preview, companion ensure, and runtime-issue cleanup.",
   },
   {
+    name: "ads_settings",
+    label: "Manage Ads settings",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Connect ad accounts (Meta), edit ads alert thresholds, run ads syncs, and edit the cookie consent window (which countries must accept or reject tracking).",
+  },
+  {
     name: "content_types_manage",
     label: "Manage content types",
     scoped: false,

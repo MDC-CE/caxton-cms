@@ -470,6 +470,7 @@ function SeoFieldsEditor({
       fetched_at: string | null;
       stale: boolean;
     };
+    idea_origin?: { id: string; title: string; demand_label: string | null } | null;
   }>({
     queryKey: ["/api/seo/entry", contentType, slug, locale, "keyword-metrics-preview"],
     enabled: !!contentType && !!slug && !!locale && !isVariantLayer,
@@ -485,6 +486,8 @@ function SeoFieldsEditor({
     },
   });
   const resolvedKm = entryKeywordMetrics?.keyword_metrics;
+  const ideaOrigin = entryKeywordMetrics?.idea_origin ?? null;
+  const [optOutConfirmOpen, setOptOutConfirmOpen] = useState(false);
   const openrushConfigured = resolvedKm?.openrush_configured === true;
   const metricsFormEmpty =
     parseMetricInput(kwMonthlyVolume) === null && parseMetricInput(kwDifficulty) === null;
@@ -624,8 +627,12 @@ function SeoFieldsEditor({
     }
   };
 
-  const handleClusterSeoToggle = async (checked: boolean) => {
+  const handleClusterSeoToggle = async (checked: boolean, confirmedOptOut = false) => {
     if (disabled || saving) return;
+    if (!checked && ideaOrigin && !confirmedOptOut) {
+      setOptOutConfirmOpen(true);
+      return;
+    }
     if (checked && keywordSaveBlocked) {
       toast({
         title: "Cannot activate monitoring",
@@ -819,23 +826,23 @@ function SeoFieldsEditor({
               {clusterSeoOn ? "On" : "Off — this page is not monitored"}
             </dd>
           </div>
+          <div>
+            <dt className="text-xs text-muted-foreground flex items-center gap-2">
+              Main keyword
+              {seoSourceBadge(kwRow) && (
+                <Badge variant={seoSourceBadge(kwRow)!.variant} className="text-[10px] font-normal">
+                  {seoSourceBadge(kwRow)!.label}
+                </Badge>
+              )}
+            </dt>
+            <dd className="text-sm text-foreground" data-testid="text-seo-main-keyword-preview">
+              {mainKeyword.trim() || (
+                <span className="italic text-muted-foreground font-normal">Not set</span>
+              )}
+            </dd>
+          </div>
           {clusterSeoOn ? (
             <>
-              <div>
-                <dt className="text-xs text-muted-foreground flex items-center gap-2">
-                  Main keyword
-                  {seoSourceBadge(kwRow) && (
-                    <Badge variant={seoSourceBadge(kwRow)!.variant} className="text-[10px] font-normal">
-                      {seoSourceBadge(kwRow)!.label}
-                    </Badge>
-                  )}
-                </dt>
-                <dd className="text-sm text-foreground" data-testid="text-seo-main-keyword-preview">
-                  {mainKeyword.trim() || (
-                    <span className="italic text-muted-foreground font-normal">Not set</span>
-                  )}
-                </dd>
-              </div>
               <div>
                 <dt className="text-xs text-muted-foreground">Refresh tier</dt>
                 <dd className="text-sm text-foreground" data-testid="text-seo-refresh-tier-preview">
@@ -2295,6 +2302,41 @@ export function MappingFieldsTab({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={optOutConfirmOpen} onOpenChange={setOptOutConfirmOpen}>
+        <AlertDialogContent data-testid="dialog-idea-born-optout">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Take this page out of its topic cluster?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  This page came from a traffic idea
+                  {ideaOrigin ? (
+                    <>
+                      {" "}
+                      (<span className="font-medium text-foreground">{ideaOrigin.title}</span>)
+                    </>
+                  ) : null}
+                  . Turning monitoring off removes it from its topic cluster, so it stops supporting its hub.
+                </p>
+                <p>The keyword and page content stay as they are. You can turn monitoring back on later.</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep in cluster</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setOptOutConfirmOpen(false);
+                void handleClusterSeoToggle(false, true);
+              }}
+              data-testid="button-confirm-idea-born-optout"
+            >
+              Turn off anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!resetTarget} onOpenChange={(v) => { if (!v) setResetTarget(null); }}>
         <AlertDialogContent data-testid="dialog-reset-field">

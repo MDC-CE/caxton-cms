@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "wouter";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
+import { TEXT_LIMITS_EXCEEDED_CODE, type TextLimitViolation } from "@shared/component-text-limits";
+import { TextLimitsIssue } from "@/components/TextLimitsIssue";
 import { deslugify } from "../utils/debugHelpers";
 import { IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -307,10 +309,15 @@ export function VersioningView({
   const [shareTarget, setShareTarget] = useState<{ locale: string; slug: string | null } | null>(null);
 
   const [promoteTarget, setPromoteTarget] = useState<{ locale: string; slug: string } | null>(null);
-  const [promoteIssue, setPromoteIssue] = useState<{ code: string; message: string } | null>(null);
-  const [promoteConfirms, setPromoteConfirms] = useState<{ overwrite: boolean; source: boolean }>({
+  const [promoteIssue, setPromoteIssue] = useState<{
+    code: string;
+    message: string;
+    violations?: TextLimitViolation[];
+  } | null>(null);
+  const [promoteConfirms, setPromoteConfirms] = useState<{ overwrite: boolean; source: boolean; textLimits: boolean }>({
     overwrite: false,
     source: false,
+    textLimits: false,
   });
   const [isPromoting, setIsPromoting] = useState(false);
 
@@ -444,17 +451,30 @@ export function VersioningView({
 
   const resetPromoteIssue = () => {
     setPromoteIssue(null);
-    setPromoteConfirms({ overwrite: false, source: false });
+    setPromoteConfirms({ overwrite: false, source: false, textLimits: false });
   };
 
   const promoteConfirmBody = (confirms = promoteConfirms) => ({
     ...(confirms.overwrite ? { confirm_overwrite_newer_live: true } : {}),
     ...(confirms.source ? { confirm_source_changed: true } : {}),
+    ...(confirms.textLimits ? { confirm_text_limits: true } : {}),
   });
 
   /** Keep the dialog open and ask again when the server needs an explicit overwrite confirm. */
-  const holdForPromoteConfirm = (data: { code?: string; error?: string }): boolean => {
+  const holdForPromoteConfirm = (data: {
+    code?: string;
+    error?: string;
+    details?: { violations?: TextLimitViolation[] };
+  }): boolean => {
     const code = data.code;
+    if (code === TEXT_LIMITS_EXCEEDED_CODE) {
+      setPromoteIssue({
+        code,
+        message: "Some text is longer than this section allows. Long text crowds the page, especially on phones.",
+        violations: Array.isArray(data.details?.violations) ? data.details.violations : [],
+      });
+      return true;
+    }
     if (code !== "draft_base_stale" && code !== "draft_base_unknown" && code !== "translation_source_changed") {
       return false;
     }
@@ -1985,7 +2005,9 @@ export function VersioningView({
               )}
             </DialogDescription>
           </DialogHeader>
-          {promoteIssue ? (
+          {promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE ? (
+            <TextLimitsIssue message={promoteIssue.message} violations={promoteIssue.violations ?? []} />
+          ) : promoteIssue ? (
             <p
               className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
               data-testid="text-promote-issue"
@@ -1998,9 +2020,13 @@ export function VersioningView({
               variant="destructive"
               onClick={() => {
                 if (promoteIssue) {
+                  const isTextLimits = promoteIssue.code === TEXT_LIMITS_EXCEEDED_CODE;
                   const next = {
-                    overwrite: promoteConfirms.overwrite || promoteIssue.code !== "translation_source_changed",
+                    overwrite:
+                      promoteConfirms.overwrite ||
+                      (!isTextLimits && promoteIssue.code !== "translation_source_changed"),
                     source: promoteConfirms.source || promoteIssue.code === "translation_source_changed",
+                    textLimits: promoteConfirms.textLimits || isTextLimits,
                   };
                   setPromoteConfirms(next);
                   setPromoteIssue(null);
@@ -2032,7 +2058,11 @@ export function VersioningView({
               data-testid="button-cancel-promote"
             >
               <IconX className="h-4 w-4" />
-              {isDraftEntry ? "Cancel" : "No, keep it as a secondary variant"}
+              {promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE
+                ? "Go back"
+                : isDraftEntry
+                  ? "Cancel"
+                  : "No, keep it as a secondary variant"}
             </Button>
           </DialogFooter>
         </DialogContent>

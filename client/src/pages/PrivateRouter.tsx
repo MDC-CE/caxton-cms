@@ -21,6 +21,7 @@ const CloudSyncPage = lazy(() => import("@/pages/CloudSyncPage"));
 const PrivateDatabases = lazy(() => import("@/pages/PrivateDatabases"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 const SeoGeoSettingsPage = lazy(() => import("@/pages/SeoGeoSettingsPage"));
+const AdsSettingsPage = lazy(() => import("@/pages/AdsSettingsPage"));
 const AIKnowledge = lazy(() => import("@/pages/AIKnowledge"));
 const AIConversations = lazy(() => import("@/pages/AIConversations"));
 const AIKnowledgeBlocks = lazy(() => import("@/pages/AIKnowledgeBlocks"));
@@ -151,6 +152,8 @@ export default function PrivateRouter() {
           <Route path="/private/settings/seo/search-console" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/openrush" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo" component={SeoGeoSettingsPage} />
+          <Route path="/private/settings/ads/meta" component={AdsSettingsPage} />
+          <Route path="/private/settings/ads" component={AdsSettingsPage} />
           <Route path="/private/settings" component={SettingsPage} />
           <Route path="/private/sync-log" component={SyncLogRedirect} />
           <Route path="/private/repository-sync" component={SyncLogPage} />

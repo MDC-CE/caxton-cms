@@ -5,6 +5,12 @@ import path from "path";
 import yaml from "js-yaml";
 import { child } from "./logger";
 import { normalizeConsentFallbackKey } from "@shared/consent-settings";
+import {
+  DEFAULT_CONSENT_WINDOW,
+  parseConsentWindowSettings,
+  type ConsentWindowSettings,
+} from "@shared/consent";
+import { parseAdsSettings, type AdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
 import {
   type AuthSignupFieldMapEntry,
@@ -899,6 +905,8 @@ export function parseEntryPreviewSettings(raw: unknown): EntryPreviewSettings {
 /** Lead-form consent pointer in settings.yml (`consent.fallback`). */
 export interface SiteConsentSettings {
   fallback: string | null;
+  /** Cookie banner rules (`consent.window`). */
+  window: ConsentWindowSettings;
 }
 
 interface SiteSettings {
@@ -914,12 +922,16 @@ interface SiteSettings {
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
+  ads: AdsSettings;
 }
 
 function parseSiteConsentSettings(raw: unknown): SiteConsentSettings {
-  if (!raw || typeof raw !== "object") return { fallback: null };
+  if (!raw || typeof raw !== "object") return { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } };
   const rec = raw as Record<string, unknown>;
-  return { fallback: normalizeConsentFallbackKey(rec.fallback) };
+  return {
+    fallback: normalizeConsentFallbackKey(rec.fallback),
+    window: parseConsentWindowSettings(rec.window),
+  };
 }
 
 /** Build robots.txt body from settings. `baseUrl` is used for the Sitemap line when included. */
@@ -1013,7 +1025,8 @@ function loadSettings(contentRoot?: string): SiteSettings {
     },
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
-    consent: { fallback: null },
+    consent: { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } },
+    ads: parseAdsSettings(undefined),
   };
 
   if (!fs.existsSync(settingsPath)) {
@@ -1234,6 +1247,7 @@ function loadSettings(contentRoot?: string): SiteSettings {
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
+      ads: parseAdsSettings(parsed.ads),
     };
     settingsCache.set(key, result);
     log.info(
@@ -1312,6 +1326,47 @@ export function updateConsentFallback(fallback: string | null, contentRoot?: str
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(`[Settings] Updated consent.fallback=${normalized ?? "(none)"}`);
   return normalized;
+}
+
+export function getConsentWindowSettings(contentRoot?: string): ConsentWindowSettings {
+  return loadSettings(contentRoot).consent.window;
+}
+
+/** Persist `consent.window` by patching settings.yml (preserves `consent.fallback` and unrelated keys). */
+export function updateConsentWindowSettings(
+  input: Partial<ConsentWindowSettings>,
+  contentRoot?: string,
+): ConsentWindowSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      existing = (yaml.load(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>) || {};
+    } catch {}
+  }
+  const prev =
+    existing.consent && typeof existing.consent === "object"
+      ? { ...(existing.consent as Record<string, unknown>) }
+      : {};
+  const current = parseConsentWindowSettings(prev.window);
+  const merged = parseConsentWindowSettings({ ...current, ...input });
+  existing.consent = {
+    ...prev,
+    window: {
+      ask_countries: merged.ask_countries,
+      unknown_country_mode: merged.unknown_country_mode,
+      accept_days: merged.accept_days,
+      reject_days: merged.reject_days,
+    },
+  };
+  fs.writeFileSync(settingsPath, yaml.dump(existing, { lineWidth: 120, noRefs: true }), "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(
+    `[Settings] Updated consent.window ask=${
+      merged.ask_countries === "default" ? "default" : merged.ask_countries.length
+    } unknown=${merged.unknown_country_mode} accept=${merged.accept_days}d reject=${merged.reject_days}d`,
+  );
+  return merged;
 }
 
 export function normalizeLocale(locale: string | undefined | null, contentRoot?: string): string {
@@ -2019,6 +2074,55 @@ export function updateSearchConsoleOrganicMarkets(
     `[Settings] Updated search_console.organic_markets count=${organic_markets.length}`,
   );
   return updated;
+}
+
+export function getAdsSettings(contentRoot?: string): AdsSettings {
+  return loadSettings(contentRoot).ads;
+}
+
+export type AdsSettingsUpdate = {
+  meta?: Partial<Omit<MetaAdsSettings, "alert_thresholds">> & {
+    alert_thresholds?: Partial<AdsSettings["meta"]["alert_thresholds"]>;
+  };
+  test_email_patterns?: string[];
+};
+
+export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string): AdsSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const current = parseAdsSettings(existing.ads);
+  const merged = parseAdsSettings({
+    meta: {
+      ...current.meta,
+      ...(input.meta ?? {}),
+      alert_thresholds: { ...current.meta.alert_thresholds, ...(input.meta?.alert_thresholds ?? {}) },
+    },
+    test_email_patterns: input.test_email_patterns ?? current.test_email_patterns,
+  });
+  existing.ads = {
+    meta: {
+      enabled: merged.meta.enabled,
+      ad_account_ids: merged.meta.ad_account_ids,
+      alert_thresholds: merged.meta.alert_thresholds,
+    },
+    test_email_patterns: merged.test_email_patterns,
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(
+    `[Settings] Updated ads.meta enabled=${merged.meta.enabled} accounts=${merged.meta.ad_account_ids.length} ` +
+      `test_patterns=${merged.test_email_patterns.length}`,
+  );
+  return merged;
 }
 
 export function updateOpenRushSettings(

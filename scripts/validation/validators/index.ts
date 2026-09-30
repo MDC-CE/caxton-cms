@@ -50,8 +50,10 @@ import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
 import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
 import { unassignedVariablesValidator } from "./unassigned-variables";
+import { variablesMetadataValidator } from "./variables-metadata";
 import { funnelCompletenessValidator } from "./funnel-completeness";
 import { draftIntegrityValidator } from "./draft-integrity";
+import { textLimitsValidator } from "./text-limits";
 
 export const validators: Validator[] = [
   redirectValidator,
@@ -62,6 +64,7 @@ export const validators: Validator[] = [
   sitemapValidator,
   componentsValidator,
   sectionVariantsValidator,
+  textLimitsValidator,
   backgroundsValidator,
   faqsValidator,
   seoDepthValidator,
@@ -99,6 +102,7 @@ export const validators: Validator[] = [
   siteLinkIndexValidator,
   siteRelationIndexValidator,
   unassignedVariablesValidator,
+  variablesMetadataValidator,
   draftIntegrityValidator,
 ];
 

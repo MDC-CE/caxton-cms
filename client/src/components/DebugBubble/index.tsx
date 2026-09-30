@@ -1643,9 +1643,12 @@ export function DebugBubble() {
     }
   };
 
-  // Handle popover open/close - reset search but preserve menu view
+  // Handle popover open/close - reset search; on entry pages the bug always opens the root menu
   const handleOpenChange = (newOpen: boolean) => {
     setOpen(newOpen);
+    if (newOpen && contentInfo.type) {
+      setMenuView("main");
+    }
     if (!newOpen) {
       setSitemapSearch("");
       setShowSitemapSearch(false);
@@ -2333,10 +2336,10 @@ export function DebugBubble() {
             className="h-10 w-10 rounded-full shadow-lg flex-shrink-0"
             title={
               pageIsDetached
-                ? "Page versions (detached)"
+                ? "Page Info (detached)"
                 : pageIsSharedLayout
-                  ? "Page versions (linked)"
-                  : "Variant versions"
+                  ? "Page Info (linked)"
+                  : "Page Info"
             }
             data-testid="button-fork-bubble"
             onClick={() => {

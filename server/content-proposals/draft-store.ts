@@ -89,10 +89,15 @@ export type ProposalDraftStore = {
    * Create the draft: a copy of the live locale (without `_draft`), or `{}` when the
    * locale is not published. Registers it at 0% and records its base.
    * `newEntry` also creates the entry folder with `_common.yml` (accepted idea).
+   * `seo` seeds the `seo:` block only when the locale is not published yet (idea target).
    */
   create(
     ref: ProposalDraftRef,
-    opts: { author: string; newEntry?: { funnel?: Record<string, unknown> | null } },
+    opts: {
+      author: string;
+      newEntry?: { funnel?: Record<string, unknown> | null };
+      seo?: Record<string, unknown> | null;
+    },
   ): { ok: true } | { ok: false; code: string; error: string };
   /** Allocation in versioning.yml; null when not registered (a draft). */
   allocation(ref: ProposalDraftRef): number | null;
@@ -285,7 +290,9 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
       const livePath = livePathOf(withRoot(ref));
       const content = fs.existsSync(livePath)
         ? stripDraftMetaFromRaw(fs.readFileSync(livePath, "utf-8"))
-        : "{}\n";
+        : opts.seo && Object.keys(opts.seo).length > 0
+          ? safeDumpYaml({ seo: opts.seo })
+          : "{}\n";
       writeVariantFile(draftPath, content, {
         author: opts.author,
         contentRoot,

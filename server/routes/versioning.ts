@@ -964,8 +964,12 @@ export function registerVersioningRoutes(app: Express): void {
         confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
         confirmSourceChanged: req.body?.confirm_source_changed === true,
         callerIsSwarm: isSwarmCaller(req),
+        callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
+        confirmTextLimits: req.body?.confirm_text_limits === true,
         findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
         dryRun,
+        seoStandaloneReason:
+          typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
       });
 
     try {
@@ -1075,8 +1079,12 @@ export function registerVersioningRoutes(app: Express): void {
       confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
       confirmSourceChanged: req.body?.confirm_source_changed === true,
       callerIsSwarm: isSwarmCaller(req),
+      callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
+      confirmTextLimits: req.body?.confirm_text_limits === true,
       findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
       dryRun: req.body?.dry_run === true,
+      seoStandaloneReason:
+        typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
     });
     if (!result.ok) {
       res.status(result.status ?? 400).json({

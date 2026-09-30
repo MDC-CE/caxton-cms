@@ -46,6 +46,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { ServerTab } from "@/components/settings/ServerTab";
 import { RobotsTab } from "@/components/settings/RobotsTab";
+import { ConsentWindowCard } from "@/components/settings/ConsentWindowCard";
 import {
   consentLabelFromKey,
   getBuiltinConsentFallback,
@@ -1351,6 +1352,11 @@ export default function SettingsPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <ConsentWindowCard
+              locales={supportedLocalesForConsent}
+              defaultLocale={defaultLocaleForConsent}
+            />
 
             <Dialog
               modal={false}

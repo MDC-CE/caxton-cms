@@ -42,7 +42,7 @@ import {
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
-import { collectSystemAlerts, recheckDatabaseHealth } from "../system-alerts";
+import { collectSystemAlerts, recheckDatabaseHealth, recheckDecisionModel } from "../system-alerts";
 import { listEvents, listEventAuthors, clearAllEvents, listAgentSessions, getAgentSessionDetail, emitEvent, getLatestWriteGeneration, getOldestUnpublishedAgeMs, getUnpublishedCount, getUnpublishedEvents, findOpenAgentSession, resolveUsableAgentSession } from "../events/event-store";
 import { singleAttribution, EVENT_TYPES, type EventType } from "../events/types";
 import { isExactAgentModel, normalizeMcpClientName, sessionConflictPayload } from "../../shared/agent-identity";
@@ -1213,6 +1213,13 @@ export function registerAdminRoutes(app: Express): void {
       res.status(404).json(result);
       return;
     }
+    res.json({ ...result, alerts: await collectSystemAlerts() });
+  });
+
+  api.post(app, "/api/admin/decision-model-recheck", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    const result = await recheckDecisionModel(getContentRoot(res));
     res.json({ ...result, alerts: await collectSystemAlerts() });
   });
 
@@ -2969,6 +2976,13 @@ export function registerAdminRoutes(app: Express): void {
         contentRoot,
         model: modelObj?.decision?.trim() || undefined,
       });
+      const { recordDecisionOutcome } = await import("../ai/decisions/health");
+      recordDecisionOutcome(
+        getContentRootName(res),
+        decisionProbe.ok
+          ? { status: "ok", model: decisionProbe.model }
+          : { status: "unavailable", reason: "error", message: decisionProbe.error },
+      );
 
       if (!decisionProbe.ok) {
         return res.status(400).json({

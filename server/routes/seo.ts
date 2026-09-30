@@ -1183,8 +1183,15 @@ export function registerSeoRoutes(app: Express): void {
         stale: kwForSerp ? !serpEntryFresh(serpCached) : false,
       };
 
+      const { findOriginIdeaForEntry } = await import("../content-proposals/idea-origin");
+      const origin = findOriginIdeaForEntry(contentRootName, contentType, row?.slug || slug);
+      const idea_origin = origin
+        ? { id: origin.id, title: origin.title, demand_label: origin.demand_label }
+        : null;
+
       res.json({
         id,
+        idea_origin,
         contentType,
         slug: row?.slug || (typeof data.slug === "string" ? data.slug : slug),
         locale: row?.locale || locale,

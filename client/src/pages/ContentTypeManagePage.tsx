@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
-import { AlertTriangle, Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
+import { AlertTriangle, Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, Megaphone, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
+import { ContentTypeAdsList } from "@/components/ads/ContentTypeAdsList";
 import { IconChess, IconChevronDown, IconChevronRight, IconExternalLink } from "@tabler/icons-react";
 import { queryClient } from "@/lib/queryClient";
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
@@ -8653,6 +8654,8 @@ export default function ContentTypeManagePage() {
                       <Filter className="h-4 w-4" />
                     ) : listPerspective === "organic" ? (
                       <Search className="h-4 w-4" />
+                    ) : listPerspective === "ads" ? (
+                      <Megaphone className="h-4 w-4" />
                     ) : (
                       <LayoutList className="h-4 w-4" />
                     )}
@@ -8662,7 +8665,9 @@ export default function ContentTypeManagePage() {
                         ? "Funnel"
                         : listPerspective === "organic"
                           ? "Organic"
-                          : "Default"}
+                          : listPerspective === "ads"
+                            ? "Ads"
+                            : "Default"}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
@@ -8697,6 +8702,14 @@ export default function ContentTypeManagePage() {
                     <Check className={`h-4 w-4 mr-2 ${listPerspective === "organic" ? "opacity-100" : "opacity-0"}`} />
                     <Search className="h-4 w-4 mr-2" />
                     Organic
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => writeListView({ ...listView, perspective: "ads", page: 1 })}
+                    data-testid="menu-perspective-ads"
+                  >
+                    <Check className={`h-4 w-4 mr-2 ${listPerspective === "ads" ? "opacity-100" : "opacity-0"}`} />
+                    <Megaphone className="h-4 w-4 mr-2" />
+                    Ads
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -9803,6 +9816,8 @@ export default function ContentTypeManagePage() {
                   )}
                 </div>
               )
+            ) : listPerspective === "ads" ? (
+              <ContentTypeAdsList contentType={contentType} locale={listLocale.trim()} q={debouncedSearch.trim()} />
             ) : viewMode === "static" ? (
               staticListLoading ? (
                 <div className="flex items-center justify-center py-12" data-testid="loading-static">

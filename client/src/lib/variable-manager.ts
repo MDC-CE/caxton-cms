@@ -21,6 +21,11 @@ export interface VariableCondition {
 }
 
 export interface VariableDefinition {
+  description?: string;
+  category?: string;
+  unit?: string;
+  deprecated?: boolean;
+  replaced_by?: string;
   default?: string;
   conditions?: VariableCondition[];
   by_locale?: Record<string, string>;

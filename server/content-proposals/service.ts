@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import fs from "fs";
 import type Database from "better-sqlite3";
 import { getSiteSqlite } from "../db";
@@ -9,6 +9,10 @@ import { singleAttribution, type EventActor } from "../events/types";
 import { getContentForEdit } from "../content-editor";
 import { applyFieldUpdates, readFieldValueAtPath } from "../field-write-router";
 import type { SiteContext } from "../site-manager";
+import { canonicalizePillarPath, entryCanonicalPath } from "../seo-fields";
+import { assertMainKeywordAvailable, readSeoIndexFile, seoEntryId } from "../seo-index";
+import { isSeoMonitoringEnabled } from "../seo-monitoring";
+import { agentOptOutAllowed, findOriginIdeaForEntry, isSeoClusterOptOutOp } from "./idea-origin";
 import { fingerprintEdits, fingerprintNotes, fingerprintIdeas, stableJson } from "./fingerprint";
 import {
   resolveProposalEntryActivity,
@@ -32,14 +36,23 @@ import {
   type SectionIssue,
 } from "./attached-entry-gate";
 import { validateSectionsForProposal } from "./section-proposal-check";
+import { TEXT_LIMITS_EXCEEDED_CODE } from "@shared/component-text-limits";
 import { summarizeSectionsChange, type SectionsSummary } from "./sections-summary";
 import { scanTemplatePlaceholdersOnSite, type TemplatePlaceholderGap } from "./template-placeholder-scan";
 import { layoutInfoForEntry, type EntryLayoutInfo, type LayoutOwner } from "../layout-owner";
 import {
+  getAllTypes,
   getFolder,
   getContentTypeConfig,
   listExtraUrlPatternParams,
 } from "../content-types";
+import { parseContentTypeStrategy, type ContentTypeStrategy } from "@shared/contentTypeStrategy";
+import {
+  resolveIdeaContentTypeStrategies,
+  unknownContentTypeError,
+  unknownContentTypes,
+  type IdeaContentTypeStrategy,
+} from "./idea-content-type";
 import {
   isEntryDetached,
   isTemplateVersioningSlug,
@@ -65,18 +78,24 @@ import {
   collectDamageClassesForMixedCheck,
   isMixedRiskBundle,
   parseReviewSnapshot,
+  siteFactsInputText,
   snapshotFromReviewContext,
   type EntryExistenceLookup,
   type RelatedOpenProposal,
   type ReviewContext,
+  type SiteFactsCheck,
 } from "./review-context";
 import type { ExistenceState } from "./proposal-review-rules";
 import {
   askTouchesOutcomeFigures,
+  askTouchesSiteFacts,
   getDecisionClient,
 } from "../ai/decisions";
+import { recordDecisionOutcome } from "../ai/decisions/health";
 import { anyEntryHasCountsAsLeadForm } from "./counts-as-lead-hint";
 import { textFromUnknown, evaluateClaimCues } from "./claim-cues";
+import { findFigureVariableTokens } from "./figure-variable-tokens";
+import type { VariableDefinition } from "../variable-manager";
 import {
   parseReviewSituationIds,
   parseIdeaAuthorSituationIds,
@@ -118,6 +137,30 @@ import {
   IDEA_FUNNEL_REQUIRED,
   type IdeaFunnel,
 } from "./idea-funnel";
+import {
+  IDEA_SEO_TARGET_CONFLICT,
+  IDEA_SEO_TARGET_FROZEN,
+  IDEA_SEO_TARGET_HUB_GONE,
+  IDEA_SEO_TARGET_HUB_MEMBERS_REQUIRED,
+  IDEA_SEO_TARGET_HUB_NOT_LIVE,
+  IDEA_SEO_TARGET_KEYWORD_TAKEN,
+  IDEA_SEO_TARGET_REQUIRED,
+  ideaDemandLabel,
+  ideaSeoTargetComplete,
+  ideaSeoTargetsEqual,
+  normalizePath,
+  parseIdeaSeoTarget,
+  parseSeoTargetOverride,
+  seoBlockFromTarget,
+  seoTargetDiff,
+  standaloneAllowedForDemand,
+  standaloneNotAllowed,
+  validateIdeaSeoTarget,
+  validateSeoTargetOverride,
+  type IdeaSeoTarget,
+  type SeoTargetDiff,
+  type SeoTargetOverride,
+} from "./idea-seo-target";
 
 const log = child({ module: "content-proposals" });
 
@@ -415,6 +458,13 @@ export type ProposalRecord = {
    * Immutable after accept; creating edits must match / seed from this.
    */
   idea_funnel: IdeaFunnel | null;
+  /**
+   * Focus keyword + cluster decision for new-URL ideas. Frozen at accept; the
+   * creating edits proposal seeds it into the new page's draft `seo:`.
+   */
+  idea_seo_target: IdeaSeoTarget | null;
+  /** Edits implementing an idea: why seo.* ops differ from the locked target. */
+  seo_target_override: SeoTargetOverride | null;
   /** Edits that implement an accepted idea (optional unless slug is reserved). */
   implements_proposal_id: string | null;
   /** Computed on read — accepted idea whose locked page is missing and a proposal can create it. */
@@ -523,6 +573,8 @@ export type ProposalSummary = {
   accepted_entry: AcceptedEntry | null;
   /** Structured funnel on ideas (new-URL); null when unset or non-idea. */
   idea_funnel: IdeaFunnel | null;
+  /** Keyword + cluster decision on ideas (new-URL); null when unset or non-idea. */
+  idea_seo_target: IdeaSeoTarget | null;
   implements_proposal_id: string | null;
   /**
    * Accepted idea whose locked page is missing and a proposal can create it.
@@ -616,6 +668,7 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     replaced_by_proposal_id: record.replaced_by_proposal_id,
     accepted_entry: record.accepted_entry,
     idea_funnel: record.idea_funnel,
+    idea_seo_target: record.idea_seo_target,
     implements_proposal_id: record.implements_proposal_id,
     attached_create_entry: record.attached_create_entry ?? null,
     accepted_entry_create_mode: record.accepted_entry_create_mode ?? null,
@@ -687,6 +740,8 @@ type ProposalRow = {
   replaced_by_proposal_id: string | null;
   accepted_entry_json?: string | null;
   idea_funnel_json?: string | null;
+  idea_seo_target_json?: string | null;
+  seo_target_override_json?: string | null;
   implements_proposal_id?: string | null;
   author_content_at?: number | null;
   reviewer_action_at?: number | null;
@@ -777,6 +832,13 @@ export type CreateProposalInput = {
    * Soft warning when missing on new-URL create; accept refuses until complete.
    */
   idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
+  /**
+   * Ideas (new-URL): focus keyword + cluster decision. Soft warning when missing
+   * on create; accept refuses until complete (monitored types).
+   */
+  idea_seo_target?: unknown;
+  /** Edits implementing an idea: reason seo.* ops differ from the locked target. */
+  seo_target_override?: unknown;
   /** v1.0 edits: publish every entry or none on apply. */
   all_or_nothing?: boolean;
   /** v1.0: this proposal reverts an applied proposal (prefilled by revert). */
@@ -802,6 +864,8 @@ export type ProposalUpdateAction =
   | "revise_entries"
   | "set_review_situations"
   | "set_idea_funnel"
+  | "set_idea_seo_target"
+  | "set_related_entries"
   | "escalate"
   | "deescalate"
   | "review_outcome"
@@ -844,6 +908,12 @@ export type ProposalUpdateCaller = {
   review_situations?: string[];
   /** set_idea_funnel / create: structured funnel for new-URL ideas. */
   idea_funnel?: IdeaFunnel | { stage?: string; products?: unknown };
+  /** set_idea_seo_target: keyword + cluster decision for new-URL ideas. */
+  idea_seo_target?: unknown;
+  /** set_related_entries: replacement idea related pages (target page type + slug). */
+  related_entries?: unknown;
+  /** revise_entries: reason seo.* ops differ from the implemented idea's locked target. */
+  seo_target_override?: unknown;
   /** escalate: required steward note (min MIN_CLOSE_NOTE). */
   escalated_note?: string;
   /** review_outcome: good | bad | clear. */
@@ -861,6 +931,10 @@ export type ProposalUpdateCaller = {
   all_or_nothing?: boolean;
   /** apply (v1.0): publish drafts whose base version is unknown (pre-1.0 drafts). */
   confirm_base_unknown?: boolean;
+  /** apply (v1.0): staff confirmed publishing text over component text_limits. Ignored for MCP callers. */
+  confirm_text_limits?: boolean;
+  /** Request came through MCP (x-mcp-author): text-limit violations cannot be confirmed. */
+  caller_is_mcp?: boolean;
   /** apply (v1.0) of a template proposal: must equal `affected_entries.count`. */
   confirm_affected_entries?: number;
 };
@@ -1026,6 +1100,8 @@ function mapProposal(
     replaced_by_proposal_id: row.replaced_by_proposal_id ?? null,
     accepted_entry: parseAcceptedEntry(parseJson(row.accepted_entry_json ?? null, null)),
     idea_funnel: parseIdeaFunnel(parseJson(row.idea_funnel_json ?? null, null)),
+    idea_seo_target: parseIdeaSeoTarget(parseJson(row.idea_seo_target_json ?? null, null)),
+    seo_target_override: parseSeoTargetOverride(parseJson(row.seo_target_override_json ?? null, null)),
     implements_proposal_id: row.implements_proposal_id ?? null,
     author_content_at: row.author_content_at ?? null,
     reviewer_action_at: row.reviewer_action_at ?? null,
@@ -1403,6 +1479,7 @@ function emitProposalEvent(
     | "proposal_outcome_lesson_set"
     | "proposal_review_situations_set"
     | "proposal_idea_funnel_set"
+    | "proposal_idea_seo_target_set"
     | "proposal_reverted"
     | "proposal_stale_flagged"
     | "proposal_closed_abandoned_stale"
@@ -1448,6 +1525,11 @@ export type PromoteEntryOpts = {
   dry_run?: boolean;
   /** Reviewer confirmed publishing a draft whose base version is unknown. */
   confirm_base_unknown?: boolean;
+  /** Reviewer confirmed publishing text over component text_limits (staff only). */
+  confirm_text_limits?: boolean;
+  caller_is_mcp?: boolean;
+  /** New locale published standalone (seo.pillar_path: null): the proposal's seo_target_override reason. */
+  seo_standalone_reason?: string | null;
 };
 
 export type PromoteEntryResult = {
@@ -1571,6 +1653,45 @@ export type ProposalServiceDeps = {
   stampPublishedAt?: (entry: ProposalEntryRow, author: string) => { ok: boolean; error?: string };
   /** Site Agents Rules policy; default = hardcoded defaults (tests / omitted). */
   getProposalSettings?: () => ProposalSettings;
+  /**
+   * Site facts for idea SEO targets (hub liveness, keyword owners, monitoring).
+   * Absent (tests) → only shape + demand rules are enforced.
+   */
+  seoTarget?: IdeaSeoTargetDeps;
+  /** Content type `strategy` from content-types.yml (null when unset). Absent (tests) → no strategy context on ideas. */
+  strategyForContentType?: (contentType: string) => ContentTypeStrategy | null;
+  /** Content type keys from content-types.yml (not folder names). Absent (tests) → idea related_entries types are not checked. */
+  knownContentTypes?: () => string[];
+  /** Site variables (variables.yml). Absent (tests) → no figure/fact token checks. */
+  variableDefinitions?: () => Record<string, VariableDefinition>;
+};
+
+export type IdeaSeoHubFacts = {
+  /** Canonical path after following renames/redirects. */
+  path: string;
+  live: boolean;
+  /** Locale the hub is published in (null when unknown). */
+  locale: string | null;
+  /** true/false when the SEO index knows the page; null when unknown. */
+  is_hub: boolean | null;
+};
+
+export type IdeaSeoTargetDeps = {
+  /** Content type has SEO monitoring on (target required at accept). */
+  isMonitored: (contentType: string) => boolean;
+  resolveHub: (pillarPath: string, locale: string) => IdeaSeoHubFacts;
+  /** Live page holding this exact main_keyword (excluding `exclude`); "unavailable" when the index is missing. */
+  keywordOwner: (
+    keyword: string,
+    exclude: { contentType: string; slug: string; locale: string },
+  ) => { path: string } | null | "unavailable";
+  /** Public path of an entry locale (null when unknown / not live yet). */
+  selfPath: (contentType: string, slug: string, locale: string) => string | null;
+  memberInfo: (
+    contentType: string,
+    slug: string,
+    locale: string,
+  ) => { live: boolean; monitored: boolean; pillar_path: string | null };
 };
 
 export type ProposalStats = {
@@ -2151,6 +2272,19 @@ function findEscalatedSiblings(
 export function createProposalService(deps: ProposalServiceDeps) {
   const site = deps.site;
 
+  function variableDefs(): Record<string, VariableDefinition> | null {
+    try {
+      return deps.variableDefinitions?.() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function figureTokensIn(text: string): boolean {
+    const defs = variableDefs();
+    return !!defs && findFigureVariableTokens(text, defs).length > 0;
+  }
+
   function policy(): ProposalSettings {
     if (deps.getProposalSettings) return deps.getProposalSettings();
     return {
@@ -2185,6 +2319,37 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }): { live: ExistenceState; draftExists: boolean } {
     if (deps.resolveExistence) return deps.resolveExistence(entry);
     return { live: "exists", draftExists: Boolean(entry.variant?.trim()) };
+  }
+
+  function normalizeRelatedEntries(raw: unknown): RelatedEntryRef[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === "object")
+      .map((r) => {
+        const locale = typeof r.locale === "string" ? r.locale.trim() : "";
+        return {
+          contentType: String(r.contentType || "").trim(),
+          slug: String(r.slug || "").trim(),
+          ...(locale ? { locale } : {}),
+        };
+      })
+      .filter((r) => r.contentType && r.slug);
+  }
+
+  function ideaRelatedMixedRisk(relatedEntries: RelatedEntryRef[]) {
+    if (relatedEntries.length === 0) return null;
+    const classTargets = relatedEntries.map((r) => ({
+      contentType: r.contentType,
+      existence: resolveExistence({ contentType: r.contentType, slug: r.slug, locale: r.locale?.trim() || "en" }).live,
+      forIdea: true as const,
+    }));
+    if (!isMixedRiskBundle(collectDamageClassesForMixedCheck(classTargets))) return null;
+    return {
+      ok: false as const,
+      code: "mixed_risk_bundle",
+      error:
+        "This idea brief mixes different risk levels across related pages. Split into separate ideas — one risk class each.",
+    };
   }
 
   function attachedCreateKey(contentType: string, slug: string, locale: string): string {
@@ -2394,6 +2559,274 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
     }
     return { ok: true, idea };
+  }
+
+  /**
+   * Edits implementing an idea: seo.* ops that differ from the idea's locked
+   * keyword/hub need `seo_target_override.reason`; standalone still follows the demand rule.
+   */
+  function checkSeoTargetOverride(
+    idea: ProposalRecord | null,
+    entries: Array<{ updates?: Array<{ field_path: string; value?: unknown; reset?: boolean }> }>,
+    overrideRaw: unknown,
+  ):
+    | { ok: true; override: SeoTargetOverride | null; diff: SeoTargetDiff | null }
+    | { ok: false; code: string; error: string; details?: Record<string, unknown> } {
+    const ov = validateSeoTargetOverride(overrideRaw);
+    if (!ov.ok) return ov;
+    const locked = idea?.idea_seo_target;
+    if (!locked) return { ok: true, override: ov.override, diff: null };
+    const diff = seoTargetDiff(
+      entries.flatMap((e) => e.updates ?? []),
+      locked,
+    );
+    if (!diff.differs) return { ok: true, override: ov.override, diff };
+    if (!ov.override) {
+      return {
+        ok: false,
+        code: IDEA_SEO_TARGET_CONFLICT,
+        error:
+          `These edits change the ${diff.fields.join(" and ")} the accepted idea locked (${describeLockedTarget(locked)}). ` +
+          "Drop the seo.* ops to use the locked target, or pass seo_target_override.reason (min 40 chars) explaining why it must change.",
+        details: { locked, proposed: diff.proposed, fields: diff.fields },
+      };
+    }
+    if (diff.proposed_mode === "standalone") {
+      const label = ideaDemandLabel(idea!.review_situations);
+      if (!standaloneAllowedForDemand(label)) return standaloneNotAllowed(label);
+    }
+    return { ok: true, override: ov.override, diff };
+  }
+
+  /** Agent edits that take an idea-born page out of clustering: demand rule + reason. */
+  function gateAgentSeoOptOut(
+    actor: unknown,
+    implementsIdea: ProposalRecord | null,
+    entries: Array<{ contentType: string; slug: string; updates?: Array<{ field_path: string; value?: unknown; reset?: boolean }> }>,
+    reason: string | null | undefined,
+  ): { ok: true } | { ok: false; code: string; error: string; details?: Record<string, unknown> } {
+    if (!actor || typeof actor !== "object" || (actor as { type?: string }).type !== "mcp") return { ok: true };
+    for (const e of entries) {
+      if (!(e.updates ?? []).some(isSeoClusterOptOutOp)) continue;
+      const origin = findOriginIdeaForEntry(site, e.contentType, e.slug);
+      if (!origin) continue;
+      if (origin.id === implementsIdea?.id && implementsIdea.idea_seo_target?.cluster.mode === "standalone") continue;
+      const allowed = agentOptOutAllowed(origin, reason);
+      if (!allowed.ok) return allowed;
+    }
+    return { ok: true };
+  }
+
+  function describeLockedTarget(t: IdeaSeoTarget): string {
+    const c = t.cluster;
+    if (c.mode === "join") return `"${t.main_keyword}" in hub ${c.pillar_path}`;
+    if (c.mode === "hub") return `"${t.main_keyword}" as a new hub`;
+    return `"${t.main_keyword}" standalone`;
+  }
+
+  /**
+   * `seo:` block to seed into the implementing draft when the locale is not
+   * published yet. Follows hub renames; a hub that is gone fails.
+   */
+  function ideaSeoSeed(
+    idea: ProposalRecord | null,
+    ref: { contentType: string; slug: string; locale: string },
+  ):
+    | { ok: true; seo: Record<string, unknown> | null; warnings: Array<{ code: string; message: string }> }
+    | { ok: false; code: string; error: string; details?: Record<string, unknown> } {
+    const t = idea?.idea_seo_target;
+    if (!t) return { ok: true, seo: null, warnings: [] };
+    const warnings: Array<{ code: string; message: string }> = [];
+    const facts = deps.seoTarget;
+    let resolvedPillarPath: string | null = null;
+    if (t.cluster.mode === "join" && facts) {
+      const hub = facts.resolveHub(t.cluster.pillar_path, ref.locale);
+      if (!hub.live) {
+        return {
+          ok: false,
+          code: IDEA_SEO_TARGET_HUB_GONE,
+          error:
+            `The hub this idea locked (${t.cluster.pillar_path}) is no longer live. ` +
+            "Pass seo_target_override.reason with seo.pillar_path set to another live hub, or refile the idea.",
+          details: { locked_pillar_path: t.cluster.pillar_path, resolved_path: hub.path },
+        };
+      }
+      if (normalizePath(hub.path) !== normalizePath(t.cluster.pillar_path)) {
+        resolvedPillarPath = hub.path;
+        warnings.push({
+          code: "idea_seo_target_hub_renamed",
+          message: `The locked hub ${t.cluster.pillar_path} moved to ${hub.path}; the new page joins ${hub.path}.`,
+        });
+      }
+    }
+    const selfPath =
+      t.cluster.mode === "hub" && facts ? facts.selfPath(ref.contentType, ref.slug, ref.locale) : null;
+    return { ok: true, seo: seoBlockFromTarget(t, { selfPath, resolvedPillarPath }), warnings };
+  }
+
+  /**
+   * Hub-mode idea just went live: members join via one cluster-fix edits proposal
+   * each (never moved automatically). Flags members already in another hub.
+   */
+  function hubMemberFollowUp(
+    idea: ProposalRecord | null,
+    entry: { contentType: string; slug: string; locale: string },
+  ): { code: string; message: string; details: Record<string, unknown> } | null {
+    const t = idea?.idea_seo_target;
+    if (!t || t.cluster.mode !== "hub") return null;
+    const hubPath = deps.seoTarget?.selfPath(entry.contentType, entry.slug, entry.locale) ?? null;
+    const members = t.cluster.members.map((m) => {
+      const info = deps.seoTarget?.memberInfo(m.contentType, m.slug, entry.locale);
+      const current = info?.pillar_path?.trim() || null;
+      const inOtherHub =
+        current != null && (!hubPath || normalizePath(current) !== normalizePath(hubPath));
+      return { ...m, locale: entry.locale, current_pillar_path: current, in_other_hub: inOtherHub };
+    });
+    const moving = members.filter((m) => m.in_other_hub);
+    return {
+      code: "idea_seo_hub_members_follow_up",
+      message:
+        `New hub ${hubPath ?? `${entry.contentType}/${entry.slug}`} is live. File one edits proposal per member setting seo.pillar_path to it: ` +
+        members.map((m) => `${m.contentType}/${m.slug}`).join(", ") +
+        (moving.length
+          ? `. Already in another hub (moving them leaves that hub): ${moving.map((m) => `${m.contentType}/${m.slug} → ${m.current_pillar_path}`).join(", ")}.`
+          : "."),
+      details: {
+        hub_path: hubPath,
+        members,
+        next_actions: members.map((m) => ({
+          tool: "propose_change",
+          priority: "recommended",
+          reason:
+            `Cluster-fix: ${m.contentType}/${m.slug} (${m.locale}) joins the new hub` +
+            (m.in_other_hub ? ` — currently in hub ${m.current_pillar_path}; moving it leaves that hub` : ""),
+          args_hint: {
+            title: `Join hub: ${m.slug}`,
+            category: "content.seo",
+            entries: [
+              {
+                contentType: m.contentType,
+                slug: m.slug,
+                locale: m.locale,
+                updates: [{ field_path: "seo.pillar_path", value: hubPath }],
+              },
+            ],
+          },
+        })),
+      },
+    };
+  }
+
+  /** Accepted ideas whose locked page is not live yet that already claim this keyword. */
+  function ideaHoldingKeyword(
+    db: Database.Database,
+    keyword: string,
+    excludeId: string,
+  ): ProposalRecord | null {
+    const rows = db
+      .prepare(
+        `SELECT id FROM content_proposals
+         WHERE site = ? AND kind = 'idea' AND close_reason = 'accepted'
+           AND idea_seo_target_json IS NOT NULL AND id != ?`,
+      )
+      .all(site, excludeId) as Array<{ id: string }>;
+    const kw = keyword.trim().toLowerCase();
+    for (const r of rows) {
+      const idea = loadProposal(db, r.id);
+      if (!idea?.idea_seo_target || !idea.accepted_entry) continue;
+      if (idea.idea_seo_target.main_keyword.trim().toLowerCase() !== kw) continue;
+      const ex = resolveExistence(idea.accepted_entry);
+      if (ex.live === "exists") continue;
+      return idea;
+    }
+    return null;
+  }
+
+  /** Accept gate: target complete, demand rule, hub live + same locale, members valid, keyword free. */
+  function gateIdeaSeoTargetAtAccept(
+    proposal: ProposalRecord,
+    accepted: AcceptedEntry,
+    db: Database.Database,
+  ): { ok: true } | { ok: false; code: string; error: string; details?: Record<string, unknown> } {
+    const t = proposal.idea_seo_target;
+    if (!t || !ideaSeoTargetComplete(t)) {
+      return {
+        ok: false,
+        code: IDEA_SEO_TARGET_REQUIRED,
+        error:
+          "This idea creates a new page on an SEO-monitored type: set idea_seo_target first (set_idea_seo_target) — " +
+          'main_keyword plus cluster { mode: "join", pillar_path } | { mode: "hub", members } | { mode: "standalone", reason }.',
+      };
+    }
+    const label = ideaDemandLabel(proposal.review_situations);
+    if (t.cluster.mode === "standalone" && !standaloneAllowedForDemand(label)) {
+      return standaloneNotAllowed(label);
+    }
+    const facts = deps.seoTarget;
+    if (facts && t.cluster.mode === "join") {
+      const hub = facts.resolveHub(t.cluster.pillar_path, accepted.locale);
+      if (!hub.live || hub.is_hub === false) {
+        return {
+          ok: false,
+          code: IDEA_SEO_TARGET_HUB_NOT_LIVE,
+          error: hub.live
+            ? `${hub.path} is live but is not a hub (is_pillar). Pick a live hub or use mode "hub".`
+            : `The hub ${t.cluster.pillar_path} is not live. Pick a live hub, or use mode "hub" with named members.`,
+          details: { pillar_path: t.cluster.pillar_path, resolved_path: hub.path },
+        };
+      }
+      if (hub.locale && hub.locale !== accepted.locale) {
+        return {
+          ok: false,
+          code: IDEA_SEO_TARGET_HUB_NOT_LIVE,
+          error: `The hub ${hub.path} is in ${hub.locale}, but this page is ${accepted.locale}. Pick a ${accepted.locale} hub.`,
+          details: { pillar_path: hub.path, hub_locale: hub.locale, page_locale: accepted.locale },
+        };
+      }
+    }
+    if (facts && t.cluster.mode === "hub") {
+      const bad: string[] = [];
+      for (const m of t.cluster.members) {
+        const info = facts.memberInfo(m.contentType, m.slug, accepted.locale);
+        if (!info.live || !info.monitored) bad.push(`${m.contentType}/${m.slug}`);
+      }
+      if (bad.length) {
+        return {
+          ok: false,
+          code: IDEA_SEO_TARGET_HUB_MEMBERS_REQUIRED,
+          error: `Hub members must be live, SEO-monitored ${accepted.locale} pages. Not valid: ${bad.join(", ")}.`,
+          details: { invalid_members: bad },
+        };
+      }
+    }
+    if (facts) {
+      const owner = facts.keywordOwner(t.main_keyword, accepted);
+      if (owner === "unavailable") {
+        return {
+          ok: false,
+          code: "seo_index_unavailable",
+          error: "SEO index is unavailable, so the keyword cannot be checked. Rebuild the cluster index, then accept again.",
+        };
+      }
+      if (owner) {
+        return {
+          ok: false,
+          code: IDEA_SEO_TARGET_KEYWORD_TAKEN,
+          error: `Main keyword "${t.main_keyword}" is already won by live page ${owner.path}. Pick another keyword or improve that page instead.`,
+          details: { owner_path: owner.path },
+        };
+      }
+    }
+    const holder = ideaHoldingKeyword(db, t.main_keyword, proposal.id);
+    if (holder) {
+      return {
+        ok: false,
+        code: IDEA_SEO_TARGET_KEYWORD_TAKEN,
+        error: `Main keyword "${t.main_keyword}" is already claimed by accepted idea ${holder.id} ("${holder.title}"), which is not live yet.`,
+        details: { owner_proposal_id: holder.id },
+      };
+    }
+    return { ok: true };
   }
 
   function gateMissingAttachedEntry(opts: {
@@ -2714,6 +3147,54 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }
   }
 
+  /** Idea page-type strategies (any status). Null for non-ideas or when the site has no strategy dep. */
+  function contentTypeStrategiesFor(proposal: ProposalRecord): IdeaContentTypeStrategy[] | null {
+    if (proposal.kind !== "idea" || !deps.strategyForContentType) return null;
+    return resolveIdeaContentTypeStrategies({
+      related: proposal.related_entries ?? [],
+      accepted: proposal.accepted_entry ?? null,
+      known: deps.knownContentTypes?.() ?? null,
+      strategyFor: deps.strategyForContentType,
+    });
+  }
+
+  type StoredSiteFactsCheck = SiteFactsCheck & { text_hash: string; model?: string | null; at: number };
+
+  function readSiteFactsCache(proposalId: string): StoredSiteFactsCheck | null {
+    const row = dbFor(site)
+      .prepare(`SELECT site_facts_check_json FROM content_proposals WHERE id = ?`)
+      .get(proposalId) as { site_facts_check_json: string | null } | undefined;
+    const parsed = parseJson<StoredSiteFactsCheck | null>(row?.site_facts_check_json ?? null, null);
+    return parsed && typeof parsed.text_hash === "string" && Array.isArray(parsed.categories) ? parsed : null;
+  }
+
+  /** Cached per proposal text hash; an unavailable result is retried on the next read. */
+  async function resolveSiteFactsCheck(
+    proposal: ProposalRecord,
+    promoteDraftText: string | null,
+  ): Promise<SiteFactsCheck> {
+    const text = siteFactsInputText(proposal, promoteDraftText);
+    const textHash = createHash("sha256").update(text).digest("hex");
+    const cached = readSiteFactsCache(proposal.id);
+    if (cached && cached.text_hash === textHash && cached.outcome !== "unavailable") {
+      return { outcome: cached.outcome, categories: cached.categories };
+    }
+    const { outcome, categories, raw } = await askTouchesSiteFacts(getDecisionClient(), text);
+    recordDecisionOutcome(site, raw);
+    const stored: StoredSiteFactsCheck = {
+      text_hash: textHash,
+      outcome,
+      categories,
+      model: raw?.status === "ok" ? raw.model : null,
+      at: Date.now(),
+    };
+    dbFor(site)
+      .prepare(`UPDATE content_proposals SET site_facts_check_json = ? WHERE id = ?`)
+      .run(JSON.stringify(stored), proposal.id);
+    mergeProposalTags(proposal.id, [outcome === "unavailable" ? "used_jev_unavailable" : "used_jev"]);
+    return { outcome, categories };
+  }
+
   async function classifyLive(
     proposal: ProposalRecord,
     opts?: { persistIfMissingSnapshot?: boolean; refreshSnapshot?: boolean },
@@ -2738,6 +3219,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
     const classifyOpts = {
       proposal,
+      ...(proposal.kind === "idea"
+        ? {
+            contentTypeStrategies: contentTypeStrategiesFor(proposal),
+            knownContentTypes: deps.knownContentTypes?.() ?? null,
+          }
+        : {}),
       lookups: buildLookupsForProposal(proposal),
       relatedOpen: findRelatedOpenByIssues(proposal),
       snapshot: proposal.review_context_snapshot
@@ -2750,24 +3237,38 @@ export function createProposalService(deps: ProposalServiceDeps) {
         : null,
       promoteDraftText,
       countsAsLeadForm,
+      variableDefinitions: variableDefs(),
+      ...(deps.seoTarget ? { ideaSeoTargetMonitored: deps.seoTarget.isMonitored } : {}),
+      ...(proposal.kind === "edits" && proposal.implements_proposal_id
+        ? {
+            implementedIdeaSeoTarget:
+              loadProposal(dbFor(site), proposal.implements_proposal_id)?.idea_seo_target ?? null,
+          }
+        : {}),
     };
 
     let ctx = classifyProposalReview(classifyOpts);
+    let enrichedOpts: Parameters<typeof classifyProposalReview>[0] = classifyOpts;
 
     if (ctx.needs_jev_claim_check && proposal.kind === "edits") {
-      const { outcome } = await askTouchesOutcomeFigures(
+      const { outcome, raw } = await askTouchesOutcomeFigures(
         getDecisionClient(),
         ctx.claim_cue_text ?? "",
       );
-      ctx = classifyProposalReview({
-        ...classifyOpts,
-        claimCueJevOutcome: outcome,
-      });
+      recordDecisionOutcome(site, raw);
+      enrichedOpts = { ...enrichedOpts, claimCueJevOutcome: outcome };
+      ctx = classifyProposalReview(enrichedOpts);
       if (outcome === "unavailable") {
         mergeProposalTags(proposal.id, ["used_jev_unavailable"]);
       } else {
         mergeProposalTags(proposal.id, ["used_jev"]);
       }
+    }
+
+    if (ctx.needs_site_facts_check) {
+      const siteFactsCheck = await resolveSiteFactsCheck(proposal, promoteDraftText);
+      enrichedOpts = { ...enrichedOpts, siteFactsCheck };
+      ctx = classifyProposalReview(enrichedOpts);
     }
 
     const snap = snapshotFromReviewContext(ctx);
@@ -3091,6 +3592,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
     author: string;
     newEntryKeys: Set<string>;
     ideaFunnel: IdeaFunnel | null;
+    /** Implemented idea: its locked SEO target seeds the draft when the locale is not published. */
+    idea?: ProposalRecord | null;
     /** revise_entries: drafts this proposal already owns (entry key → variant, created). */
     owned?: Map<string, { variant: string; created: boolean }>;
     /** revise_entries: start drafts this proposal created from today's live (no co-author edits to keep). */
@@ -3188,6 +3691,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
           }
           let created = false;
           let rebaseAfterWrite = false;
+          let reseedSeo = false;
+          const localeLive = resolveExistence(ref).live === "exists";
+          let seoSeed: Record<string, unknown> | null = null;
+          if (!localeLive && opts.idea?.idea_seo_target) {
+            const seed = ideaSeoSeed(opts.idea, ref);
+            if (!seed.ok) return fail(seed);
+            seoSeed = seed.seo;
+            warnings.push(...seed.warnings);
+          }
           if (!exists) {
             const newEntry = opts.newEntryKeys.has(key)
               ? {
@@ -3199,7 +3711,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
                     : null,
                 }
               : undefined;
-            const res = s.create(ref, { author: opts.author, newEntry });
+            const res = s.create(ref, { author: opts.author, newEntry, seo: seoSeed });
             if (!res.ok) {
               return fail({
                 ok: false,
@@ -3216,6 +3728,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
             if (owned) {
               if (opts.resetCreated && owned.created) {
                 s.reset(ref, opts.author);
+                reseedSeo = seoSeed != null;
               } else {
                 const base = s.checkBase(ref);
                 if (base.status === "stale") {
@@ -3245,7 +3758,14 @@ export function createProposalService(deps: ProposalServiceDeps) {
           }
           if (e.translated_from_locale?.trim())
             s.recordSource(ref, e.translated_from_locale.trim(), opts.author);
-          const wrote = await s.write(ref, e.updates, opts.author);
+          const writeOps =
+            reseedSeo && seoSeed
+              ? [
+                  ...Object.entries(seoSeed).map(([k, v]) => ({ field_path: `seo.${k}`, value: v }) as FieldUpdate),
+                  ...e.updates,
+                ]
+              : e.updates;
+          const wrote = await s.write(ref, writeOps, opts.author);
           if (!wrote.ok) {
             return fail({
               ok: false,
@@ -3373,9 +3893,33 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }
 
   /** Every check promote would run, without writing (rebuild preview included). */
-  async function checkV1Entry(entry: ProposalEntryRow, caller: ProposalUpdateCaller): Promise<ApplyEntryPreview> {
+  async function checkV1Entry(
+    entry: ProposalEntryRow,
+    caller: ProposalUpdateCaller,
+    seo?: { reason: string | null; idea: ProposalRecord | null; overridden: boolean },
+  ): Promise<ApplyEntryPreview> {
+    const seoReason = seo?.reason ?? null;
     const out: ApplyEntryPreview = { entry_key: entry.entry_key, locale: entry.locale, variant: entry.variant, ok: false };
     if (!entry.variant) return { ...out, code: "variant_required", error: "v1.0 entries always have a draft variant" };
+    const lockedCluster = seo?.idea?.idea_seo_target?.cluster;
+    if (
+      lockedCluster?.mode === "join" &&
+      !seo?.overridden &&
+      deps.seoTarget &&
+      resolveExistence(entry).live !== "exists"
+    ) {
+      const hub = deps.seoTarget.resolveHub(lockedCluster.pillar_path, entry.locale);
+      if (!hub.live) {
+        return {
+          ...out,
+          code: IDEA_SEO_TARGET_HUB_GONE,
+          error:
+            `The hub this idea locked (${lockedCluster.pillar_path}) is no longer live, so the new page would join a dead cluster. ` +
+            "Revise with seo.pillar_path set to another live hub and seo_target_override.reason.",
+          details: { locked_pillar_path: lockedCluster.pillar_path, resolved_path: hub.path },
+        };
+      }
+    }
     const ref = refOf(entry);
     if (!store!.exists(ref)) {
       return { ...out, code: "draft_missing", error: `Draft ${entry.variant}.${entry.locale}.yml no longer exists.` };
@@ -3407,6 +3951,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       dry_run: true,
       confirm_end_experiment: caller.confirm_end_experiment,
       confirm_base_unknown: caller.confirm_base_unknown,
+      confirm_text_limits: caller.confirm_text_limits,
+      caller_is_mcp: caller.caller_is_mcp,
+      seo_standalone_reason: seoReason,
     });
     if (!dry.ok) {
       const mapped = applyFailureFor(dry.code, dry.details);
@@ -3472,7 +4019,19 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const db = dbFor(site);
     const id = proposal.id;
     const checks: ApplyEntryPreview[] = [];
-    for (const entry of work) checks.push(await checkV1Entry(entry, caller));
+    const implementedIdea = proposal.implements_proposal_id
+      ? loadProposal(db, proposal.implements_proposal_id)
+      : null;
+    const seoCtx = {
+      reason: proposal.seo_target_override?.reason ?? null,
+      idea: implementedIdea,
+      overridden: proposal.seo_target_override != null,
+    };
+    const localeWasLive = new Map<number, boolean>();
+    for (const entry of work) {
+      localeWasLive.set(entry.id, resolveExistence(entry).live === "exists");
+      checks.push(await checkV1Entry(entry, caller, seoCtx));
+    }
     const failed = checks.filter((c) => !c.ok);
 
     const endExperiment = failed.find((c) => c.code === "confirm_end_experiment");
@@ -3503,6 +4062,26 @@ export function createProposalService(deps: ProposalServiceDeps) {
           "Some drafts have no recorded starting point, so changes made to live since then cannot be detected. Re-send with confirm_base_unknown: true to publish the draft as-is.",
         proposal,
         details: { entries: unknownBase.map((c) => ({ entry_key: c.entry_key, locale: c.locale, variant: c.variant })) },
+      };
+    }
+    const textTooLong = failed.filter((c) => c.code === TEXT_LIMITS_EXCEEDED_CODE);
+    if (textTooLong.length && !caller.dry_run) {
+      return {
+        ok: false as const,
+        code: TEXT_LIMITS_EXCEEDED_CODE,
+        error: caller.caller_is_mcp
+          ? "Some drafts have text longer than the section allows. Shorten it on the draft and retry; agents cannot publish over the limit."
+          : "Some drafts have text longer than the section allows. Shorten it, or re-send with confirm_text_limits: true to publish anyway.",
+        proposal,
+        details: {
+          entries: textTooLong.map((c) => ({
+            entry_key: c.entry_key,
+            locale: c.locale,
+            variant: c.variant,
+            error: c.error,
+            ...(c.details ?? {}),
+          })),
+        },
       };
     }
     const placeholderGaps = affected ? templatePlaceholderWarnings(work) : [];
@@ -3557,6 +4136,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       const promoted = await deps.promoteEntry!(entry, caller.username, {
         confirm_end_experiment: caller.confirm_end_experiment,
         confirm_base_unknown: caller.confirm_base_unknown,
+        confirm_text_limits: caller.confirm_text_limits,
+        caller_is_mcp: caller.caller_is_mcp,
+        seo_standalone_reason: proposal.seo_target_override?.reason ?? null,
       });
       if (!promoted.ok) {
         const mapped = applyFailureFor(promoted.code, promoted.details);
@@ -3587,6 +4169,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }
       for (const w of promoted.warnings ?? []) {
         warnings.push({ code: w.code, message: `${entry.entry_key} (${entry.locale}): ${w.message}` });
+      }
+      if (!localeWasLive.get(entry.id)) {
+        const followUp = hubMemberFollowUp(implementedIdea, entry);
+        if (followUp) warnings.push(followUp);
       }
     }
     if (!failed.length) clearStale(id);
@@ -4069,13 +4655,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
       };
     }
 
-    const relatedEntries: RelatedEntryRef[] = (input.related_entries ?? [])
-      .map((r) => ({
-        contentType: String(r.contentType || "").trim(),
-        slug: String(r.slug || "").trim(),
-        ...(r.locale?.trim() ? { locale: r.locale.trim() } : {}),
-      }))
-      .filter((r) => r.contentType && r.slug);
+    const relatedEntries = normalizeRelatedEntries(input.related_entries);
+
+    if (kind === "idea" && deps.knownContentTypes) {
+      const known = deps.knownContentTypes();
+      const unknown = unknownContentTypes(relatedEntries, known);
+      if (unknown.length) return unknownContentTypeError(unknown, known);
+    }
 
     if (kind === "notes" && related.length > 0) {
       const blocking = findOpenNotesBlockingRetry(dbFor(site), site, related);
@@ -4214,7 +4800,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
           .join("\n");
         const outcomeFigures =
           (input.review_situations ?? []).includes("selling_figures") ||
-          evaluateClaimCues(updateText) === "clear_yes";
+          evaluateClaimCues(updateText) === "clear_yes" ||
+          figureTokensIn(updateText);
         classTargets.push({
           contentType: e.contentType,
           category:
@@ -4243,29 +4830,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (!sectionsCheck.ok) return sectionsCheck;
     }
 
-    if (kind === "idea" && relatedEntries.length > 0) {
-      const classTargets = relatedEntries.map((r) => {
-        const locale = r.locale?.trim() || "en";
-        const ex = resolveExistence({
-          contentType: r.contentType,
-          slug: r.slug,
-          locale,
-        });
-        return {
-          contentType: r.contentType,
-          existence: ex.live,
-          forIdea: true as const,
-        };
-      });
-      const classes = collectDamageClassesForMixedCheck(classTargets);
-      if (isMixedRiskBundle(classes)) {
-        return {
-          ok: false,
-          code: "mixed_risk_bundle",
-          error:
-            "This idea brief mixes different risk levels across related pages. Split into separate ideas — one risk class each.",
-        };
-      }
+    if (kind === "idea") {
+      const mixed = ideaRelatedMixedRisk(relatedEntries);
+      if (mixed) return mixed;
     }
 
     const db = dbFor(site);
@@ -4499,6 +5066,43 @@ export function createProposalService(deps: ProposalServiceDeps) {
       };
     }
 
+    let ideaSeoTargetJson: string | null = null;
+    if (kind === "idea" && input.idea_seo_target != null) {
+      const label = ideaDemandLabel(filedReviewSituations);
+      const seoCheck = validateIdeaSeoTarget(input.idea_seo_target, {
+        demandLabel: label,
+        enforceDemand: true,
+      });
+      if (!seoCheck.ok) return { ok: false, code: seoCheck.code, error: seoCheck.error };
+      ideaSeoTargetJson = JSON.stringify(seoCheck.target);
+    } else if (kind !== "idea" && input.idea_seo_target != null) {
+      return {
+        ok: false,
+        code: "idea_seo_target_ideas_only",
+        error: "idea_seo_target is only valid on kind idea proposals.",
+      };
+    }
+
+    let seoOverrideJson: string | null = null;
+    if (kind === "edits") {
+      const ovCheck = checkSeoTargetOverride(implementsIdeaForDrafts, entriesIn, input.seo_target_override);
+      if (!ovCheck.ok) return ovCheck;
+      if (ovCheck.override) seoOverrideJson = JSON.stringify(ovCheck.override);
+      const optOut = gateAgentSeoOptOut(
+        proposer.actor,
+        implementsIdeaForDrafts,
+        entriesIn,
+        ovCheck.override?.reason,
+      );
+      if (!optOut.ok) return optOut;
+    } else if (input.seo_target_override != null) {
+      return {
+        ok: false,
+        code: "seo_target_override_edits_only",
+        error: "seo_target_override is only valid on edits proposals that implement an accepted idea.",
+      };
+    }
+
     const now = Date.now();
     const id = randomUUID();
     const sessionId = input.agent_session_id?.trim() || null;
@@ -4514,6 +5118,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
         author: proposer.username,
         newEntryKeys: createsEntryKeys,
         ideaFunnel: implementsIdeaForDrafts?.idea_funnel ?? null,
+        idea: implementsIdeaForDrafts,
       });
       if (!prepared.ok) return prepared;
       draftPlans = prepared.plans;
@@ -4528,8 +5133,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
         created_agent_session_id, promote_on_apply, no_auto_retry, related_entries_json,
         review_context_snapshot_json, supersedes_proposal_id, replaced_by_proposal_id,
         review_situations_json, implements_proposal_id, idea_funnel_json,
-        system_version, all_or_nothing, reverts_proposal_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        system_version, all_or_nothing, reverts_proposal_id,
+        idea_seo_target_json, seo_target_override_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       site,
@@ -4562,6 +5168,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
       store ? PROPOSAL_SYSTEM_VERSION : null,
       kind === "edits" && input.all_or_nothing ? 1 : 0,
       input.reverts_proposal_id?.trim() || null,
+      ideaSeoTargetJson,
+      seoOverrideJson,
     );
 
     if (supersedesId) {
@@ -4630,6 +5238,16 @@ export function createProposalService(deps: ProposalServiceDeps) {
         id,
         proposer.username,
         { idea_funnel: withSnap.idea_funnel },
+        proposerEventActor,
+      );
+    }
+    if (withSnap.kind === "idea" && withSnap.idea_seo_target) {
+      emitProposalEvent(
+        site,
+        "proposal_idea_seo_target_set",
+        id,
+        proposer.username,
+        { idea_seo_target: withSnap.idea_seo_target },
         proposerEventActor,
       );
     }
@@ -5182,6 +5800,15 @@ export function createProposalService(deps: ProposalServiceDeps) {
           proposal,
         };
       }
+      const needsSeoTarget =
+        needsFunnel &&
+        (deps.seoTarget
+          ? deps.seoTarget.isMonitored(acceptedEntry.contentType)
+          : proposal.idea_seo_target != null);
+      if (needsSeoTarget) {
+        const seoGate = gateIdeaSeoTargetAtAccept(proposal, acceptedEntry, db);
+        if (!seoGate.ok) return { ...seoGate, proposal };
+      }
       const reviewBeforeAccept = await classifyLive(proposal);
       db.prepare(
         `UPDATE content_proposals
@@ -5391,6 +6018,129 @@ export function createProposalService(deps: ProposalServiceDeps) {
       return { ok: true, proposal: get(id)! };
     }
 
+    if (action === "set_idea_seo_target") {
+      if (proposal.kind !== "idea") {
+        return {
+          ok: false,
+          code: "wrong_kind",
+          error: "set_idea_seo_target is for idea proposals only",
+        };
+      }
+      if (proposal.status === "finished" || proposal.status === "rejected" || proposal.status === "withdrawn") {
+        return {
+          ok: false,
+          code: proposal.close_reason === "accepted" ? IDEA_SEO_TARGET_FROZEN : "closed",
+          error:
+            proposal.close_reason === "accepted"
+              ? "idea_seo_target is frozen after accept. The implementing edits proposal may override it with seo_target_override.reason."
+              : "Cannot change idea_seo_target on a closed proposal",
+        };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may set idea_seo_target",
+        };
+      }
+      const seoCheck = validateIdeaSeoTarget(caller.idea_seo_target, {
+        demandLabel: ideaDemandLabel(proposal.review_situations),
+        enforceDemand: true,
+      });
+      if (!seoCheck.ok) {
+        return { ok: false, code: seoCheck.code, error: seoCheck.error };
+      }
+      if (proposal.idea_seo_target && ideaSeoTargetsEqual(proposal.idea_seo_target, seoCheck.target)) {
+        return { ok: true, proposal: get(id)! };
+      }
+      db.prepare(`UPDATE content_proposals SET idea_seo_target_json = ?, updated_at = ? WHERE id = ?`).run(
+        JSON.stringify(seoCheck.target),
+        now,
+        id,
+      );
+      const after = getRaw(id)!;
+      await classifyLive(after, { refreshSnapshot: true });
+      emitProposalEvent(
+        site,
+        "proposal_idea_seo_target_set",
+        id,
+        caller.username,
+        { idea_seo_target: seoCheck.target },
+        caller.actor,
+      );
+      return { ok: true, proposal: get(id)! };
+    }
+
+    if (action === "set_related_entries") {
+      if (proposal.kind !== "idea") {
+        return { ok: false, code: "wrong_kind", error: "set_related_entries is for idea proposals only" };
+      }
+      if (proposal.status !== "open" && proposal.status !== "partial") {
+        return {
+          ok: false,
+          code: "closed",
+          error:
+            proposal.close_reason === "accepted"
+              ? "related_entries cannot change after accept — accepted_entry owns the page now."
+              : "Cannot change related_entries on a closed proposal",
+        };
+      }
+      if (
+        !sameAgentIdentity(
+          proposal.proposer_username,
+          asAgentActor(proposal.proposer_actor),
+          caller.username,
+          asAgentActor(caller.actor),
+        ) &&
+        !caller.asStaff
+      ) {
+        return {
+          ok: false,
+          code: "not_proposer",
+          error: "Only the original proposer (or staff) may set related_entries",
+        };
+      }
+      if (!Array.isArray(caller.related_entries)) {
+        return {
+          ok: false,
+          code: "related_entries_required",
+          error: "Pass related_entries: [{ contentType, slug, locale? }] (an empty array clears them).",
+        };
+      }
+      const nextRelated = normalizeRelatedEntries(caller.related_entries);
+      if (deps.knownContentTypes) {
+        const known = deps.knownContentTypes();
+        const unknown = unknownContentTypes(nextRelated, known);
+        if (unknown.length) return unknownContentTypeError(unknown, known);
+      }
+      const mixed = ideaRelatedMixedRisk(nextRelated);
+      if (mixed) return mixed;
+      if (stableJson(nextRelated) === stableJson(proposal.related_entries ?? [])) {
+        return { ok: true, proposal: get(id)! };
+      }
+      const fingerprint = fingerprintIdeas({
+        site,
+        title: proposal.title,
+        summary: proposal.summary,
+        relatedIssueIds: proposal.related_issue_ids,
+        relatedEntries: nextRelated,
+      });
+      db.prepare(
+        `UPDATE content_proposals SET related_entries_json = ?, fingerprint = ?, updated_at = ?, author_content_at = ? WHERE id = ?`,
+      ).run(JSON.stringify(nextRelated), fingerprint, now, now, id);
+      const after = getRaw(id)!;
+      await classifyLive(after, { refreshSnapshot: true });
+      return { ok: true, proposal: get(id)! };
+    }
+
     if (action === "set_review_situations") {
       if (proposal.kind !== "edits" && proposal.kind !== "idea") {
         return {
@@ -5543,6 +6293,21 @@ export function createProposalService(deps: ProposalServiceDeps) {
         id,
       );
       if (!implementsResolved.ok) return implementsResolved;
+      const reviseOverride = checkSeoTargetOverride(
+        implementsResolved.idea,
+        entriesIn,
+        caller.seo_target_override !== undefined
+          ? caller.seo_target_override
+          : proposal.seo_target_override,
+      );
+      if (!reviseOverride.ok) return reviseOverride;
+      const reviseOptOut = gateAgentSeoOptOut(
+        caller.actor,
+        implementsResolved.idea,
+        entriesIn,
+        reviseOverride.override?.reason,
+      );
+      if (!reviseOptOut.ok) return reviseOptOut;
       const reviseCreates = new Set<string>();
 
       const classTargets: Array<{
@@ -5646,7 +6411,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
           .join("\n");
         const outcomeFigures =
           (proposal.review_situations ?? []).includes("selling_figures") ||
-          evaluateClaimCues(updateText) === "clear_yes";
+          evaluateClaimCues(updateText) === "clear_yes" ||
+          figureTokensIn(updateText);
         classTargets.push({
           contentType: e.contentType,
           category: (e.updates ?? []).some(
@@ -5840,6 +6606,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
           author: caller.username,
           newEntryKeys: reviseCreates,
           ideaFunnel: implementsResolved.idea?.idea_funnel ?? null,
+          idea: implementsResolved.idea,
           owned,
           resetCreated: proposal.co_authors.length === 0,
         });
@@ -5866,6 +6633,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
       db.prepare(
         `DELETE FROM content_proposal_entries WHERE proposal_id = ? AND status IN ('pending','failed')`,
       ).run(id);
+      db.prepare(`UPDATE content_proposals SET seo_target_override_json = ? WHERE id = ?`).run(
+        reviseOverride.override ? JSON.stringify(reviseOverride.override) : null,
+        id,
+      );
       for (const plan of revisePlans) {
         db.prepare(
           `INSERT INTO content_proposal_entries (
@@ -6365,8 +7136,24 @@ export function createProposalService(deps: ProposalServiceDeps) {
               continue;
             }
             let seedFunnel: IdeaFunnel | null = null;
+            let seoSeedOps: FieldUpdate[] = [];
             if (proposal.implements_proposal_id) {
               const idea = loadProposal(db, proposal.implements_proposal_id);
+              if (idea?.idea_seo_target) {
+                const ov = checkSeoTargetOverride(idea, [{ updates: entry.ops }], proposal.seo_target_override);
+                if (!ov.ok) {
+                  failEntry(`${ov.code}: ${ov.error}`);
+                  continue;
+                }
+                const seed = ideaSeoSeed(idea, entry);
+                if (!seed.ok) {
+                  failEntry(`${seed.code}: ${seed.error}`);
+                  continue;
+                }
+                seoSeedOps = Object.entries(seed.seo ?? {}).map(
+                  ([k, v]) => ({ field_path: `seo.${k}`, value: v }) as FieldUpdate,
+                );
+              }
               const locked = idea?.idea_funnel ?? null;
               if (locked && ideaFunnelComplete(locked)) {
                 const fromOps = funnelFromFieldOps(entry.ops);
@@ -6403,7 +7190,10 @@ export function createProposalService(deps: ProposalServiceDeps) {
               failEntry(prepared.error ?? "create failed");
               continue;
             }
-            const appliedCreate = await deps.applyUpdates(entry, caller.username);
+            const appliedCreate = await deps.applyUpdates(
+              seoSeedOps.length ? { ...entry, ops: [...seoSeedOps, ...entry.ops] } : entry,
+              caller.username,
+            );
             if (!appliedCreate.ok) {
               if (prepared.seeded) deps.discardSeededEntry?.(entry);
               failEntry(appliedCreate.error ?? "apply failed");
@@ -7045,6 +7835,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     create,
     update,
     classifyLive,
+    contentTypeStrategiesFor,
   };
 }
 
@@ -7143,8 +7934,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       outcome_lesson_captured_by, outcome_lesson_note,
       reviewer_action_by, reviewer_action_by_actor_json,
       system_version, co_authors_json, all_or_nothing, reverts_proposal_id,
-      stale_since, stale_flagged_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      stale_since, stale_flagged_at, idea_seo_target_json, seo_target_override_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -7230,6 +8021,8 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.reverts_proposal_id ?? null,
         p.stale_since ?? null,
         p.stale_flagged_at ?? null,
+        p.idea_seo_target ? JSON.stringify(p.idea_seo_target) : null,
+        p.seo_target_override ? JSON.stringify(p.seo_target_override) : null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(
@@ -7405,7 +8198,10 @@ export async function promoteEntryOnSite(
     endExperimentMode: true,
     viaProposalApply: true,
     confirmOverwriteNewerLive: opts.confirm_base_unknown === true,
+    callerIsMcp: opts.caller_is_mcp === true,
+    confirmTextLimits: opts.confirm_text_limits === true,
     dryRun: opts.dry_run === true,
+    seoStandaloneReason: opts.seo_standalone_reason ?? null,
   });
   if (!result.ok) {
     return {
@@ -7615,5 +8411,52 @@ export function proposalServiceForSite(ctx: SiteContext) {
     stampPublishedAt: (entry, author) => stampPublishedAtOnSite(ctx, entry, author),
     getProposalSettings: () => loadProposalSettingsFromDisk(ctx.contentRoot),
     draftStore: draftStoreForSite(ctx),
+    seoTarget: ideaSeoTargetDepsForSite(ctx),
+    strategyForContentType: (contentType) =>
+      parseContentTypeStrategy(getContentTypeConfig(contentType, ctx.contentRoot)?.strategy),
+    knownContentTypes: () => getAllTypes(ctx.contentRoot),
+    variableDefinitions: () => ctx.variableManager.getDefinitions(),
   });
+}
+
+export function ideaSeoTargetDepsForSite(ctx: SiteContext): IdeaSeoTargetDeps {
+  const indexRow = (path: string) => {
+    const index = readSeoIndexFile(ctx.contentRoot);
+    if (!index) return null;
+    const want = normalizePath(path);
+    return Object.values(index.entries).find((r) => normalizePath(r.path || "") === want) ?? null;
+  };
+  return {
+    isMonitored: (contentType) => isSeoMonitoringEnabled(contentType, ctx.contentRoot),
+    resolveHub: (pillarPath, locale) => {
+      const canon = canonicalizePillarPath(pillarPath, locale, ctx.contentIndex);
+      const row = indexRow(canon.path);
+      const prefix = canon.path.split("/").filter(Boolean)[0] ?? "";
+      return {
+        path: canon.path,
+        live: canon.live,
+        locale: row?.locale ?? (/^[a-z]{2}$/.test(prefix) ? prefix : null),
+        is_hub: row ? row.is_pillar === true : null,
+      };
+    },
+    keywordOwner: (keyword, exclude) => {
+      const r = assertMainKeywordAvailable({ contentRoot: ctx.contentRoot, keyword, ...exclude });
+      if (r.ok) return null;
+      if (r.code === "seo_index_unavailable") return "unavailable";
+      return {
+        path: r.owner?.path?.trim() || (r.owner ? `${r.owner.content_type}/${r.owner.slug}/${r.owner.locale}` : "?"),
+      };
+    },
+    selfPath: (contentType, slug, locale) => entryCanonicalPath(contentType, slug, locale, ctx.contentIndex),
+    memberInfo: (contentType, slug, locale) => {
+      const live = resolveExistenceFromSite(ctx, { contentType, slug, locale }).live === "exists";
+      const index = readSeoIndexFile(ctx.contentRoot);
+      const row = index?.entries[seoEntryId(contentType, slug, locale)];
+      return {
+        live,
+        monitored: isSeoMonitoringEnabled(contentType, ctx.contentRoot),
+        pillar_path: row?.pillar_path ?? null,
+      };
+    },
+  };
 }

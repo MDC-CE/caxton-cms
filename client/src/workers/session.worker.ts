@@ -1,6 +1,13 @@
 import type { Session, Location, GeoData, UTMParams, DeviceData, WorkerMessage, WorkerResponse } from '@shared/session';
 import { defaultSession, SESSION_VERSION } from '@shared/session';
 import { locations } from '../lib/locations';
+import {
+  mergeUtmSets,
+  nextFirstTouch,
+  nextPaidLanding,
+  paidLandingFor,
+  parseMarketingParams,
+} from '@shared/session-marketing';
 
 const GEO_API_URL = '/api/geo';
 
@@ -41,37 +48,6 @@ function getBrowserLanguage(navigatorJson: string): string {
     // Ignore parse errors
   }
   return 'en';
-}
-
-function parseUTMParams(search: string): UTMParams {
-  const params = new URLSearchParams(search);
-  const utm: UTMParams = {};
-  
-  // Standard UTM parameters
-  const utmKeys: (keyof UTMParams)[] = [
-    'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
-    'utm_url', 'utm_placement', 'utm_plan',
-    'ref', 'referral', 'referral_key', 'coupon'
-  ];
-  
-  for (const key of utmKeys) {
-    const value = params.get(key);
-    if (value) {
-      utm[key] = value;
-    }
-  }
-  
-  // Normalize PPC click IDs into a single field (first one found wins)
-  const ppcClickIds = ['gclid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id', 'twclid', 'dclid', 'sclid'];
-  for (const clickId of ppcClickIds) {
-    const value = params.get(clickId);
-    if (value) {
-      utm.ppc_tracking_id = value;
-      break;
-    }
-  }
-  
-  return utm;
 }
 
 function getClosestLocation(lat: number, lon: number, filteredLocations: Location[]): Location | null {
@@ -296,14 +272,14 @@ async function initSession(message: WorkerMessage['payload']): Promise<Session> 
   const { cachedSession, path, search, navigator, device, existingUserId } = message;
   
   const browserLang = getBrowserLanguage(navigator);
-  const newUtm = parseUTMParams(search);
-  
-  const mergedUtm: UTMParams = {
-    ...cachedSession?.utm,
-    ...Object.fromEntries(
-      Object.entries(newUtm).filter(([, v]) => v !== undefined)
-    ),
-  };
+  const now = Date.now();
+  const newUtm = parseMarketingParams(search, { fbp: message.fbp, fbc: message.fbc, now });
+  const mergedUtm: UTMParams = mergeUtmSets(cachedSession?.utm, newUtm);
+  const first_touch = nextFirstTouch(cachedSession?.first_touch, newUtm);
+  const paid_landing = nextPaidLanding(
+    cachedSession?.paid_landing,
+    paidLandingFor(newUtm, { host: message.host || '', path, now }),
+  );
   
   let geo: GeoData | null = cachedSession?.geo || null;
   let location: Location | null = cachedSession?.location || null;
@@ -356,8 +332,10 @@ async function initSession(message: WorkerMessage['payload']): Promise<Session> 
     device: deviceData,
     landing_page,
     conversion_page,
+    first_touch,
+    paid_landing,
     consent: cachedSession?.consent || { geolocation: null },
-    timestamp: Date.now(),
+    timestamp: now,
   };
   
   return session;

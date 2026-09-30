@@ -71,6 +71,8 @@ import {
   deprecatedTemplateRefWarnings,
   isDeprecatedFieldInfo,
 } from "../lib/deprecated-field-mcp.js";
+import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
+import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
 import {
   DEPRECATED_FIELD_CODE,
   deprecatedSystemHint,
@@ -428,6 +430,7 @@ async function callEditSectionsApi(
     why?: string;
     highlights?: string[];
     agent_session_id?: string;
+    seo_optout_reason?: string;
   },
   mcpToken?: string,
   domain?: string,
@@ -447,11 +450,40 @@ async function callEditSectionsApi(
         ...(params.report ? { report: params.report } : {}),
         ...(params.why ? { why: params.why } : {}),
         ...(params.highlights?.length ? { highlights: params.highlights } : {}),
+        ...(params.seo_optout_reason ? { seo_optout_reason: params.seo_optout_reason } : {}),
       }),
     });
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok) {
       const errMsg = (data.error as string) || `Server error: ${res.status}`;
+      if (data.code === "seo_optout_idea_born") {
+        return {
+          error: fail(errMsg, {
+            code: "seo_optout_idea_born",
+            details: data.details ?? {},
+            warnings: [
+              {
+                code: "seo_optout_idea_born",
+                message:
+                  "Idea-born pages stay clustered. Agents may set seo.pillar_path: null (or include_in_clustering: false) only when the origin idea is fast_decay_news or broken_url AND seo_optout_reason (min 40 chars) is passed. Staff can still turn monitoring off in the UI.",
+              },
+            ],
+            next_actions: [
+              {
+                tool: "list_seo_clusters",
+                reason: "Find a live hub in this locale for the page instead of opting out.",
+                priority: "recommended",
+              },
+              {
+                tool: "update_fields",
+                reason: "Fix the cluster: seo.pillar_path to a live same-locale hub, or seo.is_pillar: true.",
+                priority: "recommended",
+                args_hint: { slug: params.slug, locale: params.locale, contentType: params.contentType },
+              },
+            ],
+          }),
+        };
+      }
       if (data.code === "report_quality" || data.code === "report_required" || data.code === "report_too_short") {
         return {
           error: actionRequired(
@@ -3201,6 +3233,9 @@ export function registerPageTools(
       confirm_cluster_resolution: z.boolean().optional().describe(
         "Required when becoming a pillar (seo.is_pillar:true) or opting out of clustering while ORPHAN_PAGE / PARTIALLY_SET_CLUSTER is still open. Prefer joining a hub with seo.pillar_path instead.",
       ),
+      seo_optout_reason: z.string().optional().describe(
+        "Idea-born pages only: why this page leaves every cluster (min 40 chars). Allowed only when the origin idea is fast_decay_news or broken_url; otherwise seo_optout_idea_born.",
+      ),
       seo_research_source: z
         .string()
         .optional()
@@ -3218,7 +3253,7 @@ export function registerPageTools(
         .describe("Required. From agent_session start — groups this write for staff monitoring."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
+    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_optout_reason, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { contentPath, contentFolder, domain } = siteResult;
@@ -4006,6 +4041,7 @@ export function registerPageTools(
             why: whyText,
             highlights: highlightList,
             agent_session_id,
+            ...(seo_optout_reason ? { seo_optout_reason } : {}),
           },
           mcpToken,
           domain,
@@ -4014,6 +4050,7 @@ export function registerPageTools(
         boundUpdates = apiResult.data.boundUpdates;
         appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         warnings.push(...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs));
+        warnings.push(...textLimitWarnings(apiResult.data.text_limit_warnings));
         results.push(`${localeEntries.length} field(s) → ${pathInfo.relativeHint}`);
       }
 
@@ -5646,6 +5683,15 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -5744,6 +5790,12 @@ export function registerPageTools(
         .optional()
         .describe("Publish a translation whose source locale changed after translating. Ask the user first."),
       dry_run: z.boolean().optional().describe("Run every check and return published_diff without writing."),
+      seo_standalone_reason: z
+        .string()
+        .optional()
+        .describe(
+          "New language on an SEO-monitored page whose draft sets seo.pillar_path: null: why it stays out of every cluster (min 40 chars). Idea-born pages also need a fast_decay_news/broken_url origin idea.",
+        ),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5760,6 +5812,7 @@ export function registerPageTools(
       confirm_overwrite_newer_live,
       confirm_source_changed,
       dry_run,
+      seo_standalone_reason,
       report,
       agent_session_id,
       site,
@@ -5825,6 +5878,7 @@ export function registerPageTools(
             ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
             ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
             ...(dry_run ? { dry_run: true } : {}),
+            ...(seo_standalone_reason ? { seo_standalone_reason } : {}),
           }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -5833,6 +5887,46 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === "locale_seo_target_required") {
+            return fail(errMsg, {
+              code: serverCode,
+              details: details ?? {},
+              warnings: [
+                {
+                  code: "locale_seo_target_required",
+                  message:
+                    "Each language of an SEO-monitored page needs its own seo.main_keyword plus a live hub in the same language (seo.pillar_path) or seo.is_pillar: true, set on the draft. Standalone (pillar_path: null) needs seo_standalone_reason; idea-born pages only for news/broken-URL ideas.",
+                },
+              ],
+              next_actions: [
+                {
+                  tool: "get_or_refresh_seo_research",
+                  reason: `Pick the ${locale} keyword for this language.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "list_seo_clusters",
+                  reason: `Find a live ${locale} hub.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "update_fields",
+                  reason: "Set seo.main_keyword and seo.pillar_path (or seo.is_pillar) on the draft, then retry promote_variant.",
+                  priority: "required",
+                  args_hint: { slug, locale, contentType, variant: variantSlug },
+                },
+              ],
+            });
+          }
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -6866,6 +6960,22 @@ const ghWarning = githubCommitWarning(commitResult);
         site,
       });
 
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const cache = new Map();
+        for (const [loc, localeContent] of Object.entries(normalizedLocales)) {
+          const violations = evaluatePageTextLimitsForSite(
+            { sections: localeContent.sections },
+            { contentRoot: contentPath, cache },
+          );
+          for (const w of textLimitWarnings(violations)) {
+            warnings.push({ code: w.code, message: `[${loc}] ${w.message}` });
+          }
+        }
+      } catch {
+        /* text limits are advisory on create */
+      }
+
       const title =
         (normalizedLocales[primaryLocale]?.fields?.title as string | undefined) ||
         (typeof common.title === "string" ? common.title : undefined);
@@ -7085,6 +7195,7 @@ const ghWarning = githubCommitWarning(commitResult);
         ...variantWarningsIfNeeded(variant),
         ...schemaOrgPageOverrideWarnings(sectionToAdd),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7733,6 +7844,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         UPDATED_AT_STAMP_WARNING,
         ...variantWarningsIfNeeded(variant),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -8337,6 +8449,15 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       }
       pushSlugLocaleMismatchWarning(warnings, localeUrlSlug, target_locale);
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const merged = { ...common, ...localeData } as Record<string, unknown>;
+        warnings.push(
+          ...textLimitWarnings(evaluatePageTextLimitsForSite(merged, { contentRoot: contentPath })),
+        );
+      } catch {
+        /* text limits are advisory on translate */
+      }
       {
         const missing = draftMissingRequiredWarnings(resolved.config, common, localeData);
         if (missing.length > 0) {

@@ -16,6 +16,8 @@ import {
   type McpTextResult,
   type NextAction,
 } from "./respond.js";
+import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
+import { textLimitsExceededResult } from "./text-limits-mcp.js";
 
 export function isLiveRequiredFieldsError(
   errMsg: string,
@@ -185,6 +187,9 @@ export function editApiErrorResult(
   }
   if (isSchemaOrgPageUrlMismatchError(errMsg, data.code)) {
     return schemaOrgPageUrlMismatchResult(errMsg, ctx);
+  }
+  if (data.code === TEXT_LIMITS_EXCEEDED_CODE) {
+    return textLimitsExceededResult(errMsg, data, ctx);
   }
   if (data.code === "seo_keyword_taken" || data.code === "seo_index_unavailable") {
     return fail(errMsg, {

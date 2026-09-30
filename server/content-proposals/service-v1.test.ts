@@ -16,6 +16,8 @@ import {
   exportAllProposals,
   replaceProposalsFromSnapshot,
   toProposalSummary,
+  type IdeaSeoHubFacts,
+  type IdeaSeoTargetDeps,
   type PromoteEntryOpts,
   type PromoteEntryResult,
   type ProposalEntryInput,
@@ -61,7 +63,7 @@ function fakeDraftStore(live: Record<string, Record<string, unknown>> = {}) {
         if (!opts.newEntry) return { ok: false, code: "entry_not_found", error: "no page" };
         entries.add(`${r.contentType}/${r.slug}`);
       }
-      const base = cloneJson(liveOf(r) ?? {});
+      const base = cloneJson(liveOf(r) ?? (opts.seo ? { seo: opts.seo } : {}));
       drafts.set(keyOf(r), { data: cloneJson(base), base, link: null, alloc: 0, baseStatus: "ok" });
       return { ok: true };
     },
@@ -408,6 +410,362 @@ describe("proposals v1.0 (draft-first)", () => {
         { username: "alice" },
       );
       expect(res.ok).toBe(true);
+    });
+  });
+
+  describe("idea SEO target (keyword + cluster)", () => {
+    const post = { contentType: "blog", slug: "ai-code-review", locale: "en" };
+    const sections = [{ type: "hero", version: "1.0", title: "AI code review" }];
+    const HUB = "/en/blog/ai-engineer/hub-ai-engineering";
+    let hubs: Record<string, IdeaSeoHubFacts>;
+    let liveKeywords: Record<string, string>;
+    let members: Record<string, { live: boolean; monitored: boolean; pillar_path: string | null }>;
+    let liveKeys: Set<string>;
+
+    beforeEach(() => {
+      hubs = { [HUB]: { path: HUB, live: true, locale: "en", is_hub: true } };
+      liveKeywords = {};
+      members = {
+        "blog/member-one/en": { live: true, monitored: true, pillar_path: null },
+        "blog/member-two/en": { live: true, monitored: true, pillar_path: "/en/blog/other-hub" },
+      };
+      liveKeys = new Set();
+    });
+
+    const facts = (): IdeaSeoTargetDeps => ({
+      isMonitored: (ct) => ct === "blog",
+      resolveHub: (p) => hubs[p] ?? { path: p, live: false, locale: null, is_hub: null },
+      keywordOwner: (kw) => (liveKeywords[kw] ? { path: liveKeywords[kw]! } : null),
+      selfPath: (ct, slug, loc) => `/${loc}/${ct}/${slug}`,
+      memberInfo: (ct, slug, loc) =>
+        members[`${ct}/${slug}/${loc}`] ?? { live: false, monitored: true, pillar_path: null },
+    });
+    let currentStore: ProposalDraftStore | null = null;
+    const deps = () => ({
+      resolveExistence: (e: { contentType: string; slug: string; locale: string; variant?: string | null }) => ({
+        live: liveKeys.has(`${e.contentType}/${e.slug}/${e.locale}`) ? ("exists" as const) : ("missing" as const),
+        draftExists: Boolean(e.variant && currentStore?.exists({ ...e, variant: e.variant })),
+      }),
+      inspectMissingTarget: () => ({ shape: "page_file" as const, requiredFields: [] }),
+      seoTarget: facts(),
+    });
+    const join = { main_keyword: "ai code review", cluster: { mode: "join", pillar_path: HUB } };
+    const REASON = "Breaking release news that decays within two weeks; no evergreen hub fits it.";
+
+    async function fileIdea(
+      svc: ReturnType<typeof makeService>["svc"],
+      extra: Record<string, unknown> = {},
+      slug = post.slug,
+    ) {
+      const idea = await svc.create(
+        {
+          kind: "idea",
+          title: `New article: ${slug}`,
+          summary: SUMMARY,
+          related_entries: [{ ...post, slug }],
+          idea_funnel: { stage: "awareness", products: "all" },
+          ...extra,
+        },
+        { username: "alice" },
+      );
+      if (!idea.ok) throw new Error(`${idea.code}: ${idea.error}`);
+      return idea.proposal.id;
+    }
+    const accept = (svc: ReturnType<typeof makeService>["svc"], id: string, slug = post.slug) =>
+      svc.update(id, "accept", {
+        username: "bob",
+        next_step: "File the new post with implements_proposal_id next.",
+        accepted_entry: { ...post, slug },
+      });
+    const implement = (
+      svc: ReturnType<typeof makeService>["svc"],
+      ideaId: string,
+      updates: ProposalEntryInput["updates"] = [{ field_path: "sections", value: sections }],
+      extra: Record<string, unknown> = {},
+    ) =>
+      svc.create(
+        {
+          title: "New post",
+          summary: SUMMARY,
+          implements_proposal_id: ideaId,
+          review_situations: ["new_public_content"],
+          entries: [entry({ ...post, updates })],
+          ...extra,
+        },
+        { username: "alice" },
+      );
+
+    it("accept refuses a monitored new page without a target; set works; frozen after accept", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc);
+      const ctx = await svc.classifyLive(svc.get(id)!);
+      expect(ctx?.agent_preview.warnings.some((w) => w.code === "idea_seo_target_missing")).toBe(true);
+      const blocked = await accept(svc, id);
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.code).toBe("idea_seo_target_required");
+      const set = await svc.update(id, "set_idea_seo_target", { username: "alice", idea_seo_target: join });
+      expect(set.ok).toBe(true);
+      expect((await accept(svc, id)).ok).toBe(true);
+      const frozen = await svc.update(id, "set_idea_seo_target", { username: "alice", idea_seo_target: join });
+      expect(frozen.ok).toBe(false);
+      if (!frozen.ok) expect(frozen.code).toBe("idea_seo_target_frozen");
+    });
+
+    it("non-monitored types accept without a target", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({
+        store: fake.store,
+        extraDeps: { ...deps(), seoTarget: { ...facts(), isMonitored: () => false } },
+      });
+      const id = await fileIdea(svc);
+      expect((await accept(svc, id)).ok).toBe(true);
+    });
+
+    it("standalone only for news / broken-URL ideas", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const standalone = { main_keyword: "gpt-6 launch", cluster: { mode: "standalone", reason: REASON } };
+      const refused = await svc.create(
+        {
+          kind: "idea",
+          title: "New article: standalone",
+          summary: SUMMARY,
+          review_situations: ["existing_demand"],
+          related_entries: [post],
+          idea_seo_target: standalone,
+        },
+        { username: "alice" },
+      );
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.code).toBe("idea_seo_target_standalone_not_allowed");
+      const id = await fileIdea(svc, { review_situations: ["fast_decay_news"], idea_seo_target: standalone });
+      expect((await accept(svc, id)).ok).toBe(true);
+    });
+
+    it("accept checks hub liveness, hub locale, and hub-ness", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const dead = await fileIdea(svc, {
+        idea_seo_target: { main_keyword: "k1", cluster: { mode: "join", pillar_path: "/en/blog/gone" } },
+      }, "p1");
+      const r1 = await accept(svc, dead, "p1");
+      expect(!r1.ok && r1.code).toBe("idea_seo_target_hub_not_live");
+      hubs["/es/blog/hub-es"] = { path: "/es/blog/hub-es", live: true, locale: "es", is_hub: true };
+      const wrongLocale = await fileIdea(svc, {
+        idea_seo_target: { main_keyword: "k2", cluster: { mode: "join", pillar_path: "/es/blog/hub-es" } },
+      }, "p2");
+      const r2 = await accept(svc, wrongLocale, "p2");
+      expect(!r2.ok && r2.code).toBe("idea_seo_target_hub_not_live");
+      hubs["/en/blog/plain"] = { path: "/en/blog/plain", live: true, locale: "en", is_hub: false };
+      const notHub = await fileIdea(svc, {
+        idea_seo_target: { main_keyword: "k3", cluster: { mode: "join", pillar_path: "/en/blog/plain" } },
+      }, "p3");
+      const r3 = await accept(svc, notHub, "p3");
+      expect(!r3.ok && r3.code).toBe("idea_seo_target_hub_not_live");
+    });
+
+    it("hub mode needs live monitored members", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc, {
+        idea_seo_target: {
+          main_keyword: "ai engineering",
+          cluster: { mode: "hub", members: [{ contentType: "blog", slug: "ghost" }] },
+        },
+      });
+      const r = await accept(svc, id);
+      expect(!r.ok && r.code).toBe("idea_seo_target_hub_members_required");
+    });
+
+    it("keyword taken by a live page or by another accepted unpublished idea", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      liveKeywords["ai code review"] = "/en/blog/ai/existing";
+      const a = await fileIdea(svc, { idea_seo_target: join }, "a1");
+      const r1 = await accept(svc, a, "a1");
+      expect(!r1.ok && r1.code).toBe("idea_seo_target_keyword_taken");
+      delete liveKeywords["ai code review"];
+      expect((await accept(svc, a, "a1")).ok).toBe(true);
+      const b = await fileIdea(svc, { idea_seo_target: join }, "a2");
+      const r2 = await accept(svc, b, "a2");
+      expect(!r2.ok && r2.code).toBe("idea_seo_target_keyword_taken");
+      if (!r2.ok) expect(r2.error).toContain(a);
+    });
+
+    it("implementing edits seed the locked target into the new draft", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc, { idea_seo_target: join });
+      expect((await accept(svc, id)).ok).toBe(true);
+      const res = await implement(svc, id);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const d = fake.drafts.get(`blog/ai-code-review/en/${res.proposal.entries[0]!.variant}`)!;
+      expect(d.data.seo).toEqual({ main_keyword: "ai code review", pillar_path: HUB, is_pillar: false });
+      expect(d.data.sections).toEqual(sections);
+    });
+
+    it("follows a renamed hub and fails when the hub is gone", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc, { idea_seo_target: join });
+      expect((await accept(svc, id)).ok).toBe(true);
+      hubs[HUB] = { path: "/en/blog/ai-engineer/hub-renamed", live: true, locale: "en", is_hub: true };
+      const renamed = await implement(svc, id);
+      expect(renamed.ok).toBe(true);
+      if (!renamed.ok) return;
+      expect(renamed.warnings?.some((w) => w.code === "idea_seo_target_hub_renamed")).toBe(true);
+      const d = fake.drafts.get(`blog/ai-code-review/en/${renamed.proposal.entries[0]!.variant}`)!;
+      expect((d.data.seo as Record<string, unknown>).pillar_path).toBe("/en/blog/ai-engineer/hub-renamed");
+      await svc.update(renamed.proposal.id, "withdraw", {
+        username: "alice",
+        close_note: "Withdrawing to re-file after the hub was deleted entirely.",
+      });
+      hubs[HUB] = { path: HUB, live: false, locale: "en", is_hub: null };
+      const gone = await implement(svc, id);
+      expect(gone.ok).toBe(false);
+      if (!gone.ok) expect(gone.code).toBe("idea_seo_target_hub_gone");
+    });
+
+    it("seo ops that differ from the lock need an override reason; standalone stays demand-gated", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc, { idea_seo_target: join, review_situations: ["anticipated_demand"] });
+      expect((await accept(svc, id)).ok).toBe(true);
+      const ops = [
+        { field_path: "sections", value: sections },
+        { field_path: "seo.main_keyword", value: "ai code reviewer" },
+      ];
+      const conflict = await implement(svc, id, ops);
+      expect(conflict.ok).toBe(false);
+      if (!conflict.ok) expect(conflict.code).toBe("idea_seo_target_conflict");
+      const standalone = await implement(
+        svc,
+        id,
+        [{ field_path: "sections", value: sections }, { field_path: "seo.pillar_path", value: null }],
+        { seo_target_override: { reason: REASON } },
+      );
+      expect(standalone.ok).toBe(false);
+      if (!standalone.ok) expect(standalone.code).toBe("idea_seo_target_standalone_not_allowed");
+      const ok = await implement(svc, id, ops, {
+        seo_target_override: { reason: "SERP research shows the singular phrase converts better for this page." },
+      });
+      expect(ok.ok).toBe(true);
+      if (!ok.ok) return;
+      expect(ok.proposal.seo_target_override?.reason).toMatch(/SERP research/);
+      const d = fake.drafts.get(`blog/ai-code-review/en/${ok.proposal.entries[0]!.variant}`)!;
+      expect((d.data.seo as Record<string, unknown>).main_keyword).toBe("ai code reviewer");
+    });
+
+    it("hub mode: going live lists one cluster-fix proposal per member", async () => {
+      const fake = fakeDraftStore();
+      currentStore = fake.store;
+      const { svc } = makeService({ store: fake.store, extraDeps: deps() });
+      const id = await fileIdea(svc, {
+        idea_seo_target: {
+          main_keyword: "ai engineering",
+          cluster: {
+            mode: "hub",
+            members: [
+              { contentType: "blog", slug: "member-one" },
+              { contentType: "blog", slug: "member-two" },
+            ],
+          },
+        },
+      });
+      expect((await accept(svc, id)).ok).toBe(true);
+      const res = await implement(svc, id);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const d = fake.drafts.get(`blog/ai-code-review/en/${res.proposal.entries[0]!.variant}`)!;
+      expect((d.data.seo as Record<string, unknown>).is_pillar).toBe(true);
+      const applied = await svc.update(res.proposal.id, "apply", { username: "bob" });
+      expect(applied.ok ? "ok" : `${applied.code}: ${applied.error}`).toBe("ok");
+      if (!applied.ok) return;
+      const w = applied.warnings?.find((x) => x.code === "idea_seo_hub_members_follow_up") as
+        | { details?: { next_actions?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>> } }
+        | undefined;
+      expect(w?.details?.next_actions).toHaveLength(2);
+      expect(w?.details?.members?.find((m) => m.slug === "member-two")?.in_other_hub).toBe(true);
+      expect(w?.details?.members?.find((m) => m.slug === "member-one")?.in_other_hub).toBe(false);
+    });
+
+    it("agents cannot opt an idea-born page out of clustering unless news/broken-URL + reason", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({
+        store: fake.store,
+        extraDeps: { ...deps(), seoTarget: { ...facts(), isMonitored: () => false } },
+      });
+      const agent = { username: "agent-a", actor: { type: "mcp" as const, role: "seo_specialist", model: "m", client: "c" } };
+      const optOut = [
+        { field_path: "sections", value: sections },
+        { field_path: "seo.pillar_path", value: null },
+      ];
+      const evergreen = await fileIdea(svc, { review_situations: ["existing_demand"] }, "evergreen");
+      expect((await accept(svc, evergreen, "evergreen")).ok).toBe(true);
+      const refused = await svc.create(
+        {
+          title: "Opt out",
+          summary: SUMMARY,
+          implements_proposal_id: evergreen,
+          entries: [entry({ ...post, slug: "evergreen", updates: optOut })],
+          seo_target_override: { reason: "This topic has no hub in our site and I do not want to build one." },
+        },
+        agent,
+      );
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) {
+        expect(refused.code).toBe("seo_optout_idea_born");
+        expect((refused as { details?: Record<string, unknown> }).details?.origin_idea_id).toBe(evergreen);
+      }
+      const staff = await svc.create(
+        {
+          title: "Staff opt out",
+          summary: SUMMARY,
+          implements_proposal_id: evergreen,
+          entries: [entry({ ...post, slug: "evergreen", updates: optOut })],
+        },
+        { username: "staff-user" },
+      );
+      expect(staff.ok).toBe(true);
+
+      const news = await fileIdea(svc, { review_situations: ["fast_decay_news"] }, "news");
+      expect((await accept(svc, news, "news")).ok).toBe(true);
+      const noReason = await svc.create(
+        { title: "News opt out", summary: SUMMARY, implements_proposal_id: news, entries: [entry({ ...post, slug: "news", updates: optOut })] },
+        agent,
+      );
+      expect(!noReason.ok && noReason.code).toBe("seo_optout_idea_born");
+      const withReason = await svc.create(
+        {
+          title: "News opt out",
+          summary: SUMMARY,
+          implements_proposal_id: news,
+          entries: [entry({ ...post, slug: "news", updates: optOut })],
+          seo_target_override: { reason: "Release-week news; traffic is gone in ten days and no hub fits it." },
+        },
+        agent,
+      );
+      expect(withReason.ok).toBe(true);
+    });
+
+    it("ideas accepted without a target implement unchanged", async () => {
+      const fake = fakeDraftStore();
+      const { svc } = makeService({
+        store: fake.store,
+        extraDeps: { ...deps(), seoTarget: { ...facts(), isMonitored: () => false } },
+      });
+      const id = await fileIdea(svc);
+      expect((await accept(svc, id)).ok).toBe(true);
+      const res = await implement(svc, id, [
+        { field_path: "sections", value: sections },
+        { field_path: "seo.main_keyword", value: "anything" },
+      ]);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const d = fake.drafts.get(`blog/ai-code-review/en/${res.proposal.entries[0]!.variant}`)!;
+      expect((d.data.seo as Record<string, unknown>).main_keyword).toBe("anything");
     });
   });
 
