@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Braces, Check, ChevronDown, Clock, Cpu, FileText, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { Braces, Check, ChevronDown, Clock, Cpu, FileText, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -19,12 +19,13 @@ import { ErrorLogIssueTable, type UniqueIssue } from "@/pages/ErrorLogPage";
 import { apiFetch } from "@/lib/queryClient";
 import {
   PROCESS_NAMES,
+  RANGE_MS,
   RANGE_PRESETS,
   chartBounds,
   parsePerformanceSearch,
+  selectionOverlaps,
   serializePerformanceSearch,
   type PerformanceView,
-  type PerfSection,
   type ProcessName,
   type RangePreset,
 } from "@/lib/server-performance-url";
@@ -38,6 +39,7 @@ const COLOR = {
   c2: "hsl(var(--chart-2))",
   c3: "hsl(var(--chart-3))",
   c4: "hsl(var(--chart-4))",
+  c5: "hsl(262 55% 55%)",
 };
 
 type Traffic = {
@@ -64,6 +66,16 @@ type StatsWindow = {
   api: Traffic | null;
   pages: Traffic | null;
   openCalls: Array<{ method: string; route: string; count: number; maxMs: number }> | null;
+};
+
+type RouteSeries = {
+  startingAt: number;
+  endingAt: number;
+  stepMs: number;
+  kind: "api" | "pages";
+  method: string | null;
+  route: string;
+  windows: Array<{ timestamp: number; count: number; avgMs: number; maxMs: number }>;
 };
 
 type ChartResponse = {
@@ -196,6 +208,35 @@ function insertGaps(windows: StatsWindow[], stepMs: number): StatsWindow[] {
   return out;
 }
 
+/** Inclusive sample range of the windows this selection covers. A coarse point covers its whole bucket. */
+function selectionCoverage(
+  windows: StatsWindow[],
+  stepMs: number,
+  from: number,
+  to: number,
+): { from: number; to: number } | null {
+  if (stepMs <= 0 || windows.length === 0) return null;
+  const hit = windows.filter((row) => row.timestamp <= to && row.timestamp + stepMs > from);
+  if (hit.length === 0) return null;
+  const start = hit[0].timestamp;
+  const last = hit[hit.length - 1].timestamp;
+  return { from: start, to: last + stepMs - 1 };
+}
+
+/** Draw the selection on the windows this chart actually has. A point from a finer zoom marks the window that contains it. */
+function selectionOnChart(
+  windows: StatsWindow[],
+  stepMs: number,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  if (stepMs <= 0 || windows.length === 0) return { from, to };
+  const hit = windows.filter((row) => row.timestamp <= to && row.timestamp + stepMs > from);
+  if (hit.length === 0) return { from, to };
+  if (from === to || hit.length === 1) return { from: hit[0].timestamp, to: hit[0].timestamp };
+  return { from: hit[0].timestamp, to: hit[hit.length - 1].timestamp };
+}
+
 function snapRestart(timestamp: number, stepMs: number, windows: StatsWindow[]): number | null {
   const target = stepMs > 30_000 ? Math.floor(timestamp / stepMs) * stepMs : timestamp;
   let best: number | null = null;
@@ -251,7 +292,13 @@ function PerformanceInner() {
   const [pathname, setLocation] = useLocation();
   const parsed = useMemo(() => parsePerformanceSearch(search), [search]);
   const [tab, setTab] = useState(parsed.tab);
-  const [section, setSection] = useState<PerfSection>(parsed.section);
+  const [savedRoute, setSavedRoute] = useState<{
+    api: { route: string; method: string | null } | null;
+    pages: string | null;
+  }>(() => ({
+    api: parsed.tab === "api" && parsed.route ? { route: parsed.route, method: parsed.method } : null,
+    pages: parsed.tab === "pages" && parsed.route ? parsed.route : null,
+  }));
   const [legendOn, setLegendOn] = useState<Record<string, boolean>>({
     cpu: true,
     elP50: false,
@@ -281,23 +328,35 @@ function PerformanceInner() {
     seenSearch.current = search;
     const next = parsePerformanceSearch(search);
     setTab(next.tab);
-    setSection(next.section);
   }, [search]);
 
   const write = useCallback((patch: Partial<PerformanceView>) => {
-    const next: PerformanceView = { ...parsed, tab, section, ...patch };
+    const next: PerformanceView = { ...parsed, tab, ...patch, route: null, method: null };
     if (next.process !== "web") next.tab = "process";
+    const dropSaved = (patch.process != null && patch.process !== parsed.process) || next.process !== "web";
+    if (dropSaved) setSavedRoute({ api: null, pages: null });
+    else if (patch.route !== undefined) {
+      const kind = patch.tab === "api" || patch.tab === "pages" ? patch.tab : next.tab;
+      setSavedRoute((prev) => {
+        if (kind === "api") {
+          return { ...prev, api: patch.route ? { route: patch.route, method: patch.method ?? null } : null };
+        }
+        if (kind === "pages") return { ...prev, pages: patch.route };
+        return prev;
+      });
+    }
     if (next.tab !== tab) setTab(next.tab);
-    if (next.section !== section) setSection(next.section);
     const qs = serializePerformanceSearch(next, search);
     const pathOnly = pathname.split("?")[0];
     const href = qs ? `${pathOnly}?${qs}` : pathOnly;
     seenSearch.current = qs;
     setLocation(href, { replace: true });
-  }, [parsed, tab, section, search, pathname, setLocation]);
+  }, [parsed, tab, search, pathname, setLocation]);
 
   const viewTab = parsed.process === "web" ? tab : "process";
-  const chartView = viewTab === "traffic" ? (section === "pages" ? "pages" : "api") : "process";
+  const chartView = viewTab;
+  const activeRoute = viewTab === "api" ? savedRoute.api?.route ?? null : viewTab === "pages" ? savedRoute.pages : null;
+  const activeMethod = viewTab === "api" ? savedRoute.api?.method ?? null : null;
   const selected = parsed.startingAt != null && parsed.endingAt != null;
 
   const detailPeeking = () => {
@@ -387,20 +446,55 @@ function PerformanceInner() {
     },
   });
 
+  const routeOn = viewTab === "api" || viewTab === "pages";
+  const routeQuery = useQuery({
+    queryKey: [
+      "process-stats-route",
+      parsed.process,
+      chartZoomed ? parsed.zoomFrom : parsed.range,
+      chartZoomed ? parsed.zoomTo : "preset",
+      viewTab,
+      activeRoute,
+      activeMethod,
+    ],
+    enabled: routeOn && activeRoute != null,
+    queryFn: async () => {
+      const bounds = chartBounds(parsed, Date.now());
+      const params = new URLSearchParams({
+        process: parsed.process,
+        kind: viewTab,
+        route: activeRoute ?? "",
+        starting_at: String(bounds.from),
+        ending_at: String(bounds.to),
+      });
+      if (viewTab === "api" && activeMethod) params.set("method", activeMethod);
+      const res = await apiFetch(`/api/admin/process-stats/route?${params}`);
+      if (!res.ok) throw new Error("Could not read the route");
+      return (await res.json()) as RouteSeries;
+    },
+  });
+
   const chart = chartQuery.data;
+  const windows = useMemo(() => insertGaps(chart?.windows ?? [], chart?.stepMs ?? 0), [chart]);
   stepRef.current = chart?.stepMs ?? 30_000;
   const bucketClick = selected
     && stepRef.current > 30_000
     && parsed.endingAt! - parsed.startingAt! === stepRef.current - 1;
-  const isRange = selected && parsed.startingAt! < parsed.endingAt! && !bucketClick;
-  const chartSelection = selectionIsZoom
-    ? null
-    : bucketClick
-      ? { from: parsed.startingAt!, to: parsed.startingAt! }
-      : selection;
-  const detailFrom = selected ? parsed.startingAt : chart?.startingAt;
-  const detailTo = selected ? parsed.endingAt : chart?.endingAt;
-  const wantDetail = viewTab === "traffic" || selected;
+  const drag = selected
+    && parsed.startingAt! < parsed.endingAt!
+    && !bucketClick
+    && !selectionIsZoom;
+  const zoomIn = drag || (bucketClick && !selectionIsZoom);
+  const covered = selection && !selectionIsZoom
+    ? selectionCoverage(windows, chart?.stepMs ?? 0, selection.from, selection.to)
+    : null;
+  const detailFrom = selected
+    ? (covered?.from ?? (chartQuery.isPending ? null : parsed.startingAt))
+    : chart?.startingAt;
+  const detailTo = selected
+    ? (covered?.to ?? (chartQuery.isPending ? null : parsed.endingAt))
+    : chart?.endingAt;
+  const wantDetail = viewTab !== "process" || selected;
 
   const detailQuery = useQuery({
     queryKey: ["process-stats-detail", parsed.process, detailFrom, detailTo, selected],
@@ -419,10 +513,12 @@ function PerformanceInner() {
     },
   });
 
-  const windows = useMemo(() => insertGaps(chart?.windows ?? [], chart?.stepMs ?? 0), [chart]);
+  const chartSelection = selection && !selectionIsZoom
+    ? selectionOnChart(windows, chart?.stepMs ?? 0, selection.from, selection.to)
+    : null;
   const openRows = useMemo(() => {
-    const source = selection
-      ? windows.filter((row) => row.timestamp >= selection.from && row.timestamp <= selection.to)
+    const source = selected && detailFrom != null && detailTo != null
+      ? windows.filter((row) => row.timestamp >= detailFrom && row.timestamp <= detailTo)
       : windows;
     const rows: Array<{ timestamp: number; method: string; route: string; count: number; maxMs: number }> = [];
     for (const row of source) {
@@ -431,7 +527,7 @@ function PerformanceInner() {
       }
     }
     return rows.sort((a, b) => b.maxMs - a.maxMs || b.timestamp - a.timestamp);
-  }, [windows, selection]);
+  }, [windows, selected, detailFrom, detailTo]);
   const restarts = useMemo(
     () => (chart?.restarts ?? [])
       .map((item) => snapRestart(item.timestamp, chart?.stepMs ?? 0, windows))
@@ -440,6 +536,8 @@ function PerformanceInner() {
   );
   const coarse = (chart?.stepMs ?? 0) > 30_000;
   const height = 180;
+  /** Latency has more axis labels than the process charts. */
+  const logHeight = 200;
   const toggle = (key: string) => setLegendOn((prev) => ({ ...prev, [key]: !prev[key] }));
 
   useEffect(() => {
@@ -472,23 +570,41 @@ function PerformanceInner() {
     { key: "heap", label: "heap", color: COLOR.c1, on: legendOn.heap },
     { key: "rss", label: "RSS", color: COLOR.c2, on: legendOn.rss, filled: true },
   ];
+  const routeSeries = activeRoute && routeOn
+    ? { label: activeRoute, color: COLOR.c5, on: true, pinned: true as const }
+    : null;
   const trafficSeries: ChartSeries[] = [
     { key: "p50", label: "p50", color: COLOR.c1, on: legendOn.p50 },
     { key: "p95", label: "p95", color: COLOR.c2, on: legendOn.p95 },
     { key: "p99", label: "p99", color: COLOR.c3, on: legendOn.p99 },
     { key: "max", label: "peak", color: COLOR.c4, on: legendOn.max, filled: true },
+    ...(routeSeries ? [{ ...routeSeries, key: "route" }] : []),
   ];
   const countSeries: ChartSeries[] = [
-    { key: "count", label: "Calls", color: COLOR.c1, on: legendOn.calls },
+    { key: "count", label: "Calls", color: COLOR.c1, on: legendOn.calls, filled: true },
+    ...(routeSeries ? [{ ...routeSeries, key: "routeCount" }] : []),
   ];
+  const routeBadge = activeRoute ? (
+    <button
+      type="button"
+      className="inline-flex max-w-56 items-center gap-1 rounded-full bg-foreground/10 px-2 py-0.5 text-xs text-foreground"
+      aria-label={activeMethod ? `Remove ${activeMethod} ${activeRoute} from the chart` : `Remove ${activeRoute} from the chart`}
+      title="Remove this route from the chart"
+      onClick={() => write({ route: null, method: null })}
+    >
+      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: COLOR.c5 }} />
+      <span className="truncate">{activeMethod ? `${activeMethod} ${activeRoute}` : activeRoute}</span>
+      <X className="size-4 shrink-0" strokeWidth={2} />
+    </button>
+  ) : null;
 
   const cpuRows = windows.map((row) => ({ ...row, cpu: row.cpuProcessPercent }));
   const loopRows = windows.map((row) => ({
     timestamp: row.timestamp,
     intervalMs: row.intervalMs,
-    elP50: plotMs(row.eventLoop?.p50Ms ?? null, null),
-    elP99: plotMs(row.eventLoop?.p99Ms ?? null, null),
-    elMax: plotMs(row.eventLoop?.maxMs ?? null, null),
+    elP50: plotMs(row.eventLoop?.p50Ms ?? null, 10),
+    elP99: plotMs(row.eventLoop?.p99Ms ?? null, 10),
+    elMax: plotMs(row.eventLoop?.maxMs ?? null, 10),
     rawP50: row.eventLoop?.p50Ms ?? null,
     rawP99: row.eventLoop?.p99Ms ?? null,
     rawMax: row.eventLoop?.maxMs ?? null,
@@ -499,10 +615,16 @@ function PerformanceInner() {
     rss: row.rssMb,
   }));
 
-  const trafficKey = section === "pages" ? "pages" : "api";
   const latencyFloor = chart?.boundsMs?.[0] ?? 50;
+  const trafficKey = viewTab === "pages" ? "pages" : "api";
+  const routeByTime = useMemo(() => {
+    const map = new Map<number, RouteSeries["windows"][number]>();
+    for (const row of routeQuery.data?.windows ?? []) map.set(row.timestamp, row);
+    return map;
+  }, [routeQuery.data]);
   const trafficRows = windows.map((row) => {
     const lat = row[trafficKey];
+    const hit = routeByTime.get(row.timestamp) ?? null;
     return {
       timestamp: row.timestamp,
       intervalMs: row.intervalMs,
@@ -511,15 +633,18 @@ function PerformanceInner() {
       p95: plotMs(lat?.p95Ms ?? null, latencyFloor),
       p99: plotMs(lat?.p99Ms ?? null, latencyFloor),
       max: lat ? plotMs(lat.maxMs, latencyFloor) : null,
+      route: hit ? plotMs(hit.maxMs, latencyFloor) : null,
+      routeCount: hit ? hit.count : null,
+      routeHit: hit,
       raw: lat,
     };
   });
 
-  const pageGaps = section === "pages" && windows.length > 0
+  const pageGaps = viewTab === "pages" && windows.length > 0
     && windows.filter((row) => row.pages == null || row.pages.p50Ms == null).length >= windows.length / 2;
 
   const detail = detailQuery.data;
-  const routeKind = viewTab === "traffic" ? (section === "pages" ? "pages" : "api") : null;
+  const routeKind = viewTab === "api" || viewTab === "pages" ? viewTab : null;
   const routes = useMemo(() => {
     const rows = detail?.routes ?? [];
     return rows
@@ -570,16 +695,16 @@ function PerformanceInner() {
             type="button"
             variant="outline"
             size="sm"
-            disabled={chartZoomed ? false : !isRange}
+            disabled={!zoomIn && !chartZoomed}
             onClick={() => {
               setCue(null);
-              if (chartZoomed) write({ zoomed: false, zoomFrom: null, zoomTo: null });
-              else write({ zoomed: true, zoomFrom: parsed.startingAt, zoomTo: parsed.endingAt });
+              if (zoomIn) write({ zoomed: true, zoomFrom: parsed.startingAt, zoomTo: parsed.endingAt });
+              else write({ zoomed: false, zoomFrom: null, zoomTo: null });
             }}
             data-testid="button-zoom-selection"
           >
-            {chartZoomed ? <ZoomOut /> : <ZoomIn />}
-            {chartZoomed ? "Zoom out" : "Zoom in"}
+            {chartZoomed && !zoomIn ? <ZoomOut /> : <ZoomIn />}
+            {chartZoomed && !zoomIn ? "Zoom out" : "Zoom in"}
           </Button>
           <Button
             type="button"
@@ -607,7 +732,17 @@ function PerformanceInner() {
                   <DropdownMenuItem
                     key={preset}
                     data-testid={`range-${preset}`}
-                    onSelect={() => write({ range: preset, startingAt: null, endingAt: null, zoomed: false })}
+                    onSelect={() => {
+                      const now = Date.now();
+                      const from = now - RANGE_MS[preset];
+                      const keep = selectionOverlaps(parsed.startingAt, parsed.endingAt, from, now);
+                      write({
+                        range: preset,
+                        startingAt: keep ? parsed.startingAt : null,
+                        endingAt: keep ? parsed.endingAt : null,
+                        zoomed: false,
+                      });
+                    }}
                   >
                     <Check className={cn("h-4 w-4", active ? "opacity-100" : "opacity-0")} />
                     {RANGE_LABEL[preset]}
@@ -635,11 +770,7 @@ function PerformanceInner() {
                   type="button"
                   title={mode.label}
                   data-testid={mode.testId}
-                  onClick={() => {
-                    if (mode.value === "api") write({ tab: "traffic", section: "api" });
-                    else if (mode.value === "pages") write({ tab: "traffic", section: "pages" });
-                    else write({ tab: "process" });
-                  }}
+                  onClick={() => write({ tab: mode.value })}
                   className={cn(
                     "flex h-16 w-16 flex-col items-center justify-center gap-1 rounded-md px-1 text-muted-foreground",
                     active ? "bg-muted" : "hover:bg-muted/50",
@@ -749,7 +880,7 @@ function PerformanceInner() {
             </div>
           )}
 
-          {viewTab === "traffic" && windows.length > 0 && (
+          {routeOn && windows.length > 0 && (
             <div className="space-y-2">
                 <ProcessLineChart
                     title="Latency"
@@ -758,7 +889,7 @@ function PerformanceInner() {
                     onToggle={toggle}
                     axis="latency"
                     latencyBounds={chart?.boundsMs}
-                    height={220}
+                    height={logHeight}
                     syncId="traffic"
                     selectionHot={hotSync === "traffic"}
                     onDetailHot={(hot) => setHotSync(hot ? "traffic" : null)}
@@ -769,10 +900,16 @@ function PerformanceInner() {
                     onPick={(from, to, at) => onPick("latency", from, to, at)}
                     detailButton={detailButtonFor("latency")}
                     onShowDetail={showDetail}
-                  onDismissDetail={dismissCue}
+                    onDismissDetail={dismissCue}
+                    legendExtra={routeBadge}
                     tooltip={(row) => {
                       const lat = row.raw as Traffic | null;
-                      if (!lat || lat.count <= 0) return <div>no calls</div>;
+                      const hit = row.routeHit as RouteSeries["windows"][number] | null;
+                      if (!lat || lat.count <= 0) {
+                        return hit
+                          ? <div>{hit.count} calls · peak {formatMs(hit.maxMs, true)}</div>
+                          : <div>no calls</div>;
+                      }
                       return (
                         <div className="space-y-0.5">
                           <div>{lat.count} calls</div>
@@ -781,6 +918,7 @@ function PerformanceInner() {
                           <div>{missingPercentile("p99", lat.p99Ms, lat.count, P99_MIN)}</div>
                           <div>avg {formatMs(lat.avgMs, true)}</div>
                           <div>peak {formatMs(lat.maxMs, true)}</div>
+                          {hit && <div>{activeMethod ? `${activeMethod} ` : ""}{activeRoute}: {hit.count} calls, peak {formatMs(hit.maxMs, true)}</div>}
                           {row.intervalMs !== 30000 && <div>window {Math.round(Number(row.intervalMs) / 1000)} s</div>}
                         </div>
                       );
@@ -803,10 +941,20 @@ function PerformanceInner() {
                     onPick={(from, to, at) => onPick("calls", from, to, at)}
                     detailButton={detailButtonFor("calls")}
                     onShowDetail={showDetail}
-                  onDismissDetail={dismissCue}
-                    tooltip={(row) => (
-                      <div>{row.count == null ? "no calls" : `${row.count} calls`}</div>
-                    )}
+                    onDismissDetail={dismissCue}
+                    legendExtra={routeBadge}
+                    tooltip={(row) => {
+                      const hit = row.routeHit as RouteSeries["windows"][number] | null;
+                      const total = row.count == null ? "no calls" : `${row.count} calls`;
+                      if (!hit) return <div>{total}</div>;
+                      const name = activeMethod ? `${activeMethod} ${activeRoute}` : activeRoute;
+                      return (
+                        <div className="space-y-0.5">
+                          <div>{total}</div>
+                          <div>{name}: {hit.count} calls</div>
+                        </div>
+                      );
+                    }}
                   />
                   {pageGaps && (
                     <p className="text-xs text-muted-foreground">
@@ -833,7 +981,7 @@ function PerformanceInner() {
           detail={detail}
           routes={routes}
           showKind={viewTab === "process"}
-          showSsr={viewTab === "traffic" ? section === "pages" : routes.some((row) => row.kind === "pages")}
+          showSsr={viewTab === "pages" || (viewTab === "process" && routes.some((row) => row.kind === "pages"))}
           duration={duration}
           bounds={detail?.boundsMs ?? []}
           callTotal={callTotal}
@@ -841,7 +989,14 @@ function PerformanceInner() {
           statusLine={countLine(statusTotals.acc)}
           ssrLine={countLine(statusTotals.ssr, SSR_LABELS)}
           showLogs={selected}
-          showTraffic={viewTab === "traffic"}
+          showTraffic={viewTab !== "process"}
+          pickedRoute={activeRoute}
+          pickedMethod={activeMethod}
+          onPickRoute={(row) => write({
+            tab: row.kind,
+            route: row.route,
+            method: row.kind === "api" ? row.method : null,
+          })}
           openRows={openRows}
           showOpenTimes={new Set(openRows.map((row) => row.timestamp)).size > 1}
           coarseOpenNote={coarse && (selected || openRows.length > 0)}
@@ -867,6 +1022,9 @@ function DetailBlock({
   ssrLine,
   showLogs,
   showTraffic,
+  pickedRoute,
+  pickedMethod,
+  onPickRoute,
   openRows,
   showOpenTimes,
   coarseOpenNote,
@@ -885,6 +1043,9 @@ function DetailBlock({
   ssrLine: string;
   showLogs: boolean;
   showTraffic: boolean;
+  pickedRoute: string | null;
+  pickedMethod: string | null;
+  onPickRoute: (row: DetailRoute) => void;
   openRows: Array<{ timestamp: number; method: string; route: string; count: number; maxMs: number }>;
   showOpenTimes: boolean;
   coarseOpenNote: boolean;
@@ -931,9 +1092,11 @@ function DetailBlock({
         </p>
       )}
 
-      {showTraffic && routes.length > 0 && (
+      {routes.length > 0 && (
         <div className="space-y-1">
-          <p className="text-xs text-muted-foreground">The first row is the slowest, not necessarily the cause.</p>
+          <p className="text-xs text-muted-foreground">
+            The first row is the slowest, not necessarily the cause. Click a route to draw its peak on the latency chart.
+          </p>
           <Table>
             <TableHeader>
               <TableRow>
@@ -948,21 +1111,28 @@ function DetailBlock({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {routes.map((row) => (
-                <TableRow key={`${row.kind}-${row.method}-${row.route}`}>
-                  {showKind && <TableCell>{row.kind === "pages" ? "page" : "API"}</TableCell>}
-                  <TableCell>{row.method}</TableCell>
-                  <TableCell>
-                    <div>{row.route}</div>
-                    {row.path && <div className="text-xs text-muted-foreground">{row.path}</div>}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{row.count}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.avgMs} ms</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.maxMs} ms</TableCell>
-                  <TableCell className="text-xs">{countLine(row.statusCounts) || "—"}</TableCell>
-                  {showSsr && <TableCell className="text-xs">{countLine(row.ssrCounts, SSR_LABELS) || "—"}</TableCell>}
-                </TableRow>
-              ))}
+              {routes.map((row) => {
+                const picked = row.route === pickedRoute && (pickedMethod == null || row.method === pickedMethod);
+                return (
+                  <TableRow
+                    key={`${row.kind}-${row.method}-${row.route}`}
+                    className={cn("cursor-pointer", picked && "bg-muted")}
+                    onClick={() => onPickRoute(row)}
+                  >
+                    {showKind && <TableCell>{row.kind === "pages" ? "page" : "API"}</TableCell>}
+                    <TableCell>{row.method}</TableCell>
+                    <TableCell>
+                      <div>{row.route}</div>
+                      {row.path && <div className="text-xs text-muted-foreground">{row.path}</div>}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">{row.count}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.avgMs} ms</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.maxMs} ms</TableCell>
+                    <TableCell className="text-xs">{countLine(row.statusCounts) || "—"}</TableCell>
+                    {showSsr && <TableCell className="text-xs">{countLine(row.ssrCounts, SSR_LABELS) || "—"}</TableCell>}
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>

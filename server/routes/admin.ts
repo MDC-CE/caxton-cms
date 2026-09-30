@@ -39,7 +39,7 @@ import {
   triggerGracefulShutdown,
   isShutdownHandlerRegistered,
 } from "../server-control";
-import { resolveProcessStatsDetailRequest, resolveProcessStatsRequest } from "../process-stats";
+import { resolveProcessStatsDetailRequest, resolveProcessStatsRequest, resolveRouteSeriesRequest } from "../process-stats";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
@@ -367,6 +367,29 @@ export function registerAdminRoutes(app: Express): void {
     } catch (err) {
       log.error({ err }, "Failed to read process stats");
       res.status(500).json({ error: "Failed to read process stats" });
+    }
+  });
+
+  app.get("/api/admin/process-stats/route", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveRouteSeriesRequest({
+        process: req.query.process,
+        kind: req.query.kind,
+        route: req.query.route,
+        method: req.query.method,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json(result.stats);
+    } catch (err) {
+      log.error({ err }, "Failed to read a process-stats route");
+      res.status(500).json({ error: "Failed to read route statistics" });
     }
   });
 

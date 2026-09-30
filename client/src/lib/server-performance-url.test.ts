@@ -3,6 +3,7 @@ import {
   parsePerformanceSearch,
   serializePerformanceSearch,
   chartBounds,
+  selectionOverlaps,
   PERFORMANCE_VIEW_DEFAULTS,
 } from "./server-performance-url";
 
@@ -18,14 +19,13 @@ describe("server-performance-url", () => {
       range: "1h",
       startingAt: 100,
       endingAt: 100,
-      tab: "traffic",
-      section: "pages",
+      tab: "pages",
     });
     expect(qs).toContain("starting_at=100");
     expect(qs).toContain("ending_at=100");
     expect(qs).toContain("range=1h");
-    expect(qs).toContain("tab=traffic");
-    expect(qs).toContain("section=pages");
+    expect(qs).toContain("tab=pages");
+    expect(qs).not.toContain("section=");
   });
 
   it("drops an inverted or partial window", () => {
@@ -34,20 +34,31 @@ describe("server-performance-url", () => {
     expect(parsePerformanceSearch("?starting_at=&ending_at=1").startingAt).toBeNull();
   });
 
-  it("keeps a pages section while the open tab is still process", () => {
-    const view = parsePerformanceSearch("?section=pages");
-    expect(view.tab).toBe("process");
-    expect(view.section).toBe("pages");
-    const qs = serializePerformanceSearch({ ...PERFORMANCE_VIEW_DEFAULTS, section: "pages" });
-    expect(qs).toContain("section=pages");
-    expect(qs).not.toContain("tab=");
+  it("reads an old traffic link as api or pages", () => {
+    expect(parsePerformanceSearch("?tab=traffic").tab).toBe("api");
+    expect(parsePerformanceSearch("?tab=traffic&section=pages").tab).toBe("pages");
+    expect(parsePerformanceSearch("?section=pages").tab).toBe("process");
+    const qs = serializePerformanceSearch({ ...PERFORMANCE_VIEW_DEFAULTS, tab: "pages" });
+    expect(qs).toContain("tab=pages");
+    expect(qs).not.toContain("section=");
   });
 
-  it("ignores traffic on a process that has no traffic tab", () => {
-    const view = parsePerformanceSearch("?process=sidequest&tab=traffic&section=pages");
+  it("ignores a traffic tab on a process that has no traffic", () => {
+    const view = parsePerformanceSearch("?process=sidequest&tab=pages");
     expect(view.process).toBe("sidequest");
     expect(view.tab).toBe("process");
-    expect(view.section).toBe("api");
+    expect(view.route).toBeNull();
+  });
+
+  it("reads a route on the traffic tab that is open", () => {
+    const view = parsePerformanceSearch("?tab=api&route=/api/x&method=GET");
+    expect(view.route).toBe("/api/x");
+    expect(view.method).toBe("GET");
+    expect(parsePerformanceSearch("?tab=pages&route=/pricing&method=GET").method).toBeNull();
+    const qs = serializePerformanceSearch(view);
+    expect(qs).toContain("route=%2Fapi%2Fx");
+    expect(qs).toContain("method=GET");
+    expect(serializePerformanceSearch({ ...view, tab: "process", route: null, method: null })).not.toContain("route=");
   });
 
   it("keeps the range shortcut under a drag so back-to-range can restore it", () => {
@@ -90,5 +101,13 @@ describe("server-performance-url", () => {
     expect(qs).toContain("zoom_from=100");
     expect(qs).toContain("zoom_to=400");
     expect(qs).toContain("starting_at=200");
+  });
+
+  it("keeps a selection that still meets the new range", () => {
+    expect(selectionOverlaps(100, 100, 50, 200)).toBe(true);
+    expect(selectionOverlaps(80, 120, 100, 200)).toBe(true);
+    expect(selectionOverlaps(100, 100, 100, 200)).toBe(true);
+    expect(selectionOverlaps(10, 40, 50, 200)).toBe(false);
+    expect(selectionOverlaps(null, null, 50, 200)).toBe(false);
   });
 });

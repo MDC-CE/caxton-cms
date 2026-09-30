@@ -45,8 +45,8 @@ import { child } from "./logger";
 
 const log = child({ module: "process-stats" });
 
-/** Histogram bounds, in code (not settings.yml). The last durationCounts slot is "≥ 5000 ms". Calls under 50 ms share the first slot. */
-export const DURATION_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000];
+/** Histogram bounds, in code (not settings.yml). The last durationCounts slot is "≥ 60000 ms". Calls under 10 ms share the first slot. */
+export const DURATION_BUCKETS_MS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000];
 /** Max JSON objects per jsonl file. 720 × 30s = 6 hours. */
 export const MAX_FILE_OBJECTS = 720;
 /** Tick interval. A row's intervalMs is the real time since the previous close, not always this value. */
@@ -252,7 +252,7 @@ let ingestStatements: string[] = [];
 // --- Collection ---
 // Open window, in memory. note while a request finishes, take when the tick
 // closes it. Callers outside this file use beginRequest, noteApi, and notePage.
-// durationBuckets reads the in-memory cutoffs (50, 100, 250, … ms). It opens
+// durationBuckets reads the in-memory cutoffs (10, 25, 50, … ms). It opens
 // SQLite only when that array is missing.
 
 /**
@@ -371,7 +371,7 @@ function readOpenFds(): { openFds: number | null; openFdsLimit: number | null } 
 }
 
 /**
- * Millisecond cutoffs for the duration histogram (50, 100, 250, …). In production
+ * Millisecond cutoffs for the duration histogram (10, 25, 50, …). In production
  * this is the in-memory array and does not touch SQLite — not once per tick,
  * and not once per request beyond reading a variable. The query below runs
  * only when that array was not provided (tests, or a build that dropped the constant).
@@ -1714,6 +1714,119 @@ export function resolveProcessStatsRequest(
       to: pair ? endingAt : undefined,
       now,
       processName,
+    }),
+  };
+}
+
+export type RouteSeriesWindow = {
+  timestamp: number;
+  count: number;
+  avgMs: number;
+  maxMs: number;
+};
+
+/** One route across the same windows as the chart. Empty when that window had no calls. */
+export type RouteSeries = {
+  startingAt: number;
+  endingAt: number;
+  stepMs: number;
+  kind: "api" | "pages";
+  method: string | null;
+  route: string;
+  windows: RouteSeriesWindow[];
+};
+
+/**
+ * Peak and call count of one route, bucketed like the chart. kind picks the
+ * table. method narrows an API route; omitted, every method of that route is
+ * summed. Pages ignore method. A process other than web has no route rows.
+ */
+export function readRouteSeries(opts: {
+  from?: number;
+  to?: number;
+  now?: number;
+  processName: ProcessName;
+  kind: "api" | "pages";
+  route: string;
+  method?: string | null;
+}): RouteSeries {
+  const { from, to, stepMs } = clampRange(opts);
+  const method = opts.kind === "api" && opts.method ? opts.method : null;
+  const empty: RouteSeries = {
+    startingAt: from,
+    endingAt: to,
+    stepMs,
+    kind: opts.kind,
+    method,
+    route: opts.route,
+    windows: [],
+  };
+  if (opts.processName !== "web") return empty;
+  const opened = openDatabase();
+  const processes = opened.prepare(
+    `SELECT processId FROM process_samples WHERE timestamp >= ? AND timestamp <= ? AND processName = ?`,
+  ).all(from, to, "web") as Array<{ processId: number }>;
+  const pids = [...new Set(processes.map((row) => row.processId))];
+  if (pids.length === 0) return empty;
+  const filter = pidFilter(pids);
+  const table = opts.kind === "api" ? "api_samples" : "document_samples";
+  const methodSql = method ? " AND method = ?" : "";
+  const params = method
+    ? [from, to, opts.route, ...filter.params, method]
+    : [from, to, opts.route, ...filter.params];
+  const rows = opened.prepare(
+    `SELECT timestamp, count, sumMs, maxMs FROM ${table} WHERE timestamp >= ? AND timestamp <= ? AND route = ?${filter.sql}${methodSql}`,
+  ).all(...params) as Array<{ timestamp: number; count: number; sumMs: number; maxMs: number }>;
+  const byBucket = new Map<number, { count: number; sumMs: number; maxMs: number }>();
+  for (const row of rows) {
+    const start = stepMs === TICK_MS ? row.timestamp : Math.floor(row.timestamp / stepMs) * stepMs;
+    const acc = byBucket.get(start) ?? { count: 0, sumMs: 0, maxMs: 0 };
+    acc.count += Number(row.count) || 0;
+    acc.sumMs += Number(row.sumMs) || 0;
+    acc.maxMs = Math.max(acc.maxMs, Number(row.maxMs) || 0);
+    byBucket.set(start, acc);
+  }
+  const windows = [...byBucket.entries()]
+    .filter(([, acc]) => acc.count > 0)
+    .sort((a, b) => a[0] - b[0])
+    .map(([timestamp, acc]) => ({
+      timestamp,
+      count: acc.count,
+      avgMs: Math.round(acc.sumMs / acc.count),
+      maxMs: acc.maxMs,
+    }));
+  return { ...empty, windows };
+}
+
+export function resolveRouteSeriesRequest(
+  query: { process?: unknown; kind?: unknown; route?: unknown; method?: unknown; starting_at?: unknown; ending_at?: unknown },
+  now?: number,
+): { ok: false; error: string } | { ok: true; stats: RouteSeries } {
+  const rawName = query.process;
+  const processName = typeof rawName === "string" && (PROCESS_NAMES as readonly string[]).includes(rawName)
+    ? (rawName as ProcessName)
+    : null;
+  if (!processName) {
+    return { ok: false, error: `process is required: ${PROCESS_NAMES.join(" | ")}` };
+  }
+  const kind = query.kind === "api" || query.kind === "pages" ? query.kind : null;
+  if (!kind) return { ok: false, error: "kind is required: api | pages" };
+  const route = typeof query.route === "string" ? query.route.trim() : "";
+  if (!route) return { ok: false, error: "route is required" };
+  const method = typeof query.method === "string" && query.method.trim() ? query.method.trim() : null;
+  const startingAt = queryInt(query.starting_at);
+  const endingAt = queryInt(query.ending_at);
+  const pair = startingAt != null && endingAt != null && startingAt <= endingAt;
+  return {
+    ok: true,
+    stats: readRouteSeries({
+      from: pair ? startingAt : undefined,
+      to: pair ? endingAt : undefined,
+      now,
+      processName,
+      kind,
+      route,
+      method,
     }),
   };
 }

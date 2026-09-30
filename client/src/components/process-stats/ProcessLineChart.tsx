@@ -19,6 +19,8 @@ export type ChartSeries = {
   label: string;
   color: string;
   on: boolean;
+  /** Drawn solid and on top, omitted from the toggle legend. */
+  pinned?: boolean;
   /** Flat fill under the line. Charts with one series fill that line. */
   filled?: boolean;
 };
@@ -26,16 +28,29 @@ export type ChartSeries = {
 type Row = { timestamp: number; count?: number | null; [key: string]: unknown };
 
 const CLICK_PX = 5;
-const EVENT_LOOP_DECADES = [0.1, 1, 10, 100, 1000, 10_000];
-const LATENCY_BOUNDS = [50, 100, 250, 500, 1000, 2500, 5000];
+/** Histogram cutoffs used when the server sends no bounds. 60s is only drawn when the peak passes 30s. */
+const LATENCY_BOUNDS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000];
+/** Log marks about ×3 apart. 60s is only drawn when the peak passes 30s. */
+const EVENT_LOOP_TICKS = [10, 30, 100, 300, 1000, 3000, 10_000, 30_000, 60_000];
 /** Same gutter on every chart so the plot starts at the same x. Centered ticks, with room around "10000ms". */
 const AXIS_WIDTH = 68;
 /** Restart marker. The tooltip sits just outside this radius and only opens inside DOT_HIT. */
 const DOT_R = 3;
+/** One reading has no segment. This stroke is only a mark, not a duration. */
+const ISOLATED_TICK_PX = 8;
 const DOT_GAP = 6;
 const DOT_HIT = 12;
 
 export type ChartAxis = "cpu" | "eventLoop" | "memory" | "latency" | "count";
+
+/** True when this reading cannot join a line: the windows beside it have no number. */
+export function isIsolatedReading(values: readonly unknown[], index: number): boolean {
+  const has = (i: number) => {
+    const value = values[i];
+    return typeof value === "number" && Number.isFinite(value);
+  };
+  return has(index) && !has(index - 1) && !has(index + 1);
+}
 
 export function axisScale(kind: ChartAxis, max: number, bounds: number[] = LATENCY_BOUNDS): {
   scale: "linear" | "log";
@@ -62,20 +77,9 @@ export function axisScale(kind: ChartAxis, max: number, bounds: number[] = LATEN
     const ceiling = Math.max(step, Math.ceil(top / step) * step);
     return { scale: "linear", domain: [0, ceiling], ticks: steps(0, ceiling, step), unit: "", format: labeled(""), width: AXIS_WIDTH };
   }
-  if (kind === "eventLoop") {
-    let top = EVENT_LOOP_DECADES.find((decade) => decade >= peak) ?? EVENT_LOOP_DECADES[EVENT_LOOP_DECADES.length - 1];
-    if (top <= 0.1) top = 1;
-    const ticks = EVENT_LOOP_DECADES.filter((decade) => decade <= top);
-    let ceiling = top;
-    while (ceiling < peak) {
-      ceiling *= 10;
-      ticks.push(ceiling);
-    }
-    return { scale: "log", domain: [0.1, ceiling], ticks, unit: "ms", format: labeled("ms"), width: AXIS_WIDTH };
-  }
-  const grid = bounds.length > 0 ? bounds : LATENCY_BOUNDS;
-  const floor = grid[0] ?? 50;
-  const last = grid[grid.length - 1] ?? 5000;
+  const grid = kind === "eventLoop" ? EVENT_LOOP_TICKS : (bounds.length > 0 ? bounds : LATENCY_BOUNDS);
+  const floor = grid[0] ?? 10;
+  const last = grid[grid.length - 1] ?? 60_000;
   let top = peak > last ? peak : (grid.find((bound) => bound >= Math.max(peak, floor)) ?? last);
   if (top <= floor) top = grid.find((bound) => bound > floor) ?? floor * 2;
   return {
@@ -124,13 +128,17 @@ const TOOLTIP_CLASS = "rounded-sm bg-zinc-900/85 px-1.5 py-1 text-[11px] leading
 export function SeriesLegend({
   series,
   onToggle,
+  extra,
 }: {
   series: ChartSeries[];
   onToggle: (key: string) => void;
+  extra?: ReactNode;
 }) {
+  const toggles = series.filter((item) => !item.pinned);
   return (
     <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1" role="group" aria-label="Series">
-      {series.map((item) => (
+      {extra}
+      {toggles.map((item) => (
         <button
           key={item.key}
           type="button"
@@ -235,6 +243,7 @@ export function ProcessLineChart({
   onDismissDetail,
   selectionHot = false,
   onDetailHot,
+  legendExtra,
 }: {
   title: string;
   rows: Row[];
@@ -257,6 +266,7 @@ export function ProcessLineChart({
   /** Stronger selection marks, shared across charts with the same sync id. */
   selectionHot?: boolean;
   onDetailHot?: (hot: boolean) => void;
+  legendExtra?: ReactNode;
 }) {
   const drag = useRef<{ x: number; y: number; from: number; to: number } | null>(null);
   const onPickRef = useRef(onPick);
@@ -265,6 +275,8 @@ export function ProcessLineChart({
   onDraftRef.current = onDraft;
   const underPointer = useRef(false);
   const plotRef = useRef<HTMLDivElement>(null);
+  /** Pixel of the axis floor. The area fill closes there. */
+  const floorY = useRef<number | null>(null);
   const dotAt = useRef(new Map<number, { cx: number; cy: number }>());
   const [onDot, setOnDot] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState(false);
@@ -340,7 +352,7 @@ export function ProcessLineChart({
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
       <h3 className="text-sm font-medium">{title}</h3>
       <div className="flex items-center gap-1">
-        <SeriesLegend series={series} onToggle={onToggle} />
+        <SeriesLegend series={series} onToggle={onToggle} extra={legendExtra} />
         <button
           type="button"
           className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -410,6 +422,7 @@ export function ProcessLineChart({
             tick={(props) => {
               const tick = props as { y?: number; payload?: { value?: number } };
               if (tick.y == null || tick.payload?.value == null) return <g />;
+              if (tick.payload.value === y.domain[0]) floorY.current = tick.y;
               return (
                 <text x={y.width / 2} y={tick.y} textAnchor="middle" dominantBaseline="central" className="fill-muted-foreground" fontSize={12}>
                   {tick.payload.value}
@@ -443,20 +456,65 @@ export function ProcessLineChart({
           />
           {visible
             .slice()
-            .sort((a, b) => Number(Boolean(b.filled ?? series.length === 1)) - Number(Boolean(a.filled ?? series.length === 1)))
+            .sort((a, b) => {
+              const layer = (item: ChartSeries) => item.pinned ? 2 : (item.filled ?? series.length === 1) ? 0 : 1;
+              return layer(a) - layer(b);
+            })
             .map((item) => {
               const paint = item.filled ?? series.length === 1;
+              const readings = rows.map((row) => row[item.key]);
               return (
                 <Area
                   key={item.key}
                   type="monotone"
                   dataKey={item.key}
                   stroke={item.color}
-                  strokeOpacity={paint ? 1 : 0.55}
+                  strokeOpacity={item.pinned || paint ? 1 : 0.55}
                   fill={paint ? item.color : "none"}
                   fillOpacity={paint ? 0.18 : 0}
-                  strokeWidth={1.75}
-                  dot={false}
+                  strokeWidth={item.pinned ? 2.5 : 1.75}
+                  dot={(props) => {
+                    const dot = props as {
+                      key?: string;
+                      cx?: number;
+                      cy?: number;
+                      index?: number;
+                      stroke?: string;
+                      strokeOpacity?: number;
+                      strokeWidth?: number;
+                      fill?: string;
+                      fillOpacity?: number;
+                    };
+                    const index = dot.index ?? -1;
+                    if (dot.cx == null || dot.cy == null || !isIsolatedReading(readings, index)) return <g key={dot.key} />;
+                    const half = ISOLATED_TICK_PX / 2;
+                    const bottom = floorY.current;
+                    const under = paint && bottom != null && bottom > dot.cy;
+                    return (
+                      <g key={dot.key} pointerEvents="none">
+                        {under && (
+                          <rect
+                            x={dot.cx - half}
+                            y={dot.cy}
+                            width={ISOLATED_TICK_PX}
+                            height={bottom - dot.cy}
+                            fill={dot.fill}
+                            fillOpacity={dot.fillOpacity}
+                            stroke="none"
+                          />
+                        )}
+                        <line
+                          x1={dot.cx - half}
+                          x2={dot.cx + half}
+                          y1={dot.cy}
+                          y2={dot.cy}
+                          stroke={dot.stroke}
+                          strokeOpacity={dot.strokeOpacity}
+                          strokeWidth={dot.strokeWidth}
+                        />
+                      </g>
+                    );
+                  }}
                   connectNulls={false}
                   isAnimationActive={false}
                 />
