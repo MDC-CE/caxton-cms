@@ -340,6 +340,15 @@ function loadSiteLLMConfig(res: Response): Record<string, unknown> {
   return {};
 }
 
+function parseErrorLogContext(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return { raw };
+  }
+}
+
 export function registerAdminRoutes(app: Express): void {
   app.get("/api/admin/process-stats", async (req, res) => {
     const auth = await requireCapability(req, res, "metrics_view");
@@ -4335,6 +4344,98 @@ export function registerAdminRoutes(app: Express): void {
     }
   });
 
+  // Must be registered before /api/admin/error-log/:id or "export" is parsed as an id.
+  api.get(app, "/api/admin/error-log/export", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+
+    const windowHours = 48;
+    const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
+
+    try {
+      const rows = sqlite.prepare(
+        `SELECT id, ts, level, module, message, err_name, err_stack, context
+         FROM error_log WHERE ts >= ?
+         ORDER BY id ASC`
+      ).all(cutoff) as Array<{
+        id: number;
+        ts: number;
+        level: string;
+        module: string;
+        message: string;
+        err_name: string | null;
+        err_stack: string | null;
+        context: string | null;
+      }>;
+
+      const exported = rows.map((row) => ({
+        id: row.id,
+        ts: row.ts,
+        level: row.level === "error" ? "error" : "warn",
+        module: row.module,
+        message: row.message,
+        err_name: row.err_name,
+        err_stack: row.err_stack,
+        context: parseErrorLogContext(row.context),
+      }));
+
+      res.json({ rows: exported, total: exported.length, windowHours });
+    } catch (err) {
+      log.error({ err }, "Failed to export error_log");
+      res.status(500).json({ error: "Failed to export error log" });
+    }
+  });
+
+  // Dev-only: fetch production's error log (last 48h) for a local JSON download. Never writes locally.
+  api.post(app, "/api/admin/error-log/pull-production", { rate: "staffWrite" }, async (req, res) => {
+    if (process.env.NODE_ENV === "production") {
+      res.status(403).json({
+        error: "dev_only",
+        message: "Downloading the production error log is only available in development.",
+      });
+      return;
+    }
+
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+
+    const site =
+      (typeof req.body?.site === "string" && req.body.site) ||
+      getContentRootName(res);
+    const productionOrigin =
+      typeof req.body?.productionOrigin === "string" ? req.body.productionOrigin : undefined;
+
+    try {
+      const { fetchProductionErrorLog } = await import("../error-log/pull-production");
+      const result = await fetchProductionErrorLog(site, productionOrigin);
+      if (!result.success) {
+        if (result.code === "production_staff_token_required") {
+          res.status(401).json({
+            error: result.reason ?? result.error ?? "Production staff token required",
+            code: result.code,
+            productionOrigin: result.productionOrigin,
+            envVar: result.envVar,
+            success: false,
+          });
+          return;
+        }
+        res.status(400).json({
+          error: result.reason ?? "Failed to download production error log",
+          ...result,
+        });
+        return;
+      }
+      res.json({
+        ...result,
+        education:
+          "Production error log snapshot (last 48h). Local log was not changed. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "Failed to download production error log");
+      res.status(500).json({ error: "Failed to download production error log" });
+    }
+  });
+
   // Single error_log row with stack + sanitized context (Error Log expanded row)
   api.get(app, "/api/admin/error-log/:id", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireCapability(req, res, "metrics_view");
@@ -4368,15 +4469,6 @@ export function registerAdminRoutes(app: Express): void {
         return;
       }
 
-      let context: Record<string, unknown> | null = null;
-      if (row.context) {
-        try {
-          context = JSON.parse(row.context) as Record<string, unknown>;
-        } catch {
-          context = { raw: row.context };
-        }
-      }
-
       res.json({
         id: row.id,
         ts: row.ts,
@@ -4385,7 +4477,7 @@ export function registerAdminRoutes(app: Express): void {
         message: row.message,
         err_name: row.err_name,
         err_stack: row.err_stack,
-        context,
+        context: parseErrorLogContext(row.context),
       });
     } catch (err) {
       log.error({ err, id }, "Failed to query error_log entry");

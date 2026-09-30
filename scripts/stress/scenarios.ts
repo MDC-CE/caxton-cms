@@ -538,8 +538,29 @@ export const SCENARIOS: Scenario[] = [
     id: "get_paid_traffic_diagnostics_90d",
     tool: "get_paid_traffic",
     about:
-      "Ads diagnostics with a 90-day KPI window and 50 issues per page: builds two reports (fixed 28-day issue window + 90-day KPIs), indexes every ad for per-issue details (top 3 ads each), probes up to 10 ad landing URLs (cached 6h) and saves a snapshot. Soft N.C. when not set up.",
+      "Cross-platform ads overview (diagnostics without platform) with a 90-day KPI window: builds Meta diagnostics (no landing probes) and Google diagnostics in parallel plus an all-platform report, then returns platform cards + shared issues. Writes nothing. Soft N.C. when not set up.",
     buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", days: 90, limit: 50 }),
+  },
+  {
+    id: "get_paid_traffic_diagnostics_meta_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Meta ads diagnostics with a 90-day KPI window and 50 issues per page: two reports (fixed 28-day issue window + 90-day KPIs), per-issue ad index (top 3 ads each), up to 10 landing probes (cached 6h) and a saved snapshot. Soft N.C. when Meta is not set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "meta", days: 90, limit: 50 }),
+  },
+  {
+    id: "get_paid_traffic_summary_google",
+    tool: "get_paid_traffic",
+    about:
+      "Paid traffic summary filtered to Google over 90 days: reads cached Google transfer days + network days + GA4 paid landings + ledger, with the google block and google_networks. Soft N.C. / google_not_connected when Google isn't set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "summary", platform: "google", days: 90 }),
+  },
+  {
+    id: "get_paid_traffic_diagnostics_google",
+    tool: "get_paid_traffic",
+    about:
+      "Google Ads diagnostics (28-day issues): Google-only report + transfer health, matching and network checks; records Issues/Resolved in ads-issues-google.json. No landing probes. Returns not_connected quickly when Google isn't set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "google" }),
   },
   {
     id: "list_proposals",

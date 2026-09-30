@@ -10,7 +10,8 @@ import { apiFetch } from "@/lib/queryClient";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AttributionModel } from "@shared/paid-attribution";
 import { isRefreshActive } from "@shared/ads-refresh-status";
-import type { AdsCampaignGroup, AdsMetaStatus, AdsPageRow, AdsReport } from "./ads-types";
+import { formatGoogleCustomerId } from "@shared/ads-settings";
+import { NO_URL_DESTINATION_KINDS, type AdsCampaignGroup, type AdsMetaStatus, type AdsPageRow, type AdsReport } from "./ads-types";
 import { formatMoney, formatNum, formatWhen, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 import { PaidPageRow, type PaidPerspective } from "./PaidPageRow";
 
@@ -21,7 +22,7 @@ const PERSPECTIVES: { id: PaidPerspective; label: string }[] = [
   { id: "integrity", label: "Integrity" },
 ];
 
-function accountLabel(a: AdsMetaStatus["accounts"][number]): string {
+function accountLabel(a: Pick<AdsMetaStatus["accounts"][number], "id" | "name" | "sync_error" | "history_loaded">): string {
   const base = a.name || a.id;
   if (a.sync_error) return `${base} · can't read this account`;
   if (a.history_loaded === false) return `${base} · not synced yet`;
@@ -111,8 +112,8 @@ function CampaignAccordion({ group }: { group: AdsCampaignGroup }) {
   );
 }
 
-export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: AdsIssue[] }) {
-  const [platform, setPlatform] = useState("all");
+export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { days: number; issues?: AdsIssue[]; initialPlatform?: string }) {
+  const [platform, setPlatform] = useState(initialPlatform);
   const [currency, setCurrency] = useState("all");
   const [account, setAccount] = useState("all");
   const [contentType, setContentType] = useState("all");
@@ -138,6 +139,15 @@ export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: Ad
     [data],
   );
   const currencies = Object.keys(data?.totals.spend ?? {});
+  const accountOptions = useMemo(() => {
+    const meta = (data?.meta.accounts ?? []).map((a) => ({ value: a.id, label: `Meta · ${accountLabel(a)}`, title: a.sync_error }));
+    const google = (data?.google?.connected ? data.google.accounts : []).map((a) => ({
+      value: formatGoogleCustomerId(a.id),
+      label: `Google · ${accountLabel({ ...a, name: a.name ?? formatGoogleCustomerId(a.id) })}`,
+      title: a.sync_error,
+    }));
+    return platform === "google" ? google : platform === "meta" ? meta : [...meta, ...google];
+  }, [data, platform]);
   const rows = data ? sortRows(data.pages, perspective) : [];
   const primaryHost = rows[0]?.host;
 
@@ -191,16 +201,16 @@ export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: Ad
                 </SelectContent>
               </Select>
             )}
-            {(data?.meta.accounts.length ?? 0) > 1 && (
+            {accountOptions.length > 1 && (
               <Select value={account} onValueChange={setAccount}>
                 <SelectTrigger className="h-8 w-[160px]" data-testid="select-paid-account">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All accounts</SelectItem>
-                  {data!.meta.accounts.map((a) => (
-                    <SelectItem key={a.id} value={a.id} title={a.sync_error} data-testid={`option-paid-account-${a.id}`}>
-                      {accountLabel(a)}
+                  {accountOptions.map((a) => (
+                    <SelectItem key={a.value} value={a.value} title={a.title} data-testid={`option-paid-account-${a.value}`}>
+                      {a.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -239,7 +249,7 @@ export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: Ad
           </div>
           {data && currency !== "all" && (
             <p className="text-xs text-muted-foreground" data-testid="text-paid-currency-scope">
-              Showing only Meta traffic from {currency} accounts.
+              Showing only ad traffic from {currency} accounts.
             </p>
           )}
           {data && (account !== "all" || currency !== "all") && data.totals.unassigned_visits > 0 && (
@@ -250,7 +260,9 @@ export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: Ad
           )}
           {data && (
             <p className="text-xs text-muted-foreground" data-testid="text-paid-sync-status">
-              Meta synced {formatWhen(data.meta.last_synced_at)} · GA4 through {data.ga4.last_export_date ?? "—"}
+              {data.meta.connected || !data.google?.connected ? `Meta synced ${formatWhen(data.meta.last_synced_at)} · ` : ""}
+              {data.google?.connected ? `Google data through ${data.google.data_through ?? "—"} · ` : ""}
+              GA4 through {data.ga4.last_export_date ?? "—"}
               {isRefreshActive(data.refresh) ? " · refreshing…" : ""}
               {data.refresh?.state === "failed" || data.refresh?.state === "worker_down" ? " · last refresh didn't run" : ""}
             </p>
@@ -263,9 +275,9 @@ export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: Ad
             </div>
           ) : error ? (
             <p className="px-4 py-6 text-sm text-destructive">{error instanceof Error ? error.message : "Failed to load"}</p>
-          ) : !data ? null : !data.meta.connected && !data.ga4.configured ? (
+          ) : !data ? null : !data.meta.connected && !data.google?.connected && !data.ga4.configured ? (
             <p className="px-4 py-6 text-sm text-muted-foreground" data-testid="empty-paid-not-connected">
-              Connect Meta in Settings → Ads and the GA4 export in Tracking to see paid pages.
+              Connect Meta or Google Ads in Settings → Ads and the GA4 export in Tracking to see paid pages.
             </p>
           ) : !data.ga4.configured ? (
             <p className="px-4 py-6 text-sm text-muted-foreground" data-testid="empty-paid-no-ga4">
@@ -345,7 +357,7 @@ export function OtherDestinationsCard({ rows, spendTotal }: { rows: AdsPageRow[]
           Other destinations
         </CardTitle>
         <p className="text-sm text-muted-foreground">
-          Paid traffic that did not land on a page we manage, so the totals add up to what Meta spent ({formatMoney(spendTotal)}).
+          Paid traffic that did not land on a page we manage, so the totals add up to what the ad platforms spent ({formatMoney(spendTotal)}).
         </p>
       </CardHeader>
       <CardContent className="p-0">
@@ -357,13 +369,16 @@ export function OtherDestinationsCard({ rows, spendTotal }: { rows: AdsPageRow[]
           rows.map((r) => (
             <div key={r.key} className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5 last:border-b-0" data-testid={`other-destination-${r.key}`}>
               <div className="min-w-0">
-                <p className="truncate text-sm text-foreground">{r.kind === "instant_form" || r.kind === "unknown_destination" ? r.title : r.url}</p>
+                <p className="truncate text-sm text-foreground">{NO_URL_DESTINATION_KINDS.has(r.kind) ? r.title : r.url}</p>
                 <p className="text-xs text-muted-foreground">{r.kind_label}</p>
               </div>
               <div className="flex gap-5 text-sm tabular-nums">
                 <span>{formatMoney(r.spend)}</span>
                 <span className="text-muted-foreground">{formatNum(r.paid_visits)} visits</span>
-                <span className="text-muted-foreground">{formatNum(r.meta_leads + r.instant_form_leads)} Meta leads</span>
+                {r.meta_leads + r.instant_form_leads > 0 || !r.google_leads ? (
+                  <span className="text-muted-foreground">{formatNum(r.meta_leads + r.instant_form_leads)} Meta leads</span>
+                ) : null}
+                {r.google_leads ? <span className="text-muted-foreground">{formatNum(r.google_leads)} Google leads</span> : null}
               </div>
             </div>
           ))

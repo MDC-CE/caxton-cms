@@ -9,6 +9,7 @@
 import type { PaidLandingRef, Session, UTMParams } from "./session";
 import { MARKETING_UTM_KEYS } from "./session";
 import {
+  adIdFromTag,
   CLICK_ID_PARAMS,
   classifyTraffic,
   fbcFromFbclid,
@@ -97,12 +98,19 @@ export function paidLandingFor(
   }
   const cls = classifyTraffic({ utm_source: incoming.utm_source, utm_medium: incoming.utm_medium, click_ids });
   if (cls.status !== "paid") return null;
-  return {
+  const ref: PaidLandingRef = {
     host: where.host.toLowerCase(),
     path: normalizeLandingPath(where.path),
     at: where.now ?? Date.now(),
     platform: cls.platform,
   };
+  const campaign = adIdFromTag(incoming.utm_id);
+  const adset = adIdFromTag(incoming.utm_term);
+  const ad = adIdFromTag(incoming.utm_content);
+  if (campaign) ref.campaign_id = campaign;
+  if (adset) ref.adset_id = adset;
+  if (ad) ref.ad_id = ad;
+  return ref;
 }
 
 export function nextPaidLanding(

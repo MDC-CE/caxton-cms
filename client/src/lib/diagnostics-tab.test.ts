@@ -13,4 +13,10 @@ describe("resolveDiagnosticsTab", () => {
     expect(resolveDiagnosticsTab("/private/diagnostics/legal")).toBe("legal");
     expect(resolveDiagnosticsTab("/private/diagnostics/ads")).toBe("ads");
   });
+
+  it("keeps the Meta and Google ads sub-pages on the Ads tab", () => {
+    expect(resolveDiagnosticsTab("/private/diagnostics/ads/meta")).toBe("ads");
+    expect(resolveDiagnosticsTab("/private/diagnostics/ads/google")).toBe("ads");
+    expect(resolveDiagnosticsTab("/private/diagnostics/adsense")).not.toBe("ads");
+  });
 });

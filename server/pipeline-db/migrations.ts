@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 29;
+export const PIPELINE_SCHEMA_VERSION = 30;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -629,6 +629,21 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
       if (!tableExists(db, "content_proposals")) return;
       if (!tableHasColumn(db, "content_proposals", "site_facts_check_json")) {
         db.exec("ALTER TABLE content_proposals ADD COLUMN site_facts_check_json TEXT");
+      }
+    },
+  },
+  {
+    version: 30,
+    name: "lead_submissions_paid_landing_platform",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      for (const prefix of ["first_paid", "last_paid"]) {
+        for (const field of ["platform", "campaign_id", "adset_id", "ad_id"]) {
+          const name = `${prefix}_${field}`;
+          if (!tableHasColumn(db, "lead_submissions", name)) {
+            db.exec(`ALTER TABLE lead_submissions ADD COLUMN ${name} TEXT`);
+          }
+        }
       }
     },
   },

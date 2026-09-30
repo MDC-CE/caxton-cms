@@ -5,7 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { cn } from "@/lib/utils";
 import { isClicksVisitsMismatch, type AdsIssue } from "@shared/ads-diagnostics-rules";
-import type { AdsPageRow } from "./ads-types";
+import { NO_URL_DESTINATION_KINDS, type AdsPageRow } from "./ads-types";
 import { formatMoney, formatNum, formatPct, formatSeconds, PLATFORM_LABELS } from "./ads-format";
 import { PlatformTag } from "./PlatformTag";
 
@@ -52,7 +52,10 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         },
         { label: "Conv. rate", value: formatPct(row.conversion_rate), muted: grey, testId: "cr" },
         { label: "Cost / lead", value: formatMoney(row.cost_per_lead, { decimals: 2 }), muted: grey, testId: "cpl" },
-        { label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" },
+        ...(row.platforms.includes("google") && !row.platforms.includes("meta")
+          ? []
+          : [{ label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" }]),
+        ...(row.platforms.includes("google") ? [{ label: "Google leads", value: formatNum(row.google_leads ?? 0), testId: "google-leads" }] : []),
         {
           label: "Organic rate",
           value: formatPct(row.organic?.lead_rate ?? null),
@@ -212,7 +215,7 @@ export function PaidPageRow({
                 <p className="text-muted-foreground">Seen in this browser — cross-device journeys are not joined.</p>
               </PopoverContent>
             </Popover>
-            {row.url && row.kind !== "instant_form" && row.kind !== "unknown_destination" && (
+            {row.url && !NO_URL_DESTINATION_KINDS.has(row.kind) && (
               <a
                 href={row.url}
                 target="_blank"

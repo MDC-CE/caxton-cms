@@ -22,6 +22,12 @@ import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButto
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
 import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
+import {
+  IssueConversionEvidence,
+  IssueSettingsAction,
+  LeadConversionBadges,
+  LeadConversionNotes,
+} from "@/components/diagnostics/AdsLeadConversions";
 import { TabCountBadge } from "@/components/DebugBubble/components/PageErrorsModal";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
@@ -135,10 +141,11 @@ function issuesRightNow(k: AdsDiagnostics["kpis"], affected: string | null, wind
 
 const LEADS_READINGS: KpiReading[] = [
   { reading: "Meta (left)", meaning: "Leads Meta's pixel says its ads produced, counted Meta's way (it can include people who saw an ad and converted later)." },
+  { reading: "Which Meta leads", meaning: "Only the conversions picked in Settings → Ads → Meta, added together. With none picked, the standard Lead event. The badges list what was counted." },
   { reading: "Site (right)", meaning: "Form submissions this site recorded from people who came from a paid ad in the last 30 days. Staff tests are left out." },
   { reading: "Close together", meaning: "Both sides agree. Healthy." },
   { reading: "Meta much higher", meaning: "Some gap is normal. A big one can mean forms aren't recording on the site." },
-  { reading: "Site much higher", meaning: "Meta's pixel may not be sending the Lead event." },
+  { reading: "Site much higher", meaning: "Meta's pixel may not be sending the picked conversions, or the wrong ones are picked." },
   { reading: "+ repeats", meaning: "The same person sent the same form again within 24 hours. Not counted as new leads." },
 ];
 
@@ -147,7 +154,12 @@ function leadsRightNow(k: AdsDiagnostics["kpis"], collectingSince: string | null
   if (k.meta_leads === 0 && k.site_leads === 0) {
     return `No leads on either side in this window. If these ads should bring form fills, check Open issues for pixel or form problems.${since}`;
   }
-  if (k.meta_leads === 0) return `The site recorded ${formatNum(k.site_leads)} but Meta reported none. Check that the pixel sends a Lead event.`;
+  if (k.meta_leads === 0) {
+    const picked = k.meta_lead_conversions_picked;
+    return picked && picked.length === 0
+      ? `The site recorded ${formatNum(k.site_leads)} but Meta reported no standard Lead events. Pick the conversions your forms fire in Settings → Ads → Meta.`
+      : `The site recorded ${formatNum(k.site_leads)} but Meta reported none for the picked conversions. Check the pixel tags in Tag Manager, or pick the conversions your forms fire.`;
+  }
   if (k.site_leads === 0) return `Meta reported ${formatNum(k.meta_leads)} but the site recorded none. Check Open issues — forms may not be recording.${since}`;
   return `Meta reports ${formatNum(k.meta_leads)}, the site recorded ${formatNum(k.site_leads)}. Compare the trend over time; never add them together.`;
 }
@@ -254,6 +266,7 @@ function Kpi({
   tone,
   aside,
   corner,
+  footer,
   testId,
 }: {
   label: string;
@@ -265,6 +278,8 @@ function Kpi({
   aside?: ReactNode;
   /** Bottom-right of the card, under `aside`. */
   corner?: ReactNode;
+  /** Full-width notes under the number. */
+  footer?: ReactNode;
   testId: string;
 }) {
   return (
@@ -309,6 +324,7 @@ function Kpi({
             </div>
           )}
         </div>
+        {footer}
       </CardContent>
     </Card>
   );
@@ -441,7 +457,8 @@ function IssueRow({
         : null;
   const showTemplate = issue.code === "missing_tracking_params" || issue.code === "non_paid_medium" || issue.code === "unclear_share_high" || issue.code === "spend_zero_visits";
   const unrecognized = issue.code === "unrecognized_campaign";
-  const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized;
+  const settingsFix = issue.code === "lead_conversions_overlap";
+  const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized && !settingsFix;
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border last:border-b-0">
       <CollapsibleTrigger asChild>
@@ -516,6 +533,8 @@ function IssueRow({
             {issue.scope.url}
           </a>
         )}
+        <IssueConversionEvidence issue={issue} />
+        {issue.action && <IssueSettingsAction issue={issue} onDone={onReload} />}
         {unrecognized && issue.severity !== "info" && <MarkCampaignKnown issue={issue} onDone={onReload} />}
         {showFixedElsewhere && <p className="text-xs text-muted-foreground">This is fixed in Meta Ads Manager or Tag Manager, not on the site.</p>}
       </CollapsibleContent>
@@ -535,9 +554,9 @@ export function DiagnosticsAdsPanel() {
   };
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ["/api/diagnostics/ads", days],
+    queryKey: ["/api/diagnostics/ads", "meta", days],
     queryFn: async () => {
-      const res = await apiFetch(`/api/diagnostics/ads?days=${days}`);
+      const res = await apiFetch(`/api/diagnostics/ads?platform=meta&days=${days}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads diagnostics");
       return res.json() as Promise<AdsDiagnostics>;
     },
@@ -737,6 +756,8 @@ export function DiagnosticsAdsPanel() {
               testId="leads"
             />
           }
+          corner={<LeadConversionBadges k={k} />}
+          footer={<LeadConversionNotes k={k} />}
           testId="leads"
         />
         <Kpi
@@ -892,9 +913,9 @@ export function AdsGlobalRollupCard() {
     >
       <span className="flex items-center gap-2">
         <Megaphone className="h-4 w-4" />
-        Ads: {data.open_errors} tracking error(s){data.open_warnings > 0 ? `, ${data.open_warnings} warning(s)` : ""}
+        Ads (Meta + Google): {data.open_errors} tracking error(s){data.open_warnings > 0 ? `, ${data.open_warnings} warning(s)` : ""}
       </span>
-      <span className="text-xs underline underline-offset-2">Open Ads diagnostics</span>
+      <span className="text-xs underline underline-offset-2">Open Ads overview</span>
     </Link>
   );
 }

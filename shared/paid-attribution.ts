@@ -74,6 +74,58 @@ export function creditLead(
   };
 }
 
+export type LeadPlatformRow = {
+  platform?: string | null;
+  campaign_id?: string | null;
+  adset_id?: string | null;
+  ad_id?: string | null;
+  first_paid_host?: string | null;
+  first_paid_platform?: string | null;
+  first_paid_campaign_id?: string | null;
+  first_paid_adset_id?: string | null;
+  first_paid_ad_id?: string | null;
+  last_paid_host?: string | null;
+  last_paid_platform?: string | null;
+  last_paid_campaign_id?: string | null;
+  last_paid_adset_id?: string | null;
+  last_paid_ad_id?: string | null;
+};
+
+export type LeadPlatform = {
+  platform: string | null;
+  campaign_id: string | null;
+  adset_id: string | null;
+  ad_id: string | null;
+  /** Recorded before paid landings stored their platform: falls back to the latest campaign tags. */
+  legacy: boolean;
+};
+
+/**
+ * Platform + ad ids of the paid visit the model credits (first or last paid landing).
+ * Rows recorded before those columns existed use the latest campaign tags instead.
+ */
+export function leadPlatform(row: LeadPlatformRow, model: AttributionModel = "last_paid"): LeadPlatform {
+  const first = model === "first_paid";
+  const host = first ? row.first_paid_host : row.last_paid_host;
+  const plat = first ? row.first_paid_platform : row.last_paid_platform;
+  if (host && plat) {
+    return {
+      platform: plat,
+      campaign_id: (first ? row.first_paid_campaign_id : row.last_paid_campaign_id) ?? null,
+      adset_id: (first ? row.first_paid_adset_id : row.last_paid_adset_id) ?? null,
+      ad_id: (first ? row.first_paid_ad_id : row.last_paid_ad_id) ?? null,
+      legacy: false,
+    };
+  }
+  return {
+    platform: row.platform ?? null,
+    campaign_id: row.campaign_id ?? null,
+    adset_id: row.adset_id ?? null,
+    ad_id: row.ad_id ?? null,
+    legacy: !!host,
+  };
+}
+
 export type LandingCreditTotals = {
   host: string;
   path: string;

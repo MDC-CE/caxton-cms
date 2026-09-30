@@ -10,7 +10,7 @@ import {
   parseConsentWindowSettings,
   type ConsentWindowSettings,
 } from "@shared/consent";
-import { parseAdsSettings, type AdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
+import { parseAdsSettings, type AdsSettings, type GoogleAdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
 import {
   type AuthSignupFieldMapEntry,
@@ -2108,9 +2108,12 @@ export function getAdsSettings(contentRoot?: string): AdsSettings {
 }
 
 export type AdsSettingsUpdate = {
-  meta?: Partial<Omit<MetaAdsSettings, "alert_thresholds">> & {
-    alert_thresholds?: Partial<AdsSettings["meta"]["alert_thresholds"]>;
+  meta?: Partial<Omit<MetaAdsSettings, "alert_thresholds" | "lead_conversions_changed_at">> & {
+    /** Legacy location; merged into `ads.alert_thresholds`. */
+    alert_thresholds?: Partial<AdsSettings["alert_thresholds"]>;
   };
+  google?: Partial<Omit<GoogleAdsSettings, "bigquery">> & { bigquery?: Partial<GoogleAdsSettings["bigquery"]> };
+  alert_thresholds?: Partial<AdsSettings["alert_thresholds"]>;
   test_email_patterns?: string[];
 };
 
@@ -2125,21 +2128,43 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
   }
 
   const current = parseAdsSettings(existing.ads);
+  const { alert_thresholds: legacyThresholds, ...metaInput } = input.meta ?? {};
   const merged = parseAdsSettings({
-    meta: {
-      ...current.meta,
-      ...(input.meta ?? {}),
-      alert_thresholds: { ...current.meta.alert_thresholds, ...(input.meta?.alert_thresholds ?? {}) },
+    meta: { ...current.meta, ...metaInput },
+    google: {
+      ...current.google,
+      ...(input.google ?? {}),
+      bigquery: { ...current.google.bigquery, ...(input.google?.bigquery ?? {}) },
     },
+    alert_thresholds: { ...current.alert_thresholds, ...(legacyThresholds ?? {}), ...(input.alert_thresholds ?? {}) },
     test_email_patterns: input.test_email_patterns ?? current.test_email_patterns,
   });
+  const g = merged.google;
+  const m = merged.meta;
+  const picksChanged = m.lead_conversions.join(",") !== current.meta.lead_conversions.join(",");
+  if (picksChanged) m.lead_conversions_changed_at = new Date().toISOString();
+  const googleConfigured = g.enabled || g.customer_ids.length > 0 || !!g.bigquery.project || !!g.bigquery.dataset;
   existing.ads = {
     meta: {
-      enabled: merged.meta.enabled,
-      ad_account_ids: merged.meta.ad_account_ids,
-      alert_thresholds: merged.meta.alert_thresholds,
-      ...(merged.meta.known_external_campaigns.length > 0 ? { known_external_campaigns: merged.meta.known_external_campaigns } : {}),
+      enabled: m.enabled,
+      ad_account_ids: m.ad_account_ids,
+      ...(m.known_external_campaigns.length > 0 ? { known_external_campaigns: m.known_external_campaigns } : {}),
+      ...(m.lead_conversions.length > 0 ? { lead_conversions: m.lead_conversions } : {}),
+      ...(m.lead_conversions_changed_at ? { lead_conversions_changed_at: m.lead_conversions_changed_at } : {}),
+      ...(m.expected_event_pairs.length > 0 ? { expected_event_pairs: m.expected_event_pairs } : {}),
     },
+    ...(googleConfigured
+      ? {
+          google: {
+            enabled: g.enabled,
+            customer_ids: g.customer_ids,
+            bigquery: g.bigquery,
+            ...(g.lead_conversion_actions.length > 0 ? { lead_conversion_actions: g.lead_conversion_actions } : {}),
+            ...(g.known_external_campaigns.length > 0 ? { known_external_campaigns: g.known_external_campaigns } : {}),
+          },
+        }
+      : {}),
+    alert_thresholds: merged.alert_thresholds,
     test_email_patterns: merged.test_email_patterns,
   };
 
@@ -2147,8 +2172,8 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(
-    `[Settings] Updated ads.meta enabled=${merged.meta.enabled} accounts=${merged.meta.ad_account_ids.length} ` +
-      `test_patterns=${merged.test_email_patterns.length}`,
+    `[Settings] Updated ads meta_enabled=${merged.meta.enabled} meta_accounts=${merged.meta.ad_account_ids.length} ` +
+      `google_enabled=${g.enabled} google_accounts=${g.customer_ids.length} test_patterns=${merged.test_email_patterns.length}`,
   );
   return merged;
 }

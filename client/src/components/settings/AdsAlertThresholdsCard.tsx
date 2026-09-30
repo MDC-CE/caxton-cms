@@ -188,6 +188,18 @@ export function AdsAlertThresholdsCard({
                 </p>
               </Group>
 
+              <Group title="Meta counting the same lead twice" testId="threshold-group-conversions">
+                <p>
+                  Warn when two picked lead conversions both report on at least {num("conversion_overlap_days_pct", "%")} of the
+                  ad-days where either has leads, and their counts are within {num("conversion_overlap_count_pct", "%")} of each
+                  other.
+                </p>
+                <p>
+                  Warn when two pixel events each fire at least {num("lockstep_min_events", "times")} in 7 days, with totals within{" "}
+                  {num("lockstep_count_pct", "%")} and the same count in most hours.
+                </p>
+              </Group>
+
               <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
                 <CollapsibleTrigger asChild>
                   <button
@@ -220,7 +232,14 @@ export function AdsAlertThresholdsCard({
                     <p>Drops compare the current window with the previous 28 days.</p>
                     <p>GA4 days count as complete 2 days after the date (export delay). Issues clear on the next sync once fixed.</p>
                     <p>
-                      Stored in <code className="font-mono">settings.yml → ads.meta.alert_thresholds</code>. Campaigns marked as known live in{" "}
+                      Double counting compares per-ad daily results from the last 28 days (at least 3 ad-days). Pixel events come from Meta&apos;s
+                      pixel stats for the last 7 days, read at each sync; PageView and pairs marked as expected (
+                      <code className="font-mono">ads.meta.expected_event_pairs</code>) are skipped. &quot;Most hours&quot; means at least 80% of
+                      hours where either event fired.
+                    </p>
+                    <p>
+                      Stored in <code className="font-mono">settings.yml → ads.alert_thresholds</code> (shared by Meta and Google; older files used{" "}
+                      <code className="font-mono">ads.meta.alert_thresholds</code>, still read as a fallback). Campaigns marked as known live in{" "}
                       <code className="font-mono">settings.yml → ads.meta.known_external_campaigns</code>.
                     </p>
                     <p>

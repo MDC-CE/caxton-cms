@@ -16,6 +16,12 @@ const h = vi.hoisted(() => ({
   known: [] as Array<{ key: string; note?: string }>,
   unrecognized: undefined as AdsUnrecognizedCampaigns | undefined,
   offSite: null as AdsPageRow | null,
+  rows: null as MetaAdDayRow[] | null,
+  leadConversions: [] as string[],
+  expectedPairs: [] as Array<{ pixel_id: string; events: [string, string] }>,
+  pixels: {} as Record<string, unknown>,
+  customConversions: {} as Record<string, unknown>,
+  reportLeadConversions: undefined as Record<string, unknown> | undefined,
 }));
 h.cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "ads-diagnostics-build-test-"));
 
@@ -124,6 +130,7 @@ function fakeReport(): AdsReport {
     campaigns: [],
     warnings: [],
     unrecognized_campaigns: h.unrecognized,
+    lead_conversions: h.reportLeadConversions,
   } as unknown as AdsReport;
 }
 
@@ -131,7 +138,14 @@ vi.mock("../db-cache", () => ({ CACHE_DIR: h.cacheDir }));
 vi.mock("../settings", () => ({
   getAdsSettings: () => ({
     ...DEFAULT_ADS_SETTINGS,
-    meta: { ...DEFAULT_ADS_SETTINGS.meta, enabled: true, ad_account_ids: ["111", "222"], known_external_campaigns: h.known },
+    meta: {
+      ...DEFAULT_ADS_SETTINGS.meta,
+      enabled: true,
+      ad_account_ids: ["111", "222"],
+      known_external_campaigns: h.known,
+      lead_conversions: h.leadConversions,
+      expected_event_pairs: h.expectedPairs,
+    },
   }),
 }));
 vi.mock("./ads-report", () => ({
@@ -155,8 +169,11 @@ vi.mock("./ads-report", () => ({
 }));
 vi.mock("./meta-ads-days", async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
-  loadMetaRows: () => ROWS,
+  loadMetaRows: () => h.rows ?? ROWS,
   loadMetaCreatives: () => ({ fetched_at: READ_111, ads: CREATIVES }),
+  loadMetaPixelEvents: () => ({ fetched_at: READ_111, since: "2026-09-22", pixels: h.pixels }),
+  loadMetaCustomConversions: () => ({ fetched_at: READ_111, accounts: h.customConversions }),
+  metaConversionNames: () => new Map([["1086440567304045", "request_more_info"]]),
   loadMetaState: () => ({
     consecutive_failures: h.syncFailures,
     last_error: h.syncFailures > 0 ? "Meta timeout" : null,
@@ -194,6 +211,12 @@ beforeEach(() => {
   h.known = [];
   h.unrecognized = undefined;
   h.offSite = null;
+  h.rows = null;
+  h.leadConversions = [];
+  h.expectedPairs = [];
+  h.pixels = {};
+  h.customConversions = {};
+  h.reportLeadConversions = undefined;
 });
 
 afterAll(() => {
@@ -390,5 +413,97 @@ describe("buildAdsDiagnostics clicks → visits", () => {
     h.totals = { matched_visits: 40, ratio_clicks: 200 };
     const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
     expect(d.kpis).toMatchObject({ clicks_to_visits_pct: null, clicks_to_visits_mismatch: false });
+  });
+});
+
+describe("buildAdsDiagnostics lead conversions", () => {
+  const RMI = "1086440567304045";
+  const withConv = (r: MetaAdDayRow, date: string, conversions: Record<string, number>): MetaAdDayRow => ({ ...r, date, conversions });
+  const overlapRows = [
+    withConv(ROWS[0]!, "2026-09-20", { fb_pixel_lead: 3, [RMI]: 3 }),
+    withConv(ROWS[0]!, "2026-09-21", { fb_pixel_lead: 2, [RMI]: 2 }),
+    withConv(ROWS[1]!, "2026-09-21", { fb_pixel_lead: 1, [RMI]: 1 }),
+    ...ROWS.slice(2),
+  ];
+
+  it("passes the report's per-conversion counts and pick state into the KPIs", async () => {
+    h.leadConversions = [RMI];
+    h.reportLeadConversions = {
+      meta_picked: [RMI],
+      meta_changed_at: "2026-09-25T00:00:00.000Z",
+      meta: [{ key: RMI, name: "request_more_info", count: 4 }],
+      site: [{ name: "apply", count: 2 }],
+      meta_incomplete_days: 3,
+      snapshot_lacks_conversions: false,
+    };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.kpis).toMatchObject({
+      meta_conversions: [{ key: RMI, name: "request_more_info", count: 4 }],
+      site_conversions: [{ name: "apply", count: 2 }],
+      meta_lead_conversions_picked: [RMI],
+      lead_conversions_changed_at: "2026-09-25T00:00:00.000Z",
+      meta_conversions_incomplete_days: 3,
+      snapshot_lacks_conversions: false,
+    });
+  });
+
+  it("falls back to settings when an older cached report has no lead_conversions block", async () => {
+    h.leadConversions = [RMI];
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.kpis).toMatchObject({ meta_conversions: [], site_conversions: [], meta_lead_conversions_picked: [RMI], snapshot_lacks_conversions: false });
+  });
+
+  it("raises lead_conversions_overlap while both are picked, and not after unpicking one", async () => {
+    h.rows = overlapRows;
+    h.leadConversions = ["fb_pixel_lead", RMI];
+    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const overlap = d.issues.find((i) => i.code === "lead_conversions_overlap")!;
+    expect(overlap).toMatchObject({ platform: "meta", severity: "warning", action: { kind: "unpick_lead_conversion" } });
+
+    h.leadConversions = [RMI];
+    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.some((i) => i.code === "lead_conversions_overlap")).toBe(false);
+  });
+
+  it("raises pixel_events_lockstep unless the pair is marked as expected", async () => {
+    const hourly = { "2026-09-23T10:00:00+0000": 12, "2026-09-24T10:00:00+0000": 10 };
+    h.pixels = {
+      "414": {
+        name: "4Geeks",
+        last_fired_time: null,
+        accounts: ["111"],
+        events: [
+          { event: "Lead", total: 22, hourly },
+          { event: "request_more_info", total: 22, hourly },
+          { event: "PageView", total: 22, hourly },
+        ],
+      },
+    };
+    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.filter((i) => i.code === "pixel_events_lockstep").map((i) => i.id)).toEqual(["pixel_events_lockstep:414:Lead|request_more_info"]);
+
+    h.expectedPairs = [{ pixel_id: "414", events: ["Lead", "request_more_info"] }];
+    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.some((i) => i.code === "pixel_events_lockstep")).toBe(false);
+  });
+
+  it("raises lead_conversion_stopped for a picked conversion Meta no longer lists", async () => {
+    h.leadConversions = [RMI];
+    h.customConversions = { "111": { conversions: [] }, "222": { conversions: [] } };
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "lead_conversion_stopped")).toMatchObject({
+      id: `lead_conversion_stopped:${RMI}`,
+      evidence: { reason: "missing" },
+    });
+  });
+
+  it("names the picked conversions when Meta reports no leads", async () => {
+    h.totals = { unique_leads: 4, meta_leads: 0 };
+    h.leadConversions = [RMI];
+    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "pixel_not_reporting_leads")!.why).toContain("picked in Settings → Ads → Meta (request_more_info)");
+    h.leadConversions = [];
+    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "pixel_not_reporting_leads")!.why).toContain("the standard Lead event (no conversions are picked");
   });
 });

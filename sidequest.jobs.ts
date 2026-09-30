@@ -18,3 +18,4 @@ export { EntryDeleteCleanupJob } from "./server/jobs/definitions/entry-delete-cl
 export { AiImageGcJob } from "./server/jobs/definitions/ai-image-gc";
 export { DraftLinkCheckJob, ProposalStaleSweepJob } from "./server/jobs/definitions/proposal-maintenance";
 export { MetaAdsSyncJob } from "./server/jobs/definitions/meta-ads-sync";
+export { AdsSyncJob } from "./server/jobs/definitions/ads-sync";

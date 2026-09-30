@@ -140,7 +140,10 @@ vi.mock("../site-config", async (importOriginal) => ({
 }));
 vi.mock("../content-index", () => ({ contentIndex: {} }));
 vi.mock("../settings", () => ({
-  getAdsSettings: () => ({ ...DEFAULT_ADS_SETTINGS, meta: { ...DEFAULT_ADS_SETTINGS.meta, enabled: true, ad_account_ids: ["111111"] } }),
+  getAdsSettings: () => ({
+    ...DEFAULT_ADS_SETTINGS,
+    meta: { ...DEFAULT_ADS_SETTINGS.meta, enabled: true, ad_account_ids: ["111111"], ...fixture.metaSettings },
+  }),
   getHomePage: () => ({ type: "page", slug: "home" }),
   getSupportedLocales: () => ["en", "es"],
   getDefaultLocale: () => "en",
@@ -194,6 +197,7 @@ vi.mock("./meta-ads-days", async (orig) => {
     loadMetaState: () => fixture.metaState ?? { accounts: {}, consecutive_failures: 0, last_success_at: NOW.toISOString() },
     loadMetaCreatives: () => ({ ads: fixture.creatives }),
     loadMetaPlatformRows: () => fixture.platformRows ?? [],
+    metaConversionNames: () => new Map([["1086440567304045", "request_more_info"]]),
   };
 });
 const ALL_META_DATES: string[] = [];
@@ -211,6 +215,7 @@ const fixture: {
   metaState?: Record<string, unknown>;
   /** False = no local Meta token (with a downloaded snapshot, the report is in production_snapshot mode). */
   metaConnected?: boolean;
+  metaSettings?: Partial<typeof DEFAULT_ADS_SETTINGS.meta>;
 } = {
   metaRows,
   creatives: BASE_CREATIVES,
@@ -730,7 +735,7 @@ describe("buildAdsReport date range + data gaps", () => {
   it("flags Meta and GA4 days with no cached file (GA4 only through its last complete day)", () => {
     fixture.metaDates = ALL_META_DATES.filter((d) => d !== "2026-09-10" && d !== "2026-09-11");
     const r = buildAdsReport({ site: "site_test", since: "2026-09-10", until: "2026-09-19", now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
-    expect(r.data_gaps).toEqual({ meta_missing_days: 2, ga4_missing_days: 8 });
+    expect(r.data_gaps).toEqual({ meta_missing_days: 2, ga4_missing_days: 8, google_missing_days: 0 });
     const w = r.warnings.find((x) => x.code === "data_gaps")!;
     expect(w.message).toContain("Meta (2 day(s): 2026-09-10..2026-09-11)");
     expect(w.message).toContain("GA4 (8 day(s): 2026-09-10..2026-09-14, 2026-09-16..2026-09-18)");
@@ -875,5 +880,74 @@ describe("buildAdsReport with a production download", () => {
     expect(r.meta.source).toBe("sync");
     expect(r.meta).not.toHaveProperty("pulled_at");
     expect(r.warnings.map((w) => w.code)).not.toContain("meta_production_snapshot");
+  });
+});
+
+describe("buildAdsReport lead_conversions", () => {
+  const RMI = "1086440567304045";
+  const APP = "1634685814697001";
+  const build = () => buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+  const withConversions = (conversions: Record<string, number>, date = DAY): MetaAdDayRow => ({ ...metaRows[0]!, date, conversions });
+
+  afterAll(() => {
+    fixture.metaRows = metaRows;
+    fixture.metaSettings = undefined;
+    fixture.metaState = undefined;
+    fixture.metaConnected = undefined;
+    fixture.ledgerRows = ledgerRows;
+  });
+
+  it("with nothing picked counts the standard Lead event (older rows use pixel_leads)", () => {
+    fixture.metaSettings = { lead_conversions: [] };
+    fixture.metaRows = metaRows;
+    const r = build();
+    expect(r.totals.meta_leads).toBe(5);
+    expect(r.lead_conversions.meta_picked).toEqual([]);
+    expect(r.lead_conversions.meta).toEqual([{ key: "fb_pixel_lead", name: "Standard Lead event", count: 5 }]);
+    expect(r.lead_conversions.meta_incomplete_days).toBe(0);
+  });
+
+  it("sums only the picked conversions, named from the cache (unknown ids keep their id)", () => {
+    fixture.metaSettings = { lead_conversions: [RMI, APP] };
+    fixture.metaRows = [withConversions({ fb_pixel_lead: 9, [RMI]: 3, [APP]: 1 }), metaRows[1]!];
+    const r = build();
+    expect(r.totals.meta_leads).toBe(4);
+    expect(r.pages.find((p) => p.slug === "coding-bootcamp")?.meta_leads).toBe(4);
+    expect(r.lead_conversions.meta).toEqual([
+      { key: RMI, name: "request_more_info", count: 3 },
+      { key: APP, name: APP, count: 1 },
+    ]);
+  });
+
+  it("counts days cached before per-conversion counts as incomplete (and flags an old production copy)", () => {
+    fixture.metaSettings = { lead_conversions: [RMI] };
+    fixture.metaRows = [withConversions({ [RMI]: 2 }), { ...metaRows[0]!, date: "2026-09-10" }];
+    let r = build();
+    expect(r.totals.meta_leads).toBe(2);
+    expect(r.lead_conversions.meta_incomplete_days).toBe(1);
+    expect(r.lead_conversions.snapshot_lacks_conversions).toBe(false);
+    fixture.metaConnected = false;
+    fixture.metaState = { consecutive_failures: 0, accounts: {}, pulled_from_production_at: "2026-09-20T10:00:00.000Z" };
+    r = build();
+    expect(r.lead_conversions.snapshot_lacks_conversions).toBe(true);
+    fixture.metaConnected = undefined;
+    fixture.metaState = undefined;
+  });
+
+  it("groups site leads by conversion name (credited, non-repeat, non-test)", () => {
+    fixture.metaSettings = undefined;
+    fixture.metaRows = metaRows;
+    fixture.ledgerRows = [
+      ...ledgerRows,
+      lead({ submission_id: "d", browser_hash: "b5", form: "request_more_info" }),
+      lead({ submission_id: "e", browser_hash: "b6", form: null }),
+    ];
+    const r = build();
+    expect(r.lead_conversions.site).toEqual([
+      { name: "apply", count: 2 },
+      { name: "(no conversion name)", count: 1 },
+      { name: "request_more_info", count: 1 },
+    ]);
+    expect(r.lead_conversions.site.reduce((s, c) => s + c.count, 0)).toBe(r.totals.unique_leads);
   });
 });

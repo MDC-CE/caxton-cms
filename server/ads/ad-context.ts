@@ -14,7 +14,7 @@ import {
   parseConsentCookie,
 } from "@shared/consent";
 import { MARKETING_UTM_KEYS, type PaidLandingRef, type UTMParams } from "@shared/session";
-import { normalizeLandingPath, PAID_LOOKBACK_DAYS } from "@shared/paid-traffic";
+import { adIdFromTag, normalizeLandingPath, PAID_LOOKBACK_DAYS } from "@shared/paid-traffic";
 import { getParentCookieDomain } from "../versioning/cookie-utils";
 
 const VALUE_MAX = 200;
@@ -49,7 +49,12 @@ function cleanLanding(raw: unknown, now: number): PaidLandingRef | undefined {
   if (!host || !path || !Number.isFinite(at)) return undefined;
   if (at > now + 3_600_000 || at < now - PAID_LOOKBACK_DAYS * 86_400_000) return undefined;
   const platform = typeof r.platform === "string" ? r.platform.slice(0, 20) : null;
-  return { host, path, at, platform };
+  const out: PaidLandingRef = { host, path, at, platform };
+  for (const k of ["campaign_id", "adset_id", "ad_id"] as const) {
+    const id = typeof r[k] === "string" ? adIdFromTag(r[k] as string) : null;
+    if (id) out[k] = id;
+  }
+  return out;
 }
 
 export function parseAdContextCookie(raw: string | undefined | null): AdContext | null {

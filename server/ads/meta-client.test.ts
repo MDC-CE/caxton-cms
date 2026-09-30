@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  conversionCounts,
   listMetaAdAccounts,
   MetaApiError,
   parseAdAccount,
   parseCreative,
+  parseCustomConversion,
   parseAdPlatformRow,
   parseInsightRow,
+  parsePixelEventStats,
   resetMetaAdAccountCache,
 } from "./meta-client";
 
@@ -37,6 +40,7 @@ describe("parseAdPlatformRow", () => {
       impressions: 300,
       link_clicks: 12,
       pixel_leads: 1,
+      conversions: { fb_pixel_lead: 1 },
     });
   });
 
@@ -81,6 +85,66 @@ describe("parseInsightRow", () => {
     expect(parseInsightRow({ ad_id: "a1" })).toBeNull();
     expect(parseInsightRow({ date_start: "2026-09-01" })).toBeNull();
   });
+
+  it("keeps standard Lead and custom conversions by id, ignoring other actions", () => {
+    const row = parseInsightRow({
+      date_start: "2026-09-01",
+      ad_id: "a1",
+      actions: [
+        { action_type: "offsite_conversion.fb_pixel_lead", value: "2" },
+        { action_type: "offsite_conversion.custom.1086440567304045", value: "5" },
+        { action_type: "offsite_conversion.custom.abc", value: "9" },
+        { action_type: "offsite_conversion.fb_pixel_custom", value: "40" },
+        { action_type: "lead", value: "3" },
+        { action_type: "offsite_conversion.custom.1634685814697001", value: "0" },
+      ],
+    });
+    expect(row?.conversions).toEqual({ fb_pixel_lead: 2, "1086440567304045": 5 });
+  });
+});
+
+describe("conversionCounts", () => {
+  it("returns {} for missing actions", () => {
+    expect(conversionCounts(undefined)).toEqual({});
+  });
+});
+
+describe("parseCustomConversion", () => {
+  it("maps name, pixel and archived flag; drops non-numeric ids", () => {
+    expect(
+      parseCustomConversion({
+        id: "1086440567304045",
+        name: "request_more_info",
+        custom_event_type: "OTHER",
+        last_fired_time: "2026-09-30T16:19:51+0000",
+        is_archived: false,
+        pixel: { id: "414048075447471", name: "4GeeksAcademy" },
+      }),
+    ).toEqual({
+      id: "1086440567304045",
+      name: "request_more_info",
+      pixel_id: "414048075447471",
+      pixel_name: "4GeeksAcademy",
+      custom_event_type: "OTHER",
+      last_fired_time: "2026-09-30T16:19:51+0000",
+      archived: false,
+    });
+    expect(parseCustomConversion({ id: "x" })).toBeNull();
+  });
+});
+
+describe("parsePixelEventStats", () => {
+  it("sums per event with hourly buckets, sorted by total", () => {
+    const stats = parsePixelEventStats([
+      { timestamp: "2026-09-30T15:00:00", data: [{ value: "Lead", count: 2 }, { value: "PageView", count: 50 }] },
+      { timestamp: "2026-09-30T16:00:00", data: [{ value: "Lead", count: "3" }, { value: "empty", count: 0 }] },
+      { data: [{ value: "Lead", count: 9 }] },
+    ]);
+    expect(stats).toEqual([
+      { event: "PageView", total: 50, hourly: { "2026-09-30T15:00:00": 50 } },
+      { event: "Lead", total: 5, hourly: { "2026-09-30T15:00:00": 2, "2026-09-30T16:00:00": 3 } },
+    ]);
+  });
 });
 
 describe("parseCreative", () => {
@@ -99,6 +163,15 @@ describe("parseCreative", () => {
     expect(c?.links).toEqual(["https://4geeks.com/en/bootcamp", "https://4geeks.com/en/other"]);
     expect(c?.instant_form).toBe(true);
     expect(c?.url_tags).toContain("paid_social");
+    expect(c).not.toHaveProperty("optimization_event");
+  });
+
+  it("reads the conversion the ad set optimizes for as a lead key", () => {
+    const withAdset = (promoted_object: Record<string, unknown>) =>
+      parseCreative({ id: "a1", adset: { promoted_object, id: "s1" }, creative: {} })?.optimization_event;
+    expect(withAdset({ pixel_id: "414", custom_conversion_id: "1086440567304045" })).toBe("1086440567304045");
+    expect(withAdset({ pixel_id: "414", custom_event_type: "LEAD" })).toBe("fb_pixel_lead");
+    expect(withAdset({ pixel_id: "414", custom_event_type: "PURCHASE" })).toBeUndefined();
   });
 });
 

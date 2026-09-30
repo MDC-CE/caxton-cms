@@ -37,11 +37,12 @@ import {
   type AdsUncheckedReason,
   type TrackingParamsCoverage,
 } from "@shared/ads-diagnostics-rules";
-import { META_UTM_TEMPLATE, isKnownExternalCampaign, type AdsAlertThresholds, type KnownExternalCampaign } from "@shared/ads-settings";
+import { META_UTM_TEMPLATE, adsThresholds, isKnownExternalCampaign, type AdsAlertThresholds, type KnownExternalCampaign } from "@shared/ads-settings";
 import {
   buildAdsReport,
   getAdsReport,
   makeDestinationResolver,
+  type AdsLeadConversions,
   type AdsMetaPlatforms,
   type AdsReport,
   type AdsUnrecognizedCampaigns,
@@ -51,12 +52,22 @@ import {
 import {
   addDays,
   loadMetaCreatives,
+  loadMetaCustomConversions,
+  loadMetaPixelEvents,
   loadMetaRows,
   loadMetaState,
+  metaConversionNames,
   utcDate,
   type MetaAdsCreatives,
   type MetaAdsSyncState,
 } from "./meta-ads-days";
+import {
+  conversionOverlapIssues,
+  conversionStoppedIssues,
+  findStoppedConversions,
+  leadConversionName,
+  pixelLockstepIssues,
+} from "./lead-conversion-issues";
 import type { MetaAdDayRow } from "./meta-client";
 import { lastCompleteGa4Date } from "./paid-detection";
 import { ledgerLastRecordedAt } from "./lead-ledger";
@@ -88,6 +99,15 @@ export type AdsDiagnostics = {
     open_warnings: number;
     meta_leads: number;
     site_leads: number;
+    /** Meta keys behind `meta_leads` with window counts (standard Lead when nothing is picked). */
+    meta_conversions: AdsLeadConversions["meta"];
+    /** Site conversion names behind `site_leads`. */
+    site_conversions: AdsLeadConversions["site"];
+    /** Conversions picked in Settings → Ads → Meta; empty = counting the standard Lead event. */
+    meta_lead_conversions_picked: string[];
+    lead_conversions_changed_at: string | null;
+    meta_conversions_incomplete_days: number;
+    snapshot_lacks_conversions: boolean;
     repeat_submissions: number;
     /** Matched visits / link clicks from tagged on-site ads on GA4-exported days, in percent. */
     clicks_to_visits_pct: number | null;
@@ -254,13 +274,17 @@ export function leadIssues(input: {
   };
 }
 
-function issueStatePath(site: string): string {
-  return path.join(CACHE_DIR, site, "ads-issues.json");
+/** Meta keeps the original file name; Google has its own so the two Resolved lists never mix. */
+export const META_ISSUE_STATE_FILE = "ads-issues.json";
+export const GOOGLE_ISSUE_STATE_FILE = "ads-issues-google.json";
+
+function issueStatePath(site: string, file: string): string {
+  return path.join(CACHE_DIR, site, file);
 }
 
-function loadIssueState(site: string): IssueState {
+export function loadIssueState(site: string, file = META_ISSUE_STATE_FILE): IssueState {
   try {
-    const f = issueStatePath(site);
+    const f = issueStatePath(site, file);
     if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, "utf-8")) as IssueState;
   } catch {
     /* ignore */
@@ -268,10 +292,13 @@ function loadIssueState(site: string): IssueState {
   return { open: {}, resolved: [] };
 }
 
-function saveIssueState(site: string, state: IssueState): void {
-  fs.mkdirSync(path.dirname(issueStatePath(site)), { recursive: true });
-  fs.writeFileSync(issueStatePath(site), JSON.stringify(state), "utf-8");
+export function saveIssueState(site: string, state: IssueState, file = META_ISSUE_STATE_FILE): void {
+  fs.mkdirSync(path.dirname(issueStatePath(site, file)), { recursive: true });
+  fs.writeFileSync(issueStatePath(site, file), JSON.stringify(state), "utf-8");
 }
+
+/** Checks that aren't about one ad platform (lead records, consent). Listed once on the overview. */
+export const SHARED_ISSUE_CODES = new Set<AdsIssue["code"]>(["ga4_ledger_gap", "ledger_not_recording", "consent_rate_drop"]);
 
 // ── Tracking params coverage ────────────────────────────────────────────────
 function addSpend(into: MoneyByCurrency, from: MoneyByCurrency): void {
@@ -583,7 +610,7 @@ export async function buildAdsDiagnostics(opts: {
   const now = opts.now ?? new Date();
   const { kpiDays, issueDays } = resolveAdsDiagnosticsWindows(opts.days);
   const settings = getAdsSettings(opts.contentRoot);
-  const t = settings.meta.alert_thresholds;
+  const t = adsThresholds(settings);
   const reuseIssueReport = kpiDays === issueDays || !!opts.issuesOnly;
   const report = await getAdsReport({
     site: opts.site,
@@ -835,19 +862,42 @@ export async function buildAdsDiagnostics(opts: {
   }
 
   // Pixel not reporting leads while the site records Meta leads
+  const pickedConversions = settings.meta.lead_conversions ?? [];
+  const conversionNames = connected ? metaConversionNames(opts.site) : new Map<string, string>();
   const floorHit = Object.entries(totalSpend).some(([c, v]) => v >= (t.severity_spend_floor[c] ?? Infinity));
   if (connected && floorHit && report.totals.meta_leads === 0 && report.totals.unique_leads > 0) {
+    const counted =
+      pickedConversions.length > 0
+        ? `the conversions picked in Settings → Ads → Meta (${pickedConversions.map((k) => leadConversionName(k, conversionNames)).join(", ")})`
+        : "the standard Lead event (no conversions are picked in Settings → Ads → Meta)";
     issues.push({
       id: "pixel_not_reporting_leads",
       code: "pixel_not_reporting_leads",
       severity: "warning",
       title: "Meta pixel is not reporting leads",
-      why: `Our site recorded ${report.totals.unique_leads} leads from Meta ads, but Meta reports none. Meta cannot optimize campaigns for leads it does not see.`,
-      how_to_fix: "In Tag Manager, check the Meta pixel Lead event fires on the lead form conversion and respects consent.",
+      why: `Our site recorded ${report.totals.unique_leads} leads from Meta ads, but Meta reports none for ${counted}. Meta cannot optimize campaigns for leads it does not see.`,
+      how_to_fix:
+        pickedConversions.length > 0
+          ? "In Tag Manager, check the Meta tags behind the picked conversions fire on the lead forms and respect consent. If your leads use other conversions, pick those instead."
+          : "Pick the conversions your lead forms fire in Settings → Ads → Meta. If they should fire the standard Lead event, check the Meta pixel Lead tag in Tag Manager.",
       spend_affected: totalSpend,
       scope: {},
       site_fixable: false,
     });
+  }
+
+  // Lead conversions: double counting, pixel events in lockstep, picks Meta stopped reporting
+  if (connected) {
+    issues.push(...conversionOverlapIssues({ rows: metaRows, picked: pickedConversions, names: conversionNames, creatives, t }));
+    issues.push(...pixelLockstepIssues({ pixels: loadMetaPixelEvents(opts.site), expected: settings.meta.expected_event_pairs ?? [], t }));
+    const stopped = findStoppedConversions({
+      picked: pickedConversions,
+      customConversions: loadMetaCustomConversions(opts.site),
+      accountIds: settings.meta.ad_account_ids,
+      accountsWithSpend: new Set(spendingAds.map((a) => a.account_id)),
+    });
+    const accountNames = Object.fromEntries(Object.entries(metaState.accounts ?? {}).map(([id, a]) => [id, a?.name]));
+    issues.push(...conversionStoppedIssues({ stopped, accountNames }));
   }
 
   // GA4 vs ledger: not recording, or gap over shared days
@@ -971,11 +1021,13 @@ export async function buildAdsDiagnostics(opts: {
   for (const i of issues) {
     const firstSeen = state.open[i.id]?.first_seen;
     if (firstSeen) i.first_seen = firstSeen;
+    i.platform = SHARED_ISSUE_CODES.has(i.code) ? "shared" : "meta";
   }
   sortAdsIssues(issues);
   const openErrors = issues.filter((i) => i.severity === "error").length;
   const openWarnings = issues.filter((i) => i.severity === "warning").length;
   const k = kpiReport.totals;
+  const lc = kpiReport.lead_conversions as AdsLeadConversions | undefined;
   const kpiRatio = k.ratio_clicks > 0 && kpiReport.ga4.configured ? k.matched_visits / k.ratio_clicks : null;
   const refresh = kpiReport.refresh;
   const warnings = kpiReport.warnings;
@@ -996,6 +1048,12 @@ export async function buildAdsDiagnostics(opts: {
       open_warnings: openWarnings,
       meta_leads: k.meta_leads,
       site_leads: k.unique_leads,
+      meta_conversions: lc?.meta ?? [],
+      site_conversions: lc?.site ?? [],
+      meta_lead_conversions_picked: lc?.meta_picked ?? pickedConversions,
+      lead_conversions_changed_at: lc?.meta_changed_at ?? settings.meta.lead_conversions_changed_at ?? null,
+      meta_conversions_incomplete_days: lc?.meta_incomplete_days ?? 0,
+      snapshot_lacks_conversions: lc?.snapshot_lacks_conversions ?? false,
       repeat_submissions: k.repeat_submissions,
       clicks_to_visits_pct: kpiRatio != null ? Math.round(kpiRatio * 1000) / 10 : null,
       clicks_to_visits_mismatch: isClicksVisitsMismatch(kpiRatio),
@@ -1016,7 +1074,14 @@ export async function buildAdsDiagnostics(opts: {
 
 /** Light roll-up for the Global tab (no landing probes). */
 export async function adsDiagnosticsSummary(site: string, contentRoot?: string): Promise<{ status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number }> {
-  const d = await buildAdsDiagnostics({ site, contentRoot, days: ADS_ISSUE_WINDOW_DAYS, probe: false });
+  return summarizeMetaDiagnostics(site, await buildAdsDiagnostics({ site, contentRoot, days: ADS_ISSUE_WINDOW_DAYS, probe: false }));
+}
+
+/** Probe-less build + landing issues still open from the last full build (probes are skipped in roll-ups). */
+export function summarizeMetaDiagnostics(
+  site: string,
+  d: AdsDiagnostics,
+): { status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number } {
   const severities = new Map<string, AdsIssue["severity"]>();
   for (const [id, prev] of Object.entries(loadIssueState(site).open)) {
     if (id.startsWith("landing_http_error:") || id.startsWith("redirect_drops_params:")) severities.set(id, prev.severity);

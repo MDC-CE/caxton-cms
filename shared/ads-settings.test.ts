@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ADS_ALERT_THRESHOLDS,
   MAX_KNOWN_EXTERNAL_CAMPAIGNS,
+  META_STANDARD_LEAD_KEY,
+  effectiveMetaLeadKeys,
+  isExpectedEventPair,
   isKnownExternalCampaign,
+  normalizeMetaLeadConversionKey,
   parseAdsSettings,
   parseKnownExternalCampaigns,
 } from "./ads-settings";
@@ -62,5 +66,80 @@ describe("parseAdsSettings", () => {
     expect(s.meta.alert_thresholds.unrecognized_campaign_error_share_pct).toBe(2);
     expect(s.meta.alert_thresholds.unrecognized_campaign_error_visits).toBe(DEFAULT_ADS_ALERT_THRESHOLDS.unrecognized_campaign_error_visits);
     expect(s.meta.known_external_campaigns).toEqual([{ key: "123456789", note: "Partner" }]);
+  });
+
+  it("reads thresholds from ads.alert_thresholds first, falling back to the legacy meta block", () => {
+    const legacy = parseAdsSettings({ meta: { alert_thresholds: { ratio_min_clicks: 42 } } });
+    expect(legacy.alert_thresholds.ratio_min_clicks).toBe(42);
+    expect(legacy.meta.alert_thresholds.ratio_min_clicks).toBe(42);
+    const top = parseAdsSettings({ alert_thresholds: { ratio_min_clicks: 7 }, meta: { alert_thresholds: { ratio_min_clicks: 42 } } });
+    expect(top.alert_thresholds.ratio_min_clicks).toBe(7);
+    expect(top.meta.alert_thresholds.ratio_min_clicks).toBe(7);
+  });
+
+  it("parses the Google block: dashed customer ids, BigQuery ids, lead actions", () => {
+    const s = parseAdsSettings({
+      google: {
+        enabled: true,
+        customer_ids: ["123-456-7890", "1234567890", "12345", "abc"],
+        bigquery: { project: "my-project-1", dataset: "google_ads" },
+        lead_conversion_actions: ["Apply form", "apply form", " ", 987654321],
+      },
+    });
+    expect(s.google).toEqual({
+      enabled: true,
+      customer_ids: ["1234567890"],
+      bigquery: { project: "my-project-1", dataset: "google_ads" },
+      lead_conversion_actions: ["Apply form", "987654321"],
+      known_external_campaigns: [],
+    });
+    expect(parseAdsSettings({ google: { bigquery: { project: "Bad Project!", dataset: "x-y" } } }).google.bigquery).toEqual({ project: null, dataset: null });
+    expect(parseAdsSettings(null).google.enabled).toBe(false);
+  });
+
+  it("parses Meta lead conversions, change date and expected event pairs", () => {
+    const s = parseAdsSettings({
+      meta: {
+        lead_conversions: ["fb_pixel_lead", "offsite_conversion.custom.1086440567304045", 1634685814697001, "abc", "FB_PIXEL_LEAD"],
+        lead_conversions_changed_at: "2026-09-30T16:00:00.000Z",
+        expected_event_pairs: [
+          { pixel_id: "414048075447471", events: ["sign_up", "join_event"], note: "Same form" },
+          { pixel_id: "414048075447471", events: ["join_event", "sign_up"] },
+          { pixel_id: "bad", events: ["a", "b"] },
+          { pixel_id: "414048075447471", events: ["a", "a"] },
+        ],
+      },
+    });
+    expect(s.meta.lead_conversions).toEqual(["fb_pixel_lead", "1086440567304045", "1634685814697001"]);
+    expect(s.meta.lead_conversions_changed_at).toBe("2026-09-30T16:00:00.000Z");
+    expect(s.meta.expected_event_pairs).toEqual([{ pixel_id: "414048075447471", events: ["join_event", "sign_up"], note: "Same form" }]);
+    expect(isExpectedEventPair(s.meta.expected_event_pairs, "414048075447471", "sign_up", "join_event")).toBe(true);
+    expect(isExpectedEventPair(s.meta.expected_event_pairs, "414048075447471", "sign_up", "purchase")).toBe(false);
+  });
+
+  it("defaults the new Meta fields and overlap / lockstep thresholds", () => {
+    const s = parseAdsSettings({ meta: { enabled: true, lead_conversions_changed_at: "not a date" } });
+    expect(s.meta.lead_conversions).toEqual([]);
+    expect(s.meta.lead_conversions_changed_at).toBeNull();
+    expect(s.meta.expected_event_pairs).toEqual([]);
+    expect(s.alert_thresholds).toMatchObject({
+      conversion_overlap_days_pct: 80,
+      conversion_overlap_count_pct: 20,
+      lockstep_min_events: 20,
+      lockstep_count_pct: 2,
+    });
+  });
+});
+
+describe("normalizeMetaLeadConversionKey / effectiveMetaLeadKeys", () => {
+  it("accepts the standard Lead key and numeric ids only", () => {
+    expect(normalizeMetaLeadConversionKey("offsite_conversion.fb_pixel_lead")).toBe(META_STANDARD_LEAD_KEY);
+    expect(normalizeMetaLeadConversionKey(" 1086440567304045 ")).toBe("1086440567304045");
+    expect(normalizeMetaLeadConversionKey("lead")).toBeNull();
+  });
+
+  it("falls back to the standard Lead event when nothing is picked", () => {
+    expect(effectiveMetaLeadKeys([])).toEqual([META_STANDARD_LEAD_KEY]);
+    expect(effectiveMetaLeadKeys(["123456789"])).toEqual(["123456789"]);
   });
 });

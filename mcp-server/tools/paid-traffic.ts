@@ -21,7 +21,7 @@ const MAX_ISSUE_IDS = 10;
 const MAX_ADS_LIMIT = 200;
 const MAX_FILTER_IDS = 20;
 const DATE_ARG = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
-const ID_LIST_ARG = z.array(z.string().regex(/^\d+$/, "numeric Meta id")).max(MAX_FILTER_IDS);
+const ID_LIST_ARG = z.array(z.string().regex(/^\d+$/, "numeric Meta or Google id")).max(MAX_FILTER_IDS);
 const ID_FILTER_KEYS = ["campaign_ids", "adset_ids", "ad_ids"] as const;
 
 function appendIdFilters(params: URLSearchParams, f: Partial<Record<(typeof ID_FILTER_KEYS)[number], string[] | undefined>>): boolean {
@@ -134,11 +134,33 @@ type RefreshStatus = {
 };
 
 const REFRESH_WARNING_CODES = new Set(["meta_refresh_in_progress", "meta_refresh_failed", "jobs_worker_down"]);
+const GOOGLE_STATUS_WARNING_CODES = new Set(["google_data_through", "google_transfer_stale", "google_account_not_synced", "google_network_not_split"]);
+
+type PlatformCard = { connected?: boolean; status?: string; open_errors?: number; open_warnings?: number };
+
+/** One next action per connected platform with open issues, pointing at its full diagnostics. */
+export function overviewNextActions(platforms: Partial<Record<"meta" | "google", PlatformCard>> | undefined): NextAction[] {
+  const out: NextAction[] = [];
+  for (const p of ["meta", "google"] as const) {
+    const c = platforms?.[p];
+    const open = (c?.open_errors ?? 0) + (c?.open_warnings ?? 0);
+    if (!c?.connected || open === 0) continue;
+    out.push({
+      tool: "get_paid_traffic",
+      priority: (c.open_errors ?? 0) > 0 ? "recommended" : "optional",
+      reason: `${p === "meta" ? "Meta" : "Google Ads"}: ${c.open_errors ?? 0} error(s), ${c.open_warnings ?? 0} warning(s); list them with evidence and how to fix`,
+      args_hint: { mode: "diagnostics", platform: p },
+    });
+  }
+  return out;
+}
 
 /** Re-call only while a refresh is queued/running; point at setup docs when it failed or cannot run. */
-function refreshNextActions(refresh: RefreshStatus | undefined, mode: string): NextAction[] {
+function refreshNextActions(refresh: RefreshStatus | undefined, mode: string, platform?: string): NextAction[] {
   if (refresh?.state === "queued" || refresh?.state === "running") {
-    return [{ tool: "get_paid_traffic", priority: "recommended", reason: "Ad data is refreshing; re-call in ~1 minute", args_hint: { mode } }];
+    return [
+      { tool: "get_paid_traffic", priority: "recommended", reason: "Ad data is refreshing; re-call in ~1 minute", args_hint: platform ? { mode, platform } : { mode } },
+    ];
   }
   if (refresh?.state === "failed" || refresh?.state === "worker_down") {
     return [
@@ -178,6 +200,8 @@ type Report = {
   platform: string;
   attribution: unknown;
   meta: { connected: boolean; last_synced_at: string | null; accounts: unknown[] };
+  google?: { connected: boolean; data_through: string | null; accounts: unknown[]; [k: string]: unknown };
+  google_networks?: unknown;
   ga4: { configured: boolean; last_export_date: string | null };
   refreshing: boolean;
   refresh?: RefreshStatus;
@@ -186,6 +210,7 @@ type Report = {
   data_gaps?: { meta_missing_days: number; ga4_missing_days: number };
   filters?: Record<(typeof ID_FILTER_KEYS)[number], string[]>;
   totals: Record<string, unknown>;
+  lead_conversions?: unknown;
   pages: PageRow[];
   destinations: PageRow[];
   campaigns: unknown[];
@@ -233,28 +258,33 @@ function sortPages(rows: PageRow[], sort: SortKey): PageRow[] {
 }
 
 const NON_EFFECTS = [
-  "Read-only: does not change Meta campaigns, settings, or lead delivery.",
-  "refresh: true only queues a read from Meta (ad days + ad setups into .cache); it never changes campaigns, ads, or budgets.",
+  "Read-only: does not change Meta or Google Ads campaigns, settings, or lead delivery.",
+  "refresh: true only queues reads (Meta API + Google Ads BigQuery transfer tables into .cache); it never changes campaigns, ads, or budgets, and cannot make Google's daily transfer run sooner.",
   "Test leads (staff session / test email pattern) are excluded from lead counts.",
-  "Meta-reported leads and site leads are separate sources — never summed.",
+  "Meta-reported leads, Google-reported leads and site leads are separate sources — never summed.",
 ];
+
+const DIAG_PLATFORMS = new Set(["meta", "google"]);
 
 export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, grants?: CatalogGrant[]): void {
   mcp.tool(
     "get_paid_traffic",
-    "Paid traffic by landing page: ad spend (Meta Marketing API), paid visits (GA4 BigQuery export), and site leads (lead ledger), " +
+    "Paid traffic by landing page: ad spend (Meta Marketing API + Google Ads BigQuery transfer), paid visits (GA4 BigQuery export), and site leads (lead ledger), " +
       "plus ad tracking health. Requires metrics_view. Exclusive mode per call: " +
-      "summary (totals + top pages) | campaigns | entries (managed pages, paginated) | destinations (spend that did not land on a managed page) | diagnostics (tracking issues, KPIs; unrecognized_campaign = paid Meta visits to own pages from a campaign not in any connected account). " +
+      "summary (totals + lead_conversions: which Meta conversions / site forms sit behind the lead counts + top pages) | campaigns | entries (managed pages, paginated) | destinations (spend that did not land on a managed page, incl. Google lead forms / calls / video views / app — excluded from cost per lead) | diagnostics. " +
+      "diagnostics without platform → cross-platform overview (platforms.meta / platforms.google cards with top_issues, shared lead-tracking issues, totals; next_actions per platform with open issues). diagnostics with platform meta | google → that platform's full issue list (Meta: snapshot_id, evidence, landing probes; unrecognized_campaign = paid Meta visits from a campaign not in any connected account. Google: transfer health, matching, networks). " +
+      "Google data lags 1–2 days (google_data_through warning; google_transfer_stale when older). google_leads (Submit lead form conversions + staff-picked actions) are never summed with Meta or site leads. " +
       "Consent surfaces only as warnings (consent_estimates, consent_rate_drop); the consent breakdown is staff-only (Diagnostics → Legal). " +
       "days 1–90 ending yesterday (default 28). diagnostics: KPIs follow days; issues and open_errors/open_warnings always cover the last 28 days (issue_window_days). Credit: one lead → one landing page (model last_paid default | first_paid), 30-day lookback, no split; the form page never gets credit. " +
       "Money is per currency (never converted). Soft status not_configured when neither Meta nor GA4 export is set up. " +
       "diagnostics issues sort severity → spend affected; each carries scope (campaign/account ids), first_seen and details { ads (top 3 by spend unless issue_ids), ads_total, ads_offset, unchecked reasons, ga4_seen for destinations with no synced ad, setup_last_read_at }. " +
       "Every diagnostics call returns snapshot_id (30 min): pass it with issue_ids (≤10) for up to ads_limit ads per issue (default 50, max 200; page with ads_offset) from the same build. " +
       "Refresh status (refresh.state): meta_refresh_in_progress → re-call in ~1 minute; meta_refresh_failed / jobs_worker_down → numbers are the last cached sync, do not re-call in a loop (staff retry via Sync now). refresh.progress { done, total, label } only while running (uneven steps; not a time estimate). " +
-      "refresh: true (any mode, needs ads_settings) queues a Meta read first; without the grant → refresh_not_allowed warning and the cached read proceeds. " +
-      "Filters: campaign_ids / adset_ids / ad_ids (≤20 each; OR within a level, AND across levels) narrow spend, GA4 visits (matched by link tags; parents filled from synced ads) and leads (by last-clicked ad); untagged visits are left out (untagged_visits_excluded = floor). " +
+      "refresh: true (any mode, needs ads_settings) queues a Meta + Google + GA4 read first; without the grant → refresh_not_allowed warning and the cached read proceeds. " +
+      "Filters: campaign_ids / adset_ids / ad_ids (≤20 each; OR within a level, AND across levels; Google ad groups go in adset_ids) narrow spend, GA4 visits (matched by link tags; parents filled from synced ads) and leads (by last-clicked ad); untagged visits are left out (untagged_visits_excluded = floor). " +
+      "When both Meta and Google are connected, id filters need platform meta | google (error code platform_required_for_ids). Leads recorded before per-platform ids → lead_platform_legacy warning (platform guessed from UTMs). " +
       "since / until (YYYY-MM-DD, ≤90 days, within ~13 months) replace days; gaps → data_gaps warning (missing, not zero). diagnostics: id filters keep issues touching those ads; since/until ignored. " +
-      "summary / diagnostics carry meta_platforms (Facebook vs Instagram: spend, visits, site leads per placement; see explain topic ads). " +
+      "summary / diagnostics carry meta_platforms (Facebook vs Instagram) and google_networks (Search / Display / YouTube / PMax…; google_network_not_split when visits can't be tied to a network); see explain topic ads. " +
       "Read-only — not GSC (get_organic_traffic), not general GA4 reports (get_analytics_report). " +
       MULTI_SITE_TOOL_BLURB,
     {
@@ -263,7 +293,9 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
       platform: z
         .enum(["all", "meta", "google", "microsoft", "tiktok", "linkedin", "x", "snapchat", "pinterest", "other"])
         .optional()
-        .describe("Filter paid visits by ad platform (default all). Spend is Meta only in Phase 1."),
+        .describe(
+          "Report modes: filter spend, paid visits and leads by ad platform (default all; spend exists for meta and google). Required with id filters when both are connected. diagnostics: meta | google for that platform's issues; omit (or all) for the overview.",
+        ),
       currency: z
         .string()
         .optional()
@@ -274,13 +306,13 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
         .string()
         .optional()
         .describe(
-          "Meta ad account id filter (digits; act_ prefix optional). Narrows spend, paid visits (matched by utm_id / utm_term / utm_content to that account's synced ads) and leads (by last-clicked ad ids). Excludes non-Meta and unclear visits. Untagged Meta visits → totals.unassigned_visits + row.unassigned_visits; visits with ids from unsynced accounts → totals.unsynced_account_visits (warning visits_not_tied_to_account; visits are a floor).",
+          "Ad account filter: Meta id (digits; act_ prefix optional) or Google customer id (123-456-7890). Narrows spend, paid visits (matched by utm_id / utm_term / utm_content to that account's synced ads) and leads (by last-clicked ad ids). Excludes non-Meta and unclear visits. Untagged Meta visits → totals.unassigned_visits + row.unassigned_visits; visits with ids from unsynced accounts → totals.unsynced_account_visits (warning visits_not_tied_to_account; visits are a floor).",
         ),
       content_type: z.string().optional().describe("entries/summary: limit pages to one CMS content type"),
       model: z.enum(["last_paid", "first_paid"]).optional().describe("Lead credit model (default last_paid)"),
-      campaign_ids: ID_LIST_ARG.optional().describe(`Meta campaign ids (≤${MAX_FILTER_IDS}); AND with adset_ids / ad_ids`),
-      adset_ids: ID_LIST_ARG.optional().describe(`Meta ad set ids (≤${MAX_FILTER_IDS})`),
-      ad_ids: ID_LIST_ARG.optional().describe(`Meta ad ids (≤${MAX_FILTER_IDS})`),
+      campaign_ids: ID_LIST_ARG.optional().describe(`Meta or Google campaign ids (≤${MAX_FILTER_IDS}); AND with adset_ids / ad_ids`),
+      adset_ids: ID_LIST_ARG.optional().describe(`Meta ad set or Google ad group ids (≤${MAX_FILTER_IDS})`),
+      ad_ids: ID_LIST_ARG.optional().describe(`Meta or Google ad ids (≤${MAX_FILTER_IDS}; Performance Max has campaign level only)`),
       since: DATE_ARG.optional().describe("Window start (UTC, inclusive). Overrides days; with only since, the window runs days (default 90) forward, capped at yesterday."),
       until: DATE_ARG.optional().describe("Window end (UTC, inclusive; clamped to yesterday). With only until, the window is days (default 28) back from it. Max span 90 days."),
       group: z
@@ -315,7 +347,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
         .boolean()
         .optional()
         .describe(
-          "Queue a Meta read (last 10 days + ad setups; 90 days while any configured account has meta.accounts[].history_loaded false) before reading; needs ads_settings. Never changes campaigns.",
+          "Queue a read of every connected source before reading: Meta (last 10 days + ad setups; 90 days while an account has history_loaded false), Google transfer tables (10 days spend / 30 days conversions + reloaded days), GA4. Needs ads_settings. Never changes campaigns; cannot force Google's transfer.",
         ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
@@ -365,26 +397,137 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
           } else {
             const syncParams = new URLSearchParams();
             if (domain) syncParams.set("__site", domain);
-            const syncRes = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/ads/meta/sync?${syncParams}`, {
+            const syncRes = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/ads/sync?${syncParams}`, {
               method: "POST",
               headers: internalHeaders(mcpToken),
               body: JSON.stringify({ mode: "refresh" }),
             });
             const syncBody = (await syncRes.json().catch(() => ({}))) as { error?: string; refresh?: RefreshStatus };
             if (!syncRes.ok) {
-              refreshWarningsOut.push({ code: "refresh_failed", message: `Meta refresh did not start: ${syncBody.error ?? `HTTP ${syncRes.status}`}` });
+              refreshWarningsOut.push({ code: "refresh_failed", message: `Ads refresh did not start: ${syncBody.error ?? `HTTP ${syncRes.status}`}` });
             } else {
-              refreshEffects.push({
-                kind: "meta_sync_enqueued",
-                summary: `Queued a Meta read (last 10 days of ad data + ad setups; state ${syncBody.refresh?.state ?? "unknown"}). Reads from Meta only.`,
-                paths: [".cache/{site}/meta-ads-days/", ".cache/{site}/meta-ads-creatives.json", ".cache/{site}/meta-ads-state.json"],
-              });
+              const state = syncBody.refresh?.state ?? "unknown";
+              refreshEffects.push(
+                {
+                  kind: "meta_sync_enqueued",
+                  summary: `Queued a Meta read if Meta is connected (last 10 days of ad data + ad setups; job state ${state}). Reads from Meta only.`,
+                  paths: [".cache/{site}/meta-ads-days/", ".cache/{site}/meta-ads-creatives.json", ".cache/{site}/meta-ads-state.json"],
+                },
+                {
+                  kind: "google_sync_enqueued",
+                  summary: `Queued a Google Ads read if Google is connected (BigQuery transfer tables: 10 days spend, 30 days conversions, reloaded days; same job, state ${state}). Does not make Google's transfer run sooner.`,
+                  paths: [
+                    ".cache/{site}/google-ads-days/",
+                    ".cache/{site}/google-ads-network-days/",
+                    ".cache/{site}/google-ads-setups.json",
+                    ".cache/{site}/google-ads-state.json",
+                  ],
+                },
+              );
             }
           }
         }
 
         if (mode === "diagnostics") {
-          const params = new URLSearchParams({ days: String(days ?? 28) });
+          if (platform && platform !== "all" && !DIAG_PLATFORMS.has(platform)) {
+            return fail(`diagnostics supports platform meta or google (omit it for the cross-platform overview); got ${platform}.`, {
+              code: "diagnostics_platform_unsupported",
+            });
+          }
+          const hasIdFilters = [campaign_ids, adset_ids, ad_ids].some((l) => (l?.length ?? 0) > 0);
+          const detailArgs = !!snapshot_id || (issue_ids?.length ?? 0) > 0 || hasIdFilters;
+          let diagPlatform: "overview" | "meta" | "google" = platform === "meta" || platform === "google" ? platform : "overview";
+          if (diagPlatform === "overview" && detailArgs) {
+            diagPlatform = "meta";
+            refreshWarningsOut.push({
+              code: "diagnostics_platform_defaulted",
+              message: "snapshot_id / issue_ids / id filters need a platform; used meta. Pass platform: google for Google issue ids (google_* codes).",
+            });
+          }
+
+          if (diagPlatform === "overview") {
+            const params = new URLSearchParams({ platform: "overview", days: String(days ?? 28) });
+            if (domain) params.set("__site", domain);
+            const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/diagnostics/ads?${params}`, { headers: internalHeaders(mcpToken) });
+            const data = (await res.json()) as Record<string, unknown> & { platforms?: Partial<Record<"meta" | "google", PlatformCard>> };
+            if (!res.ok) return fail((data.error as string) || `Server error: ${res.status}`);
+            const warnings: Warning[] = [...refreshWarningsOut];
+            if (since || until) {
+              warnings.push({ code: "range_ignored_in_diagnostics", message: "since / until are ignored in diagnostics; use a report mode for a custom range." });
+            }
+            const shared = (Array.isArray(data.shared_issues) ? data.shared_issues : []) as DiagIssue[];
+            const consentDrop = shared.find((i) => i.code === "consent_rate_drop");
+            if (consentDrop) {
+              warnings.push({
+                code: "consent_rate_drop",
+                message: `${consentDrop.why ?? "Ask-region accept rate dropped."} Consent breakdown is staff-only in Diagnostics → Legal.`,
+              });
+            }
+            return ok(
+              {
+                message: `Ads diagnostics overview (${data.window_days}d): ${String(data.status)}`,
+                ...data,
+                shared_issues: shared.filter((i) => i.code !== "consent_rate_drop"),
+                non_effects: [...NON_EFFECTS, "Overview writes nothing (no landing probes, no Issues/Resolved update); per-platform calls do."],
+              },
+              { warnings, side_effects: refreshEffects, next_actions: overviewNextActions(data.platforms) },
+            );
+          }
+
+          if (diagPlatform === "google") {
+            const params = new URLSearchParams({ platform: "google", days: String(days ?? 28) });
+            if (domain) params.set("__site", domain);
+            for (const id of issue_ids ?? []) params.append("issue_ids[]", id);
+            const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/diagnostics/ads?${params}`, { headers: internalHeaders(mcpToken) });
+            const data = (await res.json()) as Record<string, unknown>;
+            if (!res.ok) return fail((data.error as string) || `Server error: ${res.status}`);
+            const warnings: Warning[] = [
+              ...refreshWarningsOut,
+              ...((Array.isArray(data.warnings) ? data.warnings : []) as Warning[]).filter(
+                (w) => REFRESH_WARNING_CODES.has(w.code) || GOOGLE_STATUS_WARNING_CODES.has(w.code),
+              ),
+            ];
+            if (since || until) {
+              warnings.push({ code: "range_ignored_in_diagnostics", message: "since / until are ignored in diagnostics; use a report mode for a custom range." });
+            }
+            if (hasIdFilters || snapshot_id || ads_limit != null || ads_offset != null) {
+              warnings.push({
+                code: "google_diagnostics_args_ignored",
+                message: "Google diagnostics ignores id filters, snapshot_id and ads_limit / ads_offset (no per-ad evidence lists yet). Use report modes with platform google to narrow by ids.",
+              });
+            }
+            for (const id of (Array.isArray(data.missing_issue_ids) ? data.missing_issue_ids : []) as string[]) {
+              warnings.push({ code: "issue_not_found", message: `Issue ${id} is not open in Google diagnostics (resolved, or wrong id / platform).` });
+            }
+            const issues = (Array.isArray(data.issues) ? data.issues : []) as DiagIssue[];
+            const detail = (issue_ids?.length ?? 0) > 0;
+            return ok(
+              {
+                message: detail
+                  ? `Google Ads diagnostics detail for ${issues.length} issue(s)`
+                  : `Google Ads diagnostics (KPIs ${data.window_days}d, issues ${data.issue_window_days}d): ${String(data.status)}`,
+                ...(data.status === "not_connected" ? { status_detail: "Google Ads not connected — see Settings → Ads → Google" } : {}),
+                ...data,
+                issues: detail ? issues : issues.slice(off, off + lim),
+                issues_total: issues.length,
+                non_effects: NON_EFFECTS,
+              },
+              {
+                warnings,
+                side_effects: [
+                  ...refreshEffects,
+                  {
+                    kind: "issue_state_recorded",
+                    summary: "Records Google Issues/Resolved state (first_seen / resolved_at). No landing probes; nothing sent to Google.",
+                    paths: [".cache/{site}/ads-issues-google.json"],
+                  },
+                ],
+                next_actions: refreshNextActions(data.refresh as RefreshStatus | undefined, "diagnostics", "google"),
+              },
+            );
+          }
+
+          const params = new URLSearchParams({ platform: "meta", days: String(days ?? 28) });
           if (domain) params.set("__site", domain);
           if (snapshot_id) params.set("snapshot_id", snapshot_id);
           for (const id of issue_ids ?? []) params.append("issue_ids[]", id);
@@ -506,14 +649,27 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
         appendIdFilters(params, { campaign_ids, adset_ids, ad_ids });
         if (domain) params.set("__site", domain);
         const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/ads/report?${params}`, { headers: internalHeaders(mcpToken) });
-        const data = (await res.json()) as Report & { error?: string };
-        if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
+        const data = (await res.json()) as Report & { error?: string; code?: string };
+        if (!res.ok) {
+          if (data.code === "platform_required_for_ids") {
+            return fail(data.error || "Pass platform meta or google with id filters when both are connected.", {
+              code: data.code,
+              hint: "Re-call with platform: \"meta\" or platform: \"google\" (ids are per platform).",
+            });
+          }
+          return fail(data.error || `Server error: ${res.status}`);
+        }
 
         const warnings: Warning[] = [...refreshWarningsOut, ...(data.warnings ?? []), ...accountSyncWarnings(data.meta.accounts)];
-        const notConfigured = !data.meta.connected && !data.ga4.configured;
+        const notConfigured = !data.meta.connected && !data.google?.connected && !data.ga4.configured;
         const next_actions: NextAction[] = notConfigured ? [] : refreshNextActions(data.refresh, mode);
         if (notConfigured) {
-          next_actions.push({ tool: "explain_site", priority: "recommended", reason: "Setup: Meta token + accounts, GA4 export", args_hint: { topic: "ads" } });
+          next_actions.push({
+            tool: "explain_site",
+            priority: "recommended",
+            reason: "Setup: Meta token + accounts and/or Google Ads BigQuery transfer, GA4 export",
+            args_hint: { topic: "ads" },
+          });
         }
         if (warnings.some((w) => w.code === "filter_no_match")) next_actions.push(NO_MATCH_NEXT_ACTION);
 
@@ -527,6 +683,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
           ...(data.filters && ID_FILTER_KEYS.some((k) => data.filters![k]?.length) ? { filters: data.filters } : {}),
           collecting_since: data.collecting_since,
           meta: data.meta,
+          ...(data.google ? { google: data.google } : {}),
           ga4: data.ga4,
           refreshing: data.refreshing,
           refresh: data.refresh,
@@ -544,11 +701,13 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               message: "Paid traffic summary",
               ...base,
               totals: data.totals,
+              ...(data.lead_conversions ? { lead_conversions: data.lead_conversions } : {}),
               pages_total: data.pages.length,
               destinations_total: data.destinations.length,
               campaigns_total: data.campaigns.length,
               top_pages: top,
               ...(data.meta_platforms ? { meta_platforms: data.meta_platforms } : {}),
+              ...(data.google_networks ? { google_networks: data.google_networks } : {}),
             },
             meta,
           );

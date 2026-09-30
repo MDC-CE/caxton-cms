@@ -16,10 +16,12 @@ export function AdsResyncButton({
   onStarted,
   testIdPrefix,
   snapshotPulledAt,
+  endpoint = "/api/ads/meta/sync",
 }: {
   refresh: AdsRefreshStatus | undefined;
   onStarted?: () => void;
   testIdPrefix: string;
+  endpoint?: string;
   /** Set (ISO or null) when showing a production download with no local Meta token: re-sync is disabled. */
   snapshotPulledAt?: string | null;
 }) {
@@ -31,7 +33,7 @@ export function AdsResyncButton({
   async function start() {
     setStarting(true);
     try {
-      const res = await apiRequest("POST", "/api/ads/meta/sync", { mode: "refresh" });
+      const res = await apiRequest("POST", endpoint, { mode: "refresh" });
       const body = (await res.json()) as { refresh?: AdsRefreshStatus };
       const state = body.refresh?.state;
       if (state === "failed" || state === "worker_down") {

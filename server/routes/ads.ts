@@ -2,11 +2,19 @@
  * Ads (paid traffic) routes.
  *
  * Settings (ads_settings):
- *   GET/PUT /api/settings/ads/meta        — accounts, thresholds, known external campaigns, test email patterns, sync status
+ *   GET/PUT /api/settings/ads/meta        — accounts, lead conversions, thresholds, known external campaigns, expected event pairs, test email patterns, sync status
  *   POST    /api/settings/ads/meta/known-campaigns — mark one campaign as known (idempotent append)
+ *   GET     /api/ads/meta/conversions     — lead conversion picker options (?account_ids=a,b&picked=k1,k2 → per-account availability + overlap)
+ *   POST    /api/ads/meta/lead-conversions/unpick — remove one pick (issue fix action; idempotent)
+ *   POST    /api/ads/meta/expected-event-pairs    — mark two pixel events as meant to fire together (idempotent append)
  *   GET     /api/settings/ads/meta/accounts — ad accounts the token can read (picker options)
  *   POST    /api/settings/ads/meta/test   — probe token + accounts (read-only)
  *   POST    /api/ads/meta/sync            — Sync now / Load older history
+ *   GET/PUT /api/settings/ads/google      — Google Ads accounts, BigQuery transfer dataset, lead conversion actions, sync status
+ *   GET     /api/settings/ads/google/accounts — customers found in the transfer dataset (picker options)
+ *   POST    /api/settings/ads/google/test — probe the transfer dataset (read-only)
+ *   GET     /api/settings/ads/google/setup — guided transfer setup checklist (read-only; ?project=&dataset=)
+ *   POST    /api/ads/sync                 — Sync now for every connected platform (Meta, Google, GA4)
  * Live-ad edits (ads_edit, staff session only — MCP loopback is refused):
  *   POST /api/ads/meta/tracking-fix/preview — per-ad plan for a missing_tracking_params issue
  *   POST /api/ads/meta/tracking-fix/apply   — add missing URL parameters to the selected ads in Meta
@@ -14,9 +22,10 @@
  *   GET /api/ads/report                   — paid pages / destinations / campaigns;
  *       since / until (≤90 days) and campaign_ids / adset_ids / ad_ids (≤20 each) narrow it
  *   GET /api/content-types/:type/ads-entries — Ads perspective for one content type
- *   GET /api/diagnostics/ads              — Diagnostics Ads tab (or ?summary=1 roll-up);
- *       snapshot_id / issue_ids (≤10) / ads_limit / ads_offset page each issue's affected ads;
- *       campaign_ids / adset_ids / ad_ids keep issues touching those ads
+ *   GET /api/diagnostics/ads              — Diagnostics Ads; ?platform=meta (default) | google | overview;
+ *       ?summary=1 = worst status across platforms (Global tab; platform=meta for Meta only);
+ *       Meta: snapshot_id / issue_ids (≤10) / ads_limit / ads_offset page each issue's affected ads;
+ *       campaign_ids / adset_ids / ad_ids keep issues touching those ads. Google: issue_ids only.
  *   GET /api/ads/export, GET /api/ads/leads/export — snapshots for local "Download from production"
  * Dev only (metrics_view): /api/ads/pull-production(/origin), /api/ads/leads/pull-production
  */
@@ -29,10 +38,37 @@ import { getAdsSettings, updateAdsSettings } from "../settings";
 import { markFileAsModified } from "../sync-state";
 import { isMcpLoopbackRequest, requireCapability } from "./_helpers";
 import { child } from "../logger";
-import { MAX_KNOWN_EXTERNAL_CAMPAIGNS, META_UTM_TEMPLATE, isKnownExternalCampaign, normalizeAdAccountId } from "@shared/ads-settings";
+import {
+  MAX_EXPECTED_EVENT_PAIRS,
+  MAX_KNOWN_EXTERNAL_CAMPAIGNS,
+  MAX_META_LEAD_CONVERSIONS,
+  META_STANDARD_LEAD_KEY,
+  META_UTM_TEMPLATE,
+  isExpectedEventPair,
+  isKnownExternalCampaign,
+  normalizeAdAccountId,
+  normalizeGoogleCustomerId,
+  normalizeMetaLeadConversionKey,
+} from "@shared/ads-settings";
 import { resolveAdsDiagnosticsWindows } from "@shared/ads-diagnostics-rules";
 import { parseAttributionModel } from "@shared/paid-attribution";
-import type { AdPlatform } from "@shared/paid-traffic";
+import { GOOGLE_URL_SUFFIX_TEMPLATE, type AdPlatform } from "@shared/paid-traffic";
+import {
+  GOOGLE_BACKFILL_DAYS,
+  GOOGLE_CONVERSION_REFRESH_DAYS,
+  GOOGLE_REFRESH_DAYS,
+  GOOGLE_RETENTION_DAYS,
+  GOOGLE_TRANSFER_LAG_DAYS,
+  googleDataThrough,
+  googleExpectedThrough,
+  isGoogleConfiguredSettings,
+  listGoogleDayDates,
+  loadGoogleSetups,
+  loadGoogleState,
+} from "../ads/google-ads-days";
+import { testGoogleTransfer } from "../ads/google-ads-bq";
+import { checkGoogleSetup } from "../ads/google-ads-setup";
+import { resolveBigQueryCredentials } from "../ecommerce/bigquery-client";
 import {
   isMetaTokenConfigured,
   listMetaAdAccounts,
@@ -44,8 +80,10 @@ import { listMetaDayDates, loadMetaState, META_BACKFILL_DAYS, META_REFRESH_DAYS,
 import { isGa4Configured, loadPaidLandingState } from "../ads/paid-detection";
 import { getAdsRefreshStatus, hasMetaData, requestAdsRefresh } from "../ads/ads-refresh";
 import { isRefreshActive } from "@shared/ads-refresh-status";
-import { AdsReportRangeError, getAdsReport } from "../ads/ads-report";
+import { AdsPlatformRequiredError, AdsReportRangeError, getAdsReport } from "../ads/ads-report";
 import { adsDiagnosticsSummary, buildAdsDiagnostics, loadTrackingParamsCoverage } from "../ads/ads-diagnostics";
+import { adsOverviewSummary, buildAdsDiagnosticsOverview } from "../ads/ads-diagnostics-overview";
+import { buildGoogleAdsDiagnostics } from "../ads/google-ads-diagnostics";
 import {
   ADS_DETAIL_ADS_LIMIT,
   ADS_LIST_ADS_LIMIT,
@@ -64,6 +102,7 @@ import {
   type AdsDiagnosticsSnapshot,
 } from "../ads/ads-diagnostics-snapshots";
 import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
+import { listLeadConversionOptions } from "../ads/meta-conversion-options";
 import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
 import { TRACKING_FIX_MAX_ADS } from "@shared/ads-tracking-fix";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
@@ -92,6 +131,10 @@ async function findTrackingIssue(site: string, contentRoot: string, issueId: str
 
 function isBadReportQuery(err: unknown): err is Error {
   return err instanceof AdsReportRangeError || err instanceof AdsIdFilterError;
+}
+
+function badQueryBody(err: Error): { error: string; code?: string } {
+  return err instanceof AdsPlatformRequiredError ? { error: err.message, code: err.code } : { error: err.message };
 }
 
 const PLATFORMS: Array<AdPlatform | "all"> = ["all", "meta", "google", "microsoft", "tiktok", "linkedin", "x", "snapchat", "pinterest", "other"];
@@ -166,19 +209,92 @@ const thresholdsSchema = z
     unrecognized_campaign_error_visits: z.number().int().min(1),
     unrecognized_campaign_error_share_pct: z.number().min(0).max(100),
     unrecognized_campaign_share_min_visits: z.number().int().min(1),
+    conversion_overlap_days_pct: z.number().min(0).max(100),
+    conversion_overlap_count_pct: z.number().min(0).max(100),
+    lockstep_min_events: z.number().int().min(1),
+    lockstep_count_pct: z.number().min(0).max(100),
   })
   .partial();
+
+const leadConversionKeySchema = z.union([z.string().trim().max(60), z.number()]);
+
+const expectedEventPairSchema = z.object({
+  pixel_id: z.string().trim().regex(/^\d{5,25}$/),
+  events: z.tuple([z.string().trim().min(1).max(100), z.string().trim().min(1).max(100)]),
+  note: z.string().trim().max(200).optional(),
+});
 
 const knownCampaignSchema = z.object({
   key: z.string().trim().min(1).max(200),
   note: z.string().trim().max(200).optional(),
 });
 
+const googleUpdateSchema = z.object({
+  enabled: z.boolean().optional(),
+  customer_ids: z.array(z.union([z.string(), z.number()])).max(50).optional(),
+  bigquery: z
+    .object({
+      project: z.string().trim().max(64).nullable().optional(),
+      dataset: z.string().trim().max(1024).nullable().optional(),
+    })
+    .optional(),
+  lead_conversion_actions: z.array(z.string().trim().max(200)).max(50).optional(),
+  known_external_campaigns: z.array(knownCampaignSchema).max(MAX_KNOWN_EXTERNAL_CAMPAIGNS).optional(),
+});
+
+const googleProbeSchema = z.object({
+  project: z.string().trim().regex(/^[a-z][a-z0-9-]{4,62}$/, "GCP project ids are lowercase letters, digits and dashes"),
+  dataset: z.string().trim().regex(/^[A-Za-z0-9_]{1,1024}$/, "Dataset ids are letters, digits and underscores"),
+});
+
+function googleSettingsPayload(res: Response) {
+  const contentRoot = getContentRoot(res);
+  const site = getSite(res);
+  const ads = getAdsSettings(contentRoot);
+  const state = loadGoogleState(site);
+  const setups = loadGoogleSetups(site);
+  const days = listGoogleDayDates(site);
+  const refresh = getAdsRefreshStatus(site);
+  const ticked = new Set(ads.google.customer_ids);
+  return {
+    google: ads.google,
+    configured: isGoogleConfiguredSettings(ads.google),
+    credentials_source: resolveBigQueryCredentials().source,
+    url_suffix_template: GOOGLE_URL_SUFFIX_TEMPLATE,
+    refreshing: isRefreshActive(refresh),
+    refresh,
+    sync: {
+      last_success_at: state.last_success_at ?? null,
+      last_attempt_at: state.last_attempt_at ?? null,
+      last_error: state.last_error ?? null,
+      consecutive_failures: state.consecutive_failures ?? 0,
+      data_through: googleDataThrough(state, ads.google.customer_ids),
+      expected_through: googleExpectedThrough(),
+      history_since: days[0] ?? null,
+      history_until: days[days.length - 1] ?? null,
+      customers: state.customers,
+      available_customers: state.available_customers ?? [],
+      unticked_customers: (state.available_customers ?? []).filter((id) => !ticked.has(id)),
+    },
+    conversion_actions: setups.conversion_actions,
+    policy: {
+      refresh_days: GOOGLE_REFRESH_DAYS,
+      conversion_refresh_days: GOOGLE_CONVERSION_REFRESH_DAYS,
+      backfill_days: GOOGLE_BACKFILL_DAYS,
+      retention_days: GOOGLE_RETENTION_DAYS,
+      transfer_lag_days: GOOGLE_TRANSFER_LAG_DAYS,
+      cache_dir: `.cache/${site}/google-ads-days`,
+    },
+  };
+}
+
 const updateSchema = z.object({
   enabled: z.boolean().optional(),
   ad_account_ids: z.array(z.union([z.string(), z.number()])).max(50).optional(),
   alert_thresholds: thresholdsSchema.optional(),
   known_external_campaigns: z.array(knownCampaignSchema).max(MAX_KNOWN_EXTERNAL_CAMPAIGNS).optional(),
+  lead_conversions: z.array(leadConversionKeySchema).max(MAX_META_LEAD_CONVERSIONS).optional(),
+  expected_event_pairs: z.array(expectedEventPairSchema).max(MAX_EXPECTED_EVENT_PAIRS).optional(),
   test_email_patterns: z.array(z.string().max(200)).max(100).optional(),
 });
 
@@ -194,7 +310,7 @@ function parseReportQuery(req: Request) {
     ...parseAdIdFilters(q),
     platform,
     currency: typeof q.currency === "string" && /^[A-Za-z]{3}$/.test(q.currency) ? q.currency.toUpperCase() : null,
-    account: typeof q.account === "string" ? normalizeAdAccountId(q.account) : null,
+    account: typeof q.account === "string" ? (q.account.includes("-") ? normalizeGoogleCustomerId(q.account) : normalizeAdAccountId(q.account)) : null,
     content_type: typeof q.content_type === "string" && q.content_type.trim() ? q.content_type.trim() : null,
     model: parseAttributionModel(q.model),
     split_by_version: q.split_by_version === "1" || q.split_by_version === "true",
@@ -223,6 +339,12 @@ export function registerAdsRoutes(app: Express): void {
     if (invalidIds.length > 0) {
       return res.status(400).json({ error: `Invalid ad account id(s): ${invalidIds.join(", ")}. Use the numeric id (with or without act_).` });
     }
+    const invalidConversions = (parsed.data.lead_conversions ?? []).filter((k) => !normalizeMetaLeadConversionKey(k));
+    if (invalidConversions.length > 0) {
+      return res.status(400).json({
+        error: `Invalid lead conversion(s): ${invalidConversions.join(", ")}. Use "${META_STANDARD_LEAD_KEY}" or a numeric custom conversion id.`,
+      });
+    }
     try {
       const contentRoot = getContentRoot(res);
       const site = getSite(res);
@@ -234,6 +356,8 @@ export function registerAdsRoutes(app: Express): void {
             ad_account_ids: parsed.data.ad_account_ids?.map((id) => normalizeAdAccountId(id)!),
             alert_thresholds: parsed.data.alert_thresholds,
             known_external_campaigns: parsed.data.known_external_campaigns,
+            lead_conversions: parsed.data.lead_conversions?.map((k) => normalizeMetaLeadConversionKey(k)!),
+            expected_event_pairs: parsed.data.expected_event_pairs,
           },
           test_email_patterns: parsed.data.test_email_patterns,
         },
@@ -277,6 +401,84 @@ export function registerAdsRoutes(app: Express): void {
     } catch (err) {
       log.warn({ err }, "[ads] failed to add known external campaign");
       res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save known campaign" });
+    }
+  });
+
+  api.get(app, "/api/ads/meta/conversions", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const q = req.query as Record<string, unknown>;
+    const list = (v: unknown) => (typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean) : null);
+    const contentRoot = getContentRoot(res);
+    const settings = getAdsSettings(contentRoot);
+    const rawIds = list(q.account_ids);
+    const accountIds = rawIds
+      ? rawIds.map(normalizeAdAccountId).filter((x): x is string => !!x).slice(0, 50)
+      : settings.meta.ad_account_ids;
+    const rawPicked = list(q.picked);
+    const picked = rawPicked
+      ? rawPicked.map(normalizeMetaLeadConversionKey).filter((x): x is string => !!x).slice(0, MAX_META_LEAD_CONVERSIONS)
+      : undefined;
+    try {
+      res.json(await listLeadConversionOptions({ site: getSite(res), settings, accountIds, picked }));
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to list Meta conversions");
+      res.status(500).json({ error: err instanceof Error ? err.message : "Could not list Meta conversions" });
+    }
+  });
+
+  api.post(app, "/api/ads/meta/lead-conversions/unpick", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const key = normalizeMetaLeadConversionKey((req.body ?? {}).key);
+    if (!key) {
+      return res.status(400).json({ error: `Invalid lead conversion. Use "${META_STANDARD_LEAD_KEY}" or a numeric custom conversion id.` });
+    }
+    try {
+      const contentRoot = getContentRoot(res);
+      const current = getAdsSettings(contentRoot).meta.lead_conversions;
+      if (!current.includes(key)) return res.json({ success: true, already_unpicked: true, lead_conversions: current });
+      const next = updateAdsSettings({ meta: { lead_conversions: current.filter((k) => k !== key) } }, contentRoot);
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      res.json({
+        success: true,
+        already_unpicked: false,
+        lead_conversions: next.meta.lead_conversions,
+        lead_conversions_changed_at: next.meta.lead_conversions_changed_at,
+      });
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to unpick lead conversion");
+      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to unpick lead conversion" });
+    }
+  });
+
+  api.post(app, "/api/ads/meta/expected-event-pairs", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const parsed = expectedEventPairSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    }
+    const { pixel_id, note } = parsed.data;
+    const [a, b] = parsed.data.events;
+    if (a === b) return res.status(400).json({ error: "Pick two different events." });
+    try {
+      const contentRoot = getContentRoot(res);
+      const current = getAdsSettings(contentRoot).meta.expected_event_pairs;
+      if (isExpectedEventPair(current, pixel_id, a, b)) {
+        return res.json({ success: true, already_expected: true, expected_event_pairs: current });
+      }
+      if (current.length >= MAX_EXPECTED_EVENT_PAIRS) {
+        return res.status(400).json({ error: `Expected event pairs is full (${MAX_EXPECTED_EVENT_PAIRS}). Remove one in Settings → Ads first.` });
+      }
+      const events = [a, b].sort() as [string, string];
+      const entry = note ? { pixel_id, events, note } : { pixel_id, events };
+      const next = updateAdsSettings({ meta: { expected_event_pairs: [...current, entry] } }, contentRoot);
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      res.json({ success: true, already_expected: false, expected_event_pairs: next.meta.expected_event_pairs });
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to add expected event pair");
+      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save expected event pair" });
     }
   });
 
@@ -325,6 +527,122 @@ export function registerAdsRoutes(app: Express): void {
     res.json({ success: true, requested: isRefreshActive(refresh), mode, refreshing: isRefreshActive(refresh), refresh });
   });
 
+  api.post(app, "/api/ads/sync", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const refresh = await requestAdsRefresh(getSite(res), getContentRoot(res), "refresh", { manual: true });
+    res.json({ success: true, requested: isRefreshActive(refresh), mode: "refresh", refreshing: isRefreshActive(refresh), refresh });
+  });
+
+  api.get(app, "/api/settings/ads/google", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    try {
+      res.json(googleSettingsPayload(res));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load Google Ads settings" });
+    }
+  });
+
+  api.put(app, "/api/settings/ads/google", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const parsed = googleUpdateSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    }
+    const invalidIds = (parsed.data.customer_ids ?? []).filter((id) => !normalizeGoogleCustomerId(id));
+    if (invalidIds.length > 0) {
+      return res.status(400).json({ error: `Invalid Google Ads customer id(s): ${invalidIds.join(", ")}. Use the 10-digit id (123-456-7890).` });
+    }
+    const bq = parsed.data.bigquery;
+    if (bq?.project && !/^[a-z][a-z0-9-]{4,62}$/.test(bq.project)) return res.status(400).json({ error: "Invalid GCP project id." });
+    if (bq?.dataset && !/^[A-Za-z0-9_]{1,1024}$/.test(bq.dataset)) return res.status(400).json({ error: "Invalid BigQuery dataset id." });
+    try {
+      const contentRoot = getContentRoot(res);
+      const site = getSite(res);
+      const before = getAdsSettings(contentRoot).google;
+      const next = updateAdsSettings(
+        {
+          google: {
+            enabled: parsed.data.enabled,
+            customer_ids: parsed.data.customer_ids?.map((id) => normalizeGoogleCustomerId(id)!),
+            bigquery: bq ? { project: bq.project || null, dataset: bq.dataset || null } : undefined,
+            lead_conversion_actions: parsed.data.lead_conversion_actions,
+            known_external_campaigns: parsed.data.known_external_campaigns,
+          },
+        },
+        contentRoot,
+      );
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      const g = next.google;
+      const newAccounts = g.customer_ids.filter((id) => !before.customer_ids.includes(id));
+      const datasetChanged = g.bigquery.project !== before.bigquery.project || g.bigquery.dataset !== before.bigquery.dataset;
+      let sync_requested = false;
+      if (isGoogleConfiguredSettings(g) && ((g.enabled && !before.enabled) || newAccounts.length > 0 || datasetChanged)) {
+        sync_requested = isRefreshActive(await requestAdsRefresh(site, contentRoot, "refresh", { manual: true }));
+      }
+      res.json({ success: true, sync_requested, ...googleSettingsPayload(res) });
+    } catch (err) {
+      log.warn({ err }, "[ads] failed to save Google Ads settings");
+      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save Google Ads settings" });
+    }
+  });
+
+  api.get(app, "/api/settings/ads/google/accounts", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const saved = getAdsSettings(getContentRoot(res)).google.bigquery;
+    const parsed = googleProbeSchema.safeParse({ project: req.query.project ?? saved.project ?? "", dataset: req.query.dataset ?? saved.dataset ?? "" });
+    if (!parsed.success) return res.json({ configured: false, accounts: [], error: "Set the BigQuery project and dataset first." });
+    const result = await testGoogleTransfer(parsed.data.project, parsed.data.dataset);
+    res.json({ configured: true, accounts: result.customers, ...(result.ok ? {} : { error: result.error, error_kind: result.error_kind }) });
+  });
+
+  api.get(app, "/api/settings/ads/google/setup", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const q = req.query as { project?: unknown; dataset?: unknown };
+    const project = typeof q.project === "string" && q.project.trim() ? q.project.trim() : null;
+    const dataset = typeof q.dataset === "string" && q.dataset.trim() ? q.dataset.trim() : null;
+    if (project && !googleProbeSchema.shape.project.safeParse(project).success) {
+      return res.status(400).json({ error: "GCP project ids are lowercase letters, digits and dashes" });
+    }
+    if (dataset && !googleProbeSchema.shape.dataset.safeParse(dataset).success) {
+      return res.status(400).json({ error: "Dataset ids are letters, digits and underscores" });
+    }
+    try {
+      const contentRoot = getContentRoot(res);
+      res.json(
+        await checkGoogleSetup({
+          contentRoot,
+          project,
+          dataset,
+          savedGoogle: getAdsSettings(contentRoot).google,
+          backfillDays: GOOGLE_BACKFILL_DAYS,
+        }),
+      );
+    } catch (err) {
+      log.warn({ err }, "[ads] google setup check failed");
+      res.status(500).json({ error: err instanceof Error ? err.message : "Setup check failed" });
+    }
+  });
+
+  api.post(app, "/api/settings/ads/google/test", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "ads_settings");
+    if (!auth.authorized) return;
+    const saved = getAdsSettings(getContentRoot(res)).google;
+    const body = (req.body ?? {}) as { project?: unknown; dataset?: unknown; customer_ids?: unknown };
+    const parsed = googleProbeSchema.safeParse({ project: body.project ?? saved.bigquery.project ?? "", dataset: body.dataset ?? saved.bigquery.dataset ?? "" });
+    if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.issues[0]?.message ?? "Set the BigQuery project and dataset." });
+    const wanted = Array.isArray(body.customer_ids)
+      ? body.customer_ids.map(normalizeGoogleCustomerId).filter((x): x is string => !!x)
+      : saved.customer_ids;
+    const result = await testGoogleTransfer(parsed.data.project, parsed.data.dataset);
+    const found = new Set(result.customers.map((c) => c.id));
+    res.json({ ...result, missing_customers: result.ok ? wanted.filter((id) => !found.has(id)) : [] });
+  });
+
   api.get(app, "/api/ads/report", { rate: "staffWrite" }, async (req: Request, res: Response) => {
     const auth = await requireCapability(req, res, "metrics_view");
     if (!auth.authorized) return;
@@ -333,7 +651,7 @@ export function registerAdsRoutes(app: Express): void {
       const report = await getAdsReport({ site: getSite(res), contentRoot: getContentRoot(res), ...q });
       res.json(report);
     } catch (err) {
-      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
+      if (isBadReportQuery(err)) return res.status(400).json(badQueryBody(err));
       log.warn({ err }, "[ads] report failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Ads report" });
     }
@@ -373,7 +691,7 @@ export function registerAdsRoutes(app: Express): void {
         warnings: report.warnings,
       });
     } catch (err) {
-      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
+      if (isBadReportQuery(err)) return res.status(400).json(badQueryBody(err));
       log.warn({ err }, "[ads] ads-entries failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load Ads entries" });
     }
@@ -385,10 +703,34 @@ export function registerAdsRoutes(app: Express): void {
     try {
       const site = getSite(res);
       const contentRoot = getContentRoot(res);
+      const platformParam = typeof req.query.platform === "string" ? req.query.platform : "meta";
+      if (!["meta", "google", "overview"].includes(platformParam)) {
+        return res.status(400).json({ error: "platform must be meta, google or overview" });
+      }
       if (req.query.summary === "1") {
-        return res.json(await adsDiagnosticsSummary(site, contentRoot));
+        return res.json(req.query.platform === "meta" ? await adsDiagnosticsSummary(site, contentRoot) : await adsOverviewSummary(site, contentRoot));
       }
       const { kpiDays } = resolveAdsDiagnosticsWindows(req.query.days);
+      if (platformParam === "overview") {
+        return res.json(await buildAdsDiagnosticsOverview({ site, contentRoot, days: kpiDays }));
+      }
+      if (platformParam === "google") {
+        const d = await buildGoogleAdsDiagnostics({ site, contentRoot, days: kpiDays });
+        const ids = parseIssueIds(req.query.issue_ids);
+        if (ids.length === 0) return res.json(d);
+        const wanted = new Set(ids);
+        return res.json({
+          generated_at: d.generated_at,
+          platform: "google",
+          issue_window_days: d.issue_window_days,
+          status: d.status,
+          refreshing: d.refreshing,
+          refresh: d.refresh,
+          url_suffix_template: d.url_suffix_template,
+          issues: d.issues.filter((i) => wanted.has(i.id)),
+          missing_issue_ids: ids.filter((id) => !d.issues.some((i) => i.id === id)),
+        });
+      }
       const idFilters = parseAdIdFilters(req.query as Record<string, unknown>);
       const filtersEcho = hasAdIdFilters(idFilters)
         ? { filters: { campaign_ids: idFilters.campaign_ids ?? [], adset_ids: idFilters.adset_ids ?? [], ad_ids: idFilters.ad_ids ?? [] } }
@@ -438,7 +780,7 @@ export function registerAdsRoutes(app: Express): void {
         ...snapshotFields,
       });
     } catch (err) {
-      if (isBadReportQuery(err)) return res.status(400).json({ error: err.message });
+      if (isBadReportQuery(err)) return res.status(400).json(badQueryBody(err));
       log.warn({ err }, "[ads] diagnostics failed");
       res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Ads diagnostics" });
     }

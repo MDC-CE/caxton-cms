@@ -1,6 +1,6 @@
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AttributionModel } from "@shared/paid-attribution";
-import type { AdPlatform, MetaPlacementRow } from "@shared/paid-traffic";
+import type { AdPlatform, GoogleNetworkRow, MetaPlacementRow } from "@shared/paid-traffic";
 import type { AdsRefreshStatus } from "@shared/ads-refresh-status";
 
 export type MoneyByCurrency = Record<string, number>;
@@ -24,9 +24,22 @@ export type AdsCampaignRef = {
   spend: MoneyByCurrency;
 };
 
+/** Destinations with no page URL to show (their `title` is the label). */
+export const NO_URL_DESTINATION_KINDS = new Set<AdsPageRow["kind"]>(["instant_form", "unknown_destination", "google_lead_form", "calls", "video_views", "app"]);
+
 export type AdsPageRow = {
   key: string;
-  kind: "entry" | "instant_form" | "off_site" | "other_site" | "missing_page" | "unknown_destination";
+  kind:
+    | "entry"
+    | "instant_form"
+    | "off_site"
+    | "other_site"
+    | "missing_page"
+    | "unknown_destination"
+    | "google_lead_form"
+    | "calls"
+    | "video_views"
+    | "app";
   kind_label: string;
   host: string;
   path: string;
@@ -51,6 +64,8 @@ export type AdsPageRow = {
   landing_page_views: number;
   meta_leads: number;
   instant_form_leads: number;
+  /** Google-reported lead conversions (never summed with Meta or site leads). */
+  google_leads?: number;
   unique_leads: number;
   submissions: number;
   repeat_submissions: number;
@@ -76,9 +91,33 @@ export type AdsCampaignGroup = {
   spend: MoneyByCurrency;
   clicks: number;
   meta_leads: number;
+  google_leads?: number;
   paid_visits: number;
   pages: Array<{ key: string; title: string; path: string; paid_visits: number }>;
 };
+
+export type AdsGoogleStatus = {
+  connected: boolean;
+  last_synced_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  /** Newest day the BigQuery transfer loaded for every connected account. */
+  data_through: string | null;
+  expected_through: string;
+  accounts: Array<{ id: string; name?: string | null; currency?: string | null; history_loaded?: boolean; data_through?: string | null; auto_tagging?: boolean | null; sync_error?: string }>;
+  unconnected_accounts: Array<{ customer_id: string; paid_visits: number }>;
+  available_accounts: string[];
+};
+
+export type AdsGoogleNetworkRow = {
+  network: GoogleNetworkRow;
+  spend: MoneyByCurrency;
+  clicks: number;
+  impressions: number;
+  paid_visits: number;
+};
+
+export type AdsGoogleNetworks = { rows: AdsGoogleNetworkRow[]; not_split_share: number | null };
 
 export type AdsMetaStatus = {
   connected: boolean;
@@ -100,6 +139,7 @@ export type AdsReport = {
   platform: AdPlatform | "all";
   attribution: { model: AttributionModel; lookback_days: 30; basis: "browser_observed" };
   meta: AdsMetaStatus;
+  google?: AdsGoogleStatus;
   ga4: AdsGa4Status;
   refreshing: boolean;
   refresh: AdsRefreshStatus;
@@ -121,6 +161,7 @@ export type AdsReport = {
     untagged_clicks: number;
     meta_leads: number;
     instant_form_leads: number;
+    google_leads?: number;
     ga4_leads: number;
     unique_leads: number;
     submissions: number;
@@ -130,6 +171,7 @@ export type AdsReport = {
   pages: AdsPageRow[];
   destinations: AdsPageRow[];
   campaigns: AdsCampaignGroup[];
+  google_networks?: AdsGoogleNetworks;
   thresholds: { min_paid_visits_for_rates: number };
   warnings: AdsWarning[];
 };
@@ -159,6 +201,28 @@ export type AdsMetaPlatforms = {
   not_split_share: number | null;
 };
 
+export type AdsMetaConversionCount = { key: string; name: string; count: number };
+export type AdsSiteConversionCount = { name: string; count: number };
+
+/** GET /api/ads/meta/conversions — Settings → Ads → Meta lead conversion picker. */
+export type MetaLeadConversionOptions = {
+  token_configured: boolean;
+  options: Array<{
+    key: string;
+    name: string;
+    pixel_id: string | null;
+    pixel_name: string | null;
+    custom_event_type: string | null;
+    last_fired_time: string | null;
+    archived: boolean;
+    accounts: string[];
+    missing_accounts: string[];
+  }>;
+  accounts: Array<{ id: string; source: "live" | "cache" | "none"; error?: string }>;
+  unlisted_picked: Array<{ key: string; name: string }>;
+  overlaps: Array<{ keys: [string, string]; names: [string, string]; both_days_pct: number; count_diff_pct: number }>;
+};
+
 export type AdsDiagnostics = {
   generated_at: string;
   window_days: number;
@@ -176,6 +240,14 @@ export type AdsDiagnostics = {
     open_warnings: number;
     meta_leads: number;
     site_leads: number;
+    /** Missing on snapshots built before lead conversions shipped. */
+    meta_conversions?: AdsMetaConversionCount[];
+    site_conversions?: AdsSiteConversionCount[];
+    /** Empty = nothing picked in Settings → Ads → Meta, counting the standard Lead event. */
+    meta_lead_conversions_picked?: string[];
+    lead_conversions_changed_at?: string | null;
+    meta_conversions_incomplete_days?: number;
+    snapshot_lacks_conversions?: boolean;
     repeat_submissions: number;
     clicks_to_visits_pct: number | null;
     clicks_to_visits_mismatch: boolean;
@@ -196,6 +268,67 @@ export type AdsDiagnostics = {
   snapshot_expires_at: string;
   snapshot_expired?: boolean;
   newer_data_available?: boolean;
+};
+
+export type AdsDiagnosticsStatus = AdsDiagnostics["status"];
+
+/** GET /api/diagnostics/ads?platform=google */
+export type GoogleAdsDiagnostics = {
+  generated_at: string;
+  platform: "google";
+  window_days: number;
+  issue_window_days: number;
+  status: AdsDiagnosticsStatus;
+  google: AdsGoogleStatus & { visit_match: { ga4_link: number; gclid: number; tags: number; none: number } };
+  ga4: AdsGa4Status;
+  refreshing: boolean;
+  refresh: AdsRefreshStatus;
+  collecting_since: string | null;
+  kpis: {
+    spend: MoneyByCurrency;
+    tracked_spend: MoneyByCurrency;
+    no_site_spend: MoneyByCurrency;
+    open_errors: number;
+    open_warnings: number;
+    google_leads: number;
+    site_leads: number;
+    paid_visits: number;
+    clicks: number;
+    clicks_to_visits_pct: number | null;
+    matched_visits_pct: number | null;
+  };
+  networks: AdsGoogleNetworks | null;
+  matching: { ga4_link_available: boolean | null; gclid_join_tables: number; gclid_join_error: string | null };
+  issues: AdsIssue[];
+  resolved: AdsDiagnostics["resolved"];
+  url_suffix_template: string;
+  warnings: AdsWarning[];
+};
+
+export type AdsPlatformCard = {
+  connected: boolean;
+  status: AdsDiagnosticsStatus;
+  open_errors: number;
+  open_warnings: number;
+  spend: MoneyByCurrency;
+  platform_leads: number;
+  site_leads: number;
+  last_synced_at: string | null;
+  data_through?: string | null;
+  top_issues: Array<Pick<AdsIssue, "id" | "code" | "title" | "severity">>;
+};
+
+/** GET /api/diagnostics/ads?platform=overview */
+export type AdsDiagnosticsOverview = {
+  generated_at: string;
+  platform: "overview";
+  window_days: number;
+  status: AdsDiagnosticsStatus;
+  open_errors: number;
+  open_warnings: number;
+  platforms: { meta: AdsPlatformCard; google: AdsPlatformCard };
+  shared_issues: AdsIssue[];
+  totals: { spend: MoneyByCurrency; site_leads: number; paid_visits: number };
 };
 
 /** GET /api/diagnostics/ads?issue_ids=… — full ads lists for a few issues. */

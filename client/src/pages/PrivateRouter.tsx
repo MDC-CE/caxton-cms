@@ -142,6 +142,7 @@ export default function PrivateRouter() {
           <Route path="/private/databases/:name" component={PrivateDatabases} />
           <Route path="/private/diagnostics/seo/organic" component={DiagnosticsPage} />
           <Route path="/private/diagnostics/seo-geo" component={SeoGeoRedirect} />
+          <Route path="/private/diagnostics/ads/:platform" component={DiagnosticsPage} />
           <Route path="/private/diagnostics/:tab" component={DiagnosticsPage} />
           <Route path="/private/diagnostics" component={DiagnosticsPage} />
           <Route path="/private/redirects" component={PrivateRedirects} />

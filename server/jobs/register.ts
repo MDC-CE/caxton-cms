@@ -10,6 +10,7 @@ import { SeoIndexRefreshJob } from "./definitions/seo-index-refresh";
 import { EventWebhookDeliveryJob } from "./definitions/event-webhook-delivery";
 import { DraftLinkCheckJob, ProposalStaleSweepJob } from "./definitions/proposal-maintenance";
 import { MetaAdsSyncJob } from "./definitions/meta-ads-sync";
+import { AdsSyncJob } from "./definitions/ads-sync";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -23,5 +24,6 @@ export function registerAllJobs(): void {
   registerJobClass("event_webhook_delivery", EventWebhookDeliveryJob);
   registerJobClass("proposal_stale_sweep", ProposalStaleSweepJob);
   registerJobClass("draft_link_check", DraftLinkCheckJob);
+  registerJobClass("ads_sync", AdsSyncJob);
   registerJobClass("meta_ads_sync", MetaAdsSyncJob);
 }

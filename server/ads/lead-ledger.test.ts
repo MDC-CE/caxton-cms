@@ -111,6 +111,38 @@ describe("lead ledger", () => {
     expect(row.last_paid_path).toBe("/en/ai");
   });
 
+  it("stores platform and ids of the first and last paid landings", async () => {
+    const at = Date.now() - 5000;
+    const { row } = await prepareLead(fakeReq(), fakeRes(), {
+      email: "d@example.com",
+      utm_source: "google",
+      utm_medium: "cpc",
+      utm_id: "2233445566",
+      first_paid_landing_host: "4geeks.com",
+      first_paid_landing_path: "/en/a",
+      first_paid_landing_at: at,
+      first_paid_landing_platform: "meta",
+      first_paid_landing_campaign_id: "120000000001",
+      last_paid_landing_host: "4geeks.com",
+      last_paid_landing_path: "/en/b",
+      last_paid_landing_at: at,
+      last_paid_landing_platform: "google",
+      last_paid_landing_campaign_id: "2233445566",
+      last_paid_landing_adset_id: "not-a-number",
+    });
+    expect(row).toMatchObject({
+      platform: "google",
+      campaign_id: "2233445566",
+      first_paid_platform: "meta",
+      first_paid_campaign_id: "120000000001",
+      last_paid_platform: "google",
+      last_paid_campaign_id: "2233445566",
+      last_paid_adset_id: null,
+    });
+    insertLedgerRow(SITE, row);
+    expect(listLedgerRows(SITE, 0).find((r) => r.submission_id === row.submission_id)?.last_paid_platform).toBe("google");
+  });
+
   it("drops ledger-only keys from the forwarded body", () => {
     const out = enrichLeadBody({ email: "x@y.z", last_paid_landing_host: "h", page_experiment_id: "p" }, {
       submission_id: "s",

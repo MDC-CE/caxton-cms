@@ -19,6 +19,9 @@ export type AdsIssueCode =
   | "tracking_params_unchecked"
   | "non_paid_medium"
   | "pixel_not_reporting_leads"
+  | "lead_conversions_overlap"
+  | "pixel_events_lockstep"
+  | "lead_conversion_stopped"
   | "ga4_ledger_gap"
   | "ledger_not_recording"
   | "clicks_visits_low"
@@ -27,11 +30,25 @@ export type AdsIssueCode =
   | "off_site_destination"
   | "instant_form_destination"
   | "unmanaged_destination"
-  | "unrecognized_campaign";
+  | "unrecognized_campaign"
+  | "google_sync_failing"
+  | "google_transfer_stale"
+  | "google_transfer_missing_account"
+  | "google_history_short"
+  | "google_account_not_connected"
+  | "google_auto_tagging_off"
+  | "google_ga4_not_linked"
+  | "google_gclid_join_unavailable"
+  | "google_destination_policy"
+  | "google_conversions_not_reporting";
+
+/** Which dashboard owns an issue; `shared` = lead records / consent, listed once on the overview. */
+export type AdsIssuePlatform = "meta" | "google" | "shared";
 
 export type AdsIssue = {
   id: string;
   code: AdsIssueCode;
+  platform?: AdsIssuePlatform;
   severity: AdsIssueSeverity;
   title: string;
   why: string;
@@ -45,7 +62,49 @@ export type AdsIssue = {
   details?: AdsIssueDetails;
   /** When this issue first appeared (ISO), from the Issues | Resolved bookkeeping. */
   first_seen?: string;
+  /** One-click settings fix staff confirm in the UI (never applied automatically). */
+  action?: AdsIssueAction;
+  /** Numbers behind conversion / pixel event checks. */
+  evidence?: AdsIssueEvidence;
 };
+
+/** Settings writes offered on an issue; the UI asks for confirmation first. */
+export type AdsIssueAction =
+  | { kind: "unpick_lead_conversion"; label: string; confirm: string; conversion_key: string; conversion_name: string }
+  | { kind: "mark_expected_event_pair"; label: string; confirm: string; pixel_id: string; events: [string, string] };
+
+export type AdsIssueEvidence =
+  | {
+      kind: "conversion_overlap";
+      conversions: Array<{ key: string; name: string; count: number; optimized_ads: number }>;
+      /** Ad-days where either conversion had results. */
+      ad_days: number;
+      /** Share of those ad-days where both had results (0–100). */
+      both_days_pct: number;
+      /** Count difference relative to the larger count (0–100). */
+      count_diff_pct: number;
+      /** Leads Meta likely counts twice (the smaller count). */
+      estimated_extra: number;
+    }
+  | {
+      kind: "event_lockstep";
+      pixel_id: string;
+      pixel_name: string;
+      since: string;
+      events: Array<{ event: string; total: number }>;
+      hours_compared: number;
+      /** Hours with identical counts (0–100). */
+      hours_matching_pct: number;
+      count_diff_pct: number;
+    }
+  | {
+      kind: "conversion_stopped";
+      conversion_key: string;
+      conversion_name: string;
+      reason: "missing" | "archived" | "not_shared";
+      /** not_shared: selected accounts with spend that can't see it. */
+      accounts: string[];
+    };
 
 /** Why an ad with spend could not be checked against the URL parameters template. */
 export type AdsUncheckedReason = "account_unreadable" | "setup_fetch_failed" | "ad_removed_in_meta" | "no_link_found";
