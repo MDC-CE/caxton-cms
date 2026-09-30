@@ -1389,7 +1389,8 @@ export function registerProposalTools(
       "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "outcome_review* / outcome_lesson* fields = human-only steward retro on closed proposals (good|bad, what went wrong, what should have happened, lesson captured). " +
-      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured). " +
+      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured; none = closed, unreviewed, excluding system closures abandoned_stale|legacy_version). " +
+      "proposal_stats.by_outcome = whole-site all-time { good, bad, bad_open, none } with the same meanings. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
@@ -1453,7 +1454,7 @@ export function registerProposalTools(
         .optional()
         .describe(
           "Steward outcome review on closed proposals (finished|rejected|withdrawn). good | bad; bad_open = bad with no lesson captured yet; " +
-            "none = closed and not reviewed. Omit status (or use a closed status) — open/partial never match.",
+            "none = closed and not reviewed, excluding system closures (close_reason abandoned_stale | legacy_version). Omit status (or use a closed status) — open/partial never match.",
         ),
       attention: z
         .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked", "needs_author"])
@@ -1482,7 +1483,7 @@ export function registerProposalTools(
         .string()
         .optional()
         .describe(
-          "Scoped only: attention (default when omitted) | created_at | updated_at. Invalid values fail.",
+          "Scoped only: attention (default when omitted) | created_at | updated_at | outcome_recent (verdict time, else close time, else updated — pairs with outcome_review). Invalid values fail.",
         ),
       sort_dir: z
         .string()

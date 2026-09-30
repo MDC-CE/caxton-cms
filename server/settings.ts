@@ -974,14 +974,43 @@ Disallow: /
   return lines.join("\n");
 }
 
-const settingsCache = new Map<string, SiteSettings>();
+/**
+ * Keyed by settings root. `stamp` is the file's mtime+size when it was read, so every
+ * process (web + job worker) picks up writes made by another process.
+ */
+const settingsCache = new Map<string, { settings: SiteSettings; stamp: string }>();
+/** Stamp of the last unparseable read per root, so a broken file is not re-parsed on every call. */
+const failedSettingsStamp = new Map<string, string>();
+
+function settingsFileStamp(settingsPath: string): string {
+  try {
+    const s = fs.statSync(settingsPath);
+    return `${s.mtimeMs}:${s.size}`;
+  } catch {
+    return "missing";
+  }
+}
 
 function loadSettings(contentRoot?: string): SiteSettings {
   const key = resolveSettingsRoot(contentRoot);
-  if (settingsCache.has(key)) return settingsCache.get(key)!;
-
   const settingsPath = getSettingsPath(key);
+  const stamp = settingsFileStamp(settingsPath);
+  const cached = settingsCache.get(key);
+  if (cached && cached.stamp === stamp) return cached.settings;
+  if (failedSettingsStamp.get(key) === stamp) return cached?.settings ?? readSettingsFile(settingsPath, true).settings;
 
+  const read = readSettingsFile(settingsPath);
+  if (read.ok) {
+    failedSettingsStamp.delete(key);
+    settingsCache.set(key, { settings: read.settings, stamp });
+    return read.settings;
+  }
+  // Unparseable (e.g. read mid-write): keep the last good settings; the next stamp change retries.
+  failedSettingsStamp.set(key, stamp);
+  return cached?.settings ?? read.settings;
+}
+
+function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; settings: SiteSettings } {
   const defaults: SiteSettings = {
     i18n: {
       default_locale: "en",
@@ -1031,16 +1060,14 @@ function loadSettings(contentRoot?: string): SiteSettings {
 
   if (!fs.existsSync(settingsPath)) {
     log.warn("[Settings] settings.yml not found, using defaults");
-    settingsCache.set(key, defaults);
-    return defaults;
+    return { ok: true, settings: defaults };
   }
 
   try {
     const raw = fs.readFileSync(settingsPath, "utf-8");
     const parsed = yaml.load(raw) as Record<string, unknown> | null;
     if (!parsed) {
-      settingsCache.set(key, defaults);
-      return defaults;
+      return { ok: true, settings: defaults };
     }
 
     const i18nRaw = parsed.i18n as Record<string, unknown> | undefined;
@@ -1249,15 +1276,13 @@ function loadSettings(contentRoot?: string): SiteSettings {
       consent: parseSiteConsentSettings(parsed.consent),
       ads: parseAdsSettings(parsed.ads),
     };
-    settingsCache.set(key, result);
     log.info(
       `[Settings] Loaded: ${i18n.supported_locales.length} locale(s), default="${i18n.default_locale}", home_page="${home_page.slug}", conversion_events=${tracking.conversion_events.length}, block_indexing=${robots.block_indexing}`
     );
-    return result;
+    return { ok: true, settings: result };
   } catch (err) {
-    log.error({ err: err }, "[Settings] Failed to parse settings.yml, using defaults:");
-    settingsCache.set(key, defaults);
-    return defaults;
+    if (!quiet) log.error({ err: err }, "[Settings] Failed to parse settings.yml; keeping last good settings (or defaults):");
+    return { ok: false, settings: defaults };
   }
 }
 
@@ -1446,8 +1471,10 @@ export function updateLocaleSettings(input: {
 export function resetSettings(contentRoot?: string): void {
   if (contentRoot) {
     settingsCache.delete(contentRoot);
+    failedSettingsStamp.delete(contentRoot);
   } else {
     settingsCache.clear();
+    failedSettingsStamp.clear();
   }
 }
 
@@ -2111,6 +2138,7 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
       enabled: merged.meta.enabled,
       ad_account_ids: merged.meta.ad_account_ids,
       alert_thresholds: merged.meta.alert_thresholds,
+      ...(merged.meta.known_external_campaigns.length > 0 ? { known_external_campaigns: merged.meta.known_external_campaigns } : {}),
     },
     test_email_patterns: merged.test_email_patterns,
   };

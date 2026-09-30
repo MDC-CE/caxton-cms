@@ -8,4 +8,9 @@ describe("resolveDiagnosticsTab", () => {
     expect(isDiagnosticsSeoOrganic("/private/diagnostics/seo/organic")).toBe(true);
     expect(isDiagnosticsSeoOrganic("/private/diagnostics/seo")).toBe(false);
   });
+
+  it("resolves /private/diagnostics/legal to the Legal tab", () => {
+    expect(resolveDiagnosticsTab("/private/diagnostics/legal")).toBe("legal");
+    expect(resolveDiagnosticsTab("/private/diagnostics/ads")).toBe("ads");
+  });
 });

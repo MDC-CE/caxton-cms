@@ -9,7 +9,8 @@ import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-
 import { apiFetch } from "@/lib/queryClient";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AttributionModel } from "@shared/paid-attribution";
-import type { AdsCampaignGroup, AdsPageRow, AdsReport } from "./ads-types";
+import { isRefreshActive } from "@shared/ads-refresh-status";
+import type { AdsCampaignGroup, AdsMetaStatus, AdsPageRow, AdsReport } from "./ads-types";
 import { formatMoney, formatNum, formatWhen, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 import { PaidPageRow, type PaidPerspective } from "./PaidPageRow";
 
@@ -19,6 +20,13 @@ const PERSPECTIVES: { id: PaidPerspective; label: string }[] = [
   { id: "engagement", label: "Engagement" },
   { id: "integrity", label: "Integrity" },
 ];
+
+function accountLabel(a: AdsMetaStatus["accounts"][number]): string {
+  const base = a.name || a.id;
+  if (a.sync_error) return `${base} · can't read this account`;
+  if (a.history_loaded === false) return `${base} · not synced yet`;
+  return base;
+}
 
 function sortRows(rows: AdsPageRow[], perspective: PaidPerspective): AdsPageRow[] {
   const byRate = (get: (r: AdsPageRow) => number | null, dir: 1 | -1) =>
@@ -66,7 +74,7 @@ export function useAdsReport(params: {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads report");
       return res.json() as Promise<AdsReport>;
     },
-    refetchInterval: (q) => ((q.state.data as AdsReport | undefined)?.refreshing ? 8000 : false),
+    refetchInterval: (q) => (isRefreshActive((q.state.data as AdsReport | undefined)?.refresh) ? 8000 : false),
   });
 }
 
@@ -103,8 +111,7 @@ function CampaignAccordion({ group }: { group: AdsCampaignGroup }) {
   );
 }
 
-export function PaidPagesCard({ issues = [] }: { issues?: AdsIssue[] }) {
-  const [days, setDays] = useState(28);
+export function PaidPagesCard({ days, issues = [] }: { days: number; issues?: AdsIssue[] }) {
   const [platform, setPlatform] = useState("all");
   const [currency, setCurrency] = useState("all");
   const [account, setAccount] = useState("all");
@@ -142,7 +149,7 @@ export function PaidPagesCard({ issues = [] }: { issues?: AdsIssue[] }) {
             <CardTitle className="text-base flex items-center gap-2">
               <Megaphone className="h-4 w-4" />
               Paid pages
-              {data?.refreshing && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+              {isRefreshActive(data?.refresh) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
             </CardTitle>
             <ToggleButtonBar value={perspective} onValueChange={(v) => setPerspective(v as PaidPerspective)} listTestId="paid-perspectives" listClassName="flex">
               {PERSPECTIVES.map((p) => (
@@ -157,18 +164,6 @@ export function PaidPagesCard({ issues = [] }: { issues?: AdsIssue[] }) {
             repeat submissions from the same person are shown but not counted twice.
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
-              <SelectTrigger className="h-8 w-[110px]" data-testid="select-paid-window">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[7, 28, 90].map((d) => (
-                  <SelectItem key={d} value={String(d)}>
-                    Last {d} days
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
             <Select value={platform} onValueChange={setPlatform}>
               <SelectTrigger className="h-8 w-[140px]" data-testid="select-paid-platform">
                 <SelectValue />
@@ -204,8 +199,8 @@ export function PaidPagesCard({ issues = [] }: { issues?: AdsIssue[] }) {
                 <SelectContent>
                   <SelectItem value="all">All accounts</SelectItem>
                   {data!.meta.accounts.map((a) => (
-                    <SelectItem key={a.id} value={a.id}>
-                      {a.name || a.id}
+                    <SelectItem key={a.id} value={a.id} title={a.sync_error} data-testid={`option-paid-account-${a.id}`}>
+                      {accountLabel(a)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -242,10 +237,22 @@ export function PaidPagesCard({ issues = [] }: { issues?: AdsIssue[] }) {
               Split by version
             </label>
           </div>
+          {data && currency !== "all" && (
+            <p className="text-xs text-muted-foreground" data-testid="text-paid-currency-scope">
+              Showing only Meta traffic from {currency} accounts.
+            </p>
+          )}
+          {data && (account !== "all" || currency !== "all") && data.totals.unassigned_visits > 0 && (
+            <p className="text-xs text-muted-foreground" data-testid="text-paid-unassigned">
+              {formatNum(data.totals.unassigned_visits)} paid visits had no ad tags, so they aren't counted under{" "}
+              {account !== "all" ? "this account" : "these accounts"}.
+            </p>
+          )}
           {data && (
             <p className="text-xs text-muted-foreground" data-testid="text-paid-sync-status">
               Meta synced {formatWhen(data.meta.last_synced_at)} · GA4 through {data.ga4.last_export_date ?? "—"}
-              {data.refreshing ? " · refreshing…" : ""}
+              {isRefreshActive(data.refresh) ? " · refreshing…" : ""}
+              {data.refresh?.state === "failed" || data.refresh?.state === "worker_down" ? " · last refresh didn't run" : ""}
             </p>
           )}
         </CardHeader>

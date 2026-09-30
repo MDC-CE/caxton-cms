@@ -1,6 +1,6 @@
 ---
 description: Layout shell for private Settings, store, and related admin dashboard pages
-globs: client/src/pages/*Settings*.tsx,client/src/pages/SecurityPage.tsx,client/src/pages/TrackingPage.tsx,client/src/pages/McpServerPage.tsx,client/src/pages/AgentsOrgChartPage.tsx,client/src/pages/Store*.tsx,client/src/pages/DiagnosticsPage.tsx
+globs: client/src/pages/*Settings*.tsx,client/src/components/settings/SettingsShell.tsx,client/src/pages/SecurityPage.tsx,client/src/pages/TrackingPage.tsx,client/src/pages/McpServerPage.tsx,client/src/pages/AgentsOrgChartPage.tsx,client/src/pages/Store*.tsx,client/src/pages/DiagnosticsPage.tsx
 alwaysApply: false
 ---
 
@@ -102,9 +102,34 @@ Put each tab’s primary content in a [`Card`](client/src/components/ui/card.tsx
 - Page-level alerts (unreachable service, missing secret) may sit above the card so they stay visible across tabs; field-level readiness alerts stay inside the relevant card.
 - Exemplars: [`AuthTab`](client/src/components/settings/AuthTab.tsx), [`ServerTab`](client/src/components/settings/ServerTab.tsx), MCP Connection on [`McpServerPage`](client/src/pages/McpServerPage.tsx).
 
-## Header + section tabs (top right)
+## Settings area: `SettingsShell` (main bar + section tabs)
 
-When a settings page has multiple sections (route tabs or mode switches), put a [`ToggleButtonBar`](client/src/components/ui/toggle-button-bar.tsx) in the **page header row, top right** — same row as back + title, not a full-width bar under the header.
+The six Settings sections — General, SEO/GEO, Ads, AI, Tracking, Security — all render through [`SettingsShell`](client/src/components/settings/SettingsShell.tsx). Do not hand-build headers on these pages.
+
+```tsx
+<SettingsShell
+  section="seo"                       // highlights the main bar (top right)
+  icon={IconSearch}
+  title="SEO/GEO"                     // heading = section name
+  titleTestId="text-seo-geo-settings-title"
+  backTestId="button-seo-geo-settings-back"
+  description="One plain-English line about this section."
+  secondary={{ value: activeTab, tabs: SEO_TABS, listTestId: "…", triggerTestId: (id) => `tab-seo-${id}` }}
+>
+  {/* panels */}
+</SettingsShell>
+```
+
+- **Row 1:** back + icon + section title + description (left); main section bar (right, wraps under the title on narrow screens). Optional `advanced` prop renders the heading info popover.
+- **Row 2:** the section's own tabs (`secondary`), left-aligned under the header. Every secondary tab is a route (`href`); General uses `/private/settings/<tab>` (no `?tab=`).
+- **Navigation replaces history** (`setLocation(href, { replace: true })`), so Back leaves Settings in one step. Bare section paths redirect with `replace` too.
+- **Permissions:** Tracking stays visible but disabled (tooltip) without `metrics_view`; disabled secondary tabs use `disabled` on the tab item.
+- **Unsaved edits:** panels with a Save button call `useSettingsDirty(dirty)`; page-level state passes `dirty` to the shell. Leaving the section, switching tab, or pressing Back while dirty asks first. Page-level `dirty` only blocks leaving the page (tab switches keep its state). For other in-page links use `useSettingsNavigate()`.
+- Section and General tab resolvers live in [`client/src/lib/settings-tab.ts`](client/src/lib/settings-tab.ts); add new sections there and in `SETTINGS_SECTIONS`.
+
+## Header + section tabs (top right) — other admin pages
+
+Outside the Settings area (MCP Server, Agents, Diagnostics…), when a page has multiple sections (route tabs or mode switches), put a [`ToggleButtonBar`](client/src/components/ui/toggle-button-bar.tsx) in the **page header row, top right** — same row as back + title, not a full-width bar under the header.
 
 ```tsx
 <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
@@ -130,8 +155,7 @@ When a settings page has multiple sections (route tabs or mode switches), put a 
 
 - Left: back control, title, optional one-line description (`min-w-0 flex-1`).
 - Right: `ToggleButtonBar` with `shrink-0` so it stays top-right; wrap with `flex-wrap` on narrow viewports.
-- Prefer this over a second full-width tab row under the header (SEO/GEO, Security).
-- Exception: General [`SettingsPage`](client/src/pages/SettingsPage.tsx) keeps a full-width `ToggleButtonBarList` under the title because it hosts many `TabsContent` panels in one page — do not use that as the default for new multi-route settings shells.
+- Prefer this over a second full-width tab row under the header. (The Settings area is the exception: its own tabs sit on row 2 because the main section bar owns the top right — see `SettingsShell` above.)
 - Visual contract for the bar itself stays in [`ui-and-design.mdc`](ui-and-design.mdc) (Toggle button bars).
 
 ## Third-party integrations — Test connection
@@ -166,11 +190,7 @@ Every settings surface that wires an external API, cloud credential, or vendor S
 
 ## Applies to
 
-- [`SettingsPage`](client/src/pages/SettingsPage.tsx) (General) — shell width; tab placement exception above
-- [`SeoGeoSettingsPage`](client/src/pages/SeoGeoSettingsPage.tsx) — header + top-right tabs (canonical)
-- [`AISettingsPage`](client/src/pages/AISettingsPage.tsx)
-- [`SecurityPage`](client/src/pages/SecurityPage.tsx) — header + top-right tabs
-- [`TrackingPage`](client/src/pages/TrackingPage.tsx) — header + top-right tabs (same shell)
+- Settings area via [`SettingsShell`](client/src/components/settings/SettingsShell.tsx): [`SettingsPage`](client/src/pages/SettingsPage.tsx) (General), [`SeoGeoSettingsPage`](client/src/pages/SeoGeoSettingsPage.tsx) (canonical), [`AdsSettingsPage`](client/src/pages/AdsSettingsPage.tsx), [`AISettingsPage`](client/src/pages/AISettingsPage.tsx), [`TrackingPage`](client/src/pages/TrackingPage.tsx), [`SecurityPage`](client/src/pages/SecurityPage.tsx)
 - [`McpServerPage`](client/src/pages/McpServerPage.tsx) — header + top-right tabs (Connection / Tools)
 - [`AgentsOrgChartPage`](client/src/pages/AgentsOrgChartPage.tsx) — page-heading advanced popover exemplar; header + top-right tabs (Org Chart / Proposals)
 - Store admin — [`StoreProductDetailPage`](client/src/pages/StoreProductDetailPage.tsx) (KPI strip exemplar), [`StoreEcommercePage`](client/src/pages/StoreEcommercePage.tsx), [`StoreProductsPage`](client/src/pages/StoreProductsPage.tsx)

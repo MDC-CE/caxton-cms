@@ -75,10 +75,10 @@ function formatWhen(ms: number | null | undefined): string {
   return ms ? new Date(ms).toLocaleString() : "";
 }
 
-function DevLocalNotice() {
+export function DevLocalNotice({ testId = "text-outcome-dev-notice" }: { testId?: string }) {
   if (!import.meta.env.DEV) return null;
   return (
-    <p className="text-xs text-muted-foreground" data-testid="text-outcome-dev-notice">
+    <p className="text-xs text-muted-foreground" data-testid={testId}>
       Local reviews are overwritten by the next production refresh.
     </p>
   );

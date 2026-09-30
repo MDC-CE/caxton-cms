@@ -57,7 +57,7 @@ function ConsentVariableInfo({ variable }: { variable: string }) {
             className="w-full text-xs"
             onClick={() => {
               setOpen(false);
-              window.location.href = "/en/admin/settings?tab=legal";
+              window.location.href = "/private/settings/legal";
             }}
             data-testid="button-consent-edit-settings"
           >

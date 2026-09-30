@@ -535,6 +535,13 @@ export const SCENARIOS: Scenario[] = [
       withSite(ctx, { mode: "entries", days: 90, group: "campaign", split_by_version: true, limit: 100 }),
   },
   {
+    id: "get_paid_traffic_diagnostics_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Ads diagnostics with a 90-day KPI window and 50 issues per page: builds two reports (fixed 28-day issue window + 90-day KPIs), indexes every ad for per-issue details (top 3 ads each), probes up to 10 ad landing URLs (cached 6h) and saves a snapshot. Soft N.C. when not set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", days: 90, limit: 50 }),
+  },
+  {
     id: "list_proposals",
     tool: "list_proposals",
     about: "Unscoped proposals call — returns proposal_stats only (no filter).",

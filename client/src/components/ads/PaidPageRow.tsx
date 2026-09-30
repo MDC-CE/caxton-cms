@@ -4,9 +4,10 @@ import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { cn } from "@/lib/utils";
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
+import { isClicksVisitsMismatch, type AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AdsPageRow } from "./ads-types";
 import { formatMoney, formatNum, formatPct, formatSeconds, PLATFORM_LABELS } from "./ads-format";
+import { PlatformTag } from "./PlatformTag";
 
 export type PaidPerspective = "traffic" | "conversion" | "engagement" | "integrity";
 
@@ -20,7 +21,12 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         { label: "Spend", value: formatMoney(row.spend), testId: "spend" },
         { label: "Paid visits", value: formatNum(row.paid_visits), testId: "visits" },
         { label: "Cost / visit", value: formatMoney(row.cost_per_visit, { decimals: 2 }), muted: grey, testId: "cpv" },
-        { label: "Clicks → visits", value: formatPct(row.clicks_to_visits, 0), muted: grey, testId: "ctv" },
+        {
+          label: "Clicks → visits",
+          value: isClicksVisitsMismatch(row.clicks_to_visits) ? "Mismatch" : formatPct(row.clicks_to_visits, 0),
+          muted: grey,
+          testId: "ctv",
+        },
       ];
     case "conversion":
       return [
@@ -99,9 +105,7 @@ export function PaidPageRow({
                 </Badge>
               )}
               {row.platforms.map((p) => (
-                <span key={p} className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {PLATFORM_LABELS[p] ?? p}
-                </span>
+                <PlatformTag key={p} platform={p} row={row} />
               ))}
             </div>
             <p className="truncate text-xs text-muted-foreground">
@@ -147,6 +151,9 @@ export function PaidPageRow({
                 <p>
                   Started here: {row.started_here} · Form sent here: {row.closed_here}
                 </p>
+                {row.unassigned_visits > 0 && (
+                  <p>{formatNum(row.unassigned_visits)} paid visit(s) here had no ad tags, so they aren't counted under the selected account or currency.</p>
+                )}
                 {row.last_visit_organic > 0 && (
                   <p>{row.last_visit_organic} lead(s) came back later without a new ad click; still credited here.</p>
                 )}

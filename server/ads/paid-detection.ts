@@ -16,7 +16,7 @@ import { bqNormalizedPagePathSql, bqSessionLastClickChannelSql } from "../analyt
 import { getLeadConversionEventNames } from "../settings";
 import { normalizeLandingPath, PAID_MEDIUMS, CLICK_ID_PARAMS, type ClickIdParam } from "@shared/paid-traffic";
 import { child } from "../logger";
-import { addDays, dateRange, utcDate } from "./meta-ads-days";
+import { addDays, dateRange, shortDateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
 
 const log = child({ module: "ads/paid-detection" });
 
@@ -142,6 +142,12 @@ export function paidLandingDatesToFetch(site: string, now = new Date()): string[
     if (!f || (!f.complete && d <= completeCutoff) || d > completeCutoff) out.push(d);
   }
   return out;
+}
+
+/** GA4 days `syncPaidLandingDays` will query on a run starting now; 0 when GA4 isn't configured. */
+export function planPaidLandingSteps(site: string, contentRoot?: string, now = new Date()): number {
+  if (!isGa4Configured(contentRoot)) return 0;
+  return Math.min(paidLandingDatesToFetch(site, now).length, MAX_DAYS_PER_RUN);
 }
 
 export function buildPaidLandingSql(eventsTable: string, includeSessionLastClick: boolean): string {
@@ -325,13 +331,21 @@ async function queryDay(date: string, contentRoot?: string): Promise<Pick<PaidLa
 
 export type PaidLandingSyncResult = { ok: boolean; fetched: string[]; error?: string; skipped?: "ga4_not_configured" };
 
-export async function syncPaidLandingDays(site: string, contentRoot?: string, now = new Date()): Promise<PaidLandingSyncResult> {
+export async function syncPaidLandingDays(
+  site: string,
+  contentRoot?: string,
+  now = new Date(),
+  onStep?: SyncStepCallback,
+): Promise<PaidLandingSyncResult> {
   if (!isGa4Configured(contentRoot)) return { ok: false, fetched: [], skipped: "ga4_not_configured" };
   const state = loadPaidLandingState(site);
   const completeCutoff = lastCompleteGa4Date(now);
   const fetched: string[] = [];
   try {
-    for (const date of paidLandingDatesToFetch(site, now).slice(0, MAX_DAYS_PER_RUN)) {
+    const dates = paidLandingDatesToFetch(site, now).slice(0, MAX_DAYS_PER_RUN);
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
+      onStep?.(`GA4: day ${i + 1} of ${dates.length} (${shortDateRange(date, date)})`);
       const rows = await queryDay(date, contentRoot);
       const hasData = rows.candidates.length + rows.organic.length + rows.cookieless.length > 0;
       writeJson(path.join(dir(site), `${date}.json`), {

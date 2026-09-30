@@ -11,6 +11,7 @@ import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-atta
 import {
   createProposalService,
   listOpenProposalsForVariant,
+  parseProposalSort,
   parseProposerActorType,
   PROPOSAL_CLAIM_TTL_MS,
   proposalQueryTerms,
@@ -2079,6 +2080,92 @@ describe("content proposals", () => {
       limit: 50,
     }).filter((e) => e.payload?.proposal_id === id);
     expect(lessonEvents).toHaveLength(1);
+  });
+
+  it("outcomes tab: by_outcome counts, any/none skip system closures, outcome_recent order", async () => {
+    const svc = makeService();
+    const steward = { username: "steward", actor: { type: "ui" as const } };
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const wentWrong = "Agent applied copy that named the wrong product on a selling page.";
+    const ids: Record<string, string> = {};
+    for (const key of ["good", "badLesson", "badOpen", "unreviewed", "open", "stale", "legacyGood"]) {
+      const created = await svc.create(
+        { title: `Outcome ${key}`, summary, entries: [sampleEntry({ slug: `outcome-${key}` })] },
+        { username: "alice" },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      ids[key] = created.proposal.id;
+      if (key === "open") continue;
+      const withdrawn = await svc.update(created.proposal.id, "withdraw", {
+        username: "alice",
+        close_note: "Pulling back to refile with a corrected product name scope.",
+      });
+      expect(withdrawn.ok).toBe(true);
+    }
+
+    const review = async (id: string, outcome: "good" | "bad") => {
+      const res = await svc.update(id, "review_outcome", {
+        ...steward,
+        outcome_review: outcome,
+        ...(outcome === "bad"
+          ? {
+              outcome_review_note: wentWrong,
+              outcome_review_expected: "Reviewer should have blocked until the product name matched the funnel.",
+            }
+          : {}),
+      });
+      expect(res.ok).toBe(true);
+    };
+    await review(ids.good, "good");
+    await review(ids.badLesson, "bad");
+    await review(ids.badOpen, "bad");
+    await review(ids.legacyGood, "good");
+    const lesson = await svc.update(ids.badLesson, "set_outcome_lesson", {
+      ...steward,
+      outcome_lesson_captured: true,
+    });
+    expect(lesson.ok).toBe(true);
+
+    const db = getSiteSqlite(SITE);
+    const setCloseReason = db.prepare(`UPDATE content_proposals SET close_reason = ? WHERE id = ?`);
+    setCloseReason.run("abandoned_stale", ids.stale);
+    setCloseReason.run("legacy_version", ids.legacyGood);
+
+    const t = Date.now() - 60_000;
+    const setTimes = db.prepare(
+      `UPDATE content_proposals SET outcome_review_at = ?, closed_at = ?, updated_at = ? WHERE id = ?`,
+    );
+    setTimes.run(t + 1000, t, t, ids.good);
+    setTimes.run(t + 2000, t, t, ids.badOpen);
+    setTimes.run(t + 3000, t, t, ids.badLesson);
+    setTimes.run(t + 4000, t, t, ids.legacyGood);
+    setTimes.run(null, t + 5000, t, ids.unreviewed);
+
+    expect(svc.stats().by_outcome).toEqual({ good: 2, bad: 2, bad_open: 1, none: 1 });
+
+    expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).toEqual([ids.unreviewed]);
+
+    const any = svc.list({ outcome_review: "any", sort: "outcome_recent", sort_dir: "desc" });
+    expect(any.total).toBe(5);
+    expect(any.proposals.map((p) => p.id)).toEqual([
+      ids.unreviewed,
+      ids.legacyGood,
+      ids.badLesson,
+      ids.badOpen,
+      ids.good,
+    ]);
+
+    const page2 = svc.list({ outcome_review: "any", sort: "outcome_recent", sort_dir: "desc", limit: 2, offset: 2 });
+    expect(page2.total).toBe(5);
+    expect(page2.proposals.map((p) => p.id)).toEqual([ids.badLesson, ids.badOpen]);
+
+    expect(parseProposalSort("outcome_recent", "desc")).toEqual({
+      ok: true,
+      sort: "outcome_recent",
+      sortDir: "desc",
+    });
   });
 
   it("idea follow-through: accept locks entry, implements gates, stalled resurfaces after reject", async () => {

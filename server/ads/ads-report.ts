@@ -7,8 +7,10 @@
 
 import { getSiteConfigs } from "../site-config";
 import { getAdsSettings } from "../settings";
-import { loadSeoIndex, type SeoIndex } from "../seo-index";
-import { lookupRedirect } from "../redirects";
+import { contentIndex as defaultContentIndex, type ContentIndex } from "../content-index";
+import { getSiteContextMap } from "../site-manager";
+import { createPublicUrlResolver } from "../redirects";
+import { parseRoute } from "../ssr-route";
 import { child } from "../logger";
 import { classifyTraffic, normalizeLandingPath, type AdPlatform } from "@shared/paid-traffic";
 import {
@@ -20,31 +22,71 @@ import {
   type AttributionModel,
 } from "@shared/paid-attribution";
 import type { AdsAlertThresholds } from "@shared/ads-settings";
-import { addDays, loadMetaCreatives, loadMetaRows, loadMetaState, utcDate } from "./meta-ads-days";
+import {
+  missingTemplateParams,
+  parseTrackingParams,
+  unrecognizedCampaignKey,
+  type AdsGa4SeenRow,
+  type AdsUnrecognizedCampaign,
+  type AdsUnrecognizedCampaignPage,
+  type LeadGapCompare,
+} from "@shared/ads-diagnostics-rules";
+import {
+  addDays,
+  dateRange,
+  listMetaDayDates,
+  loadMetaCreatives,
+  loadMetaRows,
+  loadMetaState,
+  META_RETENTION_DAYS,
+  utcDate,
+} from "./meta-ads-days";
 import type { MetaAdDayRow } from "./meta-client";
-import { isGa4Configured, loadPaidLandingDays, loadPaidLandingState, type PaidLandingCandidateRow } from "./paid-detection";
+import {
+  isGa4Configured,
+  lastCompleteGa4Date,
+  loadPaidLandingDays,
+  loadPaidLandingState,
+  type PaidLandingCandidateRow,
+} from "./paid-detection";
 import { ledgerCollectingSince, listLedgerRows, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, summarizeConsentRates } from "./consent-store";
-import { isAdsRefreshing, isMetaConnected, triggerAdsRefreshIfStale } from "./ads-refresh";
+import { getAdsRefreshStatus, isMetaConnected, triggerAdsRefreshIfStale } from "./ads-refresh";
+import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
 const log = child({ module: "ads/ads-report" });
 
 export const ADS_REPORT_MAX_DAYS = 90;
 
-export type AdsReportOpts = {
+/** Campaign / ad set / ad id filters: OR within a level, AND across levels. */
+export type AdsIdFilters = { campaign_ids?: string[]; adset_ids?: string[]; ad_ids?: string[] };
+
+export type AdsReportOpts = AdsIdFilters & {
   site: string;
   contentRoot?: string;
   days?: number;
+  /** Inclusive UTC window (YYYY-MM-DD); overrides `days` when set. */
+  since?: string | null;
+  until?: string | null;
   platform?: AdPlatform | "all";
   currency?: string | null;
   account?: string | null;
   content_type?: string | null;
   model?: AttributionModel;
   split_by_version?: boolean;
+  /** Defaults to the content index of the site whose folder is `site`. */
+  contentIndex?: ContentIndex;
   /** Skip the stale-read refresh trigger (tests / diagnostics fan-out). */
   noRefresh?: boolean;
+  /** Keep the top GA4 campaign/ad-set/ad tags per row (`ga4_ads`) — diagnostics only. */
+  includeGa4Ads?: boolean;
   now?: Date;
 };
+
+/** GA4 paid visits on a row grouped by their tags (utm_id / utm_term / utm_content). */
+export type AdsGa4AdRef = AdsGa4SeenRow;
+
+const MAX_GA4_ADS_PER_ROW = 10;
 
 export type DestinationKind = "entry" | "instant_form" | "off_site" | "other_site" | "missing_page" | "unknown_destination";
 
@@ -80,13 +122,19 @@ export type AdsPageRow = {
   title: string;
   redirected_from: string[];
   paid_visits: number;
+  /** Paid visits whose UTM ids match a synced Meta campaign / ad set / ad (numerator of `clicks_to_visits`). */
+  matched_visits: number;
   unclear_visits: number;
+  /** Only under an account/currency filter: paid Meta visits with no ad tags, so not counted in `paid_visits`. */
+  unassigned_visits: number;
   engaged_sessions: number;
   bounce_rate: number | null;
   avg_engaged_seconds: number | null;
   ga4_leads: number;
   spend: MoneyByCurrency;
   clicks: number;
+  /** Link clicks from ads without the URL parameters template (left out of `clicks_to_visits`). */
+  untagged_clicks: number;
   landing_page_views: number;
   meta_leads: number;
   instant_form_leads: number;
@@ -99,12 +147,17 @@ export type AdsPageRow = {
   conversion_rate: number | null;
   cost_per_visit: MoneyByCurrency;
   cost_per_lead: MoneyByCurrency;
+  /** matched_visits / link clicks from tagged ads on days GA4 exported; can exceed 1 on a measurement mismatch. */
   clicks_to_visits: number | null;
   organic: { sessions: number; bounce_rate: number | null; lead_rate: number | null } | null;
   low_sample: boolean;
   platforms: AdPlatform[];
   campaigns: AdsCampaignRef[];
   versions?: AdsVersionRow[];
+  /** Only with `includeGa4Ads`: top GA4 paid-visit tags on this row, by visits. */
+  ga4_ads?: AdsGa4AdRef[];
+  /** Only with `includeGa4Ads`: paid visits with no ad id (utm_content) tag. */
+  ga4_untagged_visits?: number;
 };
 
 export type AdsCampaignGroup = {
@@ -130,12 +183,28 @@ export type AdsReport = {
     last_synced_at: string | null;
     last_error: string | null;
     consecutive_failures: number;
-    accounts: Array<{ id: string; name?: string; currency?: string }>;
+    accounts: Array<{
+      id: string;
+      name?: string;
+      currency?: string;
+      /** False until a full 90-day load finished for this account. */
+      history_loaded: boolean;
+      /** Why the last sync skipped this account (other accounts still saved). */
+      sync_error?: string;
+    }>;
   };
   ga4: { configured: boolean; last_synced_at: string | null; last_export_date: string | null; last_error: string | null };
+  /** Derived from `refresh` (queued or running); kept for older clients. */
   refreshing: boolean;
+  refresh: AdsRefreshStatus;
   collecting_since: string | null;
   covered_days: { covered: number; total: number };
+  /** Window days with no cached day file (Meta when connected; GA4 through its last complete day when configured). */
+  data_gaps: { meta_missing_days: number; ga4_missing_days: number };
+  /** Id filters applied (empty arrays when none). */
+  filters: { campaign_ids: string[]; adset_ids: string[]; ad_ids: string[] };
+  /** GA4 paid leads vs ledger submissions over days both cover (for the lead-gap diagnostic). */
+  lead_gap_compare: LeadGapCompare;
   consent: { mode: "advanced"; ask_region_reject_pct: number | null; ask_region_shown: number };
   totals: {
     spend: MoneyByCurrency;
@@ -144,6 +213,18 @@ export type AdsReport = {
     landing_page_views: number;
     paid_visits: number;
     unclear_visits: number;
+    /** Paid Meta visits whose UTM ids match a synced campaign / ad set / ad. */
+    matched_visits: number;
+    /** Paid Meta visits with no matching synced id (other accounts, shared links, untagged ads). */
+    unmatched_meta_visits: number;
+    /** Only under an account/currency filter: paid Meta visits with no ad tags, excluded from `paid_visits`. */
+    unassigned_visits: number;
+    /** Only under an account/currency filter: paid Meta visits tagged with ids from accounts that are not synced. */
+    unsynced_account_visits: number;
+    /** Link clicks from tagged ads landing on this site, on days with a GA4 export (denominator of clicks → visits). */
+    ratio_clicks: number;
+    /** Link clicks from ads missing the URL parameters template, landing on this site. */
+    untagged_clicks: number;
     meta_leads: number;
     instant_form_leads: number;
     ga4_leads: number;
@@ -155,6 +236,8 @@ export type AdsReport = {
   pages: AdsPageRow[];
   destinations: AdsPageRow[];
   campaigns: AdsCampaignGroup[];
+  /** Only with `includeGa4Ads` and Meta connected: campaigns sending paid Meta visits that no connected account knows. */
+  unrecognized_campaigns?: AdsUnrecognizedCampaigns;
   thresholds: AdsAlertThresholds;
   warnings: AdsWarning[];
 };
@@ -168,6 +251,9 @@ type Agg = {
   campaigns: Map<string, AdsCampaignRef>;
   platforms: Set<AdPlatform>;
   versions: Map<string, { paid_visits: number; unique_leads: number; submissions: number }>;
+  ga4Ads?: Map<string, AdsGa4AdRef>;
+  ga4Untagged?: number;
+  ratioClicks: number;
 };
 
 function clampDays(raw: unknown): number {
@@ -175,6 +261,124 @@ function clampDays(raw: unknown): number {
   if (!Number.isFinite(n)) return 28;
   return Math.min(ADS_REPORT_MAX_DAYS, Math.max(1, Math.floor(n)));
 }
+
+/** A `since` / `until` window the report cannot serve (bad date, reversed, longer than 90 days). */
+export class AdsReportRangeError extends Error {}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseDay(raw: string, label: string): string {
+  if (!DATE_RE.test(raw) || addDays(raw, 0) !== raw) throw new AdsReportRangeError(`${label} must be a real date as YYYY-MM-DD (got "${raw}").`);
+  return raw;
+}
+
+function spanDays(start: string, end: string): number {
+  return Math.round((Date.parse(`${end}T00:00:00.000Z`) - Date.parse(`${start}T00:00:00.000Z`)) / 86_400_000) + 1;
+}
+
+export type ReportWindow = { start: string; end: string; days: number; clamped: Array<"since" | "until"> };
+
+/**
+ * Inclusive UTC window ending at most yesterday and starting no earlier than the
+ * cache retention floor. `since` / `until` override `days`; spans over 90 days throw.
+ */
+export function resolveReportWindow(opts: { days?: unknown; since?: string | null; until?: string | null; now?: Date }): ReportWindow {
+  const today = utcDate(opts.now ?? new Date());
+  const yesterday = addDays(today, -1);
+  const floor = addDays(today, -META_RETENTION_DAYS);
+  if (!opts.since && !opts.until) {
+    const days = clampDays(opts.days);
+    return { start: addDays(yesterday, -(days - 1)), end: yesterday, days, clamped: [] };
+  }
+  let start: string;
+  let end: string;
+  if (opts.since && opts.until) {
+    start = parseDay(opts.since, "since");
+    end = parseDay(opts.until, "until");
+    if (start > end) throw new AdsReportRangeError(`since (${start}) is after until (${end}).`);
+  } else if (opts.since) {
+    start = parseDay(opts.since, "since");
+    const len = opts.days == null ? ADS_REPORT_MAX_DAYS : clampDays(opts.days);
+    const candidate = addDays(start, len - 1);
+    end = candidate > yesterday ? yesterday : candidate;
+  } else {
+    end = parseDay(opts.until!, "until");
+    start = addDays(end, -(clampDays(opts.days) - 1));
+  }
+  const clamped: ReportWindow["clamped"] = [];
+  if (end > yesterday) {
+    end = yesterday;
+    clamped.push("until");
+  }
+  if (start < floor) {
+    start = floor;
+    clamped.push("since");
+  }
+  if (start > end) throw new AdsReportRangeError(`No days left in ${start}..${end}: data is kept from ${floor} through yesterday (${yesterday}).`);
+  const days = spanDays(start, end);
+  if (days > ADS_REPORT_MAX_DAYS) {
+    throw new AdsReportRangeError(`Range ${start}..${end} is ${days} days; the maximum is ${ADS_REPORT_MAX_DAYS}. Split it into smaller ranges.`);
+  }
+  return { start, end, days, clamped };
+}
+
+/** Compress sorted YYYY-MM-DD dates into `a..b` ranges (single days stay bare). */
+export function compressDateRanges(dates: string[], max = 5): string {
+  const ranges: string[] = [];
+  let from: string | null = null;
+  let prev: string | null = null;
+  const flush = () => {
+    if (from && prev) ranges.push(from === prev ? from : `${from}..${prev}`);
+  };
+  for (const d of dates) {
+    if (prev && addDays(prev, 1) === d) {
+      prev = d;
+      continue;
+    }
+    flush();
+    from = d;
+    prev = d;
+  }
+  flush();
+  return ranges.length > max ? `${ranges.slice(0, max).join(", ")} and ${ranges.length - max} more` : ranges.join(", ");
+}
+
+type IdSets = { campaign: Set<string> | null; adset: Set<string> | null; ad: Set<string> | null };
+type DerivedIds = { campaign: string | null; adset: string | null; ad: string | null };
+
+function idSets(f: AdsIdFilters): IdSets | null {
+  const set = (xs?: string[]) => (xs && xs.length > 0 ? new Set(xs) : null);
+  const s = { campaign: set(f.campaign_ids), adset: set(f.adset_ids), ad: set(f.ad_ids) };
+  return s.campaign || s.adset || s.ad ? s : null;
+}
+
+/** Fill missing parent ids (ad → ad set → campaign) from synced Meta rows. */
+function makeIdDeriver(rows: MetaAdDayRow[]) {
+  const adParents = new Map<string, { adset: string; campaign: string }>();
+  const adsetParent = new Map<string, string>();
+  for (const r of rows) {
+    if (r.ad_id && !adParents.has(r.ad_id)) adParents.set(r.ad_id, { adset: r.adset_id, campaign: r.campaign_id });
+    if (r.adset_id && !adsetParent.has(r.adset_id)) adsetParent.set(r.adset_id, r.campaign_id);
+  }
+  return (campaign: string | null, adset: string | null, ad: string | null): DerivedIds => {
+    const p = ad ? adParents.get(ad) : undefined;
+    const adsetId = adset || p?.adset || null;
+    return { ad: ad || null, adset: adsetId, campaign: campaign || p?.campaign || (adsetId ? adsetParent.get(adsetId) : undefined) || null };
+  };
+}
+
+function idsMatch(d: DerivedIds, s: IdSets): boolean {
+  if (s.ad && !(d.ad && s.ad.has(d.ad))) return false;
+  if (s.adset && !(d.adset && s.adset.has(d.adset))) return false;
+  if (s.campaign && !(d.campaign && s.campaign.has(d.campaign))) return false;
+  return true;
+}
+
+function finestLevel(s: IdSets): keyof DerivedIds {
+  return s.ad ? "ad" : s.adset ? "adset" : "campaign";
+}
+
+const LEVEL_LABEL: Record<keyof DerivedIds, string> = { ad: "ad", adset: "ad set", campaign: "campaign" };
 
 function addMoney(target: MoneyByCurrency, currency: string, amount: number): void {
   if (!currency || !amount) return;
@@ -222,7 +426,7 @@ function hostSets(site: string): HostSets {
   return { own, primary, sister };
 }
 
-type Resolved = {
+export type Resolved = {
   kind: DestinationKind;
   key: string;
   host: string;
@@ -231,7 +435,11 @@ type Resolved = {
   slug: string | null;
   locale: string | null;
   redirected_from?: string;
+  /** Paths that redirected before reaching `path` (first = the URL the ad used). */
+  redirect_chain: string[];
 };
+
+const MAX_REDIRECT_HOPS = 3;
 
 export const DESTINATION_LABELS: Record<DestinationKind, string> = {
   entry: "Page",
@@ -242,14 +450,65 @@ export const DESTINATION_LABELS: Record<DestinationKind, string> = {
   unknown_destination: "Destination unknown",
 };
 
-function makeResolver(index: SeoIndex, hosts: HostSets) {
-  const cache = new Map<string, Resolved>();
-  const byPath = new Map<string, string>();
-  for (const [p, id] of Object.entries(index.by_path)) byPath.set(normalizeLandingPath(p).toLowerCase(), id);
+function siteContentIndex(site: string): ContentIndex {
+  try {
+    for (const ctx of Array.from(getSiteContextMap().values())) {
+      if (ctx.contentRootName === site || ctx.config.contentFolder === site) return ctx.contentIndex;
+    }
+  } catch (err) {
+    log.warn({ err, site }, "[ads-report] site map unavailable; using default content index");
+  }
+  return defaultContentIndex;
+}
 
-  const entryFor = (p: string) => {
-    const id = byPath.get(normalizeLandingPath(p).toLowerCase());
-    return id ? index.entries[id] : undefined;
+/** Same answers as the public site: redirects first ("before" redirects win), then routing. */
+function makeResolver(ci: ContentIndex, hosts: HostSets) {
+  const cache = new Map<string, Resolved>();
+  let publicUrls: ReturnType<typeof createPublicUrlResolver> | null = null;
+  const redirectTarget = (p: string): string | null => {
+    publicUrls ??= createPublicUrlResolver(ci, { freshRedirects: false });
+    const r = publicUrls.test(p);
+    return r.match && r.resolvedTo ? r.resolvedTo : null;
+  };
+
+  const pageAt = (p: string): { content_type: string; slug: string; locale: string } | null => {
+    const route = parseRoute(p, ci);
+    if (route) return { content_type: route.contentType, slug: route.slug, locale: route.locale };
+    const r = ci.resolveUrl(p);
+    if (!r) return null;
+    const locale = !r.patternLocale || r.patternLocale === "default" ? "en" : r.patternLocale;
+    return { content_type: r.contentType, slug: r.slug, locale };
+  };
+
+  const resolveUncached = (startHost: string, startPath: string): Resolved => {
+    let host = startHost;
+    let p = startPath;
+    const chain: string[] = [];
+    for (;;) {
+      const base = { host, path: p, content_type: null, slug: null, locale: null, redirect_chain: chain };
+      if (host && !hosts.own.has(host) && hosts.own.size > 0) {
+        return { ...base, kind: hosts.sister.has(host) ? "other_site" : "off_site", key: `dest:${host}|${p}` };
+      }
+      const to = chain.length < MAX_REDIRECT_HOPS && !chain.includes(p) ? redirectTarget(p) : null;
+      const target = to ? (/^https?:\/\//i.test(to) ? parseUrl(to) : { host, path: normalizeLandingPath(to) }) : null;
+      if (target && !(target.host === host && target.path === p)) {
+        chain.push(p);
+        host = target.host;
+        p = target.path;
+        continue;
+      }
+      const page = pageAt(p);
+      if (!page) return { ...base, kind: "missing_page", key: `dest:${host}|${p}` };
+      const canonical = ci.getLocaleUrls(page.slug, page.content_type)[page.locale];
+      return {
+        ...base,
+        ...page,
+        kind: "entry",
+        key: `entry:${page.content_type}/${page.slug}/${page.locale}`,
+        path: normalizeLandingPath(canonical || p),
+        redirected_from: chain[0],
+      };
+    }
   };
 
   return (hostRaw: string, pathRaw: string): Resolved => {
@@ -258,40 +517,17 @@ function makeResolver(index: SeoIndex, hosts: HostSets) {
     const cacheKey = `${host}|${p}`;
     const hit = cache.get(cacheKey);
     if (hit) return hit;
-    let out: Resolved;
-    const base = { host, path: p, content_type: null, slug: null, locale: null };
-    if (host && !hosts.own.has(host) && hosts.own.size > 0) {
-      out = { ...base, kind: hosts.sister.has(host) ? "other_site" : "off_site", key: `dest:${host}|${p}` };
-    } else {
-      let entry = entryFor(p);
-      let redirectedFrom: string | undefined;
-      if (!entry) {
-        const redirect = lookupRedirect(p);
-        const to = redirect ? (typeof redirect.to === "string" ? redirect.to : Object.values(redirect.to)[0]) : null;
-        if (to) {
-          const target = to.startsWith("http") ? parseUrl(to) : { host, path: normalizeLandingPath(to) };
-          if (target) {
-            entry = entryFor(target.path);
-            if (entry) redirectedFrom = p;
-          }
-        }
-      }
-      out = entry
-        ? {
-            kind: "entry",
-            key: `entry:${entry.content_type}/${entry.slug}/${entry.locale}`,
-            host,
-            path: normalizeLandingPath(entry.path || p),
-            content_type: entry.content_type,
-            slug: entry.slug,
-            locale: entry.locale,
-            redirected_from: redirectedFrom,
-          }
-        : { ...base, kind: "missing_page", key: `dest:${host}|${p}` };
-    }
+    const out = resolveUncached(host, p);
     cache.set(cacheKey, out);
     return out;
   };
+}
+
+export type DestinationResolver = ReturnType<typeof makeResolver>;
+
+/** Resolve ad destinations (host + path) to site pages, following content redirects. */
+export function makeDestinationResolver(site: string, contentIndex?: ContentIndex): DestinationResolver {
+  return makeResolver(contentIndex ?? siteContentIndex(site), hostSets(site));
 }
 
 function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
@@ -316,13 +552,16 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
     title: title || primaryHost,
     redirected_from: r.redirected_from ? [r.redirected_from] : [],
     paid_visits: 0,
+    matched_visits: 0,
     unclear_visits: 0,
+    unassigned_visits: 0,
     engaged_sessions: 0,
     bounce_rate: null,
     avg_engaged_seconds: null,
     ga4_leads: 0,
     spend: {},
     clicks: 0,
+    untagged_clicks: 0,
     landing_page_views: 0,
     meta_leads: 0,
     instant_form_leads: 0,
@@ -343,39 +582,129 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
   };
 }
 
-function classifyCandidate(c: PaidLandingCandidateRow, known: { campaigns: Set<string>; adsets: Set<string>; ads: Set<string> }) {
-  const matches =
-    (!!c.utm_id && known.campaigns.has(c.utm_id)) ||
-    (!!c.utm_term && known.adsets.has(c.utm_term)) ||
-    (!!c.utm_content && known.ads.has(c.utm_content));
-  return classifyTraffic({
+type KnownMetaIds = { campaigns: Set<string>; adsets: Set<string>; ads: Set<string> };
+
+function knownMetaIds(rows: MetaAdDayRow[]): KnownMetaIds {
+  return {
+    campaigns: new Set(rows.map((r) => r.campaign_id).filter(Boolean)),
+    adsets: new Set(rows.map((r) => r.adset_id).filter(Boolean)),
+    ads: new Set(rows.map((r) => r.ad_id).filter(Boolean)),
+  };
+}
+
+function matchesMetaIds(c: PaidLandingCandidateRow, k: KnownMetaIds): boolean {
+  return (!!c.utm_id && k.campaigns.has(c.utm_id)) || (!!c.utm_term && k.adsets.has(c.utm_term)) || (!!c.utm_content && k.ads.has(c.utm_content));
+}
+
+const MAX_UNRECOGNIZED_PAGES = 5;
+const MAX_UNRECOGNIZED_TAGS = 10;
+
+export type AdsUnrecognizedCampaigns = { paid_meta_visits: number; campaigns: AdsUnrecognizedCampaign[] };
+
+/**
+ * Paid Meta visits to our own pages from campaigns no connected account knows.
+ * "Known" = any id in every stored Meta day (all connected accounts) or ad setup,
+ * or a utm_campaign equal to a connected campaign name.
+ */
+function makeUnrecognizedTracker(site: string, accountIds: string[], end: string) {
+  const rows = loadMetaRows(site, "0000-01-01", end, accountIds);
+  const known = knownMetaIds(rows);
+  const names = new Set(rows.map((r) => (r.campaign_name ?? "").trim().toLowerCase()).filter(Boolean));
+  for (const c of Object.values(loadMetaCreatives(site).ads)) {
+    if (c.campaign_id) known.campaigns.add(c.campaign_id);
+    if (c.adset_id) known.adsets.add(c.adset_id);
+    if (c.ad_id) known.ads.add(c.ad_id);
+  }
+  type Acc = AdsUnrecognizedCampaign & { pageMap: Map<string, AdsUnrecognizedCampaignPage>; tagMap: Map<string, AdsGa4SeenRow> };
+  const byKey = new Map<string, Acc>();
+  let paidMetaVisits = 0;
+  return {
+    note(c: PaidLandingCandidateRow, r: Resolved, date: string, primaryHost: string) {
+      if (r.kind !== "entry" && r.kind !== "missing_page") return;
+      paidMetaVisits += c.sessions;
+      if (matchesMetaIds(c, known)) return;
+      if (c.campaign && names.has(c.campaign.trim().toLowerCase())) return;
+      const id = unrecognizedCampaignKey(c);
+      if (!id || (id.campaign_id && known.campaigns.has(id.campaign_id))) return;
+      let acc = byKey.get(id.key);
+      if (!acc) {
+        acc = { ...id, visits: 0, leads: 0, untagged_visits: 0, pages: [], ga4_seen: [], first_seen: date, last_seen: date, pageMap: new Map(), tagMap: new Map() };
+        byKey.set(id.key, acc);
+      }
+      acc.visits += c.sessions;
+      acc.leads += c.sessions_with_lead;
+      if (!c.utm_content) acc.untagged_visits += c.sessions;
+      if (date < acc.first_seen) acc.first_seen = date;
+      if (date > acc.last_seen) acc.last_seen = date;
+      const page = acc.pageMap.get(r.key) ?? { key: r.key, url: emptyRow(r, primaryHost).url, title: emptyRow(r, primaryHost).title, visits: 0 };
+      page.visits += c.sessions;
+      acc.pageMap.set(r.key, page);
+      const tagKey = [c.source, c.medium, c.campaign, c.utm_id ?? "", c.utm_term ?? "", c.utm_content ?? ""].join("|");
+      const tag = acc.tagMap.get(tagKey) ?? {
+        platform: "meta",
+        source: c.source,
+        medium: c.medium,
+        campaign: c.campaign,
+        campaign_id: c.utm_id,
+        adset_id: c.utm_term,
+        ad_id: c.utm_content,
+        visits: 0,
+        leads: 0,
+        first_seen: date,
+        last_seen: date,
+      };
+      tag.visits += c.sessions;
+      tag.leads += c.sessions_with_lead;
+      if (date < tag.first_seen) tag.first_seen = date;
+      if (date > tag.last_seen) tag.last_seen = date;
+      acc.tagMap.set(tagKey, tag);
+    },
+    result(): AdsUnrecognizedCampaigns {
+      const campaigns = Array.from(byKey.values())
+        .map(({ pageMap, tagMap, ...rest }) => ({
+          ...rest,
+          pages: Array.from(pageMap.values()).sort((a, b) => b.visits - a.visits).slice(0, MAX_UNRECOGNIZED_PAGES),
+          ga4_seen: Array.from(tagMap.values()).sort((a, b) => b.visits - a.visits).slice(0, MAX_UNRECOGNIZED_TAGS),
+        }))
+        .sort((a, b) => b.visits - a.visits || a.key.localeCompare(b.key));
+      return { paid_meta_visits: paidMetaVisits, campaigns };
+    },
+  };
+}
+
+/**
+ * `known` (every synced row) decides paid vs organic; `matched` uses `connected`
+ * (rows after account/currency filters) so both sides of clicks → visits narrow together.
+ */
+function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, connected: KnownMetaIds) {
+  const cls = classifyTraffic({
     utm_source: c.source === "(direct)" ? null : c.source,
     utm_medium: c.medium === "(none)" ? null : c.medium,
     click_ids: c.click_id_type ? { [c.click_id_type]: "1" } : undefined,
-    matches_known_meta_id: matches,
+    matches_known_meta_id: matchesMetaIds(c, known),
   });
+  return { ...cls, matched: cls.status === "paid" && cls.platform === "meta" && matchesMetaIds(c, connected) };
+}
+
+/** False only when the ad setup was read and lacks the URL parameters template (unknown setups count as tagged). */
+function adIsTagged(creative: { links: string[]; url_tags?: string | null } | undefined): boolean {
+  if (!creative || creative.links.length === 0) return true;
+  const params = { ...parseTrackingParams(creative.links[0]), ...parseTrackingParams(creative.url_tags) };
+  return missingTemplateParams(params).length === 0;
 }
 
 export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const now = opts.now ?? new Date();
-  const days = clampDays(opts.days);
-  const end = addDays(utcDate(now), -1);
-  const start = addDays(end, -(days - 1));
+  const win = resolveReportWindow({ days: opts.days, since: opts.since, until: opts.until, now });
+  const { start, end, days } = win;
+  const idFilter = idSets(opts);
   const platform = opts.platform ?? "all";
   const model: AttributionModel = opts.model ?? "last_paid";
   const settings = getAdsSettings(opts.contentRoot);
   const thresholds = settings.meta.alert_thresholds;
   const warnings: AdsWarning[] = [];
   const hosts = hostSets(opts.site);
-
-  let index: SeoIndex;
-  try {
-    index = loadSeoIndex(opts.contentRoot);
-  } catch (err) {
-    log.warn({ err }, "[ads-report] seo-index unavailable");
-    index = { version: 1, generated_at: "", entries: {}, by_path: {}, clusters: {}, orphans: [], warnings: [] };
-  }
-  const resolve = makeResolver(index, hosts);
+  const resolve = makeResolver(opts.contentIndex ?? siteContentIndex(opts.site), hosts);
 
   const aggs = new Map<string, Agg>();
   const aggFor = (r: Resolved): Agg => {
@@ -390,6 +719,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         campaigns: new Map(),
         platforms: new Set(),
         versions: new Map(),
+        ratioClicks: 0,
       };
       aggs.set(r.key, a);
     } else if (r.redirected_from && !a.row.redirected_from.includes(r.redirected_from)) {
@@ -432,6 +762,12 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     landing_page_views: 0,
     paid_visits: 0,
     unclear_visits: 0,
+    matched_visits: 0,
+    unmatched_meta_visits: 0,
+    unassigned_visits: 0,
+    unsynced_account_visits: 0,
+    ratio_clicks: 0,
+    untagged_clicks: 0,
     meta_leads: 0,
     instant_form_leads: 0,
     ga4_leads: 0,
@@ -446,28 +782,77 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const metaState = loadMetaState(opts.site);
   const includeMeta = platform === "all" || platform === "meta";
   const metaRowsAll: MetaAdDayRow[] = metaConnected ? loadMetaRows(opts.site, start, end, settings.meta.ad_account_ids) : [];
-  const metaRows = metaRowsAll.filter(
-    (r) => (!opts.account || r.account_id === opts.account) && (!opts.currency || r.currency === opts.currency),
-  );
-  const known = {
-    campaigns: new Set(metaRowsAll.map((r) => r.campaign_id).filter(Boolean)),
-    adsets: new Set(metaRowsAll.map((r) => r.adset_id).filter(Boolean)),
-    ads: new Set(metaRowsAll.map((r) => r.ad_id).filter(Boolean)),
+  const deriveIds = makeIdDeriver(metaRowsAll);
+  const seenIds: Record<keyof DerivedIds, Set<string>> = { campaign: new Set(), adset: new Set(), ad: new Set() };
+  const noteSeen = (d: DerivedIds) => {
+    if (d.campaign) seenIds.campaign.add(d.campaign);
+    if (d.adset) seenIds.adset.add(d.adset);
+    if (d.ad) seenIds.ad.add(d.ad);
   };
+  const metaRows = metaRowsAll.filter((r) => {
+    if (opts.account && r.account_id !== opts.account) return false;
+    if (opts.currency && r.currency !== opts.currency) return false;
+    if (!idFilter) return true;
+    const d: DerivedIds = { campaign: r.campaign_id || null, adset: r.adset_id || null, ad: r.ad_id || null };
+    if (!idsMatch(d, idFilter)) return false;
+    if (includeMeta) noteSeen(d);
+    return true;
+  });
+  const known = knownMetaIds(metaRowsAll);
+  const connected = metaRows.length === metaRowsAll.length ? known : knownMetaIds(metaRows);
+  /** Account/currency filters are Meta concepts: visits and leads count only when tied to the filtered ads. */
+  const narrowToAccount = !!opts.account || !!opts.currency;
+
+  let collectingSince: number | null = null;
+  try {
+    collectingSince = ledgerCollectingSince(opts.site);
+  } catch {
+    /* ignore */
+  }
+  // The ledger's first day is partial, so the GA4 comparison starts the day after.
+  const ledgerFirstFullDay = collectingSince != null ? addDays(utcDate(new Date(collectingSince)), 1) : null;
+  const leadGapCompare: LeadGapCompare = { days: 0, ga4_leads: 0, submissions: 0 };
+  const leadGapDays = new Set<string>();
 
   // ── GA4 paid landings ────────────────────────────────────────────────────
   const ga4Configured = isGa4Configured(opts.contentRoot);
   const ga4State = loadPaidLandingState(opts.site);
   const paidDays = ga4Configured ? loadPaidLandingDays(opts.site, start, end) : [];
   const adLandingVotes = new Map<string, Map<string, number>>();
+  const ga4Dates = new Set(paidDays.map((d) => d.date));
+  /** Filtered-out Meta visits whose finest filtered id is unknown (no tag, no parent), by row key. */
+  const untaggedByKey = new Map<string, number>();
+  const unrecognized = opts.includeGa4Ads && metaConnected && paidDays.length > 0 ? makeUnrecognizedTracker(opts.site, settings.meta.ad_account_ids, end) : null;
 
   for (const day of paidDays) {
+    const inLeadGap = ledgerFirstFullDay != null && day.date >= ledgerFirstFullDay;
+    if (inLeadGap) leadGapDays.add(day.date);
     for (const c of day.candidates) {
-      const cls = classifyCandidate(c, known);
+      const cls = classifyCandidate(c, known, connected);
       if (cls.status === "organic") continue;
       if (platform !== "all" && cls.platform !== platform) continue;
       const r = resolve(c.host, c.path);
+      if (unrecognized && cls.status === "paid" && cls.platform === "meta") unrecognized.note(c, r, day.date, hosts.primary);
       if (opts.content_type && r.content_type !== opts.content_type) continue;
+      if (narrowToAccount && !cls.matched) {
+        if (cls.status === "paid" && cls.platform === "meta" && !matchesMetaIds(c, known)) {
+          if (!c.utm_id && !c.utm_term && !c.utm_content) {
+            aggFor(r).row.unassigned_visits += c.sessions;
+            totals.unassigned_visits += c.sessions;
+          } else {
+            totals.unsynced_account_visits += c.sessions;
+          }
+        }
+        continue;
+      }
+      if (idFilter) {
+        const d = deriveIds(c.utm_id, c.utm_term, c.utm_content);
+        if (!idsMatch(d, idFilter)) {
+          if (cls.status === "paid" && cls.platform === "meta" && !d[finestLevel(idFilter)]) untaggedByKey.set(r.key, (untaggedByKey.get(r.key) ?? 0) + c.sessions);
+          continue;
+        }
+        noteSeen(d);
+      }
       const a = aggFor(r);
       if (cls.platform) a.platforms.add(cls.platform);
       if (cls.status === "unclear") {
@@ -481,11 +866,41 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       a.row.ga4_leads += c.sessions_with_lead;
       totals.paid_visits += c.sessions;
       totals.ga4_leads += c.sessions_with_lead;
+      if (cls.matched) {
+        a.row.matched_visits += c.sessions;
+        totals.matched_visits += c.sessions;
+      } else if (cls.platform === "meta") {
+        totals.unmatched_meta_visits += c.sessions;
+      }
+      if (inLeadGap) leadGapCompare.ga4_leads += c.sessions_with_lead;
       const metaCampaignId = cls.platform === "meta" && c.utm_id && known.campaigns.has(c.utm_id) ? c.utm_id : null;
       campaignRef(a, cls.platform, metaCampaignId, c.campaign).paid_visits += c.sessions;
       const g = groupFor(cls.platform, metaCampaignId, c.campaign);
       g.paid_visits += c.sessions;
       groupPage(g, a, c.sessions);
+      if (opts.includeGa4Ads) {
+        const tagKey = [cls.platform ?? "", c.source, c.medium, c.campaign, c.utm_id ?? "", c.utm_term ?? "", c.utm_content ?? ""].join("|");
+        a.ga4Ads ??= new Map();
+        const ref = a.ga4Ads.get(tagKey) ?? {
+          platform: cls.platform,
+          source: c.source,
+          medium: c.medium,
+          campaign: c.campaign,
+          campaign_id: c.utm_id,
+          adset_id: c.utm_term,
+          ad_id: c.utm_content,
+          visits: 0,
+          leads: 0,
+          first_seen: day.date,
+          last_seen: day.date,
+        };
+        ref.visits += c.sessions;
+        ref.leads += c.sessions_with_lead;
+        if (day.date < ref.first_seen) ref.first_seen = day.date;
+        if (day.date > ref.last_seen) ref.last_seen = day.date;
+        a.ga4Ads.set(tagKey, ref);
+        if (!c.utm_content) a.ga4Untagged = (a.ga4Untagged ?? 0) + c.sessions;
+      }
       if (opts.split_by_version && c.variant) {
         const v = a.versions.get(c.variant) ?? { paid_visits: 0, unique_leads: 0, submissions: 0 };
         v.paid_visits += c.sessions;
@@ -519,7 +934,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       const creative = creatives[m.ad_id];
       let r: Resolved;
       if (creative?.instant_form || (m.instant_form_leads > 0 && !creative?.links.length)) {
-        r = { kind: "instant_form", key: "dest:instant_form", host: "", path: "", content_type: null, slug: null, locale: null };
+        r = { kind: "instant_form", key: "dest:instant_form", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
       } else {
         const link = creative?.links[0] ? parseUrl(creative.links[0]) : null;
         const votes = adLandingVotes.get(m.ad_id);
@@ -527,7 +942,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         const target = link ?? (voted ? { host: voted.split("|")[0]!, path: voted.split("|")[1]! } : null);
         r = target
           ? resolve(target.host, target.path)
-          : { kind: "unknown_destination", key: "dest:unknown", host: "", path: "", content_type: null, slug: null, locale: null };
+          : { kind: "unknown_destination", key: "dest:unknown", host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
       }
       if (opts.content_type && r.content_type !== opts.content_type) continue;
       const a = aggFor(r);
@@ -537,6 +952,15 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       a.row.landing_page_views += m.landing_page_views;
       a.row.meta_leads += m.pixel_leads;
       a.row.instant_form_leads += m.instant_form_leads;
+      if (r.kind === "entry" || r.kind === "missing_page") {
+        if (!adIsTagged(creative)) {
+          a.row.untagged_clicks += m.link_clicks;
+          totals.untagged_clicks += m.link_clicks;
+        } else if (ga4Dates.has(m.date)) {
+          a.ratioClicks += m.link_clicks;
+          totals.ratio_clicks += m.link_clicks;
+        }
+      }
       if (r.kind === "entry") addMoney(totals.tracked_spend, m.currency, m.spend);
       addMoney(campaignRef(a, "meta", m.campaign_id, m.campaign_name).spend, m.currency, m.spend);
       const g = groupFor("meta", m.campaign_id, m.campaign_name);
@@ -556,7 +980,24 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   } catch (err) {
     log.warn({ err }, "[ads-report] ledger unavailable");
   }
-  const filteredLedger = ledger.filter((r) => platform === "all" || r.platform === platform);
+  const filteredLedger = ledger.filter((r) => {
+    if (platform !== "all" && r.platform !== platform) return false;
+    if (
+      narrowToAccount &&
+      !(
+        (r.campaign_id && connected.campaigns.has(r.campaign_id)) ||
+        (r.adset_id && connected.adsets.has(r.adset_id)) ||
+        (r.ad_id && connected.ads.has(r.ad_id))
+      )
+    ) {
+      return false;
+    }
+    if (!idFilter) return true;
+    const d = deriveIds(r.campaign_id, r.adset_id, r.ad_id);
+    if (!idsMatch(d, idFilter)) return false;
+    noteSeen(d);
+    return true;
+  });
   totals.test_submissions = filteredLedger.filter((r) => r.is_test).length;
   const credits = filteredLedger.map((r) => ({ lead: r, credit: creditLead(r, model) }));
   const byLanding = totalsByLanding(credits.map((c) => c.credit));
@@ -571,6 +1012,13 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     totals.unique_leads += t.unique_leads;
     totals.submissions += t.submissions;
     totals.repeat_submissions += t.repeat_submissions;
+  }
+  leadGapCompare.days = leadGapDays.size;
+  for (const { lead, credit } of credits) {
+    if (credit.reason !== "credited" || !credit.host || !credit.path) continue;
+    if (!leadGapDays.has(utcDate(new Date(lead.created_at)))) continue;
+    if (opts.content_type && resolve(credit.host, credit.path).content_type !== opts.content_type) continue;
+    leadGapCompare.submissions += 1;
   }
   if (opts.split_by_version) {
     for (const { lead, credit } of credits) {
@@ -606,7 +1054,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     row.conversion_rate = visits > 0 ? row.unique_leads / visits : null;
     row.cost_per_visit = divMoney(row.spend, visits);
     row.cost_per_lead = divMoney(row.spend, row.unique_leads);
-    row.clicks_to_visits = row.clicks > 0 ? visits / row.clicks : null;
+    row.clicks_to_visits = a.ratioClicks > 0 ? row.matched_visits / a.ratioClicks : null;
     row.organic =
       a.organicSessions > 0
         ? {
@@ -617,6 +1065,12 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         : null;
     row.platforms = Array.from(a.platforms);
     row.campaigns = Array.from(a.campaigns.values()).sort((x, y) => y.paid_visits - x.paid_visits).slice(0, 10);
+    if (opts.includeGa4Ads) {
+      row.ga4_ads = Array.from(a.ga4Ads?.values() ?? [])
+        .sort((x, y) => y.visits - x.visits)
+        .slice(0, MAX_GA4_ADS_PER_ROW);
+      row.ga4_untagged_visits = a.ga4Untagged ?? 0;
+    }
     if (opts.split_by_version && a.versions.size > 0) {
       row.versions = Array.from(a.versions.entries()).map(([variant, v]) => ({
         variant,
@@ -646,12 +1100,6 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   } catch {
     /* consent table optional */
   }
-  let collectingSince: number | null = null;
-  try {
-    collectingSince = ledgerCollectingSince(opts.site);
-  } catch {
-    /* ignore */
-  }
   const covered = coveredDays(start, end, collectingSince);
 
   // ── Warnings ────────────────────────────────────────────────────────────
@@ -676,10 +1124,87 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       message: `Ask-region numbers include estimates; ${askRejectPct}% of visitors there rejected tracking.`,
     });
   }
-  const refreshing = isAdsRefreshing(opts.site);
-  if (refreshing) {
-    warnings.push({ code: "meta_refresh_in_progress", message: "Ads data is refreshing in the background; re-check in a minute." });
+  if (win.clamped.length > 0) {
+    warnings.push({
+      code: "range_clamped",
+      message: `Requested range adjusted to ${start}..${end}: ${win.clamped
+        .map((c) => (c === "until" ? "the end moved to yesterday (today is incomplete)" : `the start moved to ${start} (data is kept about 13 months)`))
+        .join("; ")}.`,
+    });
   }
+
+  const windowDates = dateRange(start, end);
+  const metaDates = metaConnected && includeMeta ? new Set(listMetaDayDates(opts.site)) : null;
+  const metaMissing = metaDates ? windowDates.filter((d) => !metaDates.has(d)) : [];
+  const ga4Complete = lastCompleteGa4Date(now);
+  const ga4Missing = ga4Configured ? windowDates.filter((d) => d <= ga4Complete && !ga4Dates.has(d)) : [];
+  if (metaMissing.length > 0 || ga4Missing.length > 0) {
+    const parts: string[] = [];
+    if (metaMissing.length > 0) parts.push(`Meta (${metaMissing.length} day(s): ${compressDateRanges(metaMissing)})`);
+    if (ga4Missing.length > 0) parts.push(`GA4 (${ga4Missing.length} day(s): ${compressDateRanges(ga4Missing)})`);
+    warnings.push({
+      code: "data_gaps",
+      message: `No cached data for ${parts.join("; ")}. Numbers for those days are missing, not zero. Syncs read back 90 days and keep about 13 months; older days only exist if they were synced before.`,
+    });
+  }
+
+  const filters = { campaign_ids: opts.campaign_ids ?? [], adset_ids: opts.adset_ids ?? [], ad_ids: opts.ad_ids ?? [] };
+  if (idFilter) {
+    const level = finestLevel(idFilter);
+    let untagged = 0;
+    const untaggedPaths: string[] = [];
+    const kept = new Set([...pages, ...destinations]);
+    for (const [key, n] of Array.from(untaggedByKey.entries()).sort((x, y) => y[1] - x[1])) {
+      const a = aggs.get(key);
+      if (!a || !kept.has(a.row)) continue;
+      untagged += n;
+      if (untaggedPaths.length < 3) untaggedPaths.push(a.row.path || a.row.title);
+    }
+    if (untagged > 0) {
+      warnings.push({
+        code: "untagged_visits_excluded",
+        message: `${untagged} paid Meta visit(s) to pages in this result (${untaggedPaths.join(", ")}) had no ${LEVEL_LABEL[level]} id in their link tags, so they could not be matched to the filter and are left out. Visits, conversion rate and cost per visit are a floor.`,
+      });
+    }
+    if (model === "first_paid") {
+      warnings.push({
+        code: "leads_matched_by_last_click",
+        message: "Leads are matched to the filter by the ad the visitor clicked last, even with model first_paid; page credit still follows first_paid.",
+      });
+    }
+    const unmatched = (["campaign", "adset", "ad"] as const)
+      .map((lvl) => {
+        const wanted = idFilter[lvl];
+        const miss = wanted ? Array.from(wanted).filter((id) => !seenIds[lvl].has(id)) : [];
+        return miss.length > 0 ? `${lvl}_ids [${miss.join(", ")}]` : null;
+      })
+      .filter((x): x is string => !!x);
+    if (unmatched.length > 0) {
+      warnings.push({
+        code: "filter_no_match",
+        message: `No spend, visits or leads matched ${unmatched.join(", ")} in ${start}..${end}. Check the ids with mode campaigns (or entries grouped by campaign), or widen the date range.`,
+      });
+    }
+  }
+  if (narrowToAccount && (totals.unassigned_visits > 0 || totals.unsynced_account_visits > 0)) {
+    const scope = opts.account ? "this account" : `${opts.currency} accounts`;
+    const parts: string[] = [];
+    if (totals.unassigned_visits > 0) {
+      parts.push(
+        `${totals.unassigned_visits} paid Meta visit(s) had no ad tags and could not be tied to ${scope}; visits, conversion rate and cost per visit are a floor.`,
+      );
+    }
+    if (totals.unsynced_account_visits > 0) {
+      parts.push(
+        `${totals.unsynced_account_visits} more carried ad ids from Meta accounts that aren't synced; add that account in Settings → Ads if it should count.`,
+      );
+    }
+    warnings.push({ code: "visits_not_tied_to_account", message: parts.join(" ") });
+  }
+
+  const refresh = getAdsRefreshStatus(opts.site);
+  const refreshing = isRefreshActive(refresh);
+  warnings.push(...refreshWarnings(refresh));
 
   return {
     window: { start, end, days },
@@ -692,8 +1217,10 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       consecutive_failures: metaState.consecutive_failures ?? 0,
       accounts: settings.meta.ad_account_ids.map((id) => ({
         id,
-        name: metaState.accounts[id]?.name,
-        currency: metaState.accounts[id]?.currency,
+        name: metaState.accounts[id]?.name || undefined,
+        currency: metaState.accounts[id]?.currency || undefined,
+        history_loaded: !!metaState.accounts[id]?.history_loaded_at,
+        ...(metaState.accounts[id]?.sync_error ? { sync_error: metaState.accounts[id]!.sync_error } : {}),
       })),
     },
     ga4: {
@@ -703,32 +1230,63 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       last_error: ga4State.last_error ?? null,
     },
     refreshing,
+    refresh,
     collecting_since: collectingSince ? new Date(collectingSince).toISOString() : null,
     covered_days: covered,
+    data_gaps: { meta_missing_days: metaMissing.length, ga4_missing_days: ga4Missing.length },
+    filters,
+    lead_gap_compare: leadGapCompare,
     consent: { mode: "advanced", ask_region_reject_pct: askRejectPct, ask_region_shown: askShown },
     totals,
     pages,
     destinations,
     campaigns: Array.from(campaignGroups.values()).sort((x, y) => spendSum(y.spend) - spendSum(x.spend) || y.paid_visits - x.paid_visits),
+    ...(opts.includeGa4Ads ? { unrecognized_campaigns: unrecognized?.result() ?? { paid_meta_visits: 0, campaigns: [] } } : {}),
     thresholds,
     warnings,
   };
 }
 
+const REFRESH_WARNING_CODES = new Set(["meta_refresh_in_progress", "meta_refresh_failed", "jobs_worker_down"]);
+
+export function isRefreshWarning(w: AdsWarning): boolean {
+  return REFRESH_WARNING_CODES.has(w.code);
+}
+
+/** Warnings describing the background refresh. Cached numbers are always still returned. */
+export function refreshWarnings(refresh: AdsRefreshStatus): AdsWarning[] {
+  if (isRefreshActive(refresh)) {
+    return [{ code: "meta_refresh_in_progress", message: "Ads data is refreshing in the background; re-check in a minute." }];
+  }
+  if (refresh.state === "failed") {
+    const retry = refresh.retry_after ? ` Next automatic try after ${refresh.retry_after}.` : "";
+    return [
+      {
+        code: "meta_refresh_failed",
+        message: `The Ads background refresh didn't run: ${(refresh.error ?? "unknown error").trim().replace(/\.+$/, "")}. Numbers are the last cached sync; nothing was changed in Meta.${retry} Staff can retry with Sync now in Settings → Ads.`,
+      },
+    ];
+  }
+  if (refresh.state === "worker_down") {
+    return [
+      {
+        code: "jobs_worker_down",
+        message:
+          "The background job worker isn't running, so Ads data can't refresh. Numbers are the last cached sync; nothing was changed in Meta. Staff can run Sync now in Settings → Ads.",
+      },
+    ];
+  }
+  return [];
+}
+
 /** Build the report and kick a background refresh when data is stale (non-blocking). */
 export async function getAdsReport(opts: AdsReportOpts): Promise<AdsReport> {
-  let refreshing = false;
   if (!opts.noRefresh) {
     try {
-      refreshing = await triggerAdsRefreshIfStale(opts.site, opts.contentRoot);
+      await triggerAdsRefreshIfStale(opts.site, opts.contentRoot);
     } catch (err) {
       log.warn({ err }, "[ads-report] refresh trigger failed");
     }
   }
-  const report = buildAdsReport(opts);
-  if (refreshing && !report.refreshing) {
-    report.refreshing = true;
-    report.warnings.push({ code: "meta_refresh_in_progress", message: "Ads data is refreshing in the background; re-check in a minute." });
-  }
-  return report;
+  return buildAdsReport(opts);
 }

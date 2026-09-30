@@ -88,13 +88,13 @@ export function ConsentWindowCard({
 }) {
   const { toast } = useToast();
   const { hasCapability } = useDebugAuth();
-  const canEdit = hasCapability("ads_settings");
+  const canEdit = hasCapability("consent_settings");
 
   const { data, isLoading, refetch, error } = useQuery({
     queryKey: ["/api/settings/consent/window"],
     queryFn: async () => {
       const res = await apiFetch("/api/settings/consent/window");
-      if (!res.ok) throw new Error(res.status === 403 ? "You need the Manage Ads settings permission." : "Failed to load");
+      if (!res.ok) throw new Error(res.status === 403 ? "You need the Manage cookie consent permission." : "Failed to load");
       return res.json() as Promise<WindowResponse>;
     },
     retry: false,

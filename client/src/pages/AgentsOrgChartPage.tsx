@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { useLocation, useParams } from "wouter";
+import { useLocation, useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
-import { IconClipboardList, IconInfoCircle, IconLoader2, IconScale, IconSearch } from "@tabler/icons-react";
+import {
+  IconClipboardList,
+  IconInfoCircle,
+  IconLoader2,
+  IconScale,
+  IconSearch,
+  IconThumbUp,
+} from "@tabler/icons-react";
 import { Geekchart } from "geekchart";
 import "geekchart/fonts.css";
 import { allowedToolNames } from "@shared/mcp-tool-catalog";
@@ -27,6 +34,8 @@ import {
   ProposalListPanel,
 } from "@/pages/ProposalsPage";
 import { AgentsRulesPanel } from "@/pages/AgentsRulesPanel";
+import { AgentsOutcomesPanel } from "@/components/agents/AgentsOutcomesPanel";
+import { AGENTS_OUTCOMES_BASE, resolveAgentsTab, type AgentsTab } from "@/lib/agents-tab";
 
 interface CapabilityGrant {
   name: string;
@@ -45,8 +54,6 @@ interface AdminRolesResponse {
   roles: Record<string, RoleDefinition>;
 }
 
-type AgentsTab = "orgchart" | "proposals" | "rules";
-
 const AGENTS_TABS: {
   id: AgentsTab;
   href: string;
@@ -54,18 +61,10 @@ const AGENTS_TABS: {
   Icon: ComponentType<{ className?: string }>;
 }[] = [
   { id: "orgchart", href: "/private/agents/orgchart", label: "Org Chart", Icon: Bot },
-  { id: "proposals", href: AGENTS_PROPOSALS_BASE, label: "Agent Swarm Proposals", Icon: IconClipboardList },
+  { id: "proposals", href: AGENTS_PROPOSALS_BASE, label: "Proposals", Icon: IconClipboardList },
+  { id: "outcomes", href: AGENTS_OUTCOMES_BASE, label: "Outcomes", Icon: IconThumbUp },
   { id: "rules", href: "/private/agents/rules", label: "Rules", Icon: IconScale },
 ];
-
-function resolveAgentsTab(pathname: string): AgentsTab | null {
-  if (pathname === "/private/agents/orgchart") return "orgchart";
-  if (pathname === "/private/agents/rules") return "rules";
-  if (pathname === AGENTS_PROPOSALS_BASE || pathname.startsWith(`${AGENTS_PROPOSALS_BASE}/`)) {
-    return "proposals";
-  }
-  return null;
-}
 
 /** Logos that cycle on the Swarm Orchestrator strip. */
 const ORCHESTRATOR_LOGO_CYCLE: AgentId[] = [
@@ -356,8 +355,11 @@ function OrgChartPanel() {
 
 export default function AgentsOrgChartPage() {
   const [pathname, setLocation] = useLocation();
+  const search = useSearch();
   const params = useParams<{ id?: string }>();
-  const activeTab = resolveAgentsTab(pathname);
+  const activeTab = resolveAgentsTab(pathname, search);
+  const { data: siteInfo } = useQuery<{ domain: string }>({ queryKey: ["/api/site/info"] });
+  const siteLabel = siteInfo?.domain === "4geeks.com" ? "4Geeks.com" : siteInfo?.domain;
 
   useEffect(() => {
     if (pathname === "/private/agents" || pathname === "/private/agents/") {
@@ -383,7 +385,7 @@ export default function AgentsOrgChartPage() {
               <div className="flex items-center gap-2">
                 <Bot className="h-5 w-5 text-muted-foreground" />
                 <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-agents-title">
-                  Agents
+                  Agent Swarm
                 </h1>
                 {activeTab === "orgchart" ? (
                   <Popover>
@@ -416,6 +418,41 @@ export default function AgentsOrgChartPage() {
                           shared/agentic-swarm-roles.ts
                         </code>
                         ).
+                      </p>
+                    </PopoverContent>
+                  </Popover>
+                ) : activeTab === "outcomes" ? (
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        aria-label="Read more (advanced)"
+                        data-testid="button-agents-outcomes-advanced-info"
+                      >
+                        <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="start"
+                      className="w-80 space-y-2 text-xs text-muted-foreground leading-relaxed"
+                    >
+                      <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
+                      <p>
+                        The verdict is stored on the proposal with a history of earlier verdicts. Only a
+                        Platform Steward can set, change or clear it, from the proposal page.
+                      </p>
+                      <p>
+                        Not reviewed means finished, rejected or withdrawn with no verdict yet. Proposals
+                        the system closed on its own (drafts out of date with no activity, the legacy
+                        migration) are left out unless someone reviews them.
+                      </p>
+                      <p>
+                        Agents read the same counts in{" "}
+                        <code className="font-mono bg-muted px-1 rounded">list_proposals</code> (
+                        <code className="font-mono bg-muted px-1 rounded">stats.by_outcome</code>) but
+                        cannot set verdicts.
                       </p>
                     </PopoverContent>
                   </Popover>
@@ -461,6 +498,11 @@ export default function AgentsOrgChartPage() {
                     MCP swarm connectors — not staff CMS roles. Assign them on Security → Users to unlock{" "}
                     <code className="text-xs font-mono bg-muted px-1 rounded">/mcp/role/…</code>.
                   </>
+                ) : activeTab === "outcomes" ? (
+                  <>
+                    How closed proposals{siteLabel ? ` on ${siteLabel}` : ""} turned out, and which still
+                    need a verdict.
+                  </>
                 ) : activeTab === "rules" ? (
                   <>
                     Site policy for withdraw, four-eyes, holds, and claims — not who has which role.
@@ -501,6 +543,8 @@ export default function AgentsOrgChartPage() {
           {activeTab === "orgchart" && <OrgChartPanel />}
           {activeTab === "proposals" &&
             (params.id ? <ProposalDetailPanel id={params.id} /> : <ProposalListPanel />)}
+          {activeTab === "outcomes" &&
+            (params.id ? <ProposalDetailPanel id={params.id} /> : <AgentsOutcomesPanel />)}
           {activeTab === "rules" && <AgentsRulesPanel />}
         </div>
       </div>

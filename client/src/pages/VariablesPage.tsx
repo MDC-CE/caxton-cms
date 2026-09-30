@@ -917,7 +917,7 @@ export default function VariablesPage() {
             <div className="rounded-md border divide-y">
               <div className="px-3 py-2 flex items-center justify-between bg-muted/30">
                 <p className="text-sm font-medium">Brand</p>
-                <Link href="/private/settings?tab=brand">
+                <Link href="/private/settings/brand">
                   <Button variant="outline" size="sm" data-testid="link-settings-brand">
                     Open Brand settings
                   </Button>
@@ -944,7 +944,7 @@ export default function VariablesPage() {
             <div className="rounded-md border divide-y">
               <div className="px-3 py-2 flex items-center justify-between bg-muted/30">
                 <p className="text-sm font-medium">Legal &amp; consent</p>
-                <Link href="/private/settings?tab=legal">
+                <Link href="/private/settings/legal">
                   <Button variant="outline" size="sm" data-testid="link-settings-legal">
                     Open Legal settings
                   </Button>

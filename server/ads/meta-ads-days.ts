@@ -44,7 +44,19 @@ export type MetaAdsSyncState = {
   consecutive_failures: number;
   /** Earliest date we have fetched (inclusive). */
   history_since?: string;
-  accounts: Record<string, Pick<MetaAccountInfo, "name" | "currency" | "account_status"> & { error?: string }>;
+  accounts: Record<string, MetaAccountSyncInfo>;
+};
+
+export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "account_status"> & {
+  error?: string;
+  /** Last time this account's ad setups (links, URL parameters, status) were read successfully. */
+  setup_read_at?: string;
+  /** Why the last ad-setup read failed; cleared on the next success. */
+  setup_error?: string;
+  /** Set when a full 90-day load finished for this account; missing means the next refresh backfills. */
+  history_loaded_at?: string;
+  /** Why this account was skipped in the last sync (other accounts still saved); cleared on success. */
+  sync_error?: string;
 };
 
 export type MetaAdsCreatives = {
@@ -202,15 +214,55 @@ export function isMetaSyncInFlight(site: string): boolean {
   return inFlight.has(site);
 }
 
+/** Called as each sync step starts, with a plain-English label for staff. */
+export type SyncStepCallback = (label: string) => void;
+
+function fetchChunkCount(window: { since: string; until: string }): number {
+  return Math.ceil(dateRange(window.since, window.until).length / FETCH_CHUNK_DAYS);
+}
+
+/** Steps `syncMetaAds` will report: per account (lookup + insight chunks + creatives), then one save. */
+export function metaSyncStepCount(accountCount: number, window: { since: string; until: string } | null): number {
+  if (!window || accountCount <= 0) return 0;
+  return accountCount * (fetchChunkCount(window) + 2) + 1;
+}
+
+/** A refresh becomes a 90-day backfill while any configured account has never finished one. */
+export function effectiveMetaSyncMode(mode: MetaSyncMode, accountIds: string[], state: MetaAdsSyncState): MetaSyncMode {
+  if (mode !== "refresh") return mode;
+  return accountIds.some((id) => !state.accounts[id]?.history_loaded_at) ? "backfill" : mode;
+}
+
+/** Step total for a sync that would start now; 0 when it would skip or has nothing to fetch. */
+export function planMetaSyncSteps(site: string, contentRoot: string | undefined, mode: MetaSyncMode = "refresh", now?: Date): number {
+  const settings = getAdsSettings(contentRoot).meta;
+  if (!settings.enabled || settings.ad_account_ids.length === 0 || !isMetaTokenConfigured()) return 0;
+  const effective = effectiveMetaSyncMode(mode, settings.ad_account_ids, loadMetaState(site));
+  return metaSyncStepCount(settings.ad_account_ids.length, datesForMode(effective, listMetaDayDates(site), now));
+}
+
+const MONTH_DAY = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+const DAY_ONLY = new Intl.DateTimeFormat("en-US", { day: "numeric", timeZone: "UTC" });
+
+/** "Jun 1–15", or "May 28 – Jun 11" across months. */
+export function shortDateRange(since: string, until: string): string {
+  const a = new Date(`${since}T00:00:00.000Z`);
+  const b = new Date(`${until}T00:00:00.000Z`);
+  if (since === until) return MONTH_DAY.format(a);
+  if (since.slice(0, 7) === until.slice(0, 7)) return `${MONTH_DAY.format(a)}–${DAY_ONLY.format(b)}`;
+  return `${MONTH_DAY.format(a)} – ${MONTH_DAY.format(b)}`;
+}
+
 export async function syncMetaAds(opts: {
   site: string;
   contentRoot?: string;
   mode?: MetaSyncMode;
   now?: Date;
+  onStep?: SyncStepCallback;
 }): Promise<MetaSyncResult> {
-  const mode = opts.mode ?? "refresh";
+  const requestedMode = opts.mode ?? "refresh";
   const settings = getAdsSettings(opts.contentRoot).meta;
-  const base = { mode, dates: [] as string[], rows: 0 };
+  const base = { mode: requestedMode, dates: [] as string[], rows: 0 };
   if (!settings.enabled) return { ...base, ok: false, skipped: "not_enabled" };
   if (settings.ad_account_ids.length === 0) return { ...base, ok: false, skipped: "no_accounts" };
   if (!isMetaTokenConfigured()) return { ...base, ok: false, skipped: "no_token" };
@@ -219,6 +271,11 @@ export async function syncMetaAds(opts: {
   inFlight.add(opts.site);
   const state = loadMetaState(opts.site);
   state.last_attempt_at = new Date().toISOString();
+  for (const id of Object.keys(state.accounts)) {
+    if (!settings.ad_account_ids.includes(id)) delete state.accounts[id];
+  }
+  const mode = effectiveMetaSyncMode(requestedMode, settings.ad_account_ids, state);
+  base.mode = mode;
   try {
     const window = datesForMode(mode, listMetaDayDates(opts.site), opts.now);
     if (!window) {
@@ -229,39 +286,89 @@ export async function syncMetaAds(opts: {
     }
     const byDate = new Map<string, MetaAdDayRow[]>();
     for (const d of dateRange(window.since, window.until)) byDate.set(d, []);
+    const loadsFullHistory = mode !== "older" && byDate.size >= META_BACKFILL_DAYS;
 
     const creatives = loadMetaCreatives(opts.site);
-    for (const accountId of settings.ad_account_ids) {
-      const info = await fetchAccountInfo(accountId);
-      state.accounts[accountId] = { name: info.name, currency: info.currency, account_status: info.account_status };
-      for (let start = window.since; start <= window.until; start = addDays(start, FETCH_CHUNK_DAYS)) {
-        const endCandidate = addDays(start, FETCH_CHUNK_DAYS - 1);
-        const end = endCandidate > window.until ? window.until : endCandidate;
-        const rows = await fetchAdInsights(accountId, start, end, info.currency);
-        for (const r of rows) byDate.get(r.date)?.push(r);
-      }
+    const accountCount = settings.ad_account_ids.length;
+    const failed = new Map<string, unknown>();
+    for (let i = 0; i < accountCount; i++) {
+      const accountId = settings.ad_account_ids[i];
+      const account = `account ${i + 1} of ${accountCount}`;
+      const prev = state.accounts[accountId];
+      opts.onStep?.(`Meta: looking up ${account}`);
+      const fetched: MetaAdDayRow[] = [];
       try {
-        for (const c of await fetchAdCreatives(accountId)) creatives.ads[c.ad_id] = c;
+        const info = await fetchAccountInfo(accountId);
+        state.accounts[accountId] = {
+          name: info.name,
+          currency: info.currency,
+          account_status: info.account_status,
+          setup_read_at: prev?.setup_read_at,
+          setup_error: prev?.setup_error,
+          history_loaded_at: prev?.history_loaded_at,
+        };
+        for (let start = window.since; start <= window.until; start = addDays(start, FETCH_CHUNK_DAYS)) {
+          const endCandidate = addDays(start, FETCH_CHUNK_DAYS - 1);
+          const end = endCandidate > window.until ? window.until : endCandidate;
+          opts.onStep?.(`Meta: ${account}, ${shortDateRange(start, end)}`);
+          fetched.push(...(await fetchAdInsights(accountId, start, end, info.currency)));
+        }
       } catch (err) {
+        failed.set(accountId, err);
+        state.accounts[accountId] = {
+          ...(prev ?? { name: "", currency: "", account_status: 0 }),
+          sync_error: err instanceof Error ? err.message : String(err),
+        };
+        log.warn({ err, accountId }, "[meta] account skipped; other accounts still sync");
+        continue;
+      }
+      for (const r of fetched) byDate.get(r.date)?.push(r);
+      opts.onStep?.(`Meta: ${account}, ad creatives`);
+      try {
+        for (const c of await fetchAdCreatives(accountId)) creatives.ads[c.ad_id] = { ...c, account_id: accountId };
+        state.accounts[accountId].setup_read_at = new Date().toISOString();
+        state.accounts[accountId].setup_error = undefined;
+      } catch (err) {
+        state.accounts[accountId].setup_error = err instanceof Error ? err.message : String(err);
         log.warn({ err, accountId }, "[meta] creatives fetch failed (non-fatal)");
       }
     }
 
+    if (failed.size === accountCount) throw failed.values().next().value;
+
+    opts.onStep?.("Meta: saving synced days");
     const fetchedAt = new Date().toISOString();
     let total = 0;
     for (const [date, rows] of Array.from(byDate.entries())) {
+      // Day files are rewritten whole, so keep what skipped accounts had saved before.
+      if (failed.size > 0) {
+        for (const r of loadMetaDay(opts.site, date)?.rows ?? []) if (failed.has(r.account_id)) rows.push(r);
+      }
       saveMetaDay(opts.site, { date, fetched_at: fetchedAt, rows });
       total += rows.length;
     }
-    creatives.fetched_at = fetchedAt;
+    if (settings.ad_account_ids.every((id) => !state.accounts[id]?.setup_error && !state.accounts[id]?.sync_error)) {
+      creatives.fetched_at = fetchedAt;
+    }
     writeJson(creativesPath(opts.site), creatives);
     pruneMetaDays(opts.site, opts.now);
 
+    for (const id of settings.ad_account_ids) {
+      if (failed.has(id)) continue;
+      state.accounts[id].sync_error = undefined;
+      if (loadsFullHistory) state.accounts[id].history_loaded_at = fetchedAt;
+    }
     const dates = listMetaDayDates(opts.site);
     state.history_since = dates[0];
     state.last_success_at = fetchedAt;
-    state.last_error = undefined;
-    state.last_error_kind = undefined;
+    if (failed.size > 0) {
+      const first = failed.values().next().value;
+      state.last_error = `Skipped ${failed.size} of ${accountCount} account(s): ${Array.from(failed.keys()).join(", ")} (${first instanceof Error ? first.message : String(first)})`;
+      state.last_error_kind = first instanceof MetaApiError ? first.kind : "other";
+    } else {
+      state.last_error = undefined;
+      state.last_error_kind = undefined;
+    }
     state.consecutive_failures = 0;
     saveMetaState(opts.site, state);
     return { ...base, ok: true, dates: Array.from(byDate.keys()), rows: total };

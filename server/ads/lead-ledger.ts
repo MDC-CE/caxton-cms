@@ -365,3 +365,12 @@ export function ledgerCollectingSince(site: string): number | null {
     | undefined;
   return row?.first ?? null;
 }
+
+/** Newest non-test submission (ms), or null when the ledger never recorded a real lead. */
+export function ledgerLastRecordedAt(site: string): number | null {
+  ensurePipelineDb(site);
+  const row = getSiteSqlite(site).prepare("SELECT MAX(created_at) AS last FROM lead_submissions WHERE is_test = 0").get() as
+    | { last: number | null }
+    | undefined;
+  return row?.last ?? null;
+}

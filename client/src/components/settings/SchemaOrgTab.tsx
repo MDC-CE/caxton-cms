@@ -149,7 +149,7 @@ export function SchemaOrgTab() {
             <p>
               Social links (<code className="font-mono">organization.same_as</code>), logos, brand title, and{" "}
               <code className="font-mono">website.default_social_image</code> are edited under{" "}
-              <Link href="/private/settings?tab=brand" className="underline underline-offset-2 text-foreground">
+              <Link href="/private/settings/brand" className="underline underline-offset-2 text-foreground">
                 General → Brand
               </Link>
               . Saving here does not change those Brand fields.
@@ -343,7 +343,7 @@ export function SchemaOrgTab() {
           </div>
           <p className="text-xs text-muted-foreground">
             Default social image is managed in{" "}
-            <Link href="/private/settings?tab=brand" className="underline underline-offset-2">
+            <Link href="/private/settings/brand" className="underline underline-offset-2">
               Brand
             </Link>
             {website.default_social_image ? (

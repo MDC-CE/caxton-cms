@@ -1,0 +1,181 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CatalogGrant } from "../lib/tool-catalog.js";
+
+vi.mock("../lib/content.js", () => ({ resolveSiteContext: () => ({ ok: true, domain: "4geeks.com" }) }));
+vi.mock("../lib/oauth.js", () => ({ getTokenUsername: () => "staff@4geeks.com" }));
+vi.mock("../lib/auth.js", () => ({ denyUnlessMetricsView: async () => null, checkCap: async () => false }));
+
+const { registerPaidTrafficTools, accountSyncWarnings } = await import("./paid-traffic");
+
+describe("accountSyncWarnings", () => {
+  it("flags unreadable accounts and accounts still waiting on their first load", () => {
+    const w = accountSyncWarnings([
+      { id: "111", name: "US", history_loaded: true },
+      { id: "222", history_loaded: false, sync_error: "no access" },
+      { id: "333", history_loaded: false },
+    ]);
+    expect(w.map((x) => x.code)).toEqual(["meta_account_unreadable", "meta_account_not_synced"]);
+    expect(w[0]!.message).toContain("222");
+    expect(w[0]!.message).toContain("no access");
+    expect(w[1]!.message).toContain("333");
+    expect(w[1]!.message).not.toContain("222");
+  });
+
+  it("is empty when every account is loaded", () => {
+    expect(accountSyncWarnings([{ id: "111", history_loaded: true }])).toEqual([]);
+    expect(accountSyncWarnings(undefined)).toEqual([]);
+  });
+});
+
+type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+function register(grants: CatalogGrant[]): Handler {
+  let handler: Handler | null = null;
+  const mcp = { tool: (...args: unknown[]) => (handler = args[args.length - 1] as Handler) } as unknown as McpServer;
+  registerPaidTrafficTools(mcp, "token", grants);
+  return handler!;
+}
+
+function parse(res: Awaited<ReturnType<Handler>>) {
+  return JSON.parse(res.content[0]!.text) as Record<string, unknown> & {
+    warnings: Array<{ code: string; message: string }>;
+    side_effects: Array<{ kind: string }>;
+    issues: Array<{ id: string }>;
+  };
+}
+
+const ISSUE = {
+  id: "missing_tracking_params:c1",
+  code: "missing_tracking_params",
+  severity: "warning",
+  details: { ads: [{ ad_id: "a1" }, { ad_id: "a2" }, { ad_id: "a3" }], ads_total: 8, ads_offset: 0, unchecked: [{ reason: "setup_fetch_failed", ads: 2 }] },
+};
+
+const calls: Array<{ url: string; method: string }> = [];
+let reportWarnings: Array<{ code: string; message: string }> = [];
+
+beforeEach(() => {
+  calls.length = 0;
+  reportWarnings = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET" });
+      if (url.includes("/api/ads/meta/sync")) return new Response(JSON.stringify({ refresh: { state: "queued" } }), { status: 200 });
+      if (url.includes("/api/ads/report")) {
+        const report = {
+          meta: { connected: true, last_synced_at: null, accounts: [] },
+          ga4: { configured: true, last_export_date: null },
+          pages: [],
+          destinations: [],
+          campaigns: [],
+          totals: {},
+          warnings: reportWarnings,
+          refresh: { state: "queued" },
+        };
+        return new Response(JSON.stringify(report), { status: 200 });
+      }
+      const detail = url.includes("issue_ids");
+      const body = detail
+        ? { issue_window_days: 28, issues: [ISSUE], missing_issue_ids: ["gone:1"], snapshot_id: "ads_0123456789abcdef", refresh: { state: "idle" } }
+        : {
+            window_days: 28,
+            issue_window_days: 28,
+            status: "warnings",
+            kpis: {},
+            issues: [ISSUE],
+            warnings: [],
+            snapshot_id: "ads_0123456789abcdef",
+            refresh: { state: "idle" },
+          };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("get_paid_traffic refresh gate", () => {
+  it("warns refresh_not_allowed without ads_settings and still reads", async () => {
+    const out = parse(await register([{ name: "metrics_view" } as CatalogGrant])({ mode: "diagnostics", refresh: true }));
+    expect(out.warnings.map((w) => w.code)).toContain("refresh_not_allowed");
+    expect(calls.some((c) => c.url.includes("/api/ads/meta/sync"))).toBe(false);
+    expect(out.issues).toHaveLength(1);
+    expect(out.side_effects.map((s) => s.kind)).not.toContain("meta_sync_enqueued");
+  });
+
+  it("queues the Meta sync with ads_settings and reports the side effect", async () => {
+    const grants = [{ name: "metrics_view" }, { name: "ads_settings" }] as CatalogGrant[];
+    const out = parse(await register(grants)({ mode: "summary", refresh: true }));
+    const sync = calls.find((c) => c.url.includes("/api/ads/meta/sync"));
+    expect(sync?.method).toBe("POST");
+    expect(out.side_effects.map((s) => s.kind)).toContain("meta_sync_enqueued");
+    expect(out.warnings.map((w) => w.code)).not.toContain("refresh_not_allowed");
+  });
+});
+
+describe("get_paid_traffic diagnostics details", () => {
+  it("list mode: aggregates unchecked reasons and flags truncated ad lists", async () => {
+    const out = parse(await register([{ name: "metrics_view" } as CatalogGrant])({ mode: "diagnostics" }));
+    const codes = out.warnings.map((w) => w.code);
+    expect(codes).toContain("tracking_unchecked_setup_fetch_failed");
+    expect(codes).toContain("ads_truncated");
+    expect(out.snapshot_id).toBe("ads_0123456789abcdef");
+  });
+
+  it("detail mode: sends issue_ids, reports missing ids and the next ads_offset", async () => {
+    const out = parse(
+      await register([{ name: "metrics_view" } as CatalogGrant])({
+        mode: "diagnostics",
+        snapshot_id: "ads_0123456789abcdef",
+        issue_ids: ["missing_tracking_params:c1", "gone:1"],
+      }),
+    );
+    const diag = calls.find((c) => c.url.includes("/api/diagnostics/ads"))!;
+    expect(decodeURIComponent(diag.url)).toContain("issue_ids[]=missing_tracking_params:c1");
+    expect(decodeURIComponent(diag.url)).toContain("snapshot_id=ads_0123456789abcdef");
+    const notFound = out.warnings.find((w) => w.code === "issue_not_found");
+    expect(notFound?.message).toContain("gone:1");
+    const truncated = out.warnings.find((w) => w.code === "ads_truncated");
+    expect(truncated?.message).toContain("ads_offset 3");
+    expect(out.side_effects.map((s) => s.kind)).not.toContain("landing_probe");
+  });
+});
+
+describe("get_paid_traffic filters", () => {
+  const metricsOnly = [{ name: "metrics_view" } as CatalogGrant];
+
+  it("forwards id filters and since / until to the report", async () => {
+    await register(metricsOnly)({ mode: "campaigns", campaign_ids: ["111", "222"], ad_ids: ["9"], since: "2026-06-01", until: "2026-06-30" });
+    const url = decodeURIComponent(calls.find((c) => c.url.includes("/api/ads/report"))!.url);
+    expect(url).toContain("campaign_ids[]=111");
+    expect(url).toContain("campaign_ids[]=222");
+    expect(url).toContain("ad_ids[]=9");
+    expect(url).toContain("since=2026-06-01");
+    expect(url).toContain("until=2026-06-30");
+    expect(url).not.toContain("adset_ids");
+  });
+
+  it("adds a mode campaigns next action when ids matched nothing", async () => {
+    reportWarnings = [{ code: "filter_no_match", message: "No spend, visits or leads matched campaign_ids [111]" }];
+    const out = parse(await register(metricsOnly)({ mode: "summary", campaign_ids: ["111"] })) as unknown as {
+      warnings: Array<{ code: string }>;
+      next_actions: Array<{ tool: string; args_hint?: { mode?: string } }>;
+    };
+    expect(out.warnings.map((w) => w.code)).toContain("filter_no_match");
+    expect(out.next_actions.some((a) => a.tool === "get_paid_traffic" && a.args_hint?.mode === "campaigns")).toBe(true);
+  });
+
+  it("diagnostics: forwards id filters and warns that since / until are ignored", async () => {
+    const out = parse(await register(metricsOnly)({ mode: "diagnostics", adset_ids: ["55"], since: "2026-06-01" }));
+    const url = decodeURIComponent(calls.find((c) => c.url.includes("/api/diagnostics/ads"))!.url);
+    expect(url).toContain("adset_ids[]=55");
+    expect(url).not.toContain("since=");
+    const codes = out.warnings.map((w) => w.code);
+    expect(codes).toContain("range_ignored_in_diagnostics");
+    expect(codes).toContain("diagnostics_filtered");
+  });
+});

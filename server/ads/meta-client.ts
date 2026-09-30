@@ -1,6 +1,7 @@
 /**
  * Read-only Meta Marketing API client (Graph insights + creatives + account info).
- * Token: META_ADS_ACCESS_TOKEN (System User, `ads_read`). Never writes to Meta.
+ * Token: META_ADS_ACCESS_TOKEN (System User, `ads_read`). Never writes to Meta
+ * (live-ad edits live in ./meta-write.ts with a separate token).
  */
 
 import { child } from "../logger";
@@ -64,6 +65,8 @@ export type MetaAdCreativeInfo = {
   ad_id: string;
   campaign_id: string;
   adset_id: string;
+  /** Ad account the setup was read from (set by the sync). */
+  account_id?: string;
   effective_status?: string;
   /** Destination URLs found on the creative (link_data.link, asset_feed_spec.link_urls, …). */
   links: string[];
@@ -93,7 +96,7 @@ export function isMetaTokenConfigured(): boolean {
   return !!getMetaAccessToken();
 }
 
-function classifyError(status: number, code?: number): MetaApiError["kind"] {
+export function classifyError(status: number, code?: number): MetaApiError["kind"] {
   if (code === 190 || status === 401) return "auth";
   if (code === 10 || code === 200 || code === 270 || status === 403) return "permission";
   if (code === 4 || code === 17 || code === 32 || code === 613 || code === 80004 || status === 429) return "rate_limit";
@@ -264,6 +267,55 @@ export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativ
     limit: "200",
   });
   return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
+}
+
+export type MetaAdAccountSummary = {
+  id: string;
+  name: string;
+  currency: string;
+  /** 1 = active; anything else is disabled, closed, unsettled, etc. */
+  account_status: number;
+};
+
+const ACCOUNT_LIST_TTL_MS = 5 * 60 * 1000;
+let accountListCache: { token: string; at: number; accounts: MetaAdAccountSummary[] } | null = null;
+
+export function parseAdAccount(raw: Record<string, unknown>): MetaAdAccountSummary | null {
+  const id = String(raw.account_id ?? raw.id ?? "").replace(/^act_/i, "").trim();
+  if (!/^\d+$/.test(id)) return null;
+  return {
+    id,
+    name: String(raw.name ?? ""),
+    currency: String(raw.currency ?? "").toUpperCase(),
+    account_status: toNum(raw.account_status),
+  };
+}
+
+/** Every ad account the token can read (`me/adaccounts`), sorted by name. Cached briefly per token. */
+export async function listMetaAdAccounts(opts: { now?: number } = {}): Promise<MetaAdAccountSummary[]> {
+  const token = getMetaAccessToken();
+  if (!token) throw new MetaApiError("META_ADS_ACCESS_TOKEN is not set", 0, undefined, "auth");
+  const now = opts.now ?? Date.now();
+  if (accountListCache && accountListCache.token === token && now - accountListCache.at < ACCOUNT_LIST_TTL_MS) {
+    return accountListCache.accounts;
+  }
+  const raw = await graphGetAll("me/adaccounts", { fields: "account_id,name,currency,account_status", limit: "200" });
+  const seen = new Set<string>();
+  const accounts: MetaAdAccountSummary[] = [];
+  for (const r of raw) {
+    const a = parseAdAccount(r);
+    if (a && !seen.has(a.id)) {
+      seen.add(a.id);
+      accounts.push(a);
+    }
+  }
+  accounts.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  accountListCache = { token, at: now, accounts };
+  return accounts;
+}
+
+export function resetMetaAdAccountCache(): void {
+  accountListCache = null;
 }
 
 export type MetaConnectionTest = {
