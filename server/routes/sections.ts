@@ -190,7 +190,7 @@ import {
 import { resolveDynamicEntries } from "../dynamic-entries";
 import { mergeSingleTemplate, pruneStaleSectionAliases } from "../database-single-loader";
 import { loadMergedSinglePage } from "../entry-delivery";
-import { rejectAttachedStructuralEdit } from "../shared-layout-entry";
+import { rejectAttachedStructuralEdit, isTemplateVersioningSlug } from "../shared-layout-entry";
 import {
   resolveTemplateLocalePath,
   isTypeLayoutTarget,
