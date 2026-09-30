@@ -74,12 +74,15 @@ export type PaidLandingState = {
   last_export_date?: string;
 };
 
+export const PAID_LANDING_DAYS_DIR = "paid-landing-days";
+export const PAID_LANDING_STATE_FILE = "paid-landing-state.json";
+
 function dir(site: string): string {
-  return path.join(CACHE_DIR, site, "paid-landing-days");
+  return path.join(CACHE_DIR, site, PAID_LANDING_DAYS_DIR);
 }
 
 function statePath(site: string): string {
-  return path.join(CACHE_DIR, site, "paid-landing-state.json");
+  return path.join(CACHE_DIR, site, PAID_LANDING_STATE_FILE);
 }
 
 function readJson<T>(file: string): T | null {
@@ -121,6 +124,29 @@ export function loadPaidLandingDays(site: string, since: string, until: string):
     .filter((d) => d >= since && d <= until)
     .map((d) => loadPaidLandingDay(site, d))
     .filter((f): f is PaidLandingDayFile => !!f);
+}
+
+export type PaidLandingSnapshot = {
+  paid_landing_days: PaidLandingDayFile[];
+  paid_landing_state: PaidLandingState;
+};
+
+/** Every cached GA4 paid-landing day on or after `since` (for "Download from production"). */
+export function exportPaidLandingSnapshot(site: string, since: string): PaidLandingSnapshot {
+  return {
+    paid_landing_days: listPaidLandingDates(site)
+      .filter((d) => d >= since)
+      .map((d) => loadPaidLandingDay(site, d))
+      .filter((f): f is PaidLandingDayFile => !!f),
+    paid_landing_state: loadPaidLandingState(site),
+  };
+}
+
+/** Writes a snapshot under `stagingRoot` using the live cache layout; the caller swaps it in. */
+export function stagePaidLandingSnapshot(stagingRoot: string, snap: PaidLandingSnapshot): void {
+  fs.mkdirSync(path.join(stagingRoot, PAID_LANDING_DAYS_DIR), { recursive: true });
+  for (const f of snap.paid_landing_days) writeJson(path.join(stagingRoot, PAID_LANDING_DAYS_DIR, `${f.date}.json`), f);
+  writeJson(path.join(stagingRoot, PAID_LANDING_STATE_FILE), snap.paid_landing_state);
 }
 
 export function isGa4Configured(contentRoot?: string): boolean {

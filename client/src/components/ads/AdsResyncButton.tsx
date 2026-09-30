@@ -15,10 +15,13 @@ export function AdsResyncButton({
   refresh,
   onStarted,
   testIdPrefix,
+  snapshotPulledAt,
 }: {
   refresh: AdsRefreshStatus | undefined;
   onStarted?: () => void;
   testIdPrefix: string;
+  /** Set (ISO or null) when showing a production download with no local Meta token: re-sync is disabled. */
+  snapshotPulledAt?: string | null;
 }) {
   const { toast } = useToast();
   const { hasCapability } = useDebugAuth();
@@ -73,6 +76,30 @@ export function AdsResyncButton({
         </TooltipTrigger>
         <TooltipContent side="bottom" className="text-xs max-w-[16rem]">
           {label}
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  if (snapshotPulledAt !== undefined) {
+    const when = snapshotPulledAt ? new Date(snapshotPulledAt).toLocaleString() : "an earlier download";
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">
+            <button
+              type="button"
+              className={cn(ICON_BUTTON, "opacity-40 cursor-not-allowed")}
+              disabled
+              aria-label="Re-sync Meta ad data"
+              data-testid={`${testIdPrefix}-resync-snapshot`}
+            >
+              <RefreshCw className="h-3 w-3" />
+            </button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="text-xs max-w-[16rem]">
+          Showing production data from {when}. Re-sync needs a Meta token locally.
         </TooltipContent>
       </Tooltip>
     );

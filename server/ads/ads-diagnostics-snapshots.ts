@@ -104,6 +104,11 @@ export function saveAdsSnapshot(site: string, diagnostics: AdsDiagnostics, now =
   return snap;
 }
 
+/** Drop every saved build so the next read rebuilds from the current cache (e.g. after a production download). */
+export function clearAdsSnapshots(site: string): void {
+  fs.rmSync(dir(site), { recursive: true, force: true });
+}
+
 export type SnapshotLookup = { status: "ok"; snapshot: AdsDiagnosticsSnapshot } | { status: "expired" };
 
 /** Unknown, pruned and past-TTL ids all read as expired. */

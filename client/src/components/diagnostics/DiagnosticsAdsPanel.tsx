@@ -18,6 +18,7 @@ import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format"
 import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
 import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
+import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
 import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
@@ -654,8 +655,14 @@ export function DiagnosticsAdsPanel() {
       <div className="flex flex-wrap items-center justify-end gap-2" data-testid="ads-window-row">
         {isFetching && !isRefreshActive(data.refresh) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
         {data.status !== "not_connected" && (
-          <AdsResyncButton refresh={data.refresh} onStarted={() => void refetch()} testIdPrefix="ads-diagnostics" />
+          <AdsResyncButton
+            refresh={data.refresh}
+            onStarted={() => void refetch()}
+            testIdPrefix="ads-diagnostics"
+            snapshotPulledAt={data.meta.source === "production_snapshot" ? (data.meta.pulled_at ?? null) : undefined}
+          />
         )}
+        <AdsPullProductionButton onDone={() => void refetch()} testIdPrefix="ads-diagnostics" />
         <span className="text-sm text-muted-foreground">Numbers for</span>
         <ToggleButtonBar
           value={String(days)}

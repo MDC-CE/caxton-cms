@@ -6,6 +6,18 @@ window_days: 6
 
 entries:
   - date: "2026-09-30"
+    summary: "get_paid_traffic: local 'Download from production' copies show up as meta.source production_snapshot"
+    agent_impact:
+      - "On a local/dev server, staff can replace Ads data (Meta + GA4 cache, optionally leads + consent) with production's. Reports then show that copy even without a Meta token: meta.source = production_snapshot with pulled_at, last_date, production_origin."
+      - "New warnings meta_production_snapshot (copy, not re-synced; days after last_date are missing, not zero) and meta_snapshot_hidden_accounts (downloaded accounts missing from local settings; their spend is left out). Say 'production copy as of …', never 'live'."
+    tools_changed: false
+    paths:
+      - server/ads/ads-report.ts
+      - server/ads/ads-refresh.ts
+      - server/ads/pull-production.ts
+      - server/ads/leads-pull-production.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-09-30"
     summary: "get_paid_traffic: Facebook vs Instagram breakdown (meta_platforms) in summary + diagnostics; Meta template now utm_source={{site_source_name}}"
     agent_impact:
       - "Recommended Meta UTM template (Settings → Ads, utm_template, Fix via Meta) now uses utm_source={{site_source_name}} (Meta fills fb / ig / msg / an). Existing ads keep utm_source=facebook until staff edit them; Fix via Meta never rewrites an existing utm_source."

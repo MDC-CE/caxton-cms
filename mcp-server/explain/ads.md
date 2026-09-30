@@ -114,6 +114,8 @@ Same traffic on both sides, so it measures clicks lost between Meta and the site
 | `meta_refresh_failed` | Refresh didn't run (`refresh.state: failed`; job failed, or queued >5 min without starting). Message carries `refresh.error` and `refresh.retry_after`. Numbers are the last cached sync; do **not** re-call in a loop. Staff retry via Sync now (Settings → Ads); agents with `ads_settings` may pass `refresh: true` once |
 | `jobs_worker_down` | Background job worker not running (`refresh.state: worker_down`), so no automatic refresh. Numbers are the last cached sync. Staff Sync now runs it in the web server instead |
 | `meta_not_connected` | No token (`META_ADS_ACCESS_TOKEN`) or no enabled accounts — staff: `/private/settings/ads/meta` |
+| `meta_production_snapshot` | Dev/local only: numbers are a copy downloaded from production (`meta.source: "production_snapshot"`, `meta.pulled_at`, `meta.last_date`, `meta.production_origin`). Nothing re-syncs it without a local Meta token; days after `last_date` are missing, not zero. Say "production copy as of …", never "live" |
+| `meta_snapshot_hidden_accounts` | With a production copy: some downloaded accounts aren't in local Ads settings; their spend (in the message) is left out of totals |
 | `ga4_not_configured` | BigQuery export unset — staff: `/private/tracking/ga4` |
 | `mixed_currency` | Accounts in several currencies — compare within one currency |
 | `ledger_collecting` | Window starts before the ledger — site lead counts partial |

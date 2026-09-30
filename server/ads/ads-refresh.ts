@@ -17,6 +17,7 @@ import { isMetaTokenConfigured } from "./meta-client";
 import {
   isMetaStale,
   isMetaSyncInFlight,
+  listMetaDayDates,
   loadMetaState,
   META_STALE_MS,
   planMetaSyncSteps,
@@ -26,6 +27,7 @@ import {
 } from "./meta-ads-days";
 import {
   isGa4Configured,
+  listPaidLandingDates,
   loadPaidLandingState,
   planPaidLandingSteps,
   syncPaidLandingDays,
@@ -91,6 +93,28 @@ const inFlight = new Set<string>();
 export function isMetaConnected(contentRoot?: string): boolean {
   const meta = getAdsSettings(contentRoot).meta;
   return meta.enabled && meta.ad_account_ids.length > 0 && isMetaTokenConfigured();
+}
+
+/** Local cache was replaced by "Download from production" (dev only). */
+export function isProductionSnapshot(site: string): boolean {
+  return !!loadMetaState(site).pulled_from_production_at;
+}
+
+/**
+ * Reports and diagnostics may read Meta rows: connected, or a production download with day files.
+ * Anything that starts a sync must keep using `isMetaConnected`.
+ */
+export function hasMetaData(site: string, contentRoot?: string): boolean {
+  const meta = getAdsSettings(contentRoot).meta;
+  if (!meta.enabled || meta.ad_account_ids.length === 0) return false;
+  if (isMetaTokenConfigured()) return true;
+  return isProductionSnapshot(site) && listMetaDayDates(site).length > 0;
+}
+
+/** Reports may read GA4 paid-landing days: BigQuery configured, or a production download with day files. */
+export function hasGa4Data(site: string, contentRoot?: string): boolean {
+  if (isGa4Configured(contentRoot)) return true;
+  return isProductionSnapshot(site) && listPaidLandingDates(site).length > 0;
 }
 
 export type RefreshStatusDeps = {

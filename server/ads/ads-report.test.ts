@@ -209,6 +209,8 @@ const fixture: {
   collectingSince: number | null;
   platformRows?: MetaAdPlatformDayRow[];
   metaState?: Record<string, unknown>;
+  /** False = no local Meta token (with a downloaded snapshot, the report is in production_snapshot mode). */
+  metaConnected?: boolean;
 } = {
   metaRows,
   creatives: BASE_CREATIVES,
@@ -231,7 +233,10 @@ vi.mock("./consent-store", () => ({
   summarizeConsentRates: () => [],
 }));
 vi.mock("./ads-refresh", () => ({
-  isMetaConnected: () => true,
+  isMetaConnected: () => fixture.metaConnected ?? true,
+  hasMetaData: () => true,
+  hasGa4Data: () => true,
+  isProductionSnapshot: () => !!fixture.metaState?.pulled_from_production_at,
   getAdsRefreshStatus: () => ({ state: "idle", requested_at: null, started_at: null, finished_at: null, error: null, retry_after: null, progress: null }),
   triggerAdsRefreshIfStale: async () => false,
 }));
@@ -821,5 +826,54 @@ describe("buildAdsReport meta_platforms", () => {
 
   it("is omitted when turned off", () => {
     expect(build({ includeMetaPlatforms: false }).meta_platforms).toBeUndefined();
+  });
+});
+
+describe("buildAdsReport with a production download", () => {
+  const SNAPSHOT_STATE = {
+    consecutive_failures: 0,
+    accounts: {},
+    last_success_at: NOW.toISOString(),
+    pulled_from_production_at: "2026-09-20T10:00:00.000Z",
+    production_origin: "https://4geeks.com",
+    snapshot_last_date: "2026-09-19",
+  };
+  const build = () => buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+
+  afterAll(() => {
+    fixture.metaRows = metaRows;
+    fixture.metaState = undefined;
+    fixture.metaConnected = undefined;
+  });
+
+  it("without a local token: labels the copy, names its last day and warns about hidden accounts", () => {
+    fixture.metaConnected = false;
+    fixture.metaState = SNAPSHOT_STATE;
+    fixture.metaRows = [...metaRows, { ...metaRows[0]!, account_id: "999999", ad_id: "ad-hidden", spend: 12.5 }];
+    const r = build();
+    expect(r.meta).toMatchObject({
+      connected: true,
+      source: "production_snapshot",
+      pulled_at: "2026-09-20T10:00:00.000Z",
+      last_date: "2026-09-19",
+      production_origin: "https://4geeks.com",
+    });
+    const snap = r.warnings.find((w) => w.code === "meta_production_snapshot");
+    expect(snap?.message).toContain("https://4geeks.com");
+    expect(snap?.message).toContain("Last day: Sep 19. Newer days are missing.");
+    const hidden = r.warnings.find((w) => w.code === "meta_snapshot_hidden_accounts");
+    expect(hidden?.message).toContain("999999");
+    expect(hidden?.message).toContain("12.5 USD");
+    expect(r.warnings.map((w) => w.code)).not.toContain("meta_not_connected");
+  });
+
+  it("with a local token the same files read as a normal sync", () => {
+    fixture.metaConnected = true;
+    fixture.metaState = SNAPSHOT_STATE;
+    fixture.metaRows = metaRows;
+    const r = build();
+    expect(r.meta.source).toBe("sync");
+    expect(r.meta).not.toHaveProperty("pulled_at");
+    expect(r.warnings.map((w) => w.code)).not.toContain("meta_production_snapshot");
   });
 });

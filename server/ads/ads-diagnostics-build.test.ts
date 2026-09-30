@@ -169,7 +169,7 @@ vi.mock("./meta-ads-days", async (orig) => ({
 }));
 vi.mock("./paid-detection", () => ({ lastCompleteGa4Date: () => "2026-09-27" }));
 vi.mock("./lead-ledger", () => ({ ledgerLastRecordedAt: () => null }));
-vi.mock("./ads-refresh", () => ({ isMetaConnected: () => h.connected }));
+vi.mock("./ads-refresh", () => ({ isMetaConnected: () => h.connected, hasMetaData: () => h.connected }));
 vi.mock("../legal/legal-diagnostics", () => ({
   loadConsentWindow: () => ({ current: [], trailing: [] }),
   consentDropPct: () => null,

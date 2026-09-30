@@ -28,6 +28,7 @@ import { useSettingsDirty } from "@/components/settings/SettingsShell";
 import { AdsAlertThresholdsCard } from "@/components/settings/AdsAlertThresholdsCard";
 import { MetaTrackingParamsStatus } from "@/components/settings/MetaTrackingParamsStatus";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
+import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
 import type { TrackingParamsCoverage } from "@shared/ads-diagnostics-rules";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
@@ -65,6 +66,9 @@ type SettingsResponse = {
     history_since: string | null;
     history_until: string | null;
     accounts: Record<string, { name?: string; currency?: string; account_status?: number; error?: string }>;
+    pulled_from_production_at?: string | null;
+    production_origin?: string | null;
+    snapshot_last_date?: string | null;
   };
   ga4: { configured: boolean; last_success_at: string | null; last_export_date: string | null; last_error: string | null };
   policy: { refresh_days: number; backfill_days: number; retention_days: number; cache_dir: string };
@@ -504,6 +508,7 @@ export function MetaAdsTab() {
               {syncing === "older" ? <IconLoader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <IconHistory className="h-4 w-4 mr-1.5" />}
               Load older history
             </Button>
+            <AdsPullProductionButton variant="button" onDone={() => void refetch()} testIdPrefix="meta-sync" />
           </div>
           <ReadMore testId="button-meta-sync-advanced">
             <p>
@@ -548,7 +553,13 @@ export function MetaAdsTab() {
           {data.tracking_params && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="meta-utm-checked-at">
               <span>Checked at last sync: {fmtWhen(data.tracking_params.checked_at)}</span>
-              <AdsResyncButton refresh={data.refresh} onStarted={() => void refetch()} testIdPrefix="meta-utm" />
+              <AdsResyncButton
+                refresh={data.refresh}
+                onStarted={() => void refetch()}
+                testIdPrefix="meta-utm"
+                snapshotPulledAt={!data.token_configured ? (data.sync.pulled_from_production_at ?? undefined) : undefined}
+              />
+              <AdsPullProductionButton onDone={() => void refetch()} testIdPrefix="meta-utm" />
             </div>
           )}
           <ReadMore testId="button-meta-utm-advanced">

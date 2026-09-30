@@ -54,6 +54,11 @@ export type MetaAdsSyncState = {
   /** Earliest date we have fetched (inclusive). */
   history_since?: string;
   accounts: Record<string, MetaAccountSyncInfo>;
+  /** Dev-only: set when these files were replaced by "Download from production". */
+  pulled_from_production_at?: string;
+  production_origin?: string;
+  /** Newest day in the downloaded snapshot. */
+  snapshot_last_date?: string;
 };
 
 export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "account_status"> & {
@@ -90,8 +95,13 @@ export type MetaSyncResult = {
   skipped?: "not_enabled" | "no_accounts" | "no_token" | "in_progress";
 };
 
+export const META_DAYS_DIR = "meta-ads-days";
+export const META_PLATFORM_DAYS_DIR = "meta-ads-platform-days";
+export const META_STATE_FILE = "meta-ads-state.json";
+export const META_CREATIVES_FILE = "meta-ads-creatives.json";
+
 function dir(site: string): string {
-  return path.join(CACHE_DIR, site, "meta-ads-days");
+  return path.join(CACHE_DIR, site, META_DAYS_DIR);
 }
 
 function dayPath(site: string, date: string): string {
@@ -99,7 +109,7 @@ function dayPath(site: string, date: string): string {
 }
 
 function platformDir(site: string): string {
-  return path.join(CACHE_DIR, site, "meta-ads-platform-days");
+  return path.join(CACHE_DIR, site, META_PLATFORM_DAYS_DIR);
 }
 
 function platformDayPath(site: string, date: string): string {
@@ -107,11 +117,11 @@ function platformDayPath(site: string, date: string): string {
 }
 
 function statePath(site: string): string {
-  return path.join(CACHE_DIR, site, "meta-ads-state.json");
+  return path.join(CACHE_DIR, site, META_STATE_FILE);
 }
 
 function creativesPath(site: string): string {
-  return path.join(CACHE_DIR, site, "meta-ads-creatives.json");
+  return path.join(CACHE_DIR, site, META_CREATIVES_FILE);
 }
 
 function readJson<T>(file: string): T | null {
@@ -213,6 +223,39 @@ export function loadMetaPlatformRows(site: string, since: string, until: string,
     for (const r of file.rows) if (!allow || allow.has(r.account_id)) out.push(r);
   }
   return out;
+}
+
+export type MetaSnapshot = {
+  meta_days: MetaAdsDayFile[];
+  platform_days: MetaAdsPlatformDayFile[];
+  meta_state: MetaAdsSyncState;
+  creatives: MetaAdsCreatives;
+};
+
+/** Every cached Meta file on or after `since` (for "Download from production"). */
+export function exportMetaSnapshot(site: string, since: string): MetaSnapshot {
+  return {
+    meta_days: listMetaDayDates(site)
+      .filter((d) => d >= since)
+      .map((d) => loadMetaDay(site, d))
+      .filter((f): f is MetaAdsDayFile => !!f),
+    platform_days: listMetaPlatformDayDates(site)
+      .filter((d) => d >= since)
+      .map((d) => loadMetaPlatformDay(site, d))
+      .filter((f): f is MetaAdsPlatformDayFile => !!f),
+    meta_state: loadMetaState(site),
+    creatives: loadMetaCreatives(site),
+  };
+}
+
+/** Writes a snapshot under `stagingRoot` using the live cache layout; the caller swaps it in. */
+export function stageMetaSnapshot(stagingRoot: string, snap: MetaSnapshot): void {
+  fs.mkdirSync(path.join(stagingRoot, META_DAYS_DIR), { recursive: true });
+  fs.mkdirSync(path.join(stagingRoot, META_PLATFORM_DAYS_DIR), { recursive: true });
+  for (const f of snap.meta_days) writeJson(path.join(stagingRoot, META_DAYS_DIR, `${f.date}.json`), f);
+  for (const f of snap.platform_days) writeJson(path.join(stagingRoot, META_PLATFORM_DAYS_DIR, `${f.date}.json`), f);
+  writeJson(path.join(stagingRoot, META_CREATIVES_FILE), snap.creatives);
+  writeJson(path.join(stagingRoot, META_STATE_FILE), snap.meta_state);
 }
 
 export function pruneMetaDays(site: string, now = new Date()): number {

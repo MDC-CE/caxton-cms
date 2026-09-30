@@ -82,6 +82,11 @@ export type AdsCampaignGroup = {
 
 export type AdsMetaStatus = {
   connected: boolean;
+  /** `production_snapshot`: a dev copy downloaded from production that this server cannot re-sync. */
+  source?: "sync" | "production_snapshot";
+  pulled_at?: string;
+  last_date?: string;
+  production_origin?: string;
   last_synced_at: string | null;
   last_error: string | null;
   consecutive_failures: number;

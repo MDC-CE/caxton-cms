@@ -60,7 +60,7 @@ import {
 import type { MetaAdDayRow } from "./meta-client";
 import { lastCompleteGa4Date } from "./paid-detection";
 import { ledgerLastRecordedAt } from "./lead-ledger";
-import { isMetaConnected } from "./ads-refresh";
+import { hasMetaData } from "./ads-refresh";
 import { consentDropPct, consentTotals, loadConsentWindow } from "../legal/legal-diagnostics";
 
 const log = child({ module: "ads/ads-diagnostics" });
@@ -606,7 +606,7 @@ export async function buildAdsDiagnostics(opts: {
     noRefresh: true,
     now: new Date(Date.parse(`${report.window.start}T12:00:00.000Z`)),
   });
-  const connected = isMetaConnected(opts.contentRoot);
+  const connected = hasMetaData(opts.site, opts.contentRoot);
   const metaState = loadMetaState(opts.site);
   const issues: AdsIssue[] = [];
   const totalSpend = report.totals.spend;

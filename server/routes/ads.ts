@@ -17,6 +17,8 @@
  *   GET /api/diagnostics/ads              — Diagnostics Ads tab (or ?summary=1 roll-up);
  *       snapshot_id / issue_ids (≤10) / ads_limit / ads_offset page each issue's affected ads;
  *       campaign_ids / adset_ids / ad_ids keep issues touching those ads
+ *   GET /api/ads/export, GET /api/ads/leads/export — snapshots for local "Download from production"
+ * Dev only (metrics_view): /api/ads/pull-production(/origin), /api/ads/leads/pull-production
  */
 
 import type { Express, Request, Response } from "express";
@@ -40,7 +42,7 @@ import {
 } from "../ads/meta-client";
 import { listMetaDayDates, loadMetaState, META_BACKFILL_DAYS, META_REFRESH_DAYS, META_RETENTION_DAYS } from "../ads/meta-ads-days";
 import { isGa4Configured, loadPaidLandingState } from "../ads/paid-detection";
-import { getAdsRefreshStatus, isMetaConnected, requestAdsRefresh } from "../ads/ads-refresh";
+import { getAdsRefreshStatus, hasMetaData, requestAdsRefresh } from "../ads/ads-refresh";
 import { isRefreshActive } from "@shared/ads-refresh-status";
 import { AdsReportRangeError, getAdsReport } from "../ads/ads-report";
 import { adsDiagnosticsSummary, buildAdsDiagnostics, loadTrackingParamsCoverage } from "../ads/ads-diagnostics";
@@ -110,7 +112,7 @@ function settingsPayload(res: Response) {
   const days = listMetaDayDates(site);
   const ga4 = loadPaidLandingState(site);
   const refresh = getAdsRefreshStatus(site);
-  const trackingParams = isMetaConnected(contentRoot) ? loadTrackingParamsCoverage(site, ads.meta.ad_account_ids) : null;
+  const trackingParams = hasMetaData(site, contentRoot) ? loadTrackingParamsCoverage(site, ads.meta.ad_account_ids) : null;
   return {
     ads,
     token_configured: isMetaTokenConfigured(),
@@ -128,6 +130,9 @@ function settingsPayload(res: Response) {
       history_since: days[0] ?? null,
       history_until: days[days.length - 1] ?? null,
       accounts: state.accounts,
+      pulled_from_production_at: state.pulled_from_production_at ?? null,
+      production_origin: state.production_origin ?? null,
+      snapshot_last_date: state.snapshot_last_date ?? null,
     },
     ga4: {
       configured: isGa4Configured(contentRoot),
@@ -493,6 +498,116 @@ export function registerAdsRoutes(app: Express): void {
         error: err instanceof Error ? err.message : "Failed to update ads in Meta",
         ...(err instanceof MetaApiError ? { error_kind: err.kind } : {}),
       });
+    }
+  });
+
+  registerAdsProductionPullRoutes(app);
+}
+
+/** Refuse dev-only routes on production; returns true when the handler should stop. */
+function refuseInProduction(res: Response, what: string): boolean {
+  if (process.env.NODE_ENV !== "production") return false;
+  res.status(403).json({ error: "dev_only", message: `${what} is only available in development.` });
+  return true;
+}
+
+type PullFailure = { success: boolean; reason?: string; code?: string; productionOrigin: string; envVar?: string; not_supported?: boolean };
+
+function sendPullFailure(res: Response, result: PullFailure, fallback: string) {
+  if (result.code === "production_staff_token_required") {
+    return res.status(401).json({ ...result, error: result.reason ?? fallback });
+  }
+  res.status(result.not_supported ? 502 : 400).json({ ...result, error: result.reason ?? fallback });
+}
+
+/**
+ * "Download from production" (Diagnostics / Settings → Ads):
+ *   GET  /api/ads/export                   — production side: cached Meta + GA4 files (?days, default 90)
+ *   GET  /api/ads/leads/export             — production side: lead-ledger rows + consent_daily (?since ms)
+ *   GET  /api/ads/pull-production/origin   — dev only: which production origin a download would use
+ *   POST /api/ads/pull-production          — dev only: replace local Ads cache with production's
+ *   POST /api/ads/leads/pull-production    — dev only: replace local leads + consent with production's
+ */
+function registerAdsProductionPullRoutes(app: Express): void {
+  api.get(app, "/api/ads/export", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { buildAdsExport, clampExportDays } = await import("../ads/pull-production");
+      res.json(buildAdsExport(getSite(res), clampExportDays(req.query.days)));
+    } catch (err) {
+      log.warn({ err }, "[ads] export failed");
+      res.status(500).json({ error: "Failed to export Ads data" });
+    }
+  });
+
+  api.get(app, "/api/ads/leads/export", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { buildLeadsExport, defaultLeadsSince } = await import("../ads/leads-pull-production");
+      const raw = Number(req.query.since);
+      const since = Number.isFinite(raw) && raw > 0 ? raw : defaultLeadsSince();
+      res.json(buildLeadsExport(getSite(res), since));
+    } catch (err) {
+      log.warn({ err }, "[ads] leads export failed");
+      res.status(500).json({ error: "Failed to export leads" });
+    }
+  });
+
+  api.get(app, "/api/ads/pull-production/origin", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production ad data")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const { resolveProductionOrigin } = await import("../dev-production-fetch");
+    res.json({ productionOrigin: resolveProductionOrigin(getSite(res)) });
+  });
+
+  api.post(app, "/api/ads/pull-production", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production ad data")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const site = getSite(res);
+    try {
+      const { pullProductionAds } = await import("../ads/pull-production");
+      const body = (req.body ?? {}) as { productionOrigin?: unknown; days?: unknown };
+      const result = await pullProductionAds(site, {
+        productionOrigin: typeof body.productionOrigin === "string" ? body.productionOrigin : undefined,
+        days: typeof body.days === "number" ? body.days : undefined,
+      });
+      if (!result.success) return sendPullFailure(res, result, "Failed to download production ad data");
+      res.json({
+        ...result,
+        education:
+          "Replaced local Meta and GA4 ad data with production's. Leads were not changed by this call. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "[ads] pull-production failed");
+      res.status(500).json({ error: "Failed to download production ad data" });
+    }
+  });
+
+  api.post(app, "/api/ads/leads/pull-production", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    if (refuseInProduction(res, "Downloading production leads")) return;
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const site = getSite(res);
+    try {
+      const { pullProductionLeads } = await import("../ads/leads-pull-production");
+      const body = (req.body ?? {}) as { productionOrigin?: unknown; since?: unknown };
+      const result = await pullProductionLeads(site, {
+        sinceMs: typeof body.since === "number" && body.since > 0 ? body.since : undefined,
+        productionOrigin: typeof body.productionOrigin === "string" ? body.productionOrigin : undefined,
+      });
+      if (!result.success) return sendPullFailure(res, result, "Failed to download production leads");
+      res.json({
+        ...result,
+        education:
+          "Replaced local real leads and daily consent counts from `since` onward with production's. Local test leads were kept. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "[ads] leads pull-production failed");
+      res.status(500).json({ error: "Failed to download production leads" });
     }
   });
 }

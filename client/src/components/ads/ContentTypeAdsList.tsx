@@ -22,7 +22,7 @@ const COLUMNS: { id: SortField; label: string; title: string }[] = [
   { id: "unique_leads", label: "Leads", title: "Unique leads credited to this entry (repeats shown separately)" },
   { id: "conversion_rate", label: "Conv. rate", title: "Unique leads ÷ paid visits" },
   { id: "cost_per_lead", label: "CPL", title: "Spend ÷ unique leads" },
-  { id: "bounce_rate", label: "Bounce", title: "Share of paid visits that did not engage" },
+  { id: "bounce_rate", label: "Paid bounce", title: "Share of paid visits that did not engage" },
 ];
 
 function sortValue(row: AdsPageRow, field: SortField): number | null {

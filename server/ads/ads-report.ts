@@ -47,11 +47,11 @@ import {
   loadMetaRows,
   loadMetaState,
   META_RETENTION_DAYS,
+  shortDateRange,
   utcDate,
 } from "./meta-ads-days";
 import type { MetaAdCreativeInfo, MetaAdDayRow } from "./meta-client";
 import {
-  isGa4Configured,
   lastCompleteGa4Date,
   loadPaidLandingDays,
   loadPaidLandingState,
@@ -59,7 +59,14 @@ import {
 } from "./paid-detection";
 import { ledgerCollectingSince, listLedgerRows, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, summarizeConsentRates } from "./consent-store";
-import { getAdsRefreshStatus, isMetaConnected, triggerAdsRefreshIfStale } from "./ads-refresh";
+import {
+  getAdsRefreshStatus,
+  hasGa4Data,
+  hasMetaData,
+  isMetaConnected,
+  isProductionSnapshot,
+  triggerAdsRefreshIfStale,
+} from "./ads-refresh";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
 const log = child({ module: "ads/ads-report" });
@@ -215,7 +222,14 @@ export type AdsReport = {
   platform: AdPlatform | "all";
   attribution: { model: AttributionModel; lookback_days: 30; basis: "browser_observed" };
   meta: {
+    /** Meta rows are readable: connected, or a production download without a local token. */
     connected: boolean;
+    /** `production_snapshot`: a dev copy downloaded from production that this server cannot re-sync. */
+    source: "sync" | "production_snapshot";
+    /** Set with `production_snapshot`: when it was downloaded, its newest day and origin. */
+    pulled_at?: string;
+    last_date?: string;
+    production_origin?: string;
     last_synced_at: string | null;
     last_error: string | null;
     consecutive_failures: number;
@@ -827,8 +841,10 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   };
 
   // ── Meta spend → destination ─────────────────────────────────────────────
-  const metaConnected = isMetaConnected(opts.contentRoot);
+  const metaConnected = hasMetaData(opts.site, opts.contentRoot);
   const metaState = loadMetaState(opts.site);
+  /** Showing a production download that nothing here can refresh (no local Meta token). */
+  const snapshotMode = metaConnected && isProductionSnapshot(opts.site) && !isMetaConnected(opts.contentRoot);
   const includeMeta = platform === "all" || platform === "meta";
   const metaRowsAll: MetaAdDayRow[] = metaConnected ? loadMetaRows(opts.site, start, end, settings.meta.ad_account_ids) : [];
   const deriveIds = makeIdDeriver(metaRowsAll);
@@ -864,7 +880,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const leadGapDays = new Set<string>();
 
   // ── GA4 paid landings ────────────────────────────────────────────────────
-  const ga4Configured = isGa4Configured(opts.contentRoot);
+  const ga4Configured = hasGa4Data(opts.site, opts.contentRoot);
   const ga4State = loadPaidLandingState(opts.site);
   const paidDays = ga4Configured ? loadPaidLandingDays(opts.site, start, end) : [];
   const adLandingVotes = new Map<string, Map<string, number>>();
@@ -1212,6 +1228,35 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   if (!metaConnected && includeMeta) {
     warnings.push({ code: "meta_not_connected", message: "Meta Ads is not connected; spend, clicks and Meta-reported leads are missing." });
   }
+  if (snapshotMode) {
+    const pulledDay = metaState.pulled_from_production_at?.slice(0, 10);
+    const lastDay = metaState.snapshot_last_date;
+    warnings.push({
+      code: "meta_production_snapshot",
+      message: `Ad data downloaded from ${metaState.production_origin ?? "production"}${pulledDay ? ` on ${shortDateRange(pulledDay, pulledDay)}` : ""}. ${
+        lastDay ? `Last day: ${shortDateRange(lastDay, lastDay)}. Newer days are missing.` : "Newer days may be missing."
+      } It is a copy: nothing here re-syncs it from Meta without a local Meta token.`,
+    });
+    if (includeMeta) {
+      const configured = new Set(settings.meta.ad_account_ids);
+      const hiddenAccounts = new Set<string>();
+      const hiddenSpend: Record<string, number> = {};
+      for (const r of loadMetaRows(opts.site, start, end)) {
+        if (configured.has(r.account_id)) continue;
+        hiddenAccounts.add(r.account_id);
+        hiddenSpend[r.currency] = (hiddenSpend[r.currency] ?? 0) + r.spend;
+      }
+      if (hiddenAccounts.size > 0) {
+        const spend = Object.entries(hiddenSpend)
+          .map(([cur, n]) => `${Math.round(n * 100) / 100} ${cur}`)
+          .join(", ");
+        warnings.push({
+          code: "meta_snapshot_hidden_accounts",
+          message: `${hiddenAccounts.size} ad account(s) in the downloaded data aren't in your local Ads settings (${Array.from(hiddenAccounts).join(", ")}); their spend (${spend}) is hidden from these totals.`,
+        });
+      }
+    }
+  }
   if (!ga4Configured) {
     warnings.push({ code: "ga4_not_configured", message: "GA4 BigQuery export is not configured; paid visits and engagement are missing." });
   }
@@ -1342,6 +1387,14 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     attribution: { model, lookback_days: 30, basis: "browser_observed" },
     meta: {
       connected: metaConnected,
+      source: snapshotMode ? "production_snapshot" : "sync",
+      ...(snapshotMode
+        ? {
+            pulled_at: metaState.pulled_from_production_at,
+            last_date: metaState.snapshot_last_date,
+            production_origin: metaState.production_origin,
+          }
+        : {}),
       last_synced_at: metaState.last_success_at ?? null,
       last_error: metaState.last_error ?? null,
       consecutive_failures: metaState.consecutive_failures ?? 0,
