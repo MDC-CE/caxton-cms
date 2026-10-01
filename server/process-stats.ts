@@ -636,8 +636,10 @@ const trackedRequests = new Map<OpenRequest, number>();
 /** Express template when one exists. Otherwise the path that arrived, not "unmatched". */
 function routeForOpenCall(req: OpenRequest): string {
   const templated = resolveApiRoute({ ...req, path: req.path ?? "" });
-  if (templated !== "unmatched") return templated;
-  return req.path && req.path.length > 0 ? req.path : "unmatched";
+  const raw = (req.path ?? "").split("?")[0];
+  if (templated !== "unmatched" && !templated.includes("*")) return templated;
+  if (raw.length > 0) return raw;
+  return templated !== "unmatched" ? templated : "unmatched";
 }
 
 /** Group requests open for at least 500ms. Two of the same route share one row. */
@@ -1190,7 +1192,7 @@ export type StatsWindow = {
   eventLoop: { p50Ms: number; p99Ms: number; maxMs: number } | null;
   api: TrafficLatency | null;
   pages: TrafficLatency | null;
-  /** Open calls of this point. On a 5 or 30 minute point, only the 30s slice with the worst event loop. */
+  /** Open calls of this point. On a 5 or 30 minute point, the last 30s slice in the bucket. */
   openCalls: OpenCallRow[] | null;
 };
 
@@ -1201,6 +1203,8 @@ export type ChartStats = {
   boundsMs: number[];
   restarts?: Array<{ timestamp: number }>;
   windows: StatsWindow[];
+  /** Present when the request asked for route lines. One series per requested route, same order. */
+  routes?: RouteSeries[];
 };
 
 export type DetailRoute = {
@@ -1423,7 +1427,22 @@ function sharedBounds(groups: Array<Map<number, { bounds: number[] | null; mixed
  * Gauges are the worst 30s value in the bucket. API and page percentiles come
  * from the summed histogram. Does not backfill empty timestamps.
  */
-export function readProcessStats(opts: { from?: number; to?: number; now?: number; processName?: ProcessName } = {}): ChartStats {
+/** One route left out of Calls and Latency. Gauges are unchanged. Pages match route only. */
+export type OmittedRoute = {
+  kind: "api" | "pages";
+  method: string | null;
+  route: string;
+};
+
+export function readProcessStats(opts: {
+  from?: number;
+  to?: number;
+  now?: number;
+  processName?: ProcessName;
+  omit?: OmittedRoute[];
+  /** Route lines to attach, in this order. At most six. */
+  series?: OmittedRoute[];
+} = {}): ChartStats {
   const { from, to, stepMs } = clampRange(opts);
   const opened = openDatabase();
   const nameFilter = opts.processName;
@@ -1442,16 +1461,33 @@ export function readProcessStats(opts: { from?: number; to?: number; now?: numbe
   const includeTraffic = nameFilter == null || nameFilter === "web";
   const pids = [...new Set(samples.map((row) => row.processId))];
   const filter = includeTraffic ? pidFilter(pids) : { sql: " AND 1 = 0", params: [] };
-  const routeParams = [from, to, ...filter.params];
+  const omitSql = (kind: "api" | "pages"): { sql: string; params: string[] } => {
+    const list = (opts.omit ?? []).filter((item) => item.kind === kind);
+    if (list.length === 0) return { sql: "", params: [] };
+    if (kind === "api") {
+      const matched = list.filter((item) => item.method);
+      if (matched.length === 0) return { sql: "", params: [] };
+      return {
+        sql: ` AND ${matched.map(() => "NOT (method = ? AND route = ?)").join(" AND ")}`,
+        params: matched.flatMap((item) => [item.method as string, item.route]),
+      };
+    }
+    return {
+      sql: ` AND ${list.map(() => "route != ?").join(" AND ")}`,
+      params: list.map((item) => item.route),
+    };
+  };
+  const apiOmit = omitSql("api");
+  const pageOmit = omitSql("pages");
   const apiRows = includeTraffic && pids.length > 0
     ? opened.prepare(
-      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM api_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
-    ).all(...routeParams) as Array<Record<string, unknown>>
+      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM api_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}${apiOmit.sql}`,
+    ).all(from, to, ...filter.params, ...apiOmit.params) as Array<Record<string, unknown>>
     : [];
   const pageRows = includeTraffic && pids.length > 0
     ? opened.prepare(
-      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
-    ).all(...routeParams) as Array<Record<string, unknown>>
+      `SELECT timestamp, count, sumMs, maxMs, durationBoundsId, durationCounts FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}${pageOmit.sql}`,
+    ).all(from, to, ...filter.params, ...pageOmit.params) as Array<Record<string, unknown>>
     : [];
 
   const boundsById = loadBounds(opened, [...new Set(
@@ -1490,7 +1526,7 @@ export function readProcessStats(opts: { from?: number; to?: number; now?: numbe
       inFlightMaxRequests: Math.max(prev.inFlightMaxRequests, sample.inFlightMaxRequests),
       openFds: maxOrNull(prev.openFds, sample.openFds),
       openFdsLimit: prev.openFdsLimit ?? sample.openFdsLimit,
-      openCalls: incomingIsWorse ? sample.openCalls : prev.openCalls,
+      openCalls: sample.openCalls,
     });
   }
 
@@ -1555,6 +1591,11 @@ export function readProcessStats(opts: { from?: number; to?: number; now?: numbe
     windows,
   };
   if (nameFilter !== "diagnostics-worker") stats.restarts = restarts;
+  if (opts.series && opts.series.length > 0) {
+    stats.routes = opts.series.map((item) => readRouteSeries({
+      from, to, now: opts.now, processName: nameFilter ?? "web", route: item.route, kind: item.kind, method: item.method,
+    }));
+  }
   return stats;
 }
 
@@ -1693,20 +1734,100 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
  * inclusive pair of integer epoch milliseconds. A partial or inverted pair
  * is ignored and the read falls back to the last 24 hours.
  */
+function queryText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length > 0 ? text : undefined;
+}
+
+const MAX_CHART_ROUTES = 6;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/** Body wins when the field is present, including an explicit empty value. */
+function pickField(body: Record<string, unknown> | null, query: Record<string, unknown>, key: string): unknown {
+  if (body && Object.prototype.hasOwnProperty.call(body, key)) return body[key];
+  return query[key];
+}
+
+function parseRouteRef(value: unknown, where: string): { ok: true; route: OmittedRoute } | { ok: false; error: string } {
+  const row = asRecord(value);
+  if (!row) return { ok: false, error: `${where} must be an object` };
+  const kind = queryText(row.kind);
+  if (kind !== "api" && kind !== "pages") return { ok: false, error: `${where} kind is api or pages` };
+  const route = queryText(row.route);
+  if (!route) return { ok: false, error: `${where} route is required` };
+  if (kind === "pages") return { ok: true, route: { kind, method: null, route } };
+  const method = queryText(row.method)?.toUpperCase();
+  if (!method) return { ok: false, error: `${where} method is required` };
+  return { ok: true, route: { kind, method, route } };
+}
+
+function parseRouteList(value: unknown, where: string): { ok: true; routes: OmittedRoute[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: `${where} must be an array` };
+  if (value.length > MAX_CHART_ROUTES) return { ok: false, error: `${where} accepts at most ${MAX_CHART_ROUTES} routes` };
+  const routes: OmittedRoute[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const parsed = parseRouteRef(value[i], `${where}[${i}]`);
+    if (!parsed.ok) return parsed;
+    routes.push(parsed.route);
+  }
+  return { ok: true, routes };
+}
+
 export function resolveProcessStatsRequest(
-  query: { process?: unknown; starting_at?: unknown; ending_at?: unknown },
+  query: {
+    process?: unknown;
+    starting_at?: unknown;
+    ending_at?: unknown;
+    kind?: unknown;
+    method?: unknown;
+    route?: unknown;
+  },
   now?: number,
+  body?: unknown,
 ): { ok: false; error: string } | { ok: true; stats: ChartStats } {
-  const rawName = query.process;
+  const record = asRecord(body);
+  const rawName = pickField(record, query, "process");
   const processName = typeof rawName === "string" && (PROCESS_NAMES as readonly string[]).includes(rawName)
     ? (rawName as ProcessName)
     : null;
   if (!processName) {
     return { ok: false, error: `process is required: ${PROCESS_NAMES.join(" | ")}` };
   }
-  const startingAt = queryInt(query.starting_at);
-  const endingAt = queryInt(query.ending_at);
+  const startingAt = queryInt(pickField(record, query, "starting_at"));
+  const endingAt = queryInt(pickField(record, query, "ending_at"));
   const pair = startingAt != null && endingAt != null && startingAt <= endingAt;
+
+  let omit: OmittedRoute[] = [];
+  if (record && Object.prototype.hasOwnProperty.call(record, "exclude")) {
+    const parsed = parseRouteList(record.exclude, "exclude");
+    if (!parsed.ok) return parsed;
+    omit = parsed.routes;
+  }
+
+  let series: OmittedRoute[] = [];
+  if (record && Object.prototype.hasOwnProperty.call(record, "routes")) {
+    const parsed = parseRouteList(record.routes, "routes");
+    if (!parsed.ok) return parsed;
+    series = parsed.routes;
+  } else {
+    const kind = queryText(pickField(record, query, "kind"));
+    const route = queryText(pickField(record, query, "route"));
+    if (kind != null || route != null) {
+      const parsed = parseRouteRef({
+        kind,
+        method: pickField(record, query, "method"),
+        route,
+      }, "route");
+      if (!parsed.ok) return parsed;
+      series = [parsed.route];
+    }
+  }
+
   return {
     ok: true,
     stats: readProcessStats({
@@ -1714,6 +1835,8 @@ export function resolveProcessStatsRequest(
       to: pair ? endingAt : undefined,
       now,
       processName,
+      omit,
+      series,
     }),
   };
 }

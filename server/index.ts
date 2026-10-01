@@ -235,6 +235,23 @@ function formatApiResponseForLog(path: string, body: Record<string, unknown>): s
   return `${raw.slice(0, API_LOG_BODY_MAX_CHARS)}… (${raw.length} chars)`;
 }
 
+/** Express routes of this process, except the MCP/OAuth proxy and the /apply redirect. */
+function shouldTrackRoute(req: Request): boolean {
+  if (!req.route) return false;
+  const path = req.path || "";
+  if (path === "/apply" || path.startsWith("/apply/")) return false;
+  if (
+    path === "/mcp"
+    || path.startsWith("/mcp/")
+    || path === "/oauth"
+    || path.startsWith("/oauth/")
+    || path === "/.well-known/oauth-authorization-server"
+    || path === "/.well-known/oauth-protected-resource"
+    || path.startsWith("/.well-known/oauth-protected-resource/")
+  ) return false;
+  return true;
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -257,8 +274,10 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const duration = Date.now() - start;
     settle();
-    if (path.startsWith("/api")) {
+    if (shouldTrackRoute(req)) {
       noteApi(req.method, resolveApiRoute(req), duration, res.statusCode);
+    }
+    if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       // 304 + polling endpoints: status line only (body unchanged / not useful in logs).
       if (capturedJsonResponse && res.statusCode !== 304) {

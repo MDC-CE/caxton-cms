@@ -314,7 +314,7 @@ function SortableHead({
   );
 }
 
-export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
+export function ErrorLogIssueTable({ issues, bare = false }: { issues: UniqueIssue[]; bare?: boolean }) {
   const [openIssue, setOpenIssue] = useState<string | null>(null);
   const [pathname, setLocation] = useLocation();
   const searchString = useSearch();
@@ -329,16 +329,7 @@ export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
   );
   const sortedIssues = useMemo(() => sortErrorLogIssues(issues, sort), [issues, sort]);
   if (issues.length === 0) return null;
-  return (
-    <Card data-testid="card-unique-issues">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">Top unique issues</CardTitle>
-        <p className="text-xs text-muted-foreground mt-1">
-          Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
-          (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
-        </p>
-      </CardHeader>
-      <CardContent className="p-0">
+  const table = (
         <Table>
           <TableHeader>
             <TableRow>
@@ -396,6 +387,19 @@ export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
             })}
           </TableBody>
         </Table>
+  );
+  if (bare) return table;
+  return (
+    <Card data-testid="card-unique-issues">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Top unique issues</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
+          (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        {table}
       </CardContent>
     </Card>
   );
@@ -476,13 +480,10 @@ function ErrorLogPageInner() {
     <div className="p-6 space-y-6 max-w-6xl mx-auto">
       <ServerSectionHeader
         section="logs"
-        title="Logs y rendimiento"
-        description="Logs y rendimiento son del proceso, no de un sitio. El log guarda avisos y errores de las últimas 48 horas."
+        title="Logs"
+        description="Warnings and errors from the whole server, for every site, kept for the last 48 hours. The table groups the same message into one issue. Repeated warnings are rate-limited when they are stored, so the totals stay usable."
       />
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Logs</h2>
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <div className="flex flex-wrap gap-2">
           {import.meta.env.DEV ? (
             <Button

@@ -350,7 +350,7 @@ function parseErrorLogContext(raw: string | null): Record<string, unknown> | nul
 }
 
 export function registerAdminRoutes(app: Express): void {
-  app.get("/api/admin/process-stats", async (req, res) => {
+  const readChart = async (req: import("express").Request, res: import("express").Response) => {
     const auth = await requireCapability(req, res, "metrics_view");
     if (!auth.authorized) return;
     try {
@@ -358,7 +358,10 @@ export function registerAdminRoutes(app: Express): void {
         process: req.query.process,
         starting_at: req.query.starting_at,
         ending_at: req.query.ending_at,
-      });
+        kind: req.query.kind,
+        method: req.query.method,
+        route: req.query.route,
+      }, undefined, req.body);
       if (!result.ok) {
         res.status(400).json({ error: result.error });
         return;
@@ -368,7 +371,9 @@ export function registerAdminRoutes(app: Express): void {
       log.error({ err }, "Failed to read process stats");
       res.status(500).json({ error: "Failed to read process stats" });
     }
-  });
+  };
+  app.get("/api/admin/process-stats", readChart);
+  app.post("/api/admin/process-stats", readChart);
 
   app.get("/api/admin/process-stats/route", async (req, res) => {
     const auth = await requireCapability(req, res, "metrics_view");
