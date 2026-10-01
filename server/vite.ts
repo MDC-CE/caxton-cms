@@ -30,7 +30,10 @@ import { type Server } from "http";
 import viteConfig from "../vite.config";
 import { resolveInitialData, resolvePreloadHints, injectSsrMetaTags, type PreloadHint, type InitialDataPayload } from "./initial-data-middleware";
 import { injectSsrSchemaHtml } from "./ssr-schema";
-import { resolvePublicHtmlStatus } from "./public-html-status";
+import {
+  resolvePublicHtmlStatus,
+  shouldSkipPublicSsr,
+} from "./public-html-status";
 import { applyEntryModulePreload } from "./utils/html-transforms";
 import { getEntryAssets, buildEntryPreloadTags, buildEntryLinkHeader } from "./utils/vite-manifest";
 import { isMeaningfulSsrAppHtml } from "./utils/ssr-html";
@@ -225,9 +228,21 @@ export async function setupVite(app: Express, server: Server): Promise<ViteDevSe
 
       const initialDataPayload = await getInitialDataForRequest(url, res);
 
+      const payloadStatus =
+        initialDataPayload &&
+        typeof (initialDataPayload as { httpStatus?: number }).httpStatus === "number"
+          ? (initialDataPayload as { httpStatus: number }).httpStatus
+          : undefined;
+      const status = resolvePublicHtmlStatus({
+        url,
+        httpStatus: payloadStatus,
+        contentIndex: siteContentIndex(res),
+      });
+
       let appHtml = "";
       const cleanUrlForSsr = url.split("?")[0].split("#")[0];
-      const skipSsr = cleanUrlForSsr.startsWith("/private/");
+      const skipSsr =
+        cleanUrlForSsr.startsWith("/private/") || shouldSkipPublicSsr(status);
       let ssrOutcome: "ok" | "skipped" | "empty" | "error" = skipSsr ? "skipped" : "ok";
       if (!skipSsr) {
         const t0 = Date.now();
@@ -317,16 +332,6 @@ export async function setupVite(app: Express, server: Server): Promise<ViteDevSe
 
       html = injectGtmWebContainerId(html, (res.locals as any).site?.contentRoot);
 
-      const payloadStatus =
-        initialDataPayload &&
-        typeof (initialDataPayload as { httpStatus?: number }).httpStatus === "number"
-          ? (initialDataPayload as { httpStatus: number }).httpStatus
-          : undefined;
-      const status = resolvePublicHtmlStatus({
-        url,
-        httpStatus: payloadStatus,
-        contentIndex: siteContentIndex(res),
-      });
       maybeRecordPublicNotFound(req, res, status);
       res.status(status).set({ "Content-Type": "text/html" }).end(html);
     } catch (e) {
@@ -421,14 +426,10 @@ export function serveStatic(app: Express) {
     const tHtml = Date.now();
     let pageOutcome = "client_fallback";
 
-    let status = resolvePublicHtmlStatus({
-      url,
-      contentIndex: siteContentIndex(res),
-    });
     const ssrSchemaHtml = _req.ssrSchemaHtml;
 
     const cleanUrlForSsr = url.split("?")[0].split("#")[0];
-    const skipSsr = cleanUrlForSsr.startsWith("/private/");
+    const skipPrivate = cleanUrlForSsr.startsWith("/private/");
 
     const site = (res.locals as any).site;
     const siteId =
@@ -436,7 +437,7 @@ export function serveStatic(app: Express) {
       site?.contentRoot ||
       site?.domain ||
       "default";
-    const bypassCache = skipSsr || shouldBypassHtmlCache(_req);
+    const bypassCache = skipPrivate || shouldBypassHtmlCache(_req);
     res.on("finish", () => {
       try {
         notePage(
@@ -451,6 +452,11 @@ export function serveStatic(app: Express) {
       }
     });
 
+    let status = resolvePublicHtmlStatus({
+      url,
+      contentIndex: siteContentIndex(res),
+    });
+
     try {
       // Ensure variant key is resolved before MISS populate
       if (!(res.locals as any).htmlVariantKey && !bypassCache) {
@@ -462,15 +468,11 @@ export function serveStatic(app: Express) {
         cleanUrlForSsr,
         (res.locals as any).htmlVariantKey || "live",
       );
-      const render = !skipSsr ? await getSsrRender() : null;
-      if (!skipSsr && !render) {
-        ssrDiag(
-          { url },
-          "no SSR render fn available — falling back to empty #root",
-        );
-      }
-      if (render) {
-        const indexHtml = await fs.promises.readFile(indexHtmlPath, "utf-8");
+
+      // Private admin UI: client shell only (existing).
+      // Non-200 public URLs: skip SSR (matches renderHubHtml) — avoids empty-#root
+      // retries for /landing/null and other unknown paths.
+      if (!skipPrivate && !shouldSkipPublicSsr(status)) {
         const initialDataPayload = await getInitialDataForRequest(url, res);
         status = resolvePublicHtmlStatus({
           url,
@@ -481,73 +483,89 @@ export function serveStatic(app: Express) {
               : undefined,
           contentIndex: siteContentIndex(res),
         });
-        const t0 = Date.now();
-        let appHtml = await render(url, initialDataPayload);
-        if (!isMeaningfulSsrAppHtml(appHtml)) {
-          ssrDiag(
-            { url, appHtmlLength: appHtml?.length ?? 0, ms: Date.now() - t0 },
-            "SSR returned empty body, retrying once",
-          );
-          appHtml = await render(url, initialDataPayload);
-        }
-        if (!isMeaningfulSsrAppHtml(appHtml)) {
-          ssrDiag(
-            {
+
+        if (shouldSkipPublicSsr(status)) {
+          pageOutcome = "ssr_skipped_non_200";
+        } else {
+          const render = await getSsrRender();
+          if (!render) {
+            ssrDiag(
+              { url },
+              "no SSR render fn available — falling back to empty #root",
+            );
+          } else {
+            const indexHtml = await fs.promises.readFile(indexHtmlPath, "utf-8");
+            const t0 = Date.now();
+            let appHtml = await render(url, initialDataPayload);
+            if (!isMeaningfulSsrAppHtml(appHtml)) {
+              ssrDiag(
+                { url, appHtmlLength: appHtml?.length ?? 0, ms: Date.now() - t0 },
+                "SSR returned empty body, retrying once",
+              );
+              appHtml = await render(url, initialDataPayload);
+            }
+            if (!isMeaningfulSsrAppHtml(appHtml)) {
+              ssrDiag(
+                {
+                  url,
+                  appHtmlLength: appHtml?.length ?? 0,
+                  ms: Date.now() - t0,
+                  preview: String(appHtml ?? "").slice(0, 120),
+                },
+                "SSR returned empty body after retry — not caching empty #root",
+              );
+              pageOutcome = "ssr_empty_fallback";
+              throw new Error("empty_ssr_app_html");
+            }
+
+            let html = indexHtml.replace(
+              '<div id="root"></div>',
+              `<div id="root">${appHtml}</div>`,
+            );
+
+            const preloadUrls = resolvePreloadHints(initialDataPayload);
+            const preloadTags = buildPreloadTags(preloadUrls);
+            html = injectPreloadTags(html, preloadTags);
+            html = injectSsrMetaTags(
+              html,
+              initialDataPayload,
+              (res.locals as any).site?.contentRoot,
               url,
-              appHtmlLength: appHtml?.length ?? 0,
-              ms: Date.now() - t0,
-              preview: String(appHtml ?? "").slice(0, 120),
-            },
-            "SSR returned empty body after retry — not caching empty #root",
-          );
-          pageOutcome = "ssr_empty_fallback";
-          throw new Error("empty_ssr_app_html");
+            );
+
+            if (ssrSchemaHtml) {
+              html = injectSsrSchemaHtml(html, ssrSchemaHtml);
+            }
+
+            if (initialDataPayload) {
+              const scriptTag = `<script id="__INITIAL_DATA__" type="application/json">${JSON.stringify(initialDataPayload).replace(/</g, "\\u003c")}</script>`;
+              html = html.replace("</body>", scriptTag + "</body>");
+            }
+
+            html = applyEntryModulePreload(html);
+            html = applyEntryPreloads(html, res);
+
+            // Cache HTML with the GTM placeholder intact; inject the live ID only on send
+            // so settings changes apply on cache HITs without busting the page cache.
+            const htmlForCache = html;
+            html = injectGtmWebContainerId(html, (res.locals as any).site?.contentRoot);
+
+            if (!bypassCache && status === 200) {
+              setCachedHtml(cacheKey, htmlForCache, status);
+              res.setHeader("X-HTML-Cache", "MISS");
+            }
+            pageOutcome = "ssr_ok";
+
+            maybeRecordPublicNotFound(_req, res, status);
+            res.status(status).set({ "Content-Type": "text/html" }).send(html);
+            return;
+          }
         }
-
-        let html = indexHtml.replace(
-          '<div id="root"></div>',
-          `<div id="root">${appHtml}</div>`,
-        );
-
-        const preloadUrls = resolvePreloadHints(initialDataPayload);
-        const preloadTags = buildPreloadTags(preloadUrls);
-        html = injectPreloadTags(html, preloadTags);
-        html = injectSsrMetaTags(
-          html,
-          initialDataPayload,
-          (res.locals as any).site?.contentRoot,
-          url,
-        );
-
-        if (ssrSchemaHtml) {
-          html = injectSsrSchemaHtml(html, ssrSchemaHtml);
-        }
-
-        if (initialDataPayload) {
-          const scriptTag = `<script id="__INITIAL_DATA__" type="application/json">${JSON.stringify(initialDataPayload).replace(/</g, "\\u003c")}</script>`;
-          html = html.replace("</body>", scriptTag + "</body>");
-        }
-
-        html = applyEntryModulePreload(html);
-        html = applyEntryPreloads(html, res);
-
-        // Cache HTML with the GTM placeholder intact; inject the live ID only on send
-        // so settings changes apply on cache HITs without busting the page cache.
-        const htmlForCache = html;
-        html = injectGtmWebContainerId(html, (res.locals as any).site?.contentRoot);
-
-        if (!bypassCache && status === 200) {
-          setCachedHtml(cacheKey, htmlForCache, status);
-          res.setHeader("X-HTML-Cache", "MISS");
-        }
-        pageOutcome = "ssr_ok";
-
-        maybeRecordPublicNotFound(_req, res, status);
-        res.status(status).set({ "Content-Type": "text/html" }).send(html);
-        return;
+      } else if (!skipPrivate && shouldSkipPublicSsr(status)) {
+        pageOutcome = "ssr_skipped_non_200";
       }
     } catch (e) {
-      if (pageOutcome === "client_fallback") {
+      if (pageOutcome === "client_fallback" || pageOutcome === "ssr_skipped_non_200") {
         pageOutcome =
           e instanceof Error && e.message === "empty_ssr_app_html"
             ? "ssr_empty_fallback"
@@ -563,7 +581,9 @@ export function serveStatic(app: Express) {
       );
     }
 
-    ssrDiag({ url, hasSchema: Boolean(ssrSchemaHtml) }, "serving client-only HTML fallback");
+    if (pageOutcome !== "ssr_skipped_non_200") {
+      ssrDiag({ url, hasSchema: Boolean(ssrSchemaHtml) }, "serving client-only HTML fallback");
+    }
 
     if (ssrSchemaHtml) {
       try {

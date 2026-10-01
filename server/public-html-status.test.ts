@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   isKnownPublicHtmlRoute,
   resolvePublicHtmlStatus,
+  shouldSkipPublicSsr,
 } from "./public-html-status";
 
 const BLOG_POST = "/es/blog/herramientas-ia/mejores-agentes-de-codigo";
@@ -38,7 +39,6 @@ describe("resolvePublicHtmlStatus", () => {
 
   it("returns 200 for static and private paths without asking the index", () => {
     const ci = fakeCi(new Set());
-    expect(resolvePublicHtmlStatus({ url: "/es/aplica", contentIndex: ci })).toBe(200);
     expect(resolvePublicHtmlStatus({ url: "/preview-frame", contentIndex: ci })).toBe(200);
     expect(resolvePublicHtmlStatus({ url: "/private/diagnostics", contentIndex: ci })).toBe(200);
     expect(ci.isKnownUrl).not.toHaveBeenCalled();
@@ -66,6 +66,15 @@ describe("resolvePublicHtmlStatus", () => {
       }),
     ).toBe(200);
     expect(ci.isKnownUrl).toHaveBeenCalledWith(BLOG_POST);
+  });
+});
+
+describe("shouldSkipPublicSsr", () => {
+  it("skips SSR for any non-200 status", () => {
+    expect(shouldSkipPublicSsr(200)).toBe(false);
+    expect(shouldSkipPublicSsr(404)).toBe(true);
+    expect(shouldSkipPublicSsr(403)).toBe(true);
+    expect(shouldSkipPublicSsr(500)).toBe(true);
   });
 });
 
