@@ -12,10 +12,12 @@ import {
 } from "./entry-preview-manager";
 import { getPreviewConfig, getLocaleKey, getContentTypeConfig } from "./content-types";
 import { isPreviewCaptureReady } from "./entry-preview-config";
-import { captureScreenshotToWebp, cloudflareBrowserConfigError, getPublicSiteUrl } from "./cloudflare-browser";
-import { buildSignedEntryPreviewFrameUrl } from "./entry-preview-capture-auth";
+import { captureScreenshotToWebp, cloudflareBrowserConfigError } from "./cloudflare-browser";
 import { persistGeneratedOgImageToEntryYaml } from "./entry-preview-og-yaml";
-import { buildPreviewPropResolveContext } from "./entry-preview-resolve";
+import {
+  buildEntryCaptureHtml,
+  classifyCaptureFailure,
+} from "./entry-preview-capture-html";
 import { getEntryPreviewSettings, normalizeLocale } from "./settings";
 import { child } from "./logger";
 
@@ -150,30 +152,30 @@ async function runOneJob(job: InternalJob): Promise<void> {
         ? "light"
         : "dark";
 
-  const ctx = await buildPreviewPropResolveContext({
+  const height = preview!.maxHeight ?? 630;
+  const captureDoc = await buildEntryCaptureHtml({
     contentType: job.contentType,
     slug: job.slug,
     locale,
     entry,
+    preview: preview!,
+    theme,
     contentRoot: site.contentRoot,
+    mediaGallery: site.mediaGallery,
     db: site.database,
     contentIndex: site.contentIndex,
-    mediaGallery: site.mediaGallery,
-    theme,
+    width,
+    height,
   });
-  const propsHash = hashPreviewProps(preview!.props, ctx);
-
-  const frameUrl = buildSignedEntryPreviewFrameUrl({
-    contentType: job.contentType,
-    slug: job.slug,
-    locale,
-    theme,
-  });
+  const propsHash = hashPreviewProps(preview!.props, captureDoc.ctx);
 
   const { webp } = await captureScreenshotToWebp({
-    url: frameUrl,
+    html: captureDoc.html,
     width,
-    height: preview!.maxHeight ?? 630,
+    height,
+    waitForSelector: captureDoc.waitForSelector,
+    waitForTimeoutMs: captureDoc.waitForTimeoutMs,
+    waitUntil: "load",
     contentRoot: site.contentRoot,
   });
 
@@ -227,7 +229,18 @@ async function pump(contentRootName: string): Promise<void> {
         } catch (err) {
           q.failedSession += 1;
           const message = err instanceof Error ? err.message : String(err);
-          log.error({ key: job.key, err: message }, "[entry-preview-capture-queue] failed");
+          const failureClass = classifyCaptureFailure(err);
+          log.error(
+            {
+              contentType: job.contentType,
+              slug: job.slug,
+              locale: job.locale,
+              failureClass,
+              key: job.key,
+              err: message.slice(0, 500),
+            },
+            "[entry-preview-capture-queue] failed",
+          );
           const site = resolveSiteByContentRootName(job.contentRootName);
           if (site) {
             try {

@@ -369,7 +369,7 @@ export function OgImageTab() {
     }
   }
 
-  async function handleTestScreenshot(target: "home" | "example" = "home") {
+  async function handleTestScreenshot(target: "og" | "home" | "example" = "og") {
     setTestingCapture(true);
     clearTestPreview();
     try {
@@ -404,7 +404,12 @@ export function OgImageTab() {
       setTestPreviewUrl(objectUrl);
       setTestCaptureUrl(res.headers.get("X-Screenshot-Url"));
       toast({
-        title: target === "example" ? "API test capture ready" : "Test capture ready",
+        title:
+          target === "example"
+            ? "API test capture ready"
+            : target === "home"
+              ? "Home reachability capture ready"
+              : "OG test capture ready",
         description: "Preview only — nothing was saved.",
       });
     } catch (err: any) {
@@ -505,9 +510,10 @@ export function OgImageTab() {
                   Cloudflare Browser Rendering REST is rate-limited (error{" "}
                   <code className="font-mono text-xs">2001</code> / HTTP 429). Workers Free is about{" "}
                   <strong className="text-foreground font-medium">6 requests per minute</strong> — keep the
-                  interval near 10000&nbsp;ms and concurrency at 1. On Workers Paid you can lower the interval
-                  (e.g. 300) and raise concurrency (e.g. 2). Changes apply to the next capture start; in-flight
-                  jobs keep their current attempt.
+                  interval near 10000&nbsp;ms and concurrency at 1. Prefer Generate missing / retry failed over
+                  regenerating everything on Free. When rate-limited, all captures share one wait before the next
+                  start. On Workers Paid you can lower the interval (e.g. 300) and raise concurrency (e.g. 2).
+                  Changes apply to the next capture start; in-flight jobs keep their current attempt.
                 </p>
                 <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
                   <div className="space-y-1.5">
@@ -567,7 +573,7 @@ export function OgImageTab() {
                       data-testid="input-og-max-retries"
                     />
                     <p className="text-[11px] text-muted-foreground">
-                      Default {defaults.max_retries}. Honors Retry-After when present.
+                      Default {defaults.max_retries}. Shared cooldown on 429; honors Retry-After when present.
                     </p>
                   </div>
                 </div>
@@ -675,10 +681,9 @@ export function OgImageTab() {
 
                 <div className="pt-1 space-y-2 border-t border-border/60">
                   <p className="text-xs text-muted-foreground">
-                    Run a throwaway Browser Run shot of the home page to verify Cloudflare can reach{" "}
-                    <code className="font-mono">SITE_URL</code>. The image is shown here only — it is not written to
-                    YAML, media, or the entry-preview queue. Usually finishes in under ~25s; quick tunnels (
-                    <code className="font-mono">*.trycloudflare.com</code>) often time out from Browser Rendering.
+                    Run a throwaway OG card capture (same HTML path as the queue) to verify Browser Rendering.
+                    Prefer this over regenerating every entry. Home / API-only buttons check reachability only.
+                    Nothing is written to YAML, media, or the queue.
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
@@ -686,7 +691,7 @@ export function OgImageTab() {
                       size="sm"
                       variant="outline"
                       disabled={!ready || !canEdit || testingCapture}
-                      onClick={() => void handleTestScreenshot("home")}
+                      onClick={() => void handleTestScreenshot("og")}
                       data-testid="button-og-test-screenshot"
                     >
                       {testingCapture ? (
@@ -694,7 +699,17 @@ export function OgImageTab() {
                       ) : (
                         <IconCamera className="h-4 w-4 mr-1.5" />
                       )}
-                      {testingCapture ? "Capturing… (~25s max)" : "Test home screenshot"}
+                      {testingCapture ? "Capturing… (~25s max)" : "Test OG screenshot"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={!ready || !canEdit || testingCapture}
+                      onClick={() => void handleTestScreenshot("home")}
+                      data-testid="button-og-test-home"
+                    >
+                      Test SITE_URL home
                     </Button>
                     <Button
                       type="button"
@@ -732,7 +747,7 @@ export function OgImageTab() {
                       )}
                       <img
                         src={testPreviewUrl}
-                        alt="Throwaway home page Browser Run capture"
+                        alt="Throwaway OG Browser Run capture"
                         className="w-full rounded-md border border-border bg-black"
                       />
                       <p className="text-[11px] text-muted-foreground">Discarded after you leave or clear — not saved.</p>

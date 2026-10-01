@@ -29,6 +29,17 @@ vi.mock("./cloudflare-browser", () => ({
   cloudflareBrowserConfigError: mocks.cloudflareBrowserConfigError,
   captureScreenshotToWebp: vi.fn(),
 }));
+vi.mock("./entry-preview-capture-html", () => ({
+  buildEntryCaptureHtml: vi.fn(async () => ({
+    html: "<html/>",
+    logoAbsoluteUrl: "https://example.com/logo.webp",
+    waitForSelector: 'img[data-og-logo="1"]',
+    waitForTimeoutMs: 100,
+    section: { title: "t" },
+    ctx: { entry: {} },
+  })),
+  classifyCaptureFailure: () => "unknown",
+}));
 vi.mock("./entry-preview-manager", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./entry-preview-manager")>();
   return {

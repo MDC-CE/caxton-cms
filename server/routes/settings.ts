@@ -1701,10 +1701,11 @@ export function registerSettingsRoutes(app: Express): void {
   });
 
   /**
-   * Throwaway Browser Run probe: screenshot the public home page and return WebP bytes.
+   * Throwaway Browser Run probe.
    * Does not write to disk, YAML, or the entry-preview queue.
    *
-   * Query: ?target=home (default) | example
+   * Query: ?target=og (default) | home | example
+   * - og: same HTML OG card pipeline as the capture queue (validates CF + CSS/fonts/logo)
    * - home: SITE_URL home page (validates Browser Run can reach your public URL)
    * - example: https://example.com (validates API token / Browser Rendering only)
    */
@@ -1724,8 +1725,72 @@ export function registerSettingsRoutes(app: Express): void {
         return res.status(400).json({ error: configError });
       }
 
-      const target = String(req.query.target || "home").toLowerCase();
+      const target = String(req.query.target || "og").toLowerCase();
       const timeoutMs = 25_000;
+
+      if (target === "og") {
+        const {
+          buildOgTestCaptureHtml,
+          toAbsolutePublicUrl,
+          EntryPreviewCaptureError,
+        } = await import("../entry-preview-capture-html");
+        const { buildPreviewPropResolveContext } = await import("../entry-preview-resolve");
+        const site = res.locals.site as import("../site-manager").SiteContext | undefined;
+        const mg = site?.mediaGallery ?? mediaGallery;
+        const ctx = await buildPreviewPropResolveContext({
+          contentType: "_og_test",
+          slug: "_og_test",
+          locale: getDefaultLocale(contentRoot),
+          entry: {},
+          contentRoot,
+          mediaGallery: mg,
+          theme: "dark",
+        });
+        const brandLogo = String(
+          (ctx.brand && (ctx.brand["brand.logo"] || ctx.brand["brand.logo_dark"])) || "",
+        ).trim();
+        const logoAbsoluteUrl = brandLogo ? toAbsolutePublicUrl(brandLogo) : null;
+        if (!logoAbsoluteUrl) {
+          return res.status(400).json({
+            error:
+              "No absolute brand logo URL for OG test capture. Set brand.logo / brand.logo_dark in variables.",
+          });
+        }
+        try {
+          const doc = buildOgTestCaptureHtml({ logoAbsoluteUrl, theme: "dark" });
+          const { webp, browserMsUsed, pngBytes } = await captureScreenshotToWebp({
+            html: doc.html,
+            waitForSelector: doc.waitForSelector,
+            waitForTimeoutMs: doc.waitForTimeoutMs,
+            waitUntil: "load",
+            timeoutMs,
+            width: 1200,
+            height: 630,
+            contentRoot,
+          });
+          res.setHeader("Content-Type", "image/webp");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Screenshot-Url", `html:og-test:${logoAbsoluteUrl.slice(0, 120)}`);
+          if (browserMsUsed != null) {
+            res.setHeader("X-Browser-Ms-Used", String(browserMsUsed));
+          }
+          res.setHeader("X-Screenshot-Png-Bytes", String(pngBytes));
+          res.send(webp);
+        } catch (shotErr: any) {
+          if (shotErr instanceof EntryPreviewCaptureError) {
+            return res.status(400).json({ error: shotErr.message });
+          }
+          const raw = String(shotErr?.message || shotErr);
+          if (/429|rate.?limit/i.test(raw)) {
+            return res.status(429).json({
+              error: `${raw} — captures share one cooldown; wait and retry, or prefer Generate missing over regenerating everything.`,
+            });
+          }
+          throw shotErr;
+        }
+        return;
+      }
+
       let captureUrl: string;
 
       if (target === "example") {

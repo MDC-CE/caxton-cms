@@ -5,8 +5,9 @@
  * Credentials: environment variables only (never settings.yml).
  * Rate pacing: settings.yml → entry_preview (SEO/GEO → OG Image tab).
  *
- * Workers Free REST is ~6 req/min (≈1 / 10s). We pace starts process-wide and
- * retry 429s using Retry-After (or exponential backoff).
+ * Workers Free REST is ~6 req/min (≈1 / 10s). We pace starts process-wide,
+ * share a 429 cooldown across all callers, and retry using Retry-After
+ * (or exponential backoff).
  */
 
 import sharp from "sharp";
@@ -28,11 +29,19 @@ export type CloudflareGotoWaitUntil =
   | "networkidle2";
 
 export type CloudflareScreenshotOptions = {
-  url: string;
+  /** Live page URL (mutually exclusive with `html`). */
+  url?: string;
+  /** Full HTML document body for CF html mode (mutually exclusive with `url`). */
+  html?: string;
   width?: number;
   height?: number;
-  waitForSelector?: string;
-  /** Puppeteer-style navigation wait; default networkidle0 for entry-preview frames. */
+  /**
+   * Selector to wait for. Pass `null` to omit waitForSelector.
+   * Default for URL captures: data-capture-ready on the staff frame.
+   * HTML captures should pass an explicit selector (or null) — no frame ready attr.
+   */
+  waitForSelector?: string | null;
+  /** Puppeteer-style navigation wait; default networkidle0 for URL captures. */
   waitUntil?: CloudflareGotoWaitUntil;
   /** Extra settle time after navigation / selector (ms). */
   waitForTimeoutMs?: number;
@@ -105,7 +114,7 @@ export function isSiteUrlPubliclyReachable(): boolean {
   }
 }
 
-export function cloudflareBrowserConfigError(): string | null {
+export function cloudflareBrowserConfigError(_contentRoot?: string): string | null {
   if (!isCloudflareBrowserConfigured()) {
     return "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required for entry-preview capture (set on the host environment)";
   }
@@ -137,22 +146,53 @@ export function getCloudflareScreenshotMaxRetries(contentRoot?: string): number 
 
 let lastScreenshotStartMs = 0;
 let screenshotSlotChain: Promise<void> = Promise.resolve();
+/** Process-wide: do not start a new /screenshot until this timestamp (429 cooldown). */
+let rateLimitCoolUntilMs = 0;
+
+/** Test helper — clear pacing state between cases. */
+export function __resetScreenshotThrottleForTests(): void {
+  lastScreenshotStartMs = 0;
+  screenshotSlotChain = Promise.resolve();
+  rateLimitCoolUntilMs = 0;
+}
+
+export function getRateLimitCoolUntilMs(): number {
+  return rateLimitCoolUntilMs;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function extendRateLimitCooldown(retryAfterMs: number): void {
+  const until = Date.now() + Math.max(0, retryAfterMs);
+  if (until > rateLimitCoolUntilMs) {
+    rateLimitCoolUntilMs = until;
+    log.warn(
+      { coolUntilMs: rateLimitCoolUntilMs, retryAfterMs },
+      "[cloudflare-browser] rate-limit cooldown extended",
+    );
+  }
+}
+
 /**
- * Serialize screenshot starts and enforce min interval so queue jobs and
- * throwaway test screenshots share one account-wide budget.
+ * Serialize screenshot starts and enforce min interval + shared 429 cooldown
+ * so queue jobs and throwaway test screenshots share one account-wide budget.
  */
 export async function acquireScreenshotSlot(contentRoot?: string): Promise<void> {
   const run = async () => {
     const minInterval = getCloudflareScreenshotMinIntervalMs(contentRoot);
-    const wait = Math.max(0, minInterval - (Date.now() - lastScreenshotStartMs));
+    const intervalWait = Math.max(0, minInterval - (Date.now() - lastScreenshotStartMs));
+    const coolWait = Math.max(0, rateLimitCoolUntilMs - Date.now());
+    const wait = Math.max(intervalWait, coolWait);
     if (wait > 0) {
       log.info(
-        { waitMs: wait, minIntervalMs: minInterval },
+        {
+          waitMs: wait,
+          minIntervalMs: minInterval,
+          coolWaitMs: coolWait,
+          rateLimitCoolUntilMs,
+        },
         "[cloudflare-browser] throttling screenshot start",
       );
       await sleep(wait);
@@ -184,31 +224,50 @@ function backoffDelayMs(attempt: number): number {
 }
 
 /**
- * Capture a URL via Cloudflare Browser Run /screenshot and return WebP bytes.
+ * Capture via Cloudflare Browser Run /screenshot and return WebP bytes.
+ * Accepts either `html` (document body) or `url` (live page).
  * Paces requests process-wide and retries on HTTP 429 (rate limit).
  */
 export async function captureScreenshotToWebp(
   opts: CloudflareScreenshotOptions,
 ): Promise<CloudflareScreenshotResult> {
-  const configErr = cloudflareBrowserConfigError();
+  const configErr = cloudflareBrowserConfigError(opts.contentRoot);
   if (configErr) throw new Error(configErr);
+
+  const html = typeof opts.html === "string" ? opts.html.trim() : "";
+  const url = typeof opts.url === "string" ? opts.url.trim() : "";
+  if (!html && !url) {
+    throw new Error("captureScreenshotToWebp requires html or url");
+  }
+  if (html && url) {
+    throw new Error("captureScreenshotToWebp accepts html or url, not both");
+  }
 
   const accountId = resolveCloudflareAccountId().value;
   const token = resolveCloudflareApiToken().value;
   const width = opts.width ?? 1200;
   const height = opts.height ?? 630;
   const timeoutMs = opts.timeoutMs ?? 45_000;
-  const waitUntil = opts.waitUntil ?? "networkidle0";
-  const waitForSelector =
-    opts.waitForSelector ?? "[data-screenshot-root][data-capture-ready='1']";
+  const waitUntil = opts.waitUntil ?? (html ? "load" : "networkidle0");
   const maxRetries = Math.max(1, getCloudflareScreenshotMaxRetries(opts.contentRoot));
+
+  // URL path default: staff frame ready attr. HTML path must pass explicitly.
+  let waitForSelector: string | null;
+  if (opts.waitForSelector === null) {
+    waitForSelector = null;
+  } else if (typeof opts.waitForSelector === "string") {
+    waitForSelector = opts.waitForSelector.trim() || null;
+  } else if (html) {
+    waitForSelector = "[data-screenshot-root]";
+  } else {
+    waitForSelector = "[data-screenshot-root][data-capture-ready='1']";
+  }
 
   const endpoint =
     `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}` +
     `/browser-rendering/screenshot?cacheTTL=0`;
 
   const body: Record<string, unknown> = {
-    url: opts.url,
     viewport: {
       width,
       height,
@@ -219,16 +278,23 @@ export async function captureScreenshotToWebp(
       clip: { x: 0, y: 0, width, height },
       omitBackground: false,
     },
-    gotoOptions: {
+  };
+  if (html) {
+    body.html = html;
+  } else {
+    body.url = url;
+    body.gotoOptions = {
       waitUntil,
       timeout: timeoutMs,
-    },
-    waitForSelector: {
+    };
+  }
+  if (waitForSelector) {
+    body.waitForSelector = {
       selector: waitForSelector,
       visible: true,
       timeout: timeoutMs,
-    },
-  };
+    };
+  }
   if (opts.waitForTimeoutMs != null && opts.waitForTimeoutMs > 0) {
     body.waitForTimeout = opts.waitForTimeoutMs;
   }
@@ -259,6 +325,7 @@ export async function captureScreenshotToWebp(
         /* ignore */
       }
       const retryAfterMs = parseRetryAfterMs(res) ?? backoffDelayMs(attempt);
+      extendRateLimitCooldown(retryAfterMs);
       lastError = new Error(
         `Cloudflare screenshot failed (429)${detail ? `: ${detail.slice(0, 200)}` : ""}`,
       );
@@ -280,7 +347,7 @@ export async function captureScreenshotToWebp(
         },
         "[cloudflare-browser] screenshot rate limited, retrying",
       );
-      await sleep(retryAfterMs);
+      // Shared cooldown is honored on the next acquireScreenshotSlot — no extra sleep.
       continue;
     }
 
@@ -292,7 +359,13 @@ export async function captureScreenshotToWebp(
         /* ignore */
       }
       log.error(
-        { status: res.status, detail: detail.slice(0, 500), browserMsUsed, attempt },
+        {
+          status: res.status,
+          detail: detail.slice(0, 500),
+          browserMsUsed,
+          attempt,
+          mode: html ? "html" : "url",
+        },
         "[cloudflare-browser] screenshot failed",
       );
       throw new Error(
@@ -311,7 +384,8 @@ export async function captureScreenshotToWebp(
         pngBytes: png.length,
         webpBytes: webp.length,
         browserMsUsed,
-        url: opts.url,
+        mode: html ? "html" : "url",
+        url: html ? undefined : url,
         attempt,
       },
       "[cloudflare-browser] screenshot ok",
