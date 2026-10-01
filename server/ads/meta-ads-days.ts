@@ -12,15 +12,21 @@ import { getAdsSettings } from "../settings";
 import { child } from "../logger";
 import {
   fetchAccountInfo,
+  fetchAccountPixels,
   fetchAdCreatives,
   fetchAdInsights,
   fetchAdPlatformInsights,
+  fetchCustomConversions,
+  fetchPixelEventStats,
   isMetaTokenConfigured,
   MetaApiError,
   type MetaAccountInfo,
   type MetaAdCreativeInfo,
   type MetaAdDayRow,
   type MetaAdPlatformDayRow,
+  type MetaCustomConversion,
+  type MetaPixel,
+  type MetaPixelEventStats,
 } from "./meta-client";
 
 const log = child({ module: "ads/meta-ads-days" });
@@ -30,6 +36,9 @@ export const META_BACKFILL_DAYS = 90;
 export const META_RETENTION_DAYS = 395;
 export const META_STALE_MS = 24 * 60 * 60 * 1000;
 const FETCH_CHUNK_DAYS = 15;
+
+/** Bump when day-row fields need a one-time 90-day re-read (click/view lead split). */
+export const META_ROW_SHAPE = 2;
 
 export type MetaAdsDayFile = {
   date: string;
@@ -77,6 +86,28 @@ export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "a
   platform_history_since?: string;
   /** Why the last per-placement read failed (main rows still saved); cleared on success. */
   platform_error?: string;
+  /** Set when a 90-day load with per-conversion counts finished; missing means the next refresh re-reads 90 days once. */
+  conversions_loaded_at?: string;
+  /** Why the last custom conversion / pixel read failed; cleared on success. */
+  conversions_error?: string;
+  /** Day-row field shape last fully loaded (see `META_ROW_SHAPE`). Missing or lower → one-time 90-day re-read. */
+  row_shape?: number;
+};
+
+/** Custom conversions shared with each ad account (read every sync). */
+export type MetaCustomConversionsFile = {
+  fetched_at: string;
+  accounts: Record<string, { conversions: MetaCustomConversion[]; error?: string }>;
+};
+
+/** Last 7 days of pixel events (read every sync) for lockstep checks. */
+export type MetaPixelEventsFile = {
+  fetched_at: string;
+  since: string;
+  pixels: Record<
+    string,
+    { name: string; last_fired_time: string | null; accounts: string[]; events: MetaPixelEventStats[]; error?: string }
+  >;
 };
 
 export type MetaAdsCreatives = {
@@ -99,6 +130,10 @@ export const META_DAYS_DIR = "meta-ads-days";
 export const META_PLATFORM_DAYS_DIR = "meta-ads-platform-days";
 export const META_STATE_FILE = "meta-ads-state.json";
 export const META_CREATIVES_FILE = "meta-ads-creatives.json";
+export const META_CUSTOM_CONVERSIONS_FILE = "meta-custom-conversions.json";
+export const META_PIXEL_EVENTS_FILE = "meta-pixel-events.json";
+/** Pixel event history read each sync for lockstep checks. */
+export const META_PIXEL_EVENT_DAYS = 7;
 
 function dir(site: string): string {
   return path.join(CACHE_DIR, site, META_DAYS_DIR);
@@ -181,6 +216,77 @@ export function loadMetaCreatives(site: string): MetaAdsCreatives {
   return readJson<MetaAdsCreatives>(creativesPath(site)) ?? { fetched_at: "", ads: {} };
 }
 
+export function loadMetaCustomConversions(site: string): MetaCustomConversionsFile {
+  return readJson<MetaCustomConversionsFile>(path.join(CACHE_DIR, site, META_CUSTOM_CONVERSIONS_FILE)) ?? { fetched_at: "", accounts: {} };
+}
+
+export function saveMetaCustomConversions(site: string, file: MetaCustomConversionsFile): void {
+  writeJson(path.join(CACHE_DIR, site, META_CUSTOM_CONVERSIONS_FILE), file);
+}
+
+export function loadMetaPixelEvents(site: string): MetaPixelEventsFile {
+  return readJson<MetaPixelEventsFile>(path.join(CACHE_DIR, site, META_PIXEL_EVENTS_FILE)) ?? { fetched_at: "", since: "", pixels: {} };
+}
+
+export function saveMetaPixelEvents(site: string, file: MetaPixelEventsFile): void {
+  writeJson(path.join(CACHE_DIR, site, META_PIXEL_EVENTS_FILE), file);
+}
+
+/** Custom conversion id → name, across accounts (first non-archived name wins). */
+export function metaConversionNames(site: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const { conversions } of Object.values(loadMetaCustomConversions(site).accounts)) {
+    for (const c of conversions) if (!out.has(c.id) || !c.archived) out.set(c.id, c.name);
+  }
+  return out;
+}
+
+/** Days in the window whose rows (configured accounts) were cached before per-conversion counts. */
+export function metaDaysMissingConversions(site: string, since: string, until: string, accountIds?: string[]): string[] {
+  const allow = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
+  const out: string[] = [];
+  for (const date of listMetaDayDates(site)) {
+    if (date < since || date > until) continue;
+    const file = loadMetaDay(site, date);
+    if (file?.rows.some((r) => (!allow || allow.has(r.account_id)) && r.conversions === undefined)) out.push(date);
+  }
+  return out;
+}
+
+/**
+ * How many days in the inclusive window have the click/view lead split on every in-scope row.
+ * Days with no cached file are not covered. Empty in-scope days count as covered.
+ */
+export function loadMetaSplitCoverage(
+  site: string,
+  since: string,
+  until: string,
+  accountIds?: string[],
+): { covered: number; total: number } {
+  const allow = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
+  const dates = dateRange(since, until);
+  let covered = 0;
+  for (const date of dates) {
+    const file = loadMetaDay(site, date);
+    if (!file) continue;
+    const rows = file.rows.filter((r) => !allow || allow.has(r.account_id));
+    if (rows.every((r) => r.pixel_leads_click !== undefined)) covered += 1;
+  }
+  return { covered, total: dates.length };
+}
+
+/**
+ * Whether a refresh should widen to a 90-day backfill for this account.
+ * Accounts with a current sync_error are skipped so they cannot pin every sync to 90 days.
+ */
+export function accountNeedsMetaShapeBackfill(account: MetaAccountSyncInfo | undefined): boolean {
+  if (account?.sync_error) return false;
+  if (!account?.history_loaded_at) return true;
+  if (!account.conversions_loaded_at) return true;
+  if ((account.row_shape ?? 0) < META_ROW_SHAPE) return true;
+  return false;
+}
+
 /** Rows for configured accounts only, inclusive window. */
 export function loadMetaRows(site: string, since: string, until: string, accountIds?: string[]): MetaAdDayRow[] {
   const allow = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
@@ -230,6 +336,9 @@ export type MetaSnapshot = {
   platform_days: MetaAdsPlatformDayFile[];
   meta_state: MetaAdsSyncState;
   creatives: MetaAdsCreatives;
+  /** Optional: snapshots from before per-conversion counts omit these. */
+  custom_conversions?: MetaCustomConversionsFile;
+  pixel_events?: MetaPixelEventsFile;
 };
 
 /** Every cached Meta file on or after `since` (for "Download from production"). */
@@ -245,6 +354,8 @@ export function exportMetaSnapshot(site: string, since: string): MetaSnapshot {
       .filter((f): f is MetaAdsPlatformDayFile => !!f),
     meta_state: loadMetaState(site),
     creatives: loadMetaCreatives(site),
+    custom_conversions: loadMetaCustomConversions(site),
+    pixel_events: loadMetaPixelEvents(site),
   };
 }
 
@@ -256,6 +367,8 @@ export function stageMetaSnapshot(stagingRoot: string, snap: MetaSnapshot): void
   for (const f of snap.platform_days) writeJson(path.join(stagingRoot, META_PLATFORM_DAYS_DIR, `${f.date}.json`), f);
   writeJson(path.join(stagingRoot, META_CREATIVES_FILE), snap.creatives);
   writeJson(path.join(stagingRoot, META_STATE_FILE), snap.meta_state);
+  if (snap.custom_conversions) writeJson(path.join(stagingRoot, META_CUSTOM_CONVERSIONS_FILE), snap.custom_conversions);
+  if (snap.pixel_events) writeJson(path.join(stagingRoot, META_PIXEL_EVENTS_FILE), snap.pixel_events);
 }
 
 export function pruneMetaDays(site: string, now = new Date()): number {
@@ -356,13 +469,13 @@ function savePlatformDays(
 type DateWindow = { since: string; until: string };
 
 /**
- * Steps `syncMetaAds` will report: per account (lookup + insight chunks + placement chunks + creatives),
- * then one save. `platformWindows` defaults to the main window for every account.
+ * Steps `syncMetaAds` will report: per account (lookup + insight chunks + placement chunks + creatives + conversions),
+ * then pixel events and one save. `platformWindows` defaults to the main window for every account.
  */
 export function metaSyncStepCount(accountCount: number, window: DateWindow | null, platformWindows?: DateWindow[]): number {
   if (!window || accountCount <= 0) return 0;
   const platformChunks = (platformWindows ?? Array.from({ length: accountCount }, () => window)).reduce((n, w) => n + fetchChunkCount(w), 0);
-  return accountCount * (fetchChunkCount(window) + 2) + platformChunks + 1;
+  return accountCount * (fetchChunkCount(window) + 3) + platformChunks + 2;
 }
 
 /** Placement read window: the main window, widened to 90 days until the account has a full placement history. */
@@ -377,10 +490,14 @@ export function platformWindowFor(
   return { since: since < window.since ? since : window.since, until: window.until };
 }
 
-/** A refresh becomes a 90-day backfill while any configured account has never finished one. */
+/**
+ * A refresh becomes a 90-day backfill while any eligible account has never finished one,
+ * lacks per-conversion counts, or is behind `META_ROW_SHAPE` (click/view lead split).
+ * Accounts with an active sync_error do not trigger backfill.
+ */
 export function effectiveMetaSyncMode(mode: MetaSyncMode, accountIds: string[], state: MetaAdsSyncState): MetaSyncMode {
   if (mode !== "refresh") return mode;
-  return accountIds.some((id) => !state.accounts[id]?.history_loaded_at) ? "backfill" : mode;
+  return accountIds.some((id) => accountNeedsMetaShapeBackfill(state.accounts[id])) ? "backfill" : mode;
 }
 
 /** Step total for a sync that would start now; 0 when it would skip or has nothing to fetch. */
@@ -405,6 +522,30 @@ export function shortDateRange(since: string, until: string): string {
   if (since === until) return MONTH_DAY.format(a);
   if (since.slice(0, 7) === until.slice(0, 7)) return `${MONTH_DAY.format(a)}–${DAY_ONLY.format(b)}`;
   return `${MONTH_DAY.format(a)} – ${MONTH_DAY.format(b)}`;
+}
+
+/**
+ * Last 7 days of events for every pixel the accounts can see. A pixel whose read fails keeps its
+ * previous events (flagged with `error`); returns null when no pixel was found at all.
+ */
+async function readPixelEvents(
+  pixels: Map<string, { pixel: MetaPixel; accounts: string[] }>,
+  prev: MetaPixelEventsFile,
+  now = new Date(),
+): Promise<MetaPixelEventsFile | null> {
+  if (pixels.size === 0) return null;
+  const sinceMs = now.getTime() - META_PIXEL_EVENT_DAYS * 86_400_000;
+  const out: MetaPixelEventsFile = { fetched_at: "", since: new Date(sinceMs).toISOString(), pixels: {} };
+  for (const [id, { pixel, accounts }] of Array.from(pixels.entries())) {
+    const base = { name: pixel.name, last_fired_time: pixel.last_fired_time, accounts };
+    try {
+      out.pixels[id] = { ...base, events: await fetchPixelEventStats(id, sinceMs / 1000) };
+    } catch (err) {
+      out.pixels[id] = { ...base, events: prev.pixels[id]?.events ?? [], error: err instanceof Error ? err.message : String(err) };
+      log.warn({ err, pixelId: id }, "[meta] pixel events read failed (non-fatal)");
+    }
+  }
+  return out;
 }
 
 export async function syncMetaAds(opts: {
@@ -443,6 +584,12 @@ export async function syncMetaAds(opts: {
     const loadsFullHistory = mode !== "older" && byDate.size >= META_BACKFILL_DAYS;
 
     const creatives = loadMetaCreatives(opts.site);
+    const prevConversions = loadMetaCustomConversions(opts.site);
+    const conversionsFile: MetaCustomConversionsFile = { fetched_at: "", accounts: {} };
+    for (const id of settings.ad_account_ids) {
+      if (prevConversions.accounts[id]) conversionsFile.accounts[id] = prevConversions.accounts[id];
+    }
+    const pixelsSeen = new Map<string, { pixel: MetaPixel; accounts: string[] }>();
     const accountCount = settings.ad_account_ids.length;
     const failed = new Map<string, unknown>();
     const platformRead = new Map<string, { window: DateWindow; rows: MetaAdPlatformDayRow[] }>();
@@ -466,6 +613,9 @@ export async function syncMetaAds(opts: {
           platform_history_loaded_at: prev?.platform_history_loaded_at,
           platform_history_since: prev?.platform_history_since,
           platform_error: prev?.platform_error,
+          conversions_loaded_at: prev?.conversions_loaded_at,
+          conversions_error: prev?.conversions_error,
+          row_shape: prev?.row_shape,
         };
         for (const [start, end] of chunks(window)) {
           opts.onStep?.(`Meta: ${account}, ${shortDateRange(start, end)}`);
@@ -503,9 +653,27 @@ export async function syncMetaAds(opts: {
         state.accounts[accountId].setup_error = err instanceof Error ? err.message : String(err);
         log.warn({ err, accountId }, "[meta] creatives fetch failed (non-fatal)");
       }
+      opts.onStep?.(`Meta: ${account}, conversions and pixels`);
+      try {
+        conversionsFile.accounts[accountId] = { conversions: await fetchCustomConversions(accountId) };
+        for (const p of await fetchAccountPixels(accountId)) {
+          const seen = pixelsSeen.get(p.id);
+          if (seen) seen.accounts.push(accountId);
+          else pixelsSeen.set(p.id, { pixel: p, accounts: [accountId] });
+        }
+        state.accounts[accountId].conversions_error = undefined;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        state.accounts[accountId].conversions_error = message;
+        conversionsFile.accounts[accountId] = { conversions: prevConversions.accounts[accountId]?.conversions ?? [], error: message };
+        log.warn({ err, accountId }, "[meta] custom conversions / pixels read failed (non-fatal)");
+      }
     }
 
     if (failed.size === accountCount) throw failed.values().next().value;
+
+    opts.onStep?.("Meta: pixel events");
+    const pixelsFile = await readPixelEvents(pixelsSeen, loadMetaPixelEvents(opts.site), opts.now);
 
     opts.onStep?.("Meta: saving synced days");
     const fetchedAt = new Date().toISOString();
@@ -528,12 +696,19 @@ export async function syncMetaAds(opts: {
       creatives.fetched_at = fetchedAt;
     }
     writeJson(creativesPath(opts.site), creatives);
+    conversionsFile.fetched_at = fetchedAt;
+    saveMetaCustomConversions(opts.site, conversionsFile);
+    if (pixelsFile) saveMetaPixelEvents(opts.site, { ...pixelsFile, fetched_at: fetchedAt });
     pruneMetaDays(opts.site, opts.now);
 
     for (const id of settings.ad_account_ids) {
       if (failed.has(id)) continue;
       state.accounts[id].sync_error = undefined;
-      if (loadsFullHistory) state.accounts[id].history_loaded_at = fetchedAt;
+      if (loadsFullHistory) {
+        state.accounts[id].history_loaded_at = fetchedAt;
+        state.accounts[id].conversions_loaded_at = fetchedAt;
+        state.accounts[id].row_shape = META_ROW_SHAPE;
+      }
     }
     const dates = listMetaDayDates(opts.site);
     state.history_since = dates[0];

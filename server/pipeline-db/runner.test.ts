@@ -1145,6 +1145,46 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds paid-landing platform and id columns to lead_submissions when upgrading from v29", () => {
+    const site = `${TEST_PREFIX}-v29-lead-platform-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 29);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        platform TEXT,
+        first_paid_host TEXT,
+        last_paid_host TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0,
+        is_repeat INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, platform, last_paid_host)
+      VALUES ('s-1', 1, 'meta', 'example.com');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db.prepare(`SELECT * FROM lead_submissions WHERE submission_id = 's-1'`).get() as Record<string, unknown>;
+    expect(row.platform).toBe("meta");
+    expect(row.last_paid_host).toBe("example.com");
+    for (const prefix of ["first_paid", "last_paid"]) {
+      for (const field of ["platform", "campaign_id", "adset_id", "ad_id"]) {
+        expect(row).toHaveProperty(`${prefix}_${field}`, null);
+      }
+    }
+    db.close();
+    rmSite(site);
+  });
+
   it("adds proposal collab columns and blockers when upgrading from v9-shaped DB", () => {
     const site = `${TEST_PREFIX}-v9-collab-${Date.now()}`;
     rmSite(site);

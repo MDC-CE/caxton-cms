@@ -1,11 +1,12 @@
 /**
- * One background refresh for Ads data: Meta insights (when connected) + GA4
- * paid-landing days (when BigQuery is configured). Stale reads (> ~24h) enqueue
- * it and return cached data immediately with a `refresh` status.
+ * One background refresh for Ads data: Meta insights (when connected), Google Ads
+ * from the BigQuery Data Transfer (when connected), then GA4 paid-landing days
+ * (when BigQuery is configured). Stale reads (> ~24h) enqueue it and return cached
+ * data immediately with a `refresh` status.
  *
  * Status (`getAdsRefreshStatus`) combines this site's refresh-state file, the
- * newest MetaAdsSyncJob row in the Sidequest DB, and worker liveness, so a job
- * that never runs surfaces as `failed` / `worker_down` instead of spinning.
+ * newest AdsSyncJob / legacy MetaAdsSyncJob row in the Sidequest DB, and worker
+ * liveness, so a job that never runs surfaces as `failed` / `worker_down` instead of spinning.
  */
 
 import fs from "fs";
@@ -33,6 +34,15 @@ import {
   syncPaidLandingDays,
   type PaidLandingSyncResult,
 } from "./paid-detection";
+import {
+  isGoogleConnected,
+  isGoogleStale,
+  isGoogleSyncInFlight,
+  loadGoogleState,
+  planGoogleSyncSteps,
+  syncGoogleAds,
+  type GoogleSyncResult,
+} from "./google-ads-days";
 import { currentWorkerJob, isSidequestWorkerAlive, latestJobRows, type JobRowSummary } from "../jobs/job-rows";
 import {
   ADS_REFRESH_QUEUED_STUCK_MS,
@@ -47,8 +57,10 @@ const log = child({ module: "ads/ads-refresh" });
 
 /** A started run with no finish after this long is treated as crashed (unless the worker reports it is still on it). */
 const REFRESH_WINDOW_MS = 15 * 60 * 1000;
-const JOB_CLASS = "MetaAdsSyncJob";
-const JOB_TYPE = "meta_ads_sync";
+const JOB_CLASSES = ["AdsSyncJob", "MetaAdsSyncJob"];
+const JOB_TYPE = "ads_sync";
+/** Worker heartbeat job names that mean "the Ads refresh is running" (legacy alias included). */
+const JOB_TYPES = new Set([JOB_TYPE, "meta_ads_sync"]);
 
 type RefreshState = {
   requested_at?: string;
@@ -133,7 +145,8 @@ function jobSite(args: unknown): string | undefined {
 }
 
 function defaultLatestJob(site: string, sinceMs: number): JobRowSummary | null {
-  return latestJobRows(JOB_CLASS, sinceMs).find((r) => jobSite(r.args) === site) ?? null;
+  const rows = JOB_CLASSES.flatMap((cls) => latestJobRows(cls, sinceMs).filter((r) => jobSite(r.args) === site));
+  return rows.sort((a, b) => (b.inserted_at ?? 0) - (a.inserted_at ?? 0))[0] ?? null;
 }
 
 function retryAfterMs(s: RefreshState): number {
@@ -175,7 +188,7 @@ export function getAdsRefreshStatus(site: string, deps: RefreshStatusDeps = {}):
     };
   };
 
-  if (inFlight.has(site) || isMetaSyncInFlight(site)) return build("running");
+  if (inFlight.has(site) || isMetaSyncInFlight(site) || isGoogleSyncInFlight(site)) return build("running");
 
   const req = ms(s.requested_at);
   const started = ms(s.started_at);
@@ -184,7 +197,7 @@ export function getAdsRefreshStatus(site: string, deps: RefreshStatusDeps = {}):
   if (started && started > finished && started >= req) {
     if (now - started <= REFRESH_WINDOW_MS) return build("running");
     const workerJob = (deps.workerCurrentJob ?? currentWorkerJob)();
-    if (workerJob === JOB_TYPE) return build("running");
+    if (workerJob && JOB_TYPES.has(workerJob)) return build("running");
     s = recordFailure(site, s, "The last sync stopped before finishing.", `started:${s.started_at}`, now);
     return build("failed");
   }
@@ -216,6 +229,7 @@ export function isAdsRefreshing(site: string, deps?: RefreshStatusDeps): boolean
 
 export function isAdsDataStale(site: string, contentRoot?: string, now = Date.now()): boolean {
   if (isMetaConnected(contentRoot) && isMetaStale(loadMetaState(site), now)) return true;
+  if (isGoogleConnected(contentRoot) && isGoogleStale(loadGoogleState(site), now)) return true;
   if (isGa4Configured(contentRoot)) {
     const last = loadPaidLandingState(site).last_success_at;
     const t = last ? Date.parse(last) : NaN;
@@ -224,7 +238,7 @@ export function isAdsDataStale(site: string, contentRoot?: string, now = Date.no
   return false;
 }
 
-export type AdsRefreshResult = { meta: MetaSyncResult | null; ga4: PaidLandingSyncResult | null };
+export type AdsRefreshResult = { meta: MetaSyncResult | null; google?: GoogleSyncResult | null; ga4: PaidLandingSyncResult | null };
 
 /**
  * Each call marks the previous step finished and names the one starting, so `done`
@@ -246,7 +260,7 @@ function progressReporter(site: string, run: string, total: number): ((label: st
 }
 
 export async function runAdsRefresh(opts: { site: string; contentRoot?: string; mode?: MetaSyncMode }): Promise<AdsRefreshResult> {
-  if (inFlight.has(opts.site)) return { meta: null, ga4: null };
+  if (inFlight.has(opts.site)) return { meta: null, google: null, ga4: null };
   inFlight.add(opts.site);
   const startedAt = new Date().toISOString();
   patchState(opts.site, { started_at: startedAt, progress: undefined });
@@ -254,18 +268,22 @@ export async function runAdsRefresh(opts: { site: string; contentRoot?: string; 
   try {
     const metaConnected = isMetaConnected(opts.contentRoot);
     const runGa4 = opts.mode !== "older";
+    const runGoogle = opts.mode !== "older" && isGoogleConnected(opts.contentRoot);
     const total =
       (metaConnected ? planMetaSyncSteps(opts.site, opts.contentRoot, opts.mode) : 0) +
+      (runGoogle ? planGoogleSyncSteps(opts.contentRoot) : 0) +
       (runGa4 ? planPaidLandingSteps(opts.site, opts.contentRoot) : 0);
     const onStep = progressReporter(opts.site, startedAt, total);
 
     const meta = metaConnected
       ? await syncMetaAds({ site: opts.site, contentRoot: opts.contentRoot, mode: opts.mode, onStep })
       : null;
+    const google = runGoogle ? await syncGoogleAds({ site: opts.site, contentRoot: opts.contentRoot, onStep }) : null;
     const ga4 = runGa4 ? await syncPaidLandingDays(opts.site, opts.contentRoot, undefined, onStep) : null;
     if (meta && !meta.ok && !meta.skipped && meta.error) failure = `Meta: ${meta.error}`;
+    else if (google && !google.ok && !google.skipped && google.error) failure = `Google Ads: ${google.error}`;
     else if (ga4 && !ga4.ok && !ga4.skipped && ga4.error) failure = `GA4: ${ga4.error}`;
-    return { meta, ga4 };
+    return { meta, google, ga4 };
   } catch (err) {
     failure = err instanceof Error ? err.message : String(err);
     throw err;

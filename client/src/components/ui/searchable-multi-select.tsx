@@ -5,6 +5,7 @@ import {
   IconPencil,
   IconX,
   IconCheck,
+  IconTrash,
 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,10 @@ interface SearchableMultiSelectProps {
   isLoading?: boolean;
   testIdPrefix?: string;
   emptyMessage?: string;
+  addLabel?: string;
+  clearAllLabel?: string;
+  /** Extra controls rendered next to the inline Clear button (e.g. "Reset to defaults"). */
+  headerActions?: ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   portalContainer?: HTMLElement | null;
@@ -52,6 +57,9 @@ export function SearchableMultiSelect({
   isLoading = false,
   testIdPrefix = "item",
   emptyMessage = "No options found",
+  addLabel = "Add filter",
+  clearAllLabel = "Clear all filters",
+  headerActions,
   open: openProp,
   onOpenChange: onOpenChangeProp,
   portalContainer,
@@ -184,7 +192,7 @@ export function SearchableMultiSelect({
             }}
             data-testid={`button-clear-${testIdPrefix}-all`}
           >
-            Clear all filters
+            {clearAllLabel}
           </Button>
         </div>
       )}
@@ -202,6 +210,7 @@ export function SearchableMultiSelect({
           {label}
         </Label>
         <div className="flex items-center gap-1.5">
+          {headerActions}
           {hasValues && (
             <Button
               variant="ghost"
@@ -210,6 +219,7 @@ export function SearchableMultiSelect({
               data-testid={`button-clear-${testIdPrefix}-inline`}
               onClick={() => onChange([])}
             >
+              <IconTrash className="h-3.5 w-3.5 mr-1" />
               Clear
             </Button>
           )}
@@ -231,7 +241,7 @@ export function SearchableMultiSelect({
                 ) : (
                   <>
                     <IconPlus className="h-3.5 w-3.5 mr-1" />
-                    <span>Add filter</span>
+                    <span>{addLabel}</span>
                   </>
                 )}
               </Button>

@@ -16,13 +16,17 @@ import {
   exportMetaSnapshot,
   isMetaSyncInFlight,
   META_CREATIVES_FILE,
+  META_CUSTOM_CONVERSIONS_FILE,
   META_DAYS_DIR,
+  META_PIXEL_EVENTS_FILE,
   META_PLATFORM_DAYS_DIR,
   META_RETENTION_DAYS,
   META_STATE_FILE,
   stageMetaSnapshot,
   utcDate,
   type MetaAdsCreatives,
+  type MetaCustomConversionsFile,
+  type MetaPixelEventsFile,
   type MetaAdsDayFile,
   type MetaAdsPlatformDayFile,
   type MetaAdsSyncState,
@@ -48,6 +52,8 @@ const SWAP_ENTRIES = [
   META_PLATFORM_DAYS_DIR,
   PAID_LANDING_DAYS_DIR,
   META_CREATIVES_FILE,
+  META_CUSTOM_CONVERSIONS_FILE,
+  META_PIXEL_EVENTS_FILE,
   PAID_LANDING_STATE_FILE,
   META_STATE_FILE,
 ];
@@ -95,6 +101,9 @@ export function parseAdsExport(body: unknown): AdsExportPayload | null {
     platform_days: dayFiles<MetaAdsPlatformDayFile>(b.platform_days, "rows"),
     meta_state: { consecutive_failures: 0, accounts: {}, ...(state as Partial<MetaAdsSyncState>) },
     creatives: (b.creatives && typeof b.creatives === "object" ? b.creatives : { fetched_at: "", ads: {} }) as MetaAdsCreatives,
+    custom_conversions:
+      b.custom_conversions && typeof b.custom_conversions === "object" ? (b.custom_conversions as MetaCustomConversionsFile) : undefined,
+    pixel_events: b.pixel_events && typeof b.pixel_events === "object" ? (b.pixel_events as MetaPixelEventsFile) : undefined,
     paid_landing_days: dayFiles<PaidLandingDayFile>(b.paid_landing_days, "candidates"),
     paid_landing_state: (b.paid_landing_state && typeof b.paid_landing_state === "object"
       ? b.paid_landing_state

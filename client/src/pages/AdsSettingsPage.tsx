@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { IconBrandGoogle, IconBrandMeta, IconSpeakerphone } from "@tabler/icons-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SettingsShell, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
 import { MetaAdsTab } from "@/components/settings/MetaAdsTab";
+import { GoogleAdsTab } from "@/components/settings/GoogleAdsTab";
 
 type AdsTab = "meta" | "google";
 
@@ -16,22 +16,6 @@ function resolveAdsTab(pathname: string): AdsTab | null {
   if (pathname === "/private/settings/ads/meta") return "meta";
   if (pathname === "/private/settings/ads/google") return "google";
   return null;
-}
-
-function GoogleAdsComingSoon() {
-  return (
-    <Card data-testid="tab-panel-ads-google">
-      <CardHeader className="flex flex-row items-center gap-2 pb-4">
-        <IconBrandGoogle className="h-5 w-5 text-muted-foreground" />
-        <CardTitle className="text-base">Google Ads</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-sm text-muted-foreground" data-testid="text-ads-google-coming-soon">
-          Coming soon. You&apos;ll be able to connect Google Ads here so its spend and leads show up next to your pages.
-        </p>
-      </CardContent>
-    </Card>
-  );
 }
 
 export default function AdsSettingsPage() {
@@ -77,7 +61,7 @@ export default function AdsSettingsPage() {
     >
       <div role="tabpanel">
         {activeTab === "meta" && <MetaAdsTab />}
-        {activeTab === "google" && <GoogleAdsComingSoon />}
+        {activeTab === "google" && <GoogleAdsTab />}
       </div>
     </SettingsShell>
   );

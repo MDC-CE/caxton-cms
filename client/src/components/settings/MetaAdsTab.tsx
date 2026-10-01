@@ -37,11 +37,14 @@ import { cn } from "@/lib/utils";
 import {
   DEFAULT_ADS_ALERT_THRESHOLDS,
   MAX_KNOWN_EXTERNAL_CAMPAIGNS,
+  MAX_META_LEAD_CONVERSIONS,
   isKnownExternalCampaign,
+  normalizeMetaLeadConversionKey,
   type AdsAlertThresholds,
   type AdsSettings,
   type KnownExternalCampaign,
 } from "@shared/ads-settings";
+import type { MetaLeadConversionOptions } from "@/components/ads/ads-types";
 import {
   isRefreshActive,
   refreshProgressPercent,
@@ -144,6 +147,7 @@ export function MetaAdsTab() {
 
   const [enabled, setEnabled] = useState(false);
   const [accountIds, setAccountIds] = useState<string[]>([]);
+  const [leadConversions, setLeadConversions] = useState<string[]>([]);
   const [patternsText, setPatternsText] = useState("");
   const [thresholds, setThresholds] = useState<AdsAlertThresholds>(DEFAULT_ADS_ALERT_THRESHOLDS);
   const [floorText, setFloorText] = useState<Record<string, string>>({});
@@ -162,6 +166,7 @@ export function MetaAdsTab() {
     if (!data || dirty) return;
     setEnabled(data.ads.meta.enabled);
     setAccountIds(data.ads.meta.ad_account_ids);
+    setLeadConversions(data.ads.meta.lead_conversions ?? []);
     setPatternsText(data.ads.test_email_patterns.join("\n"));
     setThresholds(data.ads.meta.alert_thresholds);
     setFloorText(Object.fromEntries(Object.entries(data.ads.meta.alert_thresholds.severity_spend_floor).map(([c, v]) => [c, String(v)])));
@@ -191,6 +196,43 @@ export function MetaAdsTab() {
     return options;
   }, [accountList, accountIds, data]);
 
+  const { data: conversions, isLoading: conversionsLoading } = useQuery({
+    queryKey: ["/api/ads/meta/conversions", accountIds.join(","), leadConversions.join(",")],
+    queryFn: async () => {
+      const qs = new URLSearchParams({ account_ids: accountIds.join(","), picked: leadConversions.join(",") });
+      const res = await apiFetch(`/api/ads/meta/conversions?${qs.toString()}`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Meta conversions");
+      return res.json() as Promise<MetaLeadConversionOptions>;
+    },
+    enabled: connectionOpen && accountIds.length > 0,
+    staleTime: 60 * 1000,
+    placeholderData: (prev) => prev,
+  });
+
+  const conversionOptions = useMemo<SearchableMultiComboboxOption[]>(() => {
+    const accountLabel = (id: string) => accountList?.accounts.find((a) => a.id === id)?.name || data?.sync.accounts[id]?.name || id;
+    const listed = conversions?.options ?? [];
+    const options: SearchableMultiComboboxOption[] = listed.map((o) => ({
+      value: o.key,
+      label: [
+        o.pixel_name ? `${o.name} — ${o.pixel_name}` : o.name,
+        o.archived ? "archived" : null,
+        o.missing_accounts.length > 0 ? `not shared with ${o.missing_accounts.map(accountLabel).join(", ")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    }));
+    const listedKeys = new Set(listed.map((o) => o.key));
+    const anyReadable = !!conversions?.accounts.some((a) => a.source !== "none");
+    for (const key of leadConversions) {
+      if (listedKeys.has(key)) continue;
+      const name = conversions?.unlisted_picked.find((u) => u.key === key)?.name ?? key;
+      options.push({ value: key, label: anyReadable ? `${name} · no longer in Meta` : name });
+    }
+    return options;
+  }, [conversions, leadConversions, accountList, data]);
+  const conversionErrors = (conversions?.accounts ?? []).filter((a) => a.source === "none" && a.error);
+
   async function save() {
     setSaving(true);
     try {
@@ -202,6 +244,7 @@ export function MetaAdsTab() {
       const res = await apiRequest("PUT", "/api/settings/ads/meta", {
         enabled,
         ad_account_ids: accountIds,
+        lead_conversions: leadConversions,
         test_email_patterns: patternsText.split(/\n+/).map((s) => s.trim()).filter(Boolean),
         alert_thresholds: { ...thresholds, severity_spend_floor: floors },
         known_external_campaigns: knownCampaigns,
@@ -275,6 +318,7 @@ export function MetaAdsTab() {
   }
 
   const markDirty = () => setDirty(true);
+  const accountName = (id: string) => accountList?.accounts.find((a) => a.id === id)?.name || data.sync.accounts[id]?.name || id;
   const refreshActive = isRefreshActive(data.refresh);
   const refreshCopy = refreshStatusCopy(data.refresh, "settings");
   const progressPct = data.refresh.state === "running" ? refreshProgressPercent(data.refresh.progress) : null;
@@ -351,6 +395,7 @@ export function MetaAdsTab() {
 
           {connectionOpen && (
             <div className="space-y-4" data-testid="meta-connection-details">
+              <div className="grid gap-4 md:grid-cols-2">
               {data.token_configured && (
                 <div className="space-y-1.5" data-testid="field-meta-account-ids">
                   <p className="text-sm font-medium text-foreground">Ad accounts</p>
@@ -378,6 +423,49 @@ export function MetaAdsTab() {
                   )}
                 </div>
               )}
+                <div className="space-y-1.5" data-testid="field-meta-lead-conversions">
+                  <p className="text-sm font-medium text-foreground">Conversions that count as leads</p>
+                  <p className="text-xs text-muted-foreground">
+                    The Leads card counts only these. With none picked, it counts the standard Lead event.
+                  </p>
+                  <SearchableMultiCombobox
+                    values={leadConversions}
+                    onChange={(next) => {
+                      const keys = Array.from(
+                        new Set(next.map((v) => normalizeMetaLeadConversionKey(v)).filter((k): k is string => !!k)),
+                      ).slice(0, MAX_META_LEAD_CONVERSIONS);
+                      setLeadConversions(keys);
+                      markDirty();
+                    }}
+                    options={conversionOptions}
+                    placeholder={accountIds.length === 0 ? "Pick ad accounts first…" : "Select conversions…"}
+                    searchPlaceholder="Search by name or id…"
+                    emptyMessage="No conversions match"
+                    isLoading={conversionsLoading}
+                    disabled={!canEdit || accountIds.length === 0}
+                    testId="meta-lead-conversions"
+                  />
+                  {conversions?.overlaps.map((o) => (
+                    <p
+                      key={o.keys.join("|")}
+                      className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400"
+                      data-testid="text-meta-lead-conversions-overlap"
+                    >
+                      <IconAlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        {o.names[0]} and {o.names[1]} report on the same ads {o.both_days_pct}% of the time, so Meta may count the same lead
+                        twice. Keep the one your campaigns optimize for.
+                      </span>
+                    </p>
+                  ))}
+                  {conversionErrors.length > 0 && (
+                    <p className="text-xs text-destructive" data-testid="text-meta-lead-conversions-error">
+                      Could not read conversions for {conversionErrors.map((a) => accountName(a.id)).join(", ")}:{" "}
+                      {conversionErrors[0]!.error}. Already picked conversions stay picked.
+                    </p>
+                  )}
+                </div>
+              </div>
 
               {testResult && (
                 <div className="rounded-md border border-border p-3 space-y-1 text-xs" data-testid="meta-test-result">
@@ -414,6 +502,13 @@ export function MetaAdsTab() {
                 </p>
                 <p>
                   Non-secret config: <code className="font-mono">settings.yml → ads.meta</code> (per site).
+                </p>
+                <p>
+                  Lead conversions: <code className="font-mono">ads.meta.lead_conversions</code> (max {MAX_META_LEAD_CONVERSIONS}) —{" "}
+                  <code className="font-mono">fb_pixel_lead</code> (Meta&apos;s <code className="font-mono">offsite_conversion.fb_pixel_lead</code>) or a
+                  custom conversion id (<code className="font-mono">offsite_conversion.custom.&lt;id&gt;</code>). The Meta leads number is the plain
+                  sum of the picks, and changing them recalculates every window from cached days. Options come live from Meta for the selected
+                  accounts, or from the last sync when Meta can&apos;t be reached.
                 </p>
                 <p>
                   Cache: <code className="font-mono">{data.policy.cache_dir}</code> · refresh last {data.policy.refresh_days} days · keep{" "}

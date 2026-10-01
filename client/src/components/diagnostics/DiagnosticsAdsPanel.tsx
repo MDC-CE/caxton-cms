@@ -6,6 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { useToast } from "@/hooks/use-toast";
@@ -22,6 +30,12 @@ import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButto
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
 import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
+import {
+  IssueConversionEvidence,
+  IssueSettingsAction,
+  LeadConversionBadges,
+  LeadConversionNotes,
+} from "@/components/diagnostics/AdsLeadConversions";
 import { TabCountBadge } from "@/components/DebugBubble/components/PageErrorsModal";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
@@ -135,19 +149,35 @@ function issuesRightNow(k: AdsDiagnostics["kpis"], affected: string | null, wind
 
 const LEADS_READINGS: KpiReading[] = [
   { reading: "Meta (left)", meaning: "Leads Meta's pixel says its ads produced, counted Meta's way (it can include people who saw an ad and converted later)." },
+  { reading: "Which Meta leads", meaning: "Only the conversions picked in Settings → Ads → Meta, added together. With none picked, the standard Lead event. The badges list what was counted." },
   { reading: "Site (right)", meaning: "Form submissions this site recorded from people who came from a paid ad in the last 30 days. Staff tests are left out." },
   { reading: "Close together", meaning: "Both sides agree. Healthy." },
   { reading: "Meta much higher", meaning: "Some gap is normal. A big one can mean forms aren't recording on the site." },
-  { reading: "Site much higher", meaning: "Meta's pixel may not be sending the Lead event." },
+  { reading: "Site much higher", meaning: "Meta's pixel may not be sending the picked conversions, or the wrong ones are picked." },
   { reading: "+ repeats", meaning: "The same person sent the same form again within 24 hours. Not counted as new leads." },
 ];
+
+/** Clear gap only (≥2× or one side empty). No highlight for 0/0 or close pairs. */
+function leadsActiveReading(meta: number, site: number): string | undefined {
+  if (meta === 0 && site === 0) return undefined;
+  if (meta === 0) return "Site much higher";
+  if (site === 0) return "Meta much higher";
+  if (meta >= site * 2) return "Meta much higher";
+  if (site >= meta * 2) return "Site much higher";
+  return undefined;
+}
 
 function leadsRightNow(k: AdsDiagnostics["kpis"], collectingSince: string | null): string {
   const since = collectingSince ? ` Site leads are only recorded since ${collectingSince.slice(0, 10)}.` : "";
   if (k.meta_leads === 0 && k.site_leads === 0) {
     return `No leads on either side in this window. If these ads should bring form fills, check Open issues for pixel or form problems.${since}`;
   }
-  if (k.meta_leads === 0) return `The site recorded ${formatNum(k.site_leads)} but Meta reported none. Check that the pixel sends a Lead event.`;
+  if (k.meta_leads === 0) {
+    const picked = k.meta_lead_conversions_picked;
+    return picked && picked.length === 0
+      ? `The site recorded ${formatNum(k.site_leads)} but Meta reported no standard Lead events. Pick the conversions your forms fire in Settings → Ads → Meta.`
+      : `The site recorded ${formatNum(k.site_leads)} but Meta reported none for the picked conversions. Check the pixel tags in Tag Manager, or pick the conversions your forms fire.`;
+  }
   if (k.site_leads === 0) return `Meta reported ${formatNum(k.meta_leads)} but the site recorded none. Check Open issues — forms may not be recording.${since}`;
   return `Meta reports ${formatNum(k.meta_leads)}, the site recorded ${formatNum(k.site_leads)}. Compare the trend over time; never add them together.`;
 }
@@ -173,6 +203,7 @@ function KpiReadGuide({
   intro,
   readings,
   rightNow,
+  activeReading,
   template,
   footer,
   testId,
@@ -181,6 +212,8 @@ function KpiReadGuide({
   intro: string;
   readings: KpiReading[];
   rightNow: string;
+  /** Situation row that matches the current KPI (e.g. "Site much higher"). */
+  activeReading?: string;
   /** Shows a copy button for the tracking template in the "Right now" box. */
   template?: string;
   footer?: ReactNode;
@@ -188,8 +221,8 @@ function KpiReadGuide({
 }) {
   const { toast } = useToast();
   return (
-    <Popover>
-      <PopoverTrigger asChild>
+    <Dialog>
+      <DialogTrigger asChild>
         <button
           type="button"
           className="whitespace-nowrap text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -197,19 +230,40 @@ function KpiReadGuide({
         >
           How to read this
         </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-96 space-y-3 text-xs leading-relaxed text-muted-foreground">
-        <div className="space-y-1">
-          <p className="text-sm font-medium text-foreground">How to read {title}</p>
-          <p>{intro}</p>
-        </div>
+      </DialogTrigger>
+      <DialogContent
+        className="max-w-md space-y-3 text-xs leading-relaxed text-muted-foreground sm:max-w-md"
+        data-testid={`dialog-kpi-${testId}-guide`}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-base">How to read {title}</DialogTitle>
+          <DialogDescription className="text-xs leading-relaxed">{intro}</DialogDescription>
+        </DialogHeader>
         <dl className="space-y-1.5">
-          {readings.map((r) => (
-            <div key={r.reading} className="grid grid-cols-[7.5rem_1fr] gap-2">
-              <dt className="font-medium text-foreground">{r.reading}</dt>
-              <dd>{r.meaning}</dd>
-            </div>
-          ))}
+          {readings.map((r) => {
+            const active = activeReading != null && r.reading === activeReading;
+            return (
+              <div
+                key={r.reading}
+                className={cn(
+                  "grid grid-cols-[7.5rem_1fr] gap-2 rounded-md px-2 py-1.5 -mx-2",
+                  active && "bg-amber-500/10 ring-1 ring-amber-500/30",
+                )}
+                data-testid={active ? `kpi-${testId}-guide-active` : undefined}
+                data-active={active ? "true" : undefined}
+              >
+                <dt className="font-medium text-foreground">
+                  {r.reading}
+                  {active && (
+                    <span className="mt-0.5 block text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                      Matches now
+                    </span>
+                  )}
+                </dt>
+                <dd>{r.meaning}</dd>
+              </div>
+            );
+          })}
         </dl>
         <div className="space-y-2 rounded-md border bg-muted/40 p-2" data-testid={`kpi-${testId}-guide-now`}>
           <p>
@@ -233,8 +287,8 @@ function KpiReadGuide({
           )}
         </div>
         {footer && <p>{footer}</p>}
-      </PopoverContent>
-    </Popover>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -254,6 +308,7 @@ function Kpi({
   tone,
   aside,
   corner,
+  footer,
   testId,
 }: {
   label: string;
@@ -265,6 +320,8 @@ function Kpi({
   aside?: ReactNode;
   /** Bottom-right of the card, under `aside`. */
   corner?: ReactNode;
+  /** Full-width notes under the number. */
+  footer?: ReactNode;
   testId: string;
 }) {
   return (
@@ -309,6 +366,7 @@ function Kpi({
             </div>
           )}
         </div>
+        {footer}
       </CardContent>
     </Card>
   );
@@ -441,7 +499,8 @@ function IssueRow({
         : null;
   const showTemplate = issue.code === "missing_tracking_params" || issue.code === "non_paid_medium" || issue.code === "unclear_share_high" || issue.code === "spend_zero_visits";
   const unrecognized = issue.code === "unrecognized_campaign";
-  const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized;
+  const settingsFix = issue.code === "lead_conversions_overlap";
+  const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized && !settingsFix;
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border last:border-b-0">
       <CollapsibleTrigger asChild>
@@ -516,6 +575,8 @@ function IssueRow({
             {issue.scope.url}
           </a>
         )}
+        <IssueConversionEvidence issue={issue} />
+        {issue.action && <IssueSettingsAction issue={issue} onDone={onReload} />}
         {unrecognized && issue.severity !== "info" && <MarkCampaignKnown issue={issue} onDone={onReload} />}
         {showFixedElsewhere && <p className="text-xs text-muted-foreground">This is fixed in Meta Ads Manager or Tag Manager, not on the site.</p>}
       </CollapsibleContent>
@@ -535,9 +596,9 @@ export function DiagnosticsAdsPanel() {
   };
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ["/api/diagnostics/ads", days],
+    queryKey: ["/api/diagnostics/ads", "meta", days],
     queryFn: async () => {
-      const res = await apiFetch(`/api/diagnostics/ads?days=${days}`);
+      const res = await apiFetch(`/api/diagnostics/ads?platform=meta&days=${days}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads diagnostics");
       return res.json() as Promise<AdsDiagnostics>;
     },
@@ -734,9 +795,12 @@ export function DiagnosticsAdsPanel() {
               intro="Two independent counts of the same leads. They never match exactly — compare them to spot a broken pixel or form, never add them."
               readings={LEADS_READINGS}
               rightNow={leadsRightNow(k, data.collecting_since)}
+              activeReading={leadsActiveReading(k.meta_leads, k.site_leads)}
               testId="leads"
             />
           }
+          corner={<LeadConversionBadges k={k} />}
+          footer={<LeadConversionNotes k={k} />}
           testId="leads"
         />
         <Kpi
@@ -892,9 +956,9 @@ export function AdsGlobalRollupCard() {
     >
       <span className="flex items-center gap-2">
         <Megaphone className="h-4 w-4" />
-        Ads: {data.open_errors} tracking error(s){data.open_warnings > 0 ? `, ${data.open_warnings} warning(s)` : ""}
+        Ads (Meta + Google): {data.open_errors} tracking error(s){data.open_warnings > 0 ? `, ${data.open_warnings} warning(s)` : ""}
       </span>
-      <span className="text-xs underline underline-offset-2">Open Ads diagnostics</span>
+      <span className="text-xs underline underline-offset-2">Open Ads overview</span>
     </Link>
   );
 }

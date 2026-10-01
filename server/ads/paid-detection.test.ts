@@ -17,7 +17,7 @@ vi.mock("../analytics/reports", () => ({
   bqNormalizedPagePathSql: () => "",
   bqSessionLastClickChannelSql: () => "",
 }));
-vi.mock("../settings", () => ({ getLeadConversionEventNames: () => [] }));
+vi.mock("../settings", () => ({ getLeadConversionEventNames: () => [], getAdsSettings: () => ({ meta: { enabled: true, ad_account_ids: [] } }) }));
 
 const { planPaidLandingSteps, lastCompleteGa4Date, PAID_LANDING_BACKFILL_DAYS } = await import("./paid-detection");
 const { addDays, utcDate } = await import("./meta-ads-days");

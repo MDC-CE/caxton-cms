@@ -5,7 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { cn } from "@/lib/utils";
 import { isClicksVisitsMismatch, type AdsIssue } from "@shared/ads-diagnostics-rules";
-import type { AdsPageRow } from "./ads-types";
+import { NO_URL_DESTINATION_KINDS, type AdsPageRow } from "./ads-types";
 import { formatMoney, formatNum, formatPct, formatSeconds, PLATFORM_LABELS } from "./ads-format";
 import { PlatformTag } from "./PlatformTag";
 
@@ -30,6 +30,7 @@ const ORGANIC_RATE_HINT = (
 
 function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIssue[]): Metric[] {
   const grey = row.low_sample;
+  const metaGrey = row.meta_low_sample;
   switch (perspective) {
     case "traffic":
       return [
@@ -42,6 +43,8 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
           muted: grey,
           testId: "ctv",
         },
+        { label: "CTR", value: formatPct(row.ctr), muted: grey, testId: "ctr" },
+        { label: "Cost / click", value: formatMoney(row.cpc, { decimals: 2 }), muted: grey, testId: "cpc" },
       ];
     case "conversion":
       return [
@@ -52,7 +55,14 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         },
         { label: "Conv. rate", value: formatPct(row.conversion_rate), muted: grey, testId: "cr" },
         { label: "Cost / lead", value: formatMoney(row.cost_per_lead, { decimals: 2 }), muted: grey, testId: "cpl" },
-        { label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" },
+        ...(row.platforms.includes("google") && !row.platforms.includes("meta")
+          ? []
+          : [
+              { label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" },
+              { label: "Meta conv.", value: formatPct(row.meta_conversion_rate), muted: metaGrey, testId: "meta-cr" },
+              { label: "Meta cost / lead", value: formatMoney(row.meta_cost_per_lead, { decimals: 2 }), muted: metaGrey, testId: "meta-cpl" },
+            ]),
+        ...(row.platforms.includes("google") ? [{ label: "Google leads", value: formatNum(row.google_leads ?? 0), testId: "google-leads" }] : []),
         {
           label: "Organic rate",
           value: formatPct(row.organic?.lead_rate ?? null),
@@ -76,6 +86,12 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         { label: "Warnings", value: String(warnings), testId: "warnings" },
         { label: "Unclear", value: formatPct(unclearShare, 0), testId: "unclear" },
         { label: "Redirected from", value: row.redirected_from.length ? String(row.redirected_from.length) : "—", testId: "redirects" },
+        {
+          label: "Visits / page loads",
+          value: isClicksVisitsMismatch(row.lpv_to_visits) ? "Mismatch" : formatPct(row.lpv_to_visits, 0),
+          muted: grey,
+          testId: "lpv-visits",
+        },
       ];
     }
   }
@@ -86,6 +102,7 @@ export function PaidPageRow({
   perspective,
   issues = [],
   coveredDays,
+  metaSplitDays,
   askRejectPct,
   primaryHost,
 }: {
@@ -93,12 +110,16 @@ export function PaidPageRow({
   perspective: PaidPerspective;
   issues?: AdsIssue[];
   coveredDays?: { covered: number; total: number };
+  metaSplitDays?: { covered: number; total: number };
   askRejectPct?: number | null;
   primaryHost?: string;
 }) {
   const [versionsOpen, setVersionsOpen] = useState(false);
   const metrics = metricsFor(row, perspective, issues);
   const showHost = row.host && primaryHost && row.host !== primaryHost;
+  const clickLeads = row.pixel_leads_click ?? 0;
+  const viewOnlyLeads = Math.max(0, row.meta_leads - clickLeads);
+  const showMetaBlock = row.platforms.includes("meta") || row.meta_leads > 0 || row.impressions > 0 || row.landing_page_views > 0;
 
   return (
     <div className="border-b border-border last:border-b-0" data-testid={`paid-page-row-${row.key}`}>
@@ -188,6 +209,62 @@ export function PaidPageRow({
                     </ul>
                   </div>
                 )}
+                {showMetaBlock && (
+                  <div data-testid="paid-row-meta-block">
+                    <p className="font-medium text-foreground mb-1">Meta's own count</p>
+                    <ul className="space-y-0.5 text-muted-foreground">
+                      <li className="flex justify-between gap-2">
+                        <span>Impressions</span>
+                        <span className="tabular-nums text-foreground">{formatNum(row.impressions)}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>CPM</span>
+                        <span className="tabular-nums text-foreground">{formatMoney(row.cpm, { decimals: 2 })}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>Link clicks</span>
+                        <span className="tabular-nums text-foreground">{formatNum(row.clicks)}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>Landing page views</span>
+                        <span className="tabular-nums text-foreground">{formatNum(row.landing_page_views)}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>Landing rate</span>
+                        <span className="tabular-nums text-foreground">{formatPct(row.landing_rate)}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>Leads from clicks</span>
+                        <span className="tabular-nums text-foreground">{formatNum(clickLeads)}</span>
+                      </li>
+                      <li className="flex justify-between gap-2">
+                        <span>Saw the ad only</span>
+                        <span className="tabular-nums text-foreground">{formatNum(viewOnlyLeads)}</span>
+                      </li>
+                      {row.instant_form_leads > 0 && (
+                        <li className="flex justify-between gap-2">
+                          <span>Instant Form leads</span>
+                          <span className="tabular-nums text-foreground">{formatNum(row.instant_form_leads)}</span>
+                        </li>
+                      )}
+                    </ul>
+                    {row.clicks > 0 && row.landing_page_views === 0 && (
+                      <p className="mt-1.5 text-muted-foreground">
+                        Meta saw clicks but no page loads, so the Meta Pixel may be missing on this page.
+                      </p>
+                    )}
+                    {metaSplitDays && metaSplitDays.covered < metaSplitDays.total && (
+                      <p className="mt-1.5 text-muted-foreground">
+                        Click vs saw-the-ad-only based on {metaSplitDays.covered} of {metaSplitDays.total} days.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {row.platforms.length > 1 && (
+                  <p data-testid="paid-row-mixed-platforms">
+                    Site visits and leads may include other platforms (for example Google). Meta columns count Meta ads only.
+                  </p>
+                )}
                 <p>
                   Started here: {row.started_here} · Form sent here: {row.closed_here}
                 </p>
@@ -212,7 +289,7 @@ export function PaidPageRow({
                 <p className="text-muted-foreground">Seen in this browser — cross-device journeys are not joined.</p>
               </PopoverContent>
             </Popover>
-            {row.url && row.kind !== "instant_form" && row.kind !== "unknown_destination" && (
+            {row.url && !NO_URL_DESTINATION_KINDS.has(row.kind) && (
               <a
                 href={row.url}
                 target="_blank"

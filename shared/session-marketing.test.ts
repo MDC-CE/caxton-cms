@@ -65,6 +65,14 @@ describe("first touch and paid landing", () => {
     expect(two).toEqual({ first: paid, last: later });
     expect(nextPaidLanding(two, null)).toBe(two);
   });
+
+  it("keeps numeric ad ids from the URL template / suffix on the paid landing", () => {
+    const g = paidLandingFor(
+      { utm_source: "google", utm_medium: "cpc", utm_id: "2233445566", utm_term: "998877665544", utm_content: "{creative}" },
+      { host: "4geeks.com", path: "/en/x", now: 5 },
+    );
+    expect(g).toEqual({ host: "4geeks.com", path: "/en/x", at: 5, platform: "google", campaign_id: "2233445566", adset_id: "998877665544" });
+  });
 });
 
 describe("stripMarketingFields", () => {

@@ -1,6 +1,8 @@
-import { ChevronDown } from "lucide-react";
+import { type ReactNode } from "react";
+import { ChevronDown, Info } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { META_PLACEMENT_LABELS } from "@shared/paid-traffic";
 import type { AdsMetaPlatforms, MoneyByCurrency } from "@/components/ads/ads-types";
@@ -16,6 +18,48 @@ function partialNote(p: AdsMetaPlatforms): string | null {
   if (!p.spend_partial) return null;
   if (p.spend_since) return `Platform spend is only available from ${p.spend_since}, so spend and spend per lead may be lower than the real figure for this window.`;
   return "Platform spend is still loading, or the last read failed for an ad account. Spend and spend per lead may be lower than the real figure until the next sync.";
+}
+
+function ColumnInfo({
+  label,
+  align = "left",
+  testId,
+  className,
+  children,
+}: {
+  label: string;
+  align?: "left" | "right";
+  testId: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <th className={cn("py-2 font-medium", align === "right" ? "text-right" : "text-left", className)}>
+      <span className={cn("inline-flex items-center gap-1", align === "right" && "justify-end")}>
+        {label}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className={cn(
+                "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm",
+                "text-muted-foreground transition-colors hover:text-foreground",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              )}
+              aria-label={`What ${label} means`}
+              data-testid={testId}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Info className="h-3 w-3" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align={align === "right" ? "end" : "start"} className="w-72 space-y-1.5 text-sm text-muted-foreground">
+            {children}
+          </PopoverContent>
+        </Popover>
+      </span>
+    </th>
+  );
 }
 
 export function AdsMetaPlatformsCard({ data, days }: { data: AdsMetaPlatforms; days: number }) {
@@ -41,12 +85,29 @@ export function AdsMetaPlatformsCard({ data, days }: { data: AdsMetaPlatforms; d
           <table className="w-full text-sm" data-testid="table-ads-meta-platforms">
             <thead>
               <tr className="border-b border-border text-left text-xs text-muted-foreground">
-                <th className="py-2 pr-3 font-medium">Platform</th>
-                <th className="py-2 pr-3 text-right font-medium">Spend</th>
-                <th className="py-2 pr-3 text-right font-medium">Visits</th>
-                <th className="py-2 pr-3 text-right font-medium">Site leads</th>
-                <th className="py-2 pr-3 text-right font-medium">Spend per lead</th>
-                <th className="py-2 text-right font-medium">Lead rate</th>
+                <ColumnInfo label="Platform" className="pr-3" testId="info-meta-platforms-platform">
+                  <p>Where the ad ran: Facebook, Instagram, Messenger, Audience Network, or Not split.</p>
+                  <p>Not split means the ad still uses an older URL tag, so we can’t tell which app it came from.</p>
+                </ColumnInfo>
+                <ColumnInfo label="Spend" align="right" className="pr-3" testId="info-meta-platforms-spend">
+                  <p>Money spent on ads that send people to this site, for that platform.</p>
+                  <p>Instant Form ads and ads to other sites are left out (see “Not counted” below).</p>
+                </ColumnInfo>
+                <ColumnInfo label="Visits" align="right" className="pr-3" testId="info-meta-platforms-visits">
+                  <p>Paid Meta sessions on this site from Google Analytics, grouped by platform tag.</p>
+                </ColumnInfo>
+                <ColumnInfo label="Site leads" align="right" className="pr-3" testId="info-meta-platforms-leads">
+                  <p>Form submissions on this site credited to a paid Meta visit on that platform.</p>
+                  <p>Repeats and staff tests are left out. This is not Meta’s own lead count.</p>
+                </ColumnInfo>
+                <ColumnInfo label="Spend per lead" align="right" className="pr-3" testId="info-meta-platforms-cpl">
+                  <p>Spend ÷ site leads for that platform.</p>
+                  <p>Empty when there are no site leads. Lower is better, all else equal.</p>
+                </ColumnInfo>
+                <ColumnInfo label="Lead rate" align="right" testId="info-meta-platforms-lead-rate">
+                  <p>Site leads ÷ visits for that platform.</p>
+                  <p>“Few visits” means the sample is too small to treat the rate as reliable.</p>
+                </ColumnInfo>
               </tr>
             </thead>
             <tbody>

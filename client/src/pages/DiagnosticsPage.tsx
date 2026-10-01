@@ -108,7 +108,8 @@ import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import LeadsTab from "@/components/diagnostics/LeadsTab";
 import RuntimeIssuesTab from "@/components/diagnostics/RuntimeIssuesTab";
 import { DiagnosticsSeoPanel, DiagnosticsGeoPanel, DiagnosticsFunnelPanel } from "@/components/diagnostics/DiagnosticsSeoGeoPanels";
-import { AdsGlobalRollupCard, DiagnosticsAdsPanel } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { AdsGlobalRollupCard } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { DiagnosticsAdsRoute } from "@/components/diagnostics/DiagnosticsAdsPlatforms";
 import { DiagnosticsLegalPanel, LegalGlobalRollupCard } from "@/components/diagnostics/DiagnosticsLegalPanel";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import {
@@ -3134,7 +3135,7 @@ export default function DiagnosticsPage() {
               <DiagnosticsFunnelPanel />
             </TabsContent>
             <TabsContent value="ads">
-              <DiagnosticsAdsPanel />
+              <DiagnosticsAdsRoute />
             </TabsContent>
             <TabsContent value="legal">
               <DiagnosticsLegalPanel />

@@ -52,6 +52,12 @@ export type MetaAdDayRow = {
   pixel_leads: number;
   /** Instant Form leads (`lead` / `onsite_conversion.lead_grouped`). */
   instant_form_leads: number;
+  /** `fb_pixel_lead` in the 7-day click window. Absent on days cached before the attribution split. */
+  pixel_leads_click?: number;
+  /** `fb_pixel_lead` in the 1-day view window (raw Meta; UI derives saw-the-ad-only from total − click). */
+  pixel_leads_view?: number;
+  /** `fb_pixel_lead` + custom conversion ids → count. Absent on days cached before per-conversion counts. */
+  conversions?: Record<string, number>;
 };
 
 /** One ad's day on one placement (`breakdowns=publisher_platform`); kept apart from `MetaAdDayRow`. */
@@ -67,6 +73,30 @@ export type MetaAdPlatformDayRow = {
   impressions: number;
   link_clicks: number;
   pixel_leads: number;
+  conversions?: Record<string, number>;
+};
+
+export type MetaCustomConversion = {
+  id: string;
+  name: string;
+  pixel_id: string | null;
+  pixel_name: string | null;
+  custom_event_type: string | null;
+  last_fired_time: string | null;
+  archived: boolean;
+};
+
+export type MetaPixel = {
+  id: string;
+  name: string;
+  last_fired_time: string | null;
+};
+
+/** One pixel event's hits: total over the window + per-hour counts (hour ISO → count). */
+export type MetaPixelEventStats = {
+  event: string;
+  total: number;
+  hourly: Record<string, number>;
 };
 
 export type MetaAccountInfo = {
@@ -89,7 +119,19 @@ export type MetaAdCreativeInfo = {
   url_tags?: string;
   /** True when the creative sends people to an Instant Form instead of a website. */
   instant_form: boolean;
+  /** Conversion the ad set optimizes for, as a lead key (`fb_pixel_lead` or a custom conversion id). */
+  optimization_event?: string;
 };
+
+/** Ad set `promoted_object` → lead key (custom conversion id, or `fb_pixel_lead` for the standard Lead event). */
+export function optimizationEventOf(adset: unknown): string | undefined {
+  const po = (adset as { promoted_object?: Record<string, unknown> } | null | undefined)?.promoted_object;
+  if (!po) return undefined;
+  const cc = po.custom_conversion_id != null ? String(po.custom_conversion_id) : "";
+  if (/^\d{6,25}$/.test(cc)) return cc;
+  if (po.custom_event_type === "LEAD") return "fb_pixel_lead";
+  return undefined;
+}
 
 export class MetaApiError extends Error {
   constructor(
@@ -160,11 +202,52 @@ function toNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const CUSTOM_CONVERSION_PREFIX = "offsite_conversion.custom.";
+
+/**
+ * Lead-candidate conversions per row: `fb_pixel_lead` (standard Lead) and each custom conversion by id.
+ * Other action types (custom events lumped as `fb_pixel_custom`, page views, …) are not kept.
+ */
+export function conversionCounts(actions: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!Array.isArray(actions)) return out;
+  for (const a of actions as Array<{ action_type?: string; value?: unknown }>) {
+    const t = a?.action_type;
+    if (typeof t !== "string") continue;
+    let key: string | null = null;
+    if (t === "offsite_conversion.fb_pixel_lead") key = "fb_pixel_lead";
+    else if (t.startsWith(CUSTOM_CONVERSION_PREFIX)) {
+      const id = t.slice(CUSTOM_CONVERSION_PREFIX.length);
+      if (/^\d{6,25}$/.test(id)) key = id;
+    }
+    if (!key) continue;
+    const v = Math.round(toNum(a.value));
+    if (v > 0) out[key] = (out[key] ?? 0) + v;
+  }
+  return out;
+}
+
 function actionValue(actions: unknown, types: string[]): number {
   if (!Array.isArray(actions)) return 0;
   let total = 0;
   for (const a of actions as Array<{ action_type?: string; value?: unknown }>) {
     if (a && typeof a.action_type === "string" && types.includes(a.action_type)) total += toNum(a.value);
+  }
+  return total;
+}
+
+export type MetaActionWindow = "7d_click" | "1d_view";
+
+/**
+ * Sum of an action type's per-window count (Meta returns these when
+ * `action_attribution_windows` is set). Falls back to 0 when the window field is absent.
+ */
+export function actionWindowValue(actions: unknown, types: string[], window: MetaActionWindow): number {
+  if (!Array.isArray(actions)) return 0;
+  let total = 0;
+  for (const a of actions as Array<Record<string, unknown>>) {
+    if (!a || typeof a.action_type !== "string" || !types.includes(a.action_type)) continue;
+    total += toNum(a[window]);
   }
   return total;
 }
@@ -192,6 +275,9 @@ export function parseInsightRow(raw: Record<string, unknown>, fallbackCurrency =
     landing_page_views: Math.round(actionValue(raw.actions, ["landing_page_view", "omni_landing_page_view"])),
     pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
     instant_form_leads: Math.round(actionValue(raw.actions, ["lead", "onsite_conversion.lead_grouped"])),
+    pixel_leads_click: Math.round(actionWindowValue(raw.actions, ["offsite_conversion.fb_pixel_lead"], "7d_click")),
+    pixel_leads_view: Math.round(actionWindowValue(raw.actions, ["offsite_conversion.fb_pixel_lead"], "1d_view")),
+    conversions: conversionCounts(raw.actions),
   };
 }
 
@@ -212,6 +298,7 @@ export function parseAdPlatformRow(raw: Record<string, unknown>, fallbackCurrenc
     impressions: Math.round(toNum(raw.impressions)),
     link_clicks: Math.round(toNum(raw.inline_link_clicks)),
     pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
+    conversions: conversionCounts(raw.actions),
   };
 }
 
@@ -259,6 +346,7 @@ export function parseCreative(ad: Record<string, unknown>): MetaAdCreativeInfo |
     links: Array.from(links),
     url_tags: typeof creative.url_tags === "string" && creative.url_tags.trim() ? creative.url_tags.trim() : undefined,
     instant_form: instantForm,
+    ...(optimizationEventOf(ad.adset) ? { optimization_event: optimizationEventOf(ad.adset) } : {}),
   };
 }
 
@@ -320,13 +408,85 @@ export async function fetchAdPlatformInsights(
   return rows;
 }
 
+/** Fields `parseCreative` actually reads — keep nested specs narrow so large accounts fit one Graph page. */
+export const META_AD_CREATIVE_FIELDS =
+  "id,campaign_id,adset_id,effective_status,adset{promoted_object},creative{link_url,url_tags,object_story_spec{link_data{link,call_to_action,child_attachments{link,call_to_action}},video_data{call_to_action}},asset_feed_spec{link_urls}}";
+
+function isReduceDataError(err: unknown): boolean {
+  return err instanceof MetaApiError && /reduce the amount of data/i.test(err.message);
+}
+
 export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativeInfo[]> {
-  const raw = await graphGetAll(`act_${accountId}/ads`, {
-    fields:
-      "id,campaign_id,adset_id,effective_status,creative{link_url,url_tags,object_story_spec,asset_feed_spec{link_urls}}",
+  const run = (limit: string) => graphGetAll(`act_${accountId}/ads`, { fields: META_AD_CREATIVE_FIELDS, limit });
+  let raw: Record<string, unknown>[];
+  try {
+    raw = await run("50");
+  } catch (err) {
+    if (!isReduceDataError(err)) throw err;
+    raw = await run("25");
+  }
+  return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
+}
+
+export function parseCustomConversion(raw: Record<string, unknown>): MetaCustomConversion | null {
+  const id = raw.id != null ? String(raw.id) : "";
+  if (!/^\d{6,25}$/.test(id)) return null;
+  const pixel = (raw.pixel ?? null) as { id?: unknown; name?: unknown } | null;
+  return {
+    id,
+    name: String(raw.name ?? "").trim() || id,
+    pixel_id: pixel?.id != null ? String(pixel.id) : null,
+    pixel_name: typeof pixel?.name === "string" ? pixel.name : null,
+    custom_event_type: typeof raw.custom_event_type === "string" ? raw.custom_event_type : null,
+    last_fired_time: typeof raw.last_fired_time === "string" ? raw.last_fired_time : null,
+    archived: raw.is_archived === true,
+  };
+}
+
+/** Custom conversions shared with an ad account (archived ones included, flagged). */
+export async function fetchCustomConversions(accountId: string): Promise<MetaCustomConversion[]> {
+  const raw = await graphGetAll(`act_${accountId}/customconversions`, {
+    fields: "id,name,custom_event_type,last_fired_time,is_archived,pixel{id,name}",
     limit: "200",
   });
-  return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
+  return raw.map(parseCustomConversion).filter((c): c is MetaCustomConversion => !!c);
+}
+
+export async function fetchAccountPixels(accountId: string): Promise<MetaPixel[]> {
+  const raw = await graphGetAll(`act_${accountId}/adspixels`, { fields: "id,name,last_fired_time", limit: "100" });
+  const out: MetaPixel[] = [];
+  for (const r of raw) {
+    const id = r.id != null ? String(r.id) : "";
+    if (!/^\d{5,25}$/.test(id)) continue;
+    out.push({ id, name: String(r.name ?? ""), last_fired_time: typeof r.last_fired_time === "string" ? r.last_fired_time : null });
+  }
+  return out;
+}
+
+/** Parse `/{pixel}/stats?aggregation=event` buckets (one per hour) into per-event totals + hourly counts. */
+export function parsePixelEventStats(data: unknown): MetaPixelEventStats[] {
+  const byEvent = new Map<string, MetaPixelEventStats>();
+  if (!Array.isArray(data)) return [];
+  for (const bucket of data as Array<{ timestamp?: unknown; data?: unknown }>) {
+    const hour = typeof bucket?.timestamp === "string" ? bucket.timestamp : "";
+    if (!hour || !Array.isArray(bucket.data)) continue;
+    for (const d of bucket.data as Array<{ value?: unknown; count?: unknown }>) {
+      const event = typeof d?.value === "string" ? d.value : "";
+      const count = Math.round(toNum(d?.count));
+      if (!event || count <= 0) continue;
+      const s = byEvent.get(event) ?? { event, total: 0, hourly: {} };
+      s.total += count;
+      s.hourly[hour] = (s.hourly[hour] ?? 0) + count;
+      byEvent.set(event, s);
+    }
+  }
+  return Array.from(byEvent.values()).sort((a, b) => b.total - a.total || a.event.localeCompare(b.event));
+}
+
+/** Pixel event hits since `sinceSec` (unix seconds), per event with hourly buckets. */
+export async function fetchPixelEventStats(pixelId: string, sinceSec: number): Promise<MetaPixelEventStats[]> {
+  const raw = await graphGetAll(`${pixelId}/stats`, { aggregation: "event", start_time: String(Math.floor(sinceSec)) });
+  return parsePixelEventStats(raw);
 }
 
 export type MetaAdAccountSummary = {

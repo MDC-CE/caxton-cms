@@ -59,3 +59,8 @@ export function resolvePublicHtmlStatus(opts: {
   if (typeof opts.httpStatus === "number") return opts.httpStatus;
   return isKnownPublicHtmlRoute(opts.url, opts.contentIndex) ? 200 : 404;
 }
+
+/** Skip SSR when the catch-all will not send HTTP 200 (matches renderHubHtml). */
+export function shouldSkipPublicSsr(status: number): boolean {
+  return status !== 200;
+}

@@ -107,6 +107,10 @@ export interface PaidLandingRef {
   /** Epoch milliseconds. */
   at: number;
   platform?: string | null;
+  /** Numeric ad ids from the landing's utm_id / utm_term / utm_content (both Meta and Google templates). */
+  campaign_id?: string | null;
+  adset_id?: string | null;
+  ad_id?: string | null;
 }
 
 /**

@@ -22,6 +22,7 @@ import { getDebugToken } from "@/hooks/useDebugAuth";
 import { apiFetch } from "@/lib/queryClient";
 import { emitContentUpdated, emitVariantCreated, emitVariantDeleted, emitVariantPromoted } from "@/lib/contentEvents";
 import { TEMPLATE_VERSIONING_SLUG, versioningContentSlug } from "@/lib/sharedLayoutEntry";
+import { isReservedContentSlug } from "@shared/safe-href";
 import { getFolderFromType, useContentTypes } from "@/hooks/useContentTypes";
 import { FolderRestoreDialog, type FolderRestoreResult, type FolderRestoreTarget } from "./FolderRestoreDialog";
 import type { MenuView, ContentInfo, VersioningResponse } from "../types";
@@ -365,6 +366,7 @@ export function VersioningView({
   };
 
   const buildPublicPath = (type: string, slug: string, locale: string): string => {
+    if (!slug || isReservedContentSlug(slug)) return "";
     if (type === "program") return `/${locale}/career-programs/${slug}`;
     if (type === "location") return `/${locale}/location/${slug}`;
     if (type === "landing") return `/landing/${slug}`;
@@ -381,6 +383,7 @@ export function VersioningView({
       const { type, slug } = contentInfo;
       if (!type || !slug) return;
       const basePath = buildPublicPath(type, slug, locale);
+      if (!basePath) return;
       window.location.href = `${basePath}?force_variant=${encodeURIComponent(variantSlug)}`;
     }
   };
@@ -401,7 +404,9 @@ export function VersioningView({
     } else {
       const { type, slug } = contentInfo;
       if (!type || !slug) return;
-      window.location.href = buildPublicPath(type, slug, locale);
+      const basePath = buildPublicPath(type, slug, locale);
+      if (!basePath) return;
+      window.location.href = basePath;
     }
   };
 
@@ -674,7 +679,9 @@ export function VersioningView({
 
   const defaultShareUrl = (locale: string, variantSlug: string | null) => {
     if (!contentInfo.type || !contentInfo.slug) return "";
-    const base = `${window.location.origin}${buildPublicPath(contentInfo.type, contentInfo.slug, locale)}`;
+    const path = buildPublicPath(contentInfo.type, contentInfo.slug, locale);
+    if (!path) return "";
+    const base = `${window.location.origin}${path}`;
     return variantSlug ? `${base}?force_variant=${encodeURIComponent(variantSlug)}` : base;
   };
 

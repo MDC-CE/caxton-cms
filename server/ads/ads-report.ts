@@ -1,8 +1,9 @@
 /**
- * Paid-traffic report: joins Meta ad days (spend/clicks/Meta leads), GA4
- * paid-landing days (visits/engagement/GA4 leads) and credited ledger leads
- * (unique leads/submissions) per landing page. Totals are per currency — never
- * summed across currencies. Meta and site lead counts are never added together.
+ * Paid-traffic report: joins ad platform days (Meta Graph API, Google Ads via the
+ * BigQuery transfer — spend/clicks/platform leads), GA4 paid-landing days
+ * (visits/engagement/GA4 leads) and credited ledger leads (unique leads/submissions)
+ * per landing page. Totals are per currency — never summed across currencies.
+ * Platform-reported leads (Meta, Google) and site leads are never added together.
  */
 
 import { getSiteConfigs } from "../site-config";
@@ -18,6 +19,7 @@ import {
   metaPlatformFromSource,
   normalizeLandingPath,
   type AdPlatform,
+  type GoogleNetworkRow,
   type MetaPlacementRow,
 } from "@shared/paid-traffic";
 import {
@@ -25,10 +27,11 @@ import {
   coveredDays,
   isLowSample,
   landingKey,
+  leadPlatform,
   totalsByLanding,
   type AttributionModel,
 } from "@shared/paid-attribution";
-import type { AdsAlertThresholds } from "@shared/ads-settings";
+import { adsThresholds, effectiveMetaLeadKeys, META_STANDARD_LEAD_KEY, type AdsAlertThresholds } from "@shared/ads-settings";
 import {
   missingTemplateParams,
   parseTrackingParams,
@@ -45,8 +48,10 @@ import {
   loadMetaCreatives,
   loadMetaPlatformRows,
   loadMetaRows,
+  loadMetaSplitCoverage,
   loadMetaState,
   META_RETENTION_DAYS,
+  metaConversionNames,
   shortDateRange,
   utcDate,
 } from "./meta-ads-days";
@@ -57,6 +62,7 @@ import {
   loadPaidLandingState,
   type PaidLandingCandidateRow,
 } from "./paid-detection";
+import { isDubiousUtmContent, metaAutoTaggedAdIds } from "./observed-tagging";
 import { ledgerCollectingSince, listLedgerRows, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, summarizeConsentRates } from "./consent-store";
 import {
@@ -68,6 +74,16 @@ import {
   triggerAdsRefreshIfStale,
 } from "./ads-refresh";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
+import { knownIdsFromRows, type AdSpendDayRow, type KnownAdIds, type SpendDestinationHint } from "./providers/types";
+import { metaLeadsFor, metaRowToSpend } from "./providers/meta";
+import { googleProvider } from "./providers/google";
+import {
+  googleDataThrough,
+  googleExpectedThrough,
+  loadGoogleNetworkRows,
+  loadGoogleSetups,
+  loadGoogleState,
+} from "./google-ads-days";
 
 const log = child({ module: "ads/ads-report" });
 
@@ -105,7 +121,17 @@ export type AdsGa4AdRef = AdsGa4SeenRow;
 
 const MAX_GA4_ADS_PER_ROW = 10;
 
-export type DestinationKind = "entry" | "instant_form" | "off_site" | "other_site" | "missing_page" | "unknown_destination";
+export type DestinationKind =
+  | "entry"
+  | "instant_form"
+  | "off_site"
+  | "other_site"
+  | "missing_page"
+  | "unknown_destination"
+  | SpendDestinationHint;
+
+/** Spend that never reaches a website page (Google lead forms, calls, video views, app installs). */
+const NO_SITE_DESTINATIONS = new Set<DestinationKind>(["google_lead_form", "calls", "video_views", "app"]);
 
 export type MoneyByCurrency = Record<string, number>;
 
@@ -155,6 +181,12 @@ export type AdsPageRow = {
   landing_page_views: number;
   meta_leads: number;
   instant_form_leads: number;
+  /** Google-reported lead conversions (never summed with Meta or site leads). */
+  google_leads: number;
+  /** Meta impressions for ads landing here (and Google impressions when that spend is on the row). */
+  impressions: number;
+  /** Standard Meta Lead in the 7-day click window (0 when the split is not yet on cached days). */
+  pixel_leads_click: number;
   unique_leads: number;
   submissions: number;
   repeat_submissions: number;
@@ -162,12 +194,28 @@ export type AdsPageRow = {
   started_here: number;
   closed_here: number;
   conversion_rate: number | null;
+  /** Meta pixel leads ÷ Meta landing page views; null when Meta reports no page loads. */
+  meta_conversion_rate: number | null;
+  /** clicks ÷ impressions. */
+  ctr: number | null;
+  /** landing page views ÷ clicks. */
+  landing_rate: number | null;
+  /** matched_visits ÷ tagged Meta landing page views on GA4 days; can exceed 1 on a measurement mismatch. */
+  lpv_to_visits: number | null;
   cost_per_visit: MoneyByCurrency;
   cost_per_lead: MoneyByCurrency;
+  /** spend ÷ clicks. */
+  cpc: MoneyByCurrency;
+  /** spend ÷ impressions × 1000. */
+  cpm: MoneyByCurrency;
+  /** spend ÷ Meta leads. */
+  meta_cost_per_lead: MoneyByCurrency;
   /** matched_visits / link clicks from tagged ads on days GA4 exported; can exceed 1 on a measurement mismatch. */
   clicks_to_visits: number | null;
   organic: { sessions: number; bounce_rate: number | null; lead_rate: number | null } | null;
   low_sample: boolean;
+  /** True when Meta landing page views are below the rates threshold. */
+  meta_low_sample: boolean;
   platforms: AdPlatform[];
   campaigns: AdsCampaignRef[];
   versions?: AdsVersionRow[];
@@ -185,11 +233,30 @@ export type AdsCampaignGroup = {
   spend: MoneyByCurrency;
   clicks: number;
   meta_leads: number;
+  google_leads: number;
   paid_visits: number;
   pages: Array<{ key: string; title: string; path: string; paid_visits: number }>;
 };
 
 export type AdsWarning = { code: string; message: string };
+
+export type AdsLeadConversions = {
+  /** Conversions picked in Settings → Ads → Meta (`fb_pixel_lead` or custom conversion ids); empty = standard Lead fallback. */
+  meta_picked: string[];
+  /** When the picks last changed (all windows recalculate from the cache). */
+  meta_changed_at: string | null;
+  /** Counted Meta keys (picked, or `fb_pixel_lead` when none) with window counts; sum = `totals.meta_leads`. */
+  meta: Array<{ key: string; name: string; count: number }>;
+  /** Site conversion names behind `totals.unique_leads` (credited, non-test, non-repeat), highest first. */
+  site: Array<{ name: string; count: number }>;
+  /** Window days whose cached Meta rows predate per-conversion counts, so picked custom conversions read 0 there. */
+  meta_incomplete_days: number;
+  /** Dev production copy downloaded before production cached per-conversion counts. */
+  snapshot_lacks_conversions: boolean;
+};
+
+export const SITE_CONVERSION_UNNAMED = "(no conversion name)";
+export const META_STANDARD_LEAD_LABEL = "Standard Lead event";
 
 /** One placement in the Facebook vs Instagram breakdown (site ads only). */
 export type AdsMetaPlatformRow = {
@@ -215,6 +282,49 @@ export type AdsMetaPlatforms = {
   spend_partial: boolean;
   /** Share of paid Meta visits without per-platform tags (0–1). */
   not_split_share: number | null;
+};
+
+/** One Google network row (all Google spend, whatever its destination). */
+export type AdsGoogleNetworkRow = {
+  network: GoogleNetworkRow;
+  spend: MoneyByCurrency;
+  clicks: number;
+  impressions: number;
+  paid_visits: number;
+};
+
+export type AdsGoogleNetworks = {
+  /** Networks with any activity; `not_split` = paid Google visits we couldn't tie to a network. */
+  rows: AdsGoogleNetworkRow[];
+  /** Share of paid Google visits without a network (0–1). */
+  not_split_share: number | null;
+};
+
+export type AdsGoogleBlock = {
+  /** Google rows are readable (connected, or a downloaded copy). */
+  connected: boolean;
+  last_synced_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  /** Newest day the BigQuery transfer loaded for every connected account ("Google data through"). */
+  data_through: string | null;
+  /** Days after this are still expected from the transfer and aren't counted as gaps. */
+  expected_through: string;
+  accounts: Array<{
+    id: string;
+    name?: string;
+    currency?: string;
+    history_loaded: boolean;
+    data_through?: string | null;
+    auto_tagging?: boolean | null;
+    sync_error?: string;
+  }>;
+  /** Paid Google visits carrying a customer id that isn't ticked in Settings → Ads → Google. */
+  unconnected_accounts: Array<{ customer_id: string; paid_visits: number }>;
+  /** Accounts found in the transfer dataset but not ticked. */
+  available_accounts: string[];
+  /** Paid Google visits by how we tied them to a campaign (GA4 link, gclid join, URL suffix tags, or not at all). */
+  visit_match: { ga4_link: number; gclid: number; tags: number; none: number };
 };
 
 export type AdsReport = {
@@ -243,6 +353,7 @@ export type AdsReport = {
       sync_error?: string;
     }>;
   };
+  google: AdsGoogleBlock;
   ga4: { configured: boolean; last_synced_at: string | null; last_export_date: string | null; last_error: string | null };
   /** Derived from `refresh` (queued or running); kept for older clients. */
   refreshing: boolean;
@@ -250,7 +361,7 @@ export type AdsReport = {
   collecting_since: string | null;
   covered_days: { covered: number; total: number };
   /** Window days with no cached day file (Meta when connected; GA4 through its last complete day when configured). */
-  data_gaps: { meta_missing_days: number; ga4_missing_days: number };
+  data_gaps: { meta_missing_days: number; ga4_missing_days: number; google_missing_days: number };
   /** Id filters applied (empty arrays when none). */
   filters: { campaign_ids: string[]; adset_ids: string[]; ad_ids: string[] };
   /** GA4 paid leads vs ledger submissions over days both cover (for the lead-gap diagnostic). */
@@ -275,19 +386,28 @@ export type AdsReport = {
     ratio_clicks: number;
     /** Link clicks from ads missing the URL parameters template, landing on this site. */
     untagged_clicks: number;
+    impressions: number;
+    pixel_leads_click: number;
     meta_leads: number;
     instant_form_leads: number;
+    google_leads: number;
     ga4_leads: number;
     unique_leads: number;
     submissions: number;
     repeat_submissions: number;
     test_submissions: number;
   };
+  /** Days in the window whose Meta day rows include the click/view lead split. */
+  meta_split_days: { covered: number; total: number };
+  /** What sits behind `totals.meta_leads` and `totals.unique_leads`, per conversion name (Leads card badges). */
+  lead_conversions: AdsLeadConversions;
   pages: AdsPageRow[];
   destinations: AdsPageRow[];
   campaigns: AdsCampaignGroup[];
   /** Facebook vs Instagram (Meta placements); omitted when Meta is out of scope or `includeMetaPlatforms` is false. */
   meta_platforms?: AdsMetaPlatforms;
+  /** Google Search / Display / YouTube / Performance Max; omitted when Google is out of scope or not connected. */
+  google_networks?: AdsGoogleNetworks;
   /** Only with `includeGa4Ads` and Meta connected: campaigns sending paid Meta visits that no connected account knows. */
   unrecognized_campaigns?: AdsUnrecognizedCampaigns;
   thresholds: AdsAlertThresholds;
@@ -306,6 +426,8 @@ type Agg = {
   ga4Ads?: Map<string, AdsGa4AdRef>;
   ga4Untagged?: number;
   ratioClicks: number;
+  /** Tagged Meta landing page views on GA4 days (denominator of `lpv_to_visits`). */
+  ratioLandingPageViews: number;
 };
 
 function clampDays(raw: unknown): number {
@@ -316,6 +438,11 @@ function clampDays(raw: unknown): number {
 
 /** A `since` / `until` window the report cannot serve (bad date, reversed, longer than 90 days). */
 export class AdsReportRangeError extends Error {}
+
+/** Id filters with both platforms connected: campaign / ad set ids aren't unique across Meta and Google. */
+export class AdsPlatformRequiredError extends AdsReportRangeError {
+  readonly code = "platform_required_for_ids";
+}
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -404,8 +531,8 @@ function idSets(f: AdsIdFilters): IdSets | null {
   return s.campaign || s.adset || s.ad ? s : null;
 }
 
-/** Fill missing parent ids (ad → ad set → campaign) from synced Meta rows. */
-function makeIdDeriver(rows: MetaAdDayRow[]) {
+/** Fill missing parent ids (ad → ad set → campaign) from synced platform rows. */
+function makeIdDeriver(rows: Array<Pick<AdSpendDayRow, "campaign_id" | "adset_id" | "ad_id">>) {
   const adParents = new Map<string, { adset: string; campaign: string }>();
   const adsetParent = new Map<string, string>();
   for (const r of rows) {
@@ -441,6 +568,14 @@ function divMoney(money: MoneyByCurrency, denom: number): MoneyByCurrency {
   const out: MoneyByCurrency = {};
   if (denom <= 0) return out;
   for (const [c, v] of Object.entries(money)) out[c] = Math.round((v / denom) * 100) / 100;
+  return out;
+}
+
+/** Cost per thousand impressions (spend ÷ impressions × 1000). */
+function cpmMoney(money: MoneyByCurrency, impressions: number): MoneyByCurrency {
+  const out: MoneyByCurrency = {};
+  if (impressions <= 0) return out;
+  for (const [c, v] of Object.entries(money)) out[c] = Math.round((v / impressions) * 1000 * 100) / 100;
   return out;
 }
 
@@ -500,7 +635,15 @@ export const DESTINATION_LABELS: Record<DestinationKind, string> = {
   other_site: "Another of our sites",
   missing_page: "Page no longer exists or isn't managed here",
   unknown_destination: "Destination unknown",
+  google_lead_form: "Google lead form",
+  calls: "Calls",
+  video_views: "Video views",
+  app: "App",
 };
+
+function fixedDestination(kind: DestinationKind): Resolved {
+  return { kind, key: `dest:${kind}`, host: "", path: "", content_type: null, slug: null, locale: null, redirect_chain: [] };
+}
 
 function siteContentIndex(site: string): ContentIndex {
   try {
@@ -588,8 +731,8 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
       ? humanizeSlug(r.slug)
       : r.kind === "instant_form"
         ? "Instant form"
-        : r.kind === "unknown_destination"
-          ? "Destination unknown"
+        : r.kind === "unknown_destination" || NO_SITE_DESTINATIONS.has(r.kind)
+          ? DESTINATION_LABELS[r.kind]
           : r.path;
   return {
     key: r.key,
@@ -617,6 +760,9 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
     landing_page_views: 0,
     meta_leads: 0,
     instant_form_leads: 0,
+    google_leads: 0,
+    impressions: 0,
+    pixel_leads_click: 0,
     unique_leads: 0,
     submissions: 0,
     repeat_submissions: 0,
@@ -624,29 +770,41 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
     started_here: 0,
     closed_here: 0,
     conversion_rate: null,
+    meta_conversion_rate: null,
+    ctr: null,
+    landing_rate: null,
+    lpv_to_visits: null,
     cost_per_visit: {},
     cost_per_lead: {},
+    cpc: {},
+    cpm: {},
+    meta_cost_per_lead: {},
     clicks_to_visits: null,
     organic: null,
     low_sample: true,
+    meta_low_sample: true,
     platforms: [],
     campaigns: [],
   };
 }
 
-type KnownMetaIds = { campaigns: Set<string>; adsets: Set<string>; ads: Set<string> };
-
-function knownMetaIds(rows: MetaAdDayRow[]): KnownMetaIds {
-  return {
-    campaigns: new Set(rows.map((r) => r.campaign_id).filter(Boolean)),
-    adsets: new Set(rows.map((r) => r.adset_id).filter(Boolean)),
-    ads: new Set(rows.map((r) => r.ad_id).filter(Boolean)),
-  };
-}
+type KnownMetaIds = KnownAdIds;
 
 function matchesMetaIds(c: PaidLandingCandidateRow, k: KnownMetaIds): boolean {
   return (!!c.utm_id && k.campaigns.has(c.utm_id)) || (!!c.utm_term && k.adsets.has(c.utm_term)) || (!!c.utm_content && k.ads.has(c.utm_content));
 }
+
+/** Google ids on a visit: GA4 link / gclid join first, then the URL suffix template slots. */
+function googleVisitIds(c: PaidLandingCandidateRow): { campaign: string | null; adset: string | null; ad: string | null } {
+  return { campaign: c.gads_campaign_id || c.utm_id || null, adset: c.gads_ad_group_id || c.utm_term || null, ad: c.utm_content || null };
+}
+
+function matchesGoogleIds(c: PaidLandingCandidateRow, k: KnownAdIds): boolean {
+  const ids = googleVisitIds(c);
+  return (!!ids.campaign && k.campaigns.has(ids.campaign)) || (!!ids.adset && k.adsets.has(ids.adset));
+}
+
+type ByPlatform<T> = { meta: T; google: T };
 
 const MAX_UNRECOGNIZED_PAGES = 5;
 const MAX_UNRECOGNIZED_TAGS = 10;
@@ -660,7 +818,7 @@ export type AdsUnrecognizedCampaigns = { paid_meta_visits: number; campaigns: Ad
  */
 function makeUnrecognizedTracker(site: string, accountIds: string[], end: string) {
   const rows = loadMetaRows(site, "0000-01-01", end, accountIds);
-  const known = knownMetaIds(rows);
+  const known = knownIdsFromRows(rows);
   const names = new Set(rows.map((r) => (r.campaign_name ?? "").trim().toLowerCase()).filter(Boolean));
   for (const c of Object.values(loadMetaCreatives(site).ads)) {
     if (c.campaign_id) known.campaigns.add(c.campaign_id);
@@ -728,21 +886,29 @@ function makeUnrecognizedTracker(site: string, accountIds: string[], end: string
  * `known` (every synced row) decides paid vs organic; `matched` uses `connected`
  * (rows after account/currency filters) so both sides of clicks → visits narrow together.
  */
-function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, connected: KnownMetaIds) {
+function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, connected: ByPlatform<KnownAdIds>) {
   const cls = classifyTraffic({
     utm_source: c.source === "(direct)" ? null : c.source,
     utm_medium: c.medium === "(none)" ? null : c.medium,
     click_ids: c.click_id_type ? { [c.click_id_type]: "1" } : undefined,
     matches_known_meta_id: matchesMetaIds(c, known),
   });
-  return { ...cls, matched: cls.status === "paid" && cls.platform === "meta" && matchesMetaIds(c, connected) };
+  // GA4's Google Ads link marks the session as a Google Ads click even when source/medium were overwritten.
+  if (cls.status !== "paid" && c.gads_campaign_id) {
+    return { status: "paid" as const, platform: "google" as const, click_id_type: cls.click_id_type, matched: matchesGoogleIds(c, connected.google) };
+  }
+  const matched =
+    cls.status === "paid" &&
+    ((cls.platform === "meta" && matchesMetaIds(c, connected.meta)) || (cls.platform === "google" && matchesGoogleIds(c, connected.google)));
+  return { ...cls, matched };
 }
 
-/** False only when the ad setup was read and lacks the URL parameters template (unknown setups count as tagged). */
-function adIsTagged(creative: { links: string[]; url_tags?: string | null } | undefined): boolean {
+/** False when the ad setup was read and lacks the template or has a dubious utm_content (unknown setups count as tagged). */
+function adIsTagged(adId: string, creative: { links: string[]; url_tags?: string | null } | undefined): boolean {
   if (!creative || creative.links.length === 0) return true;
   const params = { ...parseTrackingParams(creative.links[0]), ...parseTrackingParams(creative.url_tags) };
-  return missingTemplateParams(params).length === 0;
+  if (missingTemplateParams(params).length > 0) return false;
+  return !isDubiousUtmContent(adId, params);
 }
 
 export function buildAdsReport(opts: AdsReportOpts): AdsReport {
@@ -753,7 +919,8 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const platform = opts.platform ?? "all";
   const model: AttributionModel = opts.model ?? "last_paid";
   const settings = getAdsSettings(opts.contentRoot);
-  const thresholds = settings.meta.alert_thresholds;
+  const thresholds = adsThresholds(settings);
+  const googleSettings = settings.google ?? { enabled: false, customer_ids: [], bigquery: { project: null, dataset: null }, lead_conversion_actions: [], known_external_campaigns: [] };
   const warnings: AdsWarning[] = [];
   const hosts = hostSets(opts.site);
   const resolve = makeResolver(opts.contentIndex ?? siteContentIndex(opts.site), hosts);
@@ -772,6 +939,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         platforms: new Set(),
         versions: new Map(),
         ratioClicks: 0,
+        ratioLandingPageViews: 0,
       };
       aggs.set(r.key, a);
     } else if (r.redirected_from && !a.row.redirected_from.includes(r.redirected_from)) {
@@ -793,7 +961,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     const k = `${plat ?? ""}|${id ?? name}`;
     let g = campaignGroups.get(k);
     if (!g) {
-      g = { key: k, platform: plat, campaign_id: id, campaign_name: name, spend: {}, clicks: 0, meta_leads: 0, paid_visits: 0, pages: [] };
+      g = { key: k, platform: plat, campaign_id: id, campaign_name: name, spend: {}, clicks: 0, meta_leads: 0, google_leads: 0, paid_visits: 0, pages: [] };
       campaignGroups.set(k, g);
     }
     return g;
@@ -820,8 +988,11 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     unsynced_account_visits: 0,
     ratio_clicks: 0,
     untagged_clicks: 0,
+    impressions: 0,
+    pixel_leads_click: 0,
     meta_leads: 0,
     instant_form_leads: 0,
+    google_leads: 0,
     ga4_leads: 0,
     unique_leads: 0,
     submissions: 0,
@@ -846,26 +1017,53 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   /** Showing a production download that nothing here can refresh (no local Meta token). */
   const snapshotMode = metaConnected && isProductionSnapshot(opts.site) && !isMetaConnected(opts.contentRoot);
   const includeMeta = platform === "all" || platform === "meta";
+  const includeGoogle = platform === "all" || platform === "google";
+  const googleConnected = googleProvider.hasData(opts.site, opts.contentRoot);
+  if (idFilter && platform === "all" && metaConnected && googleConnected) {
+    throw new AdsPlatformRequiredError(
+      "Both Meta and Google Ads are connected, so campaign / ad set / ad ids need a platform. Pass platform meta or google with the id filters.",
+    );
+  }
+  /** Platform whose ids the filter means (only one connected → that one). */
+  const filterPlatform: AdPlatform = platform !== "all" ? platform : googleConnected && !metaConnected ? "google" : "meta";
   const metaRowsAll: MetaAdDayRow[] = metaConnected ? loadMetaRows(opts.site, start, end, settings.meta.ad_account_ids) : [];
-  const deriveIds = makeIdDeriver(metaRowsAll);
+  const metaLeadKeys = effectiveMetaLeadKeys(settings.meta.lead_conversions ?? []);
+  const metaSpendAll = metaRowsAll.map((m) => metaRowToSpend(m, metaLeadKeys));
+  const metaKeyCounts = new Map<string, number>(metaLeadKeys.map((k) => [k, 0]));
+  const googleSpendAll: AdSpendDayRow[] = googleConnected ? googleProvider.loadSpendRows(opts.site, start, end, googleSettings.customer_ids) : [];
+  const deriveIds = makeIdDeriver(filterPlatform === "google" ? googleSpendAll : metaSpendAll);
   const seenIds: Record<keyof DerivedIds, Set<string>> = { campaign: new Set(), adset: new Set(), ad: new Set() };
   const noteSeen = (d: DerivedIds) => {
     if (d.campaign) seenIds.campaign.add(d.campaign);
     if (d.adset) seenIds.adset.add(d.adset);
     if (d.ad) seenIds.ad.add(d.ad);
   };
-  const metaRows = metaRowsAll.filter((r) => {
+  const inScope = (p: AdPlatform) => platform === "all" || platform === p;
+  const keepSpend = (r: AdSpendDayRow) => {
     if (opts.account && r.account_id !== opts.account) return false;
     if (opts.currency && r.currency !== opts.currency) return false;
     if (!idFilter) return true;
+    if (r.platform !== filterPlatform) return false;
     const d: DerivedIds = { campaign: r.campaign_id || null, adset: r.adset_id || null, ad: r.ad_id || null };
     if (!idsMatch(d, idFilter)) return false;
-    if (includeMeta) noteSeen(d);
+    if (inScope(r.platform)) noteSeen(d);
     return true;
-  });
-  const known = knownMetaIds(metaRowsAll);
-  const connected = metaRows.length === metaRowsAll.length ? known : knownMetaIds(metaRows);
-  /** Account/currency filters are Meta concepts: visits and leads count only when tied to the filtered ads. */
+  };
+  const metaSpend = metaSpendAll.filter(keepSpend);
+  const googleSpend = googleSpendAll.filter(keepSpend);
+  const known = knownIdsFromRows(metaSpendAll);
+  const googleKnown = knownIdsFromRows(googleSpendAll);
+  if (googleConnected) {
+    const setups = loadGoogleSetups(opts.site);
+    const ticked = new Set(googleSettings.customer_ids);
+    for (const [id, c] of Object.entries(setups.campaigns)) if (ticked.has(c.customer_id)) googleKnown.campaigns.add(id);
+    for (const [id, g] of Object.entries(setups.ad_groups)) if (googleKnown.campaigns.has(g.campaign_id)) googleKnown.adsets.add(id);
+  }
+  const connected: ByPlatform<KnownAdIds> = {
+    meta: metaSpend.length === metaSpendAll.length ? known : knownIdsFromRows(metaSpend),
+    google: googleSpend.length === googleSpendAll.length ? googleKnown : knownIdsFromRows(googleSpend),
+  };
+  /** Account/currency filters narrow spend: visits and leads count only when tied to the filtered ads. */
   const narrowToAccount = !!opts.account || !!opts.currency;
 
   let collectingSince: number | null = null;
@@ -888,6 +1086,19 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   /** Filtered-out Meta visits whose finest filtered id is unknown (no tag, no parent), by row key. */
   const untaggedByKey = new Map<string, number>();
   const unrecognized = opts.includeGa4Ads && metaConnected && paidDays.length > 0 ? makeUnrecognizedTracker(opts.site, settings.meta.ad_account_ids, end) : null;
+  const tickedGoogle = new Set(googleSettings.customer_ids);
+  const unconnectedGoogle = new Map<string, number>();
+  const googleMatch: AdsGoogleBlock["visit_match"] = { ga4_link: 0, gclid: 0, tags: 0, none: 0 };
+  type NetAgg = { spend: MoneyByCurrency; clicks: number; impressions: number; paid_visits: number };
+  const googleNets = new Map<GoogleNetworkRow, NetAgg>();
+  const googleNet = (n: GoogleNetworkRow): NetAgg => {
+    let agg = googleNets.get(n);
+    if (!agg) {
+      agg = { spend: {}, clicks: 0, impressions: 0, paid_visits: 0 };
+      googleNets.set(n, agg);
+    }
+    return agg;
+  };
 
   for (const day of paidDays) {
     const inLeadGap = ledgerFirstFullDay != null && day.date >= ledgerFirstFullDay;
@@ -898,6 +1109,13 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       if (platform !== "all" && cls.platform !== platform) continue;
       const r = resolve(c.host, c.path);
       if (unrecognized && cls.status === "paid" && cls.platform === "meta") unrecognized.note(c, r, day.date, hosts.primary);
+      if (cls.status === "paid" && cls.platform === "google") {
+        if (c.gads_customer_id && !tickedGoogle.has(c.gads_customer_id)) {
+          unconnectedGoogle.set(c.gads_customer_id, (unconnectedGoogle.get(c.gads_customer_id) ?? 0) + c.sessions);
+        }
+        const how: keyof typeof googleMatch = c.gads_match ?? (googleVisitIds(c).campaign ? "tags" : "none");
+        googleMatch[how] += c.sessions;
+      }
       if (opts.content_type && r.content_type !== opts.content_type) continue;
       if (narrowToAccount && !cls.matched) {
         if (cls.status === "paid" && cls.platform === "meta" && !matchesMetaIds(c, known)) {
@@ -911,9 +1129,11 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         continue;
       }
       if (idFilter) {
-        const d = deriveIds(c.utm_id, c.utm_term, c.utm_content);
+        if (cls.platform !== filterPlatform) continue;
+        const v = cls.platform === "google" ? googleVisitIds(c) : { campaign: c.utm_id, adset: c.utm_term, ad: c.utm_content };
+        const d = deriveIds(v.campaign, v.adset, v.ad);
         if (!idsMatch(d, idFilter)) {
-          if (cls.status === "paid" && cls.platform === "meta" && !d[finestLevel(idFilter)]) untaggedByKey.set(r.key, (untaggedByKey.get(r.key) ?? 0) + c.sessions);
+          if (cls.status === "paid" && !d[finestLevel(idFilter)]) untaggedByKey.set(r.key, (untaggedByKey.get(r.key) ?? 0) + c.sessions);
           continue;
         }
         noteSeen(d);
@@ -932,6 +1152,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       totals.paid_visits += c.sessions;
       totals.ga4_leads += c.sessions_with_lead;
       if (cls.platform === "meta") placement(metaPlatformFromSource(c.source)).paid_visits += c.sessions;
+      if (cls.platform === "google") googleNet(c.gads_network ?? "not_split").paid_visits += c.sessions;
       if (cls.matched) {
         a.row.matched_visits += c.sessions;
         totals.matched_visits += c.sessions;
@@ -939,9 +1160,15 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         totals.unmatched_meta_visits += c.sessions;
       }
       if (inLeadGap) leadGapCompare.ga4_leads += c.sessions_with_lead;
-      const metaCampaignId = cls.platform === "meta" && c.utm_id && known.campaigns.has(c.utm_id) ? c.utm_id : null;
-      campaignRef(a, cls.platform, metaCampaignId, c.campaign).paid_visits += c.sessions;
-      const g = groupFor(cls.platform, metaCampaignId, c.campaign);
+      const googleCampaign = cls.platform === "google" ? googleVisitIds(c).campaign : null;
+      const campaignId =
+        cls.platform === "meta" && c.utm_id && known.campaigns.has(c.utm_id)
+          ? c.utm_id
+          : googleCampaign && (c.gads_campaign_id || googleKnown.campaigns.has(googleCampaign))
+            ? googleCampaign
+            : null;
+      campaignRef(a, cls.platform, campaignId, c.campaign).paid_visits += c.sessions;
+      const g = groupFor(cls.platform, campaignId, c.campaign);
       g.paid_visits += c.sessions;
       groupPage(g, a, c.sessions);
       if (opts.includeGa4Ads) {
@@ -1013,40 +1240,100 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     return r;
   };
 
-  if (includeMeta && metaRows.length > 0) {
-    for (const m of metaRows) {
-      totals.clicks += m.link_clicks;
-      totals.landing_page_views += m.landing_page_views;
-      totals.meta_leads += m.pixel_leads;
-      totals.instant_form_leads += m.instant_form_leads;
-      addMoney(totals.spend, m.currency, m.spend);
+  /** Google: fixed kinds for spend with no website link, else the reported landing page. */
+  const googleDestination = (m: AdSpendDayRow): Resolved => {
+    if (m.destination_hint) return fixedDestination(m.destination_hint);
+    const link = m.landing_url ? parseUrl(m.landing_url) : null;
+    return link ? resolve(link.host, link.path) : fixedDestination("unknown_destination");
+  };
 
-      const creative = creatives()[m.ad_id];
-      const r = destinationOf(m.ad_id, m.instant_form_leads > 0);
-      if (opts.content_type && r.content_type !== opts.content_type) continue;
-      const a = aggFor(r);
-      a.platforms.add("meta");
-      addMoney(a.row.spend, m.currency, m.spend);
-      a.row.clicks += m.link_clicks;
-      a.row.landing_page_views += m.landing_page_views;
-      a.row.meta_leads += m.pixel_leads;
-      a.row.instant_form_leads += m.instant_form_leads;
-      if (r.kind === "entry" || r.kind === "missing_page") {
-        if (!adIsTagged(creative)) {
-          a.row.untagged_clicks += m.link_clicks;
-          totals.untagged_clicks += m.link_clicks;
-        } else if (ga4Dates.has(m.date)) {
-          a.ratioClicks += m.link_clicks;
-          totals.ratio_clicks += m.link_clicks;
-        }
+  const spendRows: AdSpendDayRow[] = [...(includeMeta ? metaSpend : []), ...(includeGoogle ? googleSpend : [])];
+  const metaAuto =
+    includeMeta && metaConnected
+      ? metaAutoTaggedAdIds({
+          site: opts.site,
+          since: start,
+          until: end,
+          rows: metaRowsAll,
+          knownAdIds: known.ads,
+          thresholds: adsThresholds(settings),
+          candidateAdIds: new Set(
+            Object.entries(creatives())
+              .filter(([adId, c]) => {
+                if (!c.links.length) return false;
+                const params = { ...parseTrackingParams(c.links[0]), ...parseTrackingParams(c.url_tags) };
+                return missingTemplateParams(params).length > 0 || isDubiousUtmContent(adId, params);
+              })
+              .map(([adId]) => adId),
+          ),
+        })
+      : new Set<string>();
+  for (const m of spendRows) {
+    totals.clicks += m.clicks;
+    totals.landing_page_views += m.landing_page_views;
+    totals.impressions += m.impressions;
+    if (m.platform === "meta") {
+      totals.meta_leads += m.platform_leads;
+      totals.instant_form_leads += m.form_leads;
+      if (m.pixel_leads_click != null) totals.pixel_leads_click += m.pixel_leads_click;
+      for (const k of metaLeadKeys) {
+        const n = m.conversions ? (m.conversions[k] ?? 0) : k === META_STANDARD_LEAD_KEY ? m.platform_leads : 0;
+        if (n) metaKeyCounts.set(k, (metaKeyCounts.get(k) ?? 0) + n);
       }
-      if (r.kind === "entry") addMoney(totals.tracked_spend, m.currency, m.spend);
-      addMoney(campaignRef(a, "meta", m.campaign_id, m.campaign_name).spend, m.currency, m.spend);
-      const g = groupFor("meta", m.campaign_id, m.campaign_name);
-      addMoney(g.spend, m.currency, m.spend);
-      g.clicks += m.link_clicks;
-      g.meta_leads += m.pixel_leads;
-      groupPage(g, a, 0);
+    } else {
+      totals.google_leads += m.platform_leads;
+    }
+    addMoney(totals.spend, m.currency, m.spend);
+
+    const r = m.platform === "meta" ? destinationOf(m.ad_id, m.form_leads > 0) : googleDestination(m);
+    if (opts.content_type && r.content_type !== opts.content_type) continue;
+    const a = aggFor(r);
+    a.platforms.add(m.platform);
+    addMoney(a.row.spend, m.currency, m.spend);
+    a.row.clicks += m.clicks;
+    a.row.landing_page_views += m.landing_page_views;
+    a.row.impressions += m.impressions;
+    if (m.platform === "meta") {
+      a.row.meta_leads += m.platform_leads;
+      a.row.instant_form_leads += m.form_leads;
+      if (m.pixel_leads_click != null) a.row.pixel_leads_click += m.pixel_leads_click;
+    } else {
+      a.row.google_leads = Math.round((a.row.google_leads + m.platform_leads) * 1000) / 1000;
+    }
+    if (r.kind === "entry" || r.kind === "missing_page") {
+      const tagged = m.tagged ?? (m.platform === "meta" ? adIsTagged(m.ad_id, creatives()[m.ad_id]) || metaAuto.has(m.ad_id) : true);
+      if (!tagged) {
+        a.row.untagged_clicks += m.clicks;
+        totals.untagged_clicks += m.clicks;
+      } else if (ga4Dates.has(m.date)) {
+        a.ratioClicks += m.clicks;
+        totals.ratio_clicks += m.clicks;
+        if (m.platform === "meta") a.ratioLandingPageViews += m.landing_page_views;
+      }
+    }
+    if (r.kind === "entry") addMoney(totals.tracked_spend, m.currency, m.spend);
+    addMoney(campaignRef(a, m.platform, m.campaign_id, m.campaign_name).spend, m.currency, m.spend);
+    const g = groupFor(m.platform, m.campaign_id, m.campaign_name);
+    addMoney(g.spend, m.currency, m.spend);
+    g.clicks += m.clicks;
+    if (m.platform === "meta") g.meta_leads += m.platform_leads;
+    else g.google_leads = Math.round((g.google_leads + m.platform_leads) * 1000) / 1000;
+    groupPage(g, a, 0);
+  }
+  totals.google_leads = Math.round(totals.google_leads * 1000) / 1000;
+
+  // ── Google spend per network (all destinations) ──────────────────────────
+  const buildGoogleNetworks = includeGoogle && googleConnected;
+  if (buildGoogleNetworks) {
+    const keptCampaigns = idFilter || narrowToAccount ? new Set(googleSpend.map((r) => r.campaign_id)) : null;
+    for (const n of loadGoogleNetworkRows(opts.site, start, end, googleSettings.customer_ids)) {
+      if (opts.account && n.customer_id !== opts.account) continue;
+      if (opts.currency && n.currency !== opts.currency) continue;
+      if (keptCampaigns && !keptCampaigns.has(n.campaign_id)) continue;
+      const agg = googleNet(n.network);
+      addMoney(agg.spend, n.currency, n.spend);
+      agg.clicks += n.clicks;
+      agg.impressions += n.impressions;
     }
   }
 
@@ -1075,7 +1362,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         const p = placement(tagState(m.ad_id) === "split" ? m.platform : "not_split");
         addMoney(p.spend, m.currency, m.spend);
         p.clicks += m.link_clicks;
-        p.meta_leads += m.pixel_leads;
+        p.meta_leads += metaLeadsFor(m, metaLeadKeys);
       } else if (r.kind === "instant_form") {
         addMoney(excludedSpend.instant_form, m.currency, m.spend);
       } else if (r.kind === "unknown_destination") {
@@ -1095,22 +1382,25 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   } catch (err) {
     log.warn({ err }, "[ads-report] ledger unavailable");
   }
+  let legacyLeads = 0;
+  let legacyIdLeads = 0;
   const filteredLedger = ledger.filter((r) => {
-    if (platform !== "all" && r.platform !== platform) return false;
-    if (
-      narrowToAccount &&
-      !(
-        (r.campaign_id && connected.campaigns.has(r.campaign_id)) ||
-        (r.adset_id && connected.adsets.has(r.adset_id)) ||
-        (r.ad_id && connected.ads.has(r.ad_id))
-      )
-    ) {
-      return false;
+    const lp = leadPlatform(r, model);
+    if (lp.legacy && !r.is_test) legacyLeads++;
+    if (platform !== "all" && lp.platform !== platform) return false;
+    if (narrowToAccount) {
+      const k = lp.platform === "google" ? connected.google : connected.meta;
+      if (!((lp.campaign_id && k.campaigns.has(lp.campaign_id)) || (lp.adset_id && k.adsets.has(lp.adset_id)) || (lp.ad_id && k.ads.has(lp.ad_id)))) {
+        return false;
+      }
     }
-    if (!idFilter) return true;
-    const d = deriveIds(r.campaign_id, r.adset_id, r.ad_id);
-    if (!idsMatch(d, idFilter)) return false;
-    noteSeen(d);
+    if (idFilter) {
+      if (lp.platform && lp.platform !== filterPlatform && (lp.platform === "meta" || lp.platform === "google")) return false;
+      const d = deriveIds(lp.campaign_id, lp.adset_id, lp.ad_id);
+      if (!idsMatch(d, idFilter)) return false;
+      noteSeen(d);
+      if (lp.legacy) legacyIdLeads++;
+    }
     return true;
   });
   totals.test_submissions = filteredLedger.filter((r) => r.is_test).length;
@@ -1128,9 +1418,16 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     totals.submissions += t.submissions;
     totals.repeat_submissions += t.repeat_submissions;
   }
+  const siteConversionCounts = new Map<string, number>();
+  for (const { lead, credit } of credits) {
+    if (credit.reason !== "credited" || credit.is_repeat || !credit.host || !credit.path) continue;
+    if (opts.content_type && resolve(credit.host, credit.path).content_type !== opts.content_type) continue;
+    const name = lead.form?.trim() || SITE_CONVERSION_UNNAMED;
+    siteConversionCounts.set(name, (siteConversionCounts.get(name) ?? 0) + 1);
+  }
   if (buildPlacements) {
     for (const { lead, credit } of credits) {
-      if (credit.reason !== "credited" || credit.is_repeat || lead.platform !== "meta" || !credit.host || !credit.path) continue;
+      if (credit.reason !== "credited" || credit.is_repeat || leadPlatform(lead, model).platform !== "meta" || !credit.host || !credit.path) continue;
       if (opts.content_type && resolve(credit.host, credit.path).content_type !== opts.content_type) continue;
       placement(metaPlatformFromSource(lead.utm_source)).unique_leads += 1;
     }
@@ -1174,9 +1471,17 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     row.bounce_rate = visits > 0 ? 1 - row.engaged_sessions / visits : null;
     row.avg_engaged_seconds = visits > 0 ? Math.round(a.engagementMs / visits / 100) / 10 : null;
     row.conversion_rate = visits > 0 ? row.unique_leads / visits : null;
+    row.meta_conversion_rate = row.landing_page_views > 0 ? row.meta_leads / row.landing_page_views : null;
+    row.ctr = row.impressions > 0 ? row.clicks / row.impressions : null;
+    row.landing_rate = row.clicks > 0 ? row.landing_page_views / row.clicks : null;
+    row.lpv_to_visits = a.ratioLandingPageViews > 0 ? row.matched_visits / a.ratioLandingPageViews : null;
     row.cost_per_visit = divMoney(row.spend, visits);
     row.cost_per_lead = divMoney(row.spend, row.unique_leads);
+    row.cpc = divMoney(row.spend, row.clicks);
+    row.cpm = cpmMoney(row.spend, row.impressions);
+    row.meta_cost_per_lead = divMoney(row.spend, row.meta_leads);
     row.clicks_to_visits = a.ratioClicks > 0 ? row.matched_visits / a.ratioClicks : null;
+    row.meta_low_sample = isLowSample(row.landing_page_views, minVisits);
     row.organic =
       a.organicSessions > 0
         ? {
@@ -1225,8 +1530,51 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const covered = coveredDays(start, end, collectingSince);
 
   // ── Warnings ────────────────────────────────────────────────────────────
-  if (!metaConnected && includeMeta) {
+  if (!metaConnected && includeMeta && (platform === "meta" || !googleConnected)) {
     warnings.push({ code: "meta_not_connected", message: "Meta Ads is not connected; spend, clicks and Meta-reported leads are missing." });
+  }
+  const googleState = loadGoogleState(opts.site);
+  const googleThrough = googleConnected ? googleDataThrough(googleState, googleSettings.customer_ids) : null;
+  const googleExpected = googleExpectedThrough(now);
+  if (platform === "google" && !googleConnected) {
+    warnings.push({
+      code: "google_not_connected",
+      message: "Google Ads is not connected; spend, clicks and Google-reported leads are missing. Connect it in Settings → Ads → Google.",
+    });
+  }
+  if (googleConnected && includeGoogle) {
+    if (!googleThrough) {
+      warnings.push({
+        code: "google_data_through",
+        message: "No Google Ads data has loaded yet from the BigQuery transfer for every connected account; Google spend is missing, not zero.",
+      });
+    } else if (googleThrough < end) {
+      warnings.push({
+        code: "google_data_through",
+        message: `Google data through ${shortDateRange(googleThrough, googleThrough)}: the BigQuery transfer loads each day with a delay, so ${
+          googleThrough < addDays(end, -1) ? `${shortDateRange(addDays(googleThrough, 1), end)} are` : `${shortDateRange(end, end)} is`
+        } missing for Google, not zero.`,
+      });
+    }
+    if (googleThrough && googleThrough < googleExpected) {
+      warnings.push({
+        code: "google_transfer_stale",
+        message: `The Google Ads BigQuery transfer hasn't loaded anything after ${shortDateRange(googleThrough, googleThrough)} (expected through ${shortDateRange(googleExpected, googleExpected)}). Check the transfer's run history in Google Cloud → BigQuery → Data transfers.`,
+      });
+    }
+    const unsynced = googleSettings.customer_ids.filter((id) => googleState.customers[id]?.sync_error);
+    if (unsynced.length > 0) {
+      warnings.push({
+        code: "google_account_not_synced",
+        message: `${unsynced.length} Google Ads account(s) couldn't be read on the last sync (${unsynced.join(", ")}): ${googleState.customers[unsynced[0]!]!.sync_error} Their spend is missing, other accounts are unaffected.`,
+      });
+    }
+  }
+  if (googleConnected && legacyLeads > 0 && (platform !== "all" || idFilter)) {
+    warnings.push({
+      code: "lead_platform_legacy",
+      message: `${legacyLeads} lead(s) were recorded before the site stored which ad platform each paid visit came from; they use the platform of the visitor's latest campaign tags instead of the ${model === "first_paid" ? "first" : "last"} paid visit.`,
+    });
   }
   if (snapshotMode) {
     const pulledDay = metaState.pulled_from_production_at?.slice(0, 10);
@@ -1289,9 +1637,13 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const metaMissing = metaDates ? windowDates.filter((d) => !metaDates.has(d)) : [];
   const ga4Complete = lastCompleteGa4Date(now);
   const ga4Missing = ga4Configured ? windowDates.filter((d) => d <= ga4Complete && !ga4Dates.has(d)) : [];
-  if (metaMissing.length > 0 || ga4Missing.length > 0) {
+  const googleDates = googleConnected && includeGoogle ? new Set(googleProvider.listDayDates(opts.site)) : null;
+  // Days the transfer hasn't loaded yet aren't gaps until overdue.
+  const googleMissing = googleDates ? windowDates.filter((d) => d <= googleExpected && !googleDates.has(d)) : [];
+  if (metaMissing.length > 0 || ga4Missing.length > 0 || googleMissing.length > 0) {
     const parts: string[] = [];
     if (metaMissing.length > 0) parts.push(`Meta (${metaMissing.length} day(s): ${compressDateRanges(metaMissing)})`);
+    if (googleMissing.length > 0) parts.push(`Google Ads (${googleMissing.length} day(s): ${compressDateRanges(googleMissing)})`);
     if (ga4Missing.length > 0) parts.push(`GA4 (${ga4Missing.length} day(s): ${compressDateRanges(ga4Missing)})`);
     warnings.push({
       code: "data_gaps",
@@ -1314,13 +1666,13 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     if (untagged > 0) {
       warnings.push({
         code: "untagged_visits_excluded",
-        message: `${untagged} paid Meta visit(s) to pages in this result (${untaggedPaths.join(", ")}) had no ${LEVEL_LABEL[level]} id in their link tags, so they could not be matched to the filter and are left out. Visits, conversion rate and cost per visit are a floor.`,
+        message: `${untagged} paid ${filterPlatform === "google" ? "Google" : "Meta"} visit(s) to pages in this result (${untaggedPaths.join(", ")}) had no ${LEVEL_LABEL[level]} id in their link tags, so they could not be matched to the filter and are left out. Visits, conversion rate and cost per visit are a floor.`,
       });
     }
-    if (model === "first_paid") {
+    if (model === "first_paid" && legacyIdLeads > 0) {
       warnings.push({
         code: "leads_matched_by_last_click",
-        message: "Leads are matched to the filter by the ad the visitor clicked last, even with model first_paid; page credit still follows first_paid.",
+        message: `${legacyIdLeads} lead(s) recorded before paid visits stored their ad ids are matched to the filter by the ad the visitor clicked last, even with model first_paid; page credit still follows first_paid.`,
       });
     }
     const unmatched = (["campaign", "adset", "ad"] as const)
@@ -1377,9 +1729,70 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     }
   }
 
+  let googleNetworks: AdsGoogleNetworks | undefined;
+  if (buildGoogleNetworks) {
+    googleNetworks = finalizeGoogleNetworks(googleNets);
+    const googleVisits = googleNetworks.rows.reduce((x, r) => x + r.paid_visits, 0);
+    if (googleNetworks.not_split_share != null && googleNetworks.not_split_share >= 0.5 && googleVisits >= thresholds.min_paid_visits_for_rates) {
+      warnings.push({
+        code: "google_network_not_split",
+        message: `${Math.round(googleNetworks.not_split_share * 100)}% of paid Google visits (${googleVisits}) couldn't be tied to a network (Search, Display, YouTube…). Network spend is still exact; only visits per network are incomplete. Linking GA4 to Google Ads, or the gclid join (same BigQuery location as GA4), fixes this.`,
+      });
+    }
+  }
+
   const refresh = getAdsRefreshStatus(opts.site);
   const refreshing = isRefreshActive(refresh);
   warnings.push(...refreshWarnings(refresh));
+
+  const googleBlock: AdsGoogleBlock = {
+    connected: googleConnected,
+    last_synced_at: googleState.last_success_at ?? null,
+    last_error: googleState.last_error ?? null,
+    consecutive_failures: googleState.consecutive_failures ?? 0,
+    data_through: googleThrough,
+    expected_through: googleExpected,
+    accounts: googleSettings.customer_ids.map((id) => {
+      const c = googleState.customers?.[id];
+      return {
+        id,
+        name: c?.name || undefined,
+        currency: c?.currency || undefined,
+        history_loaded: !!c?.history_loaded_at,
+        data_through: c?.data_through ?? null,
+        auto_tagging: c?.auto_tagging ?? null,
+        ...(c?.sync_error ? { sync_error: c.sync_error } : {}),
+      };
+    }),
+    unconnected_accounts: Array.from(unconnectedGoogle.entries())
+      .map(([customer_id, paid_visits]) => ({ customer_id, paid_visits }))
+      .sort((a, b) => b.paid_visits - a.paid_visits),
+    available_accounts: (googleState.available_customers ?? []).filter((id) => !tickedGoogle.has(id)),
+    visit_match: googleMatch,
+  };
+
+  const pickedCustom = metaLeadKeys.some((k) => k !== META_STANDARD_LEAD_KEY);
+  const metaIncompleteDays =
+    includeMeta && pickedCustom ? new Set(metaRowsAll.filter((m) => m.conversions === undefined).map((m) => m.date)).size : 0;
+  const conversionNames = includeMeta && pickedCustom ? metaConversionNames(opts.site) : new Map<string, string>();
+  const leadConversions: AdsLeadConversions = {
+    meta_picked: settings.meta.lead_conversions ?? [],
+    meta_changed_at: settings.meta.lead_conversions_changed_at ?? null,
+    meta: includeMeta
+      ? metaLeadKeys
+          .map((key) => ({
+            key,
+            name: key === META_STANDARD_LEAD_KEY ? META_STANDARD_LEAD_LABEL : conversionNames.get(key) ?? key,
+            count: metaKeyCounts.get(key) ?? 0,
+          }))
+          .sort((x, y) => y.count - x.count)
+      : [],
+    site: Array.from(siteConversionCounts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((x, y) => y.count - x.count || x.name.localeCompare(y.name)),
+    meta_incomplete_days: metaIncompleteDays,
+    snapshot_lacks_conversions: snapshotMode && metaIncompleteDays > 0,
+  };
 
   return {
     window: { start, end, days },
@@ -1406,6 +1819,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         ...(metaState.accounts[id]?.sync_error ? { sync_error: metaState.accounts[id]!.sync_error } : {}),
       })),
     },
+    google: googleBlock,
     ga4: {
       configured: ga4Configured,
       last_synced_at: ga4State.last_success_at ?? null,
@@ -1416,15 +1830,21 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     refresh,
     collecting_since: collectingSince ? new Date(collectingSince).toISOString() : null,
     covered_days: covered,
-    data_gaps: { meta_missing_days: metaMissing.length, ga4_missing_days: ga4Missing.length },
+    meta_split_days:
+      includeMeta && metaConnected
+        ? loadMetaSplitCoverage(opts.site, start, end, opts.account ? [opts.account] : settings.meta.ad_account_ids)
+        : { covered: 0, total: 0 },
+    data_gaps: { meta_missing_days: metaMissing.length, ga4_missing_days: ga4Missing.length, google_missing_days: googleMissing.length },
     filters,
     lead_gap_compare: leadGapCompare,
     consent: { mode: "advanced", ask_region_reject_pct: askRejectPct, ask_region_shown: askShown },
     totals,
+    lead_conversions: leadConversions,
     pages,
     destinations,
     campaigns: Array.from(campaignGroups.values()).sort((x, y) => spendSum(y.spend) - spendSum(x.spend) || y.paid_visits - x.paid_visits),
     ...(metaPlatforms ? { meta_platforms: metaPlatforms } : {}),
+    ...(googleNetworks ? { google_networks: googleNetworks } : {}),
     ...(opts.includeGa4Ads ? { unrecognized_campaigns: unrecognized?.result() ?? { paid_meta_visits: 0, campaigns: [] } } : {}),
     thresholds,
     warnings,
@@ -1463,6 +1883,21 @@ function finalizePlacements(
     spend_partial: !loaded || scope.accounts.some((a) => a?.platform_error) || (spendSince != null && spendSince > scope.start),
     not_split_share: visits > 0 ? Math.round((notSplit / visits) * 1000) / 1000 : null,
   };
+}
+
+const NETWORK_ORDER: GoogleNetworkRow[] = ["search", "search_partners", "display", "youtube", "cross_network", "other", "not_split"];
+
+function finalizeGoogleNetworks(nets: Map<GoogleNetworkRow, { spend: MoneyByCurrency; clicks: number; impressions: number; paid_visits: number }>): AdsGoogleNetworks {
+  const rows: AdsGoogleNetworkRow[] = [];
+  let visits = 0;
+  for (const network of NETWORK_ORDER) {
+    const n = nets.get(network);
+    if (!n || (n.paid_visits + n.clicks + n.impressions === 0 && Object.keys(n.spend).length === 0)) continue;
+    visits += n.paid_visits;
+    rows.push({ network, ...n });
+  }
+  const notSplit = nets.get("not_split")?.paid_visits ?? 0;
+  return { rows, not_split_share: visits > 0 ? Math.round((notSplit / visits) * 1000) / 1000 : null };
 }
 
 const REFRESH_WARNING_CODES = new Set(["meta_refresh_in_progress", "meta_refresh_failed", "jobs_worker_down"]);

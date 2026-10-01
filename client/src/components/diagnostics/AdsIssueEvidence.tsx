@@ -21,7 +21,12 @@ import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format"
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
 
 const SHOW_ALL_LIMIT = 200;
-const TRACKING_CODES = new Set<AdsIssue["code"]>(["missing_tracking_params", "non_paid_medium", "tracking_params_unchecked"]);
+const TRACKING_CODES = new Set<AdsIssue["code"]>([
+  "missing_tracking_params",
+  "non_paid_medium",
+  "tracking_params_unchecked",
+  "tracking_params_unverified",
+]);
 
 export function adsManagerUrl(accountId: string, target: { campaign_id?: string; ad_id?: string }): string {
   const params = new URLSearchParams({ act: accountId });
@@ -76,11 +81,18 @@ function AdRow({ ad, showCampaign }: { ad: AdsIssueAd; showCampaign: boolean }) 
           {showCampaign ? ` · ${ad.campaign_name}` : ""}
           {ad.last_spend_date ? ` · last spend ${ad.last_spend_date}` : ""}
         </p>
-        {(ad.missing?.length || ad.medium) && (
+        {(ad.missing?.length || ad.medium || ad.dubious_utm_content) && (
           <p className="text-[11px] text-amber-500">
+            {ad.dubious_utm_content ? "Wrong utm_content (not this ad's id)" : ""}
+            {ad.dubious_utm_content && ad.missing?.length ? " · " : ""}
             {ad.missing?.length ? `Missing ${ad.missing.join(", ")}` : ""}
-            {ad.missing?.length && ad.medium ? " · " : ""}
+            {(ad.missing?.length || ad.dubious_utm_content) && ad.medium ? " · " : ""}
             {ad.medium ? `utm_medium=${ad.medium}` : ""}
+          </p>
+        )}
+        {(ad.checked_clicks != null || ad.ga4_tagged_sessions != null) && (
+          <p className="text-[11px] text-muted-foreground" data-testid={`ads-issue-ad-ga4-${ad.ad_id}`}>
+            Meta clicks {formatNum(ad.checked_clicks ?? 0)} · GA4 visits with this ad&apos;s id {formatNum(ad.ga4_tagged_sessions ?? 0)}
           </p>
         )}
       </div>

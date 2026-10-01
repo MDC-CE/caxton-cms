@@ -46,15 +46,16 @@ export function buildLeadAdContext(
     out.first_utm_term = first.utm_term;
   }
   const pl = session.paid_landing;
-  if (pl?.first) {
-    out.first_paid_landing_host = pl.first.host;
-    out.first_paid_landing_path = pl.first.path;
-    out.first_paid_landing_at = pl.first.at;
-  }
-  if (pl?.last) {
-    out.last_paid_landing_host = pl.last.host;
-    out.last_paid_landing_path = pl.last.path;
-    out.last_paid_landing_at = pl.last.at;
+  for (const prefix of ['first', 'last'] as const) {
+    const ref = pl?.[prefix];
+    if (!ref) continue;
+    out[`${prefix}_paid_landing_host`] = ref.host;
+    out[`${prefix}_paid_landing_path`] = ref.path;
+    out[`${prefix}_paid_landing_at`] = ref.at;
+    out[`${prefix}_paid_landing_platform`] = ref.platform ?? undefined;
+    out[`${prefix}_paid_landing_campaign_id`] = ref.campaign_id ?? undefined;
+    out[`${prefix}_paid_landing_adset_id`] = ref.adset_id ?? undefined;
+    out[`${prefix}_paid_landing_ad_id`] = ref.ad_id ?? undefined;
   }
   const pv = getCurrentPageVersion();
   if (pv) out.page_experiment_id = pv.experiment_id;

@@ -159,6 +159,48 @@ export function adSourceTagState(params: Record<string, string> | null | undefin
   return SITE_SOURCE_PLACEMENT[source] ? "split" : "not_split";
 }
 
+/** Google Ads network (`segments.ad_network_type`); `cross_network` = Performance Max (MIXED). */
+export type GoogleAdNetwork = "search" | "search_partners" | "display" | "youtube" | "cross_network" | "other";
+/** Network row in the Google breakdown; `not_split` = paid Google visits we couldn't tie to a network. */
+export type GoogleNetworkRow = GoogleAdNetwork | "not_split";
+
+export const GOOGLE_NETWORK_LABELS: Record<GoogleNetworkRow, string> = {
+  search: "Google Search",
+  search_partners: "Search partners",
+  display: "Display",
+  youtube: "YouTube",
+  cross_network: "Performance Max (cross-network)",
+  other: "Other networks",
+  not_split: "Network unknown",
+};
+
+export function googleNetworkOf(adNetworkType: string | null | undefined): GoogleAdNetwork {
+  const t = (adNetworkType ?? "").trim().toUpperCase();
+  if (t === "SEARCH") return "search";
+  if (t === "SEARCH_PARTNERS") return "search_partners";
+  if (t === "CONTENT") return "display";
+  if (t.startsWith("YOUTUBE")) return "youtube";
+  if (t === "MIXED") return "cross_network";
+  return "other";
+}
+
+/**
+ * Google Ads final URL suffix staff add at account level. Fallback for matching visits when
+ * GA4 isn't linked to Google Ads and gclid can't be joined (same id slots as the Meta template).
+ */
+export const GOOGLE_URL_SUFFIX_TEMPLATE =
+  "utm_source=google&utm_medium=cpc&utm_campaign={campaignid}&utm_id={campaignid}&utm_term={adgroupid}&utm_content={creative}";
+
+/** Parameters the Google suffix must carry for id matching. */
+export const GOOGLE_SUFFIX_REQUIRED_PARAMS = ["utm_id", "utm_term"] as const;
+
+/** True when a final URL suffix carries the campaign + ad group ValueTrack ids. */
+export function googleSuffixHasIds(suffix: string | null | undefined): boolean {
+  if (!suffix) return false;
+  const s = suffix.replace(/\s+/g, "").toLowerCase();
+  return s.includes("utm_id={campaignid}") && s.includes("utm_term={adgroupid}");
+}
+
 export type TrafficSignals = {
   utm_source?: string | null;
   utm_medium?: string | null;
@@ -214,8 +256,14 @@ export type PaidLanding = {
   at: number;
   platform?: AdPlatform | null;
   campaign_id?: string | null;
+  adset_id?: string | null;
   ad_id?: string | null;
 };
+
+/** Numeric ad ids from the URL templates (Meta: utm_id / utm_term / utm_content; Google suffix: same slots). */
+export function adIdFromTag(v: string | null | undefined): string | null {
+  return v && /^\d{6,25}$/.test(v.trim()) ? v.trim() : null;
+}
 
 /** Strip query/hash and trailing slash (except root) so paths join with CMS entries. */
 export function normalizeLandingPath(path: string): string {

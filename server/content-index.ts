@@ -16,6 +16,7 @@ import { applySectionLayoutDefaults } from "./section-layout-defaults";
 import { invalidateStaticListingCache } from "./static-listing-cache";
 import { isEntryDetached } from "./shared-layout-entry";
 import { isEmptyDetachedLocaleEntry } from "./empty-locale";
+import { isReservedContentSlug } from "../shared/safe-href";
 import {
   findBestSingleMirrorSource,
   buildMirroredLocaleSingle,
@@ -224,6 +225,10 @@ export class ContentIndex {
   }
 
   buildUrl(contentType: string, locale: string, slug: string, params?: Record<string, string>): string {
+    if (slug == null || isReservedContentSlug(String(slug))) {
+      return "";
+    }
+
     const normalized = this.normalizeType(contentType);
     const config = this.contentTypeConfigs[normalized];
     if (!config?.url_pattern) {
@@ -233,7 +238,9 @@ export class ContentIndex {
     let url = config.url_pattern[locale] || config.url_pattern["default"] || `/${locale}/${slug}`;
     if (params) {
       for (const [key, value] of Object.entries(params)) {
-        url = url.replace(`:${key}`, value);
+        const safe =
+          value == null || isReservedContentSlug(String(value)) ? "" : String(value);
+        url = url.replace(`:${key}`, safe);
       }
     }
     const unresolved: string[] = [];

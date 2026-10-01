@@ -18,6 +18,9 @@ vi.mock("./meta-client", () => ({
   fetchAdInsights: vi.fn(async () => []),
   fetchAdPlatformInsights: vi.fn(async () => []),
   fetchAdCreatives: vi.fn(async () => []),
+  fetchCustomConversions: vi.fn(async () => []),
+  fetchAccountPixels: vi.fn(async () => []),
+  fetchPixelEventStats: vi.fn(async () => []),
   MetaApiError: class MetaApiError extends Error {},
 }));
 
@@ -31,6 +34,13 @@ const {
   loadMetaCreatives,
   loadMetaPlatformDay,
   loadMetaPlatformRows,
+  loadMetaCustomConversions,
+  loadMetaPixelEvents,
+  metaDaysMissingConversions,
+  loadMetaSplitCoverage,
+  META_ROW_SHAPE,
+  accountNeedsMetaShapeBackfill,
+  effectiveMetaSyncMode,
 } = await import("./meta-ads-days");
 const metaClient = await import("./meta-client");
 
@@ -47,7 +57,7 @@ function readDay(date: string): { rows: Array<{ account_id: string; ad_id: strin
   return JSON.parse(fs.readFileSync(path.join(h.cacheDir, SITE, "meta-ads-days", `${date}.json`), "utf-8"));
 }
 
-function seedLoaded(ids: string[], platformLoaded = true) {
+function seedLoaded(ids: string[], platformLoaded = true, conversionsLoaded = true, rowShape?: number) {
   const accounts = Object.fromEntries(
     ids.map((id) => [
       id,
@@ -56,7 +66,13 @@ function seedLoaded(ids: string[], platformLoaded = true) {
         currency: "USD",
         account_status: 1,
         history_loaded_at: "2026-09-01T00:00:00.000Z",
+        ...(conversionsLoaded ? { conversions_loaded_at: "2026-09-01T00:00:00.000Z" } : {}),
         ...(platformLoaded ? { platform_history_loaded_at: "2026-09-01T00:00:00.000Z", platform_history_since: "2026-07-01" } : {}),
+        ...(rowShape != null
+          ? { row_shape: rowShape }
+          : conversionsLoaded
+            ? { row_shape: META_ROW_SHAPE }
+            : {}),
       },
     ]),
   );
@@ -79,15 +95,15 @@ afterAll(() => {
 });
 
 describe("metaSyncStepCount", () => {
-  it("counts lookup + insight chunks + placement chunks + creatives per account, plus one save", () => {
-    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(5);
-    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 6 + 2) + 1);
+  it("counts lookup + insight chunks + placement chunks + creatives + conversions per account, plus pixel events and one save", () => {
+    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(7);
+    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 6 + 3) + 2);
   });
 
   it("uses per-account placement windows when given", () => {
     const refresh = { since: "2026-09-20", until: "2026-09-29" };
     const firstFill = { since: "2026-07-02", until: "2026-09-29" };
-    expect(metaSyncStepCount(2, refresh, [refresh, firstFill])).toBe(2 * (1 + 2) + 1 + 6 + 1);
+    expect(metaSyncStepCount(2, refresh, [refresh, firstFill])).toBe(2 * (1 + 3) + 1 + 6 + 2);
   });
 
   it("is 0 with no window or no accounts", () => {
@@ -111,31 +127,37 @@ describe("platformWindowFor", () => {
 describe("planMetaSyncSteps", () => {
   it("plans the 90-day first load when no days are cached", () => {
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
   });
 
   it("plans the 10-day refresh once days are cached and history is loaded", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(5);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(7);
   });
 
   it("plans a 90-day placement fill when only placement history is missing", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"], false);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(1 + 1 + 6 + 1 + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(1 + 1 + 6 + 1 + 1 + 1 + 1);
   });
 
   it("plans a 90-day backfill when an account never loaded history", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+  });
+
+  it("plans a one-time 90-day refill when per-conversion counts were never loaded", () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"], true, false);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(6 + 6 + 3 + 2);
   });
 
   it("plans 90 older days before the earliest cached day", () => {
     seedDay("2026-09-01");
-    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 6 + 2 + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 6 + 3 + 2);
   });
 
   it("is 0 when the sync would skip", () => {
@@ -256,7 +278,95 @@ describe("syncMetaAds history loading", () => {
     expect(loadMetaState(SITE).accounts["222"]).toBeUndefined();
 
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 2) + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+  });
+});
+
+describe("syncMetaAds per-conversion refill, custom conversions and pixel events", () => {
+  it("re-reads 90 days once, marks conversions_loaded_at and row_shape, then refreshes 10 days", async () => {
+    seedDay("2026-09-01", [insightRow("111", "2026-09-01")]);
+    seedLoaded(["111"], true, false);
+    expect(metaDaysMissingConversions(SITE, "2026-09-01", "2026-09-29", ["111"])).toEqual(["2026-09-01"]);
+    const first = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(first.mode).toBe("backfill");
+    expect(first.dates).toHaveLength(90);
+    expect(loadMetaState(SITE).accounts["111"].conversions_loaded_at).toBeTruthy();
+    expect(loadMetaState(SITE).accounts["111"].row_shape).toBe(META_ROW_SHAPE);
+    const second = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(second.mode).toBe("refresh");
+    expect(second.dates).toHaveLength(10);
+  });
+
+  it("does not keep forcing 90-day backfill for an account that still has a sync_error", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111", "222"], true, false);
+    h.meta.ad_account_ids = ["111", "222"];
+    vi.mocked(metaClient.fetchAccountInfo).mockImplementation(async (accountId: string) => {
+      if (accountId === "222") throw new Error("rate limited");
+      return { id: accountId, name: "Acct", currency: "USD", account_status: 1 };
+    });
+    try {
+      await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+      const state = loadMetaState(SITE);
+      expect(state.accounts["111"].conversions_loaded_at).toBeTruthy();
+      expect(state.accounts["111"].row_shape).toBe(META_ROW_SHAPE);
+      expect(state.accounts["222"].conversions_loaded_at).toBeUndefined();
+      expect(state.accounts["222"].sync_error).toBeTruthy();
+      // Broken account is skipped for shape backfill; healthy account is current → 10-day refresh.
+      expect(effectiveMetaSyncMode("refresh", ["111", "222"], state)).toBe("refresh");
+      expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (1 + 1 + 3) + 2);
+    } finally {
+      vi.mocked(metaClient.fetchAccountInfo).mockImplementation(async () => ({ id: "", name: "Acct", currency: "USD", account_status: 1 }));
+    }
+  });
+
+  it("forces a 90-day re-read when row_shape is behind", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"], true, true, META_ROW_SHAPE - 1);
+    expect(accountNeedsMetaShapeBackfill(loadMetaState(SITE).accounts["111"])).toBe(true);
+    const first = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(first.mode).toBe("backfill");
+    expect(loadMetaState(SITE).accounts["111"].row_shape).toBe(META_ROW_SHAPE);
+  });
+
+  it("counts split coverage only for days with pixel_leads_click on every row", () => {
+    seedDay("2026-09-28", [{ ...insightRow("111", "2026-09-28"), pixel_leads_click: 1, pixel_leads_view: 0 }]);
+    seedDay("2026-09-29", [insightRow("111", "2026-09-29")]);
+    expect(loadMetaSplitCoverage(SITE, "2026-09-28", "2026-09-29", ["111"])).toEqual({ covered: 1, total: 2 });
+  });
+
+  it("saves custom conversions per account and pixel events deduped across accounts", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111", "222"]);
+    h.meta.ad_account_ids = ["111", "222"];
+    const cc = { id: "1086440567304045", name: "request_more_info", pixel_id: "414048075447471", pixel_name: "P", custom_event_type: "OTHER", last_fired_time: null, archived: false };
+    vi.mocked(metaClient.fetchCustomConversions).mockResolvedValue([cc] as never);
+    vi.mocked(metaClient.fetchAccountPixels).mockResolvedValue([{ id: "414048075447471", name: "P", last_fired_time: null }] as never);
+    vi.mocked(metaClient.fetchPixelEventStats).mockResolvedValue([{ event: "Lead", total: 3, hourly: { "2026-09-29T10:00:00": 3 } }] as never);
+    try {
+      await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+      expect(loadMetaCustomConversions(SITE).accounts["222"].conversions).toEqual([cc]);
+      const px = loadMetaPixelEvents(SITE).pixels["414048075447471"];
+      expect(px.accounts).toEqual(["111", "222"]);
+      expect(px.events[0]).toMatchObject({ event: "Lead", total: 3 });
+      expect(metaClient.fetchPixelEventStats).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(metaClient.fetchCustomConversions).mockResolvedValue([]);
+      vi.mocked(metaClient.fetchAccountPixels).mockResolvedValue([]);
+      vi.mocked(metaClient.fetchPixelEventStats).mockResolvedValue([]);
+    }
+  });
+
+  it("keeps the previous conversions and records conversions_error when the read fails", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"]);
+    const cc = { id: "1086440567304045", name: "request_more_info", pixel_id: null, pixel_name: null, custom_event_type: null, last_fired_time: null, archived: false };
+    vi.mocked(metaClient.fetchCustomConversions).mockResolvedValueOnce([cc] as never);
+    await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    vi.mocked(metaClient.fetchCustomConversions).mockRejectedValueOnce(new Error("no perms"));
+    await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(loadMetaCustomConversions(SITE).accounts["111"]).toEqual({ conversions: [cc], error: "no perms" });
+    expect(loadMetaState(SITE).accounts["111"].conversions_error).toBe("no perms");
   });
 });
 

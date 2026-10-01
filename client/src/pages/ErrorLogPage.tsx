@@ -13,6 +13,8 @@ import {
   IconArrowUp,
   IconArrowDown,
   IconArrowsSort,
+  IconCloudDownload,
+  IconLoader2,
 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,7 +30,7 @@ import {
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import { ServerSectionHeader } from "@/components/process-stats/ServerSectionHeader";
 import { useToast } from "@/hooks/use-toast";
-import { apiFetch } from "@/lib/queryClient";
+import { apiFetch, apiRequestWithAuth } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import {
   nextErrorLogSort,
@@ -411,9 +413,55 @@ export default function ErrorLogPage() {
   );
 }
 
+function productionErrorLogFilename(productionOrigin: string | undefined): string {
+  let host = "production";
+  if (productionOrigin) {
+    try {
+      host = new URL(productionOrigin).host;
+    } catch {
+      /* keep default */
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `error-log-${host}-${stamp}.json`;
+}
+
 function ErrorLogPageInner() {
+  const { toast } = useToast();
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
   const [openEventId, setOpenEventId] = useState<number | null>(null);
+  const [downloadingProduction, setDownloadingProduction] = useState(false);
+
+  const downloadProduction = async () => {
+    if (!import.meta.env.DEV) return;
+    setDownloadingProduction(true);
+    try {
+      const res = await apiRequestWithAuth("POST", "/api/admin/error-log/pull-production", {});
+      const body = (await res.json()) as { productionOrigin?: string; total?: number };
+      const filename = productionErrorLogFilename(body.productionOrigin);
+      const blob = new Blob([JSON.stringify(body, null, 2)], { type: "application/json" });
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(href);
+      toast({
+        title: "Production log downloaded",
+        description: `${body.total ?? 0} entries from ${body.productionOrigin ?? "production"} saved as ${filename}.`,
+      });
+    } catch (err) {
+      toast({
+        title: "Could not download production log",
+        description: err instanceof Error ? err.message : "Download failed.",
+        variant: "destructive",
+      });
+    } finally {
+      setDownloadingProduction(false);
+    }
+  };
 
   const { data, isLoading, refetch, isFetching, isError } = useQuery<ErrorLogResponse>({
     queryKey: ["/api/admin/error-log", levelFilter],
@@ -439,16 +487,34 @@ function ErrorLogPageInner() {
         <div>
           <h2 className="text-lg font-semibold">Logs</h2>
         </div>
-        <Button
-          variant="outline"
-          size="default"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          data-testid="button-refresh-error-log"
-        >
-          <IconRefresh className={`w-4 h-4 mr-2 ${isFetching ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {import.meta.env.DEV ? (
+            <Button
+              variant="outline"
+              size="default"
+              onClick={() => void downloadProduction()}
+              disabled={downloadingProduction}
+              data-testid="button-download-production-error-log"
+            >
+              {downloadingProduction ? (
+                <IconLoader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <IconCloudDownload className="w-4 h-4 mr-2" />
+              )}
+              {downloadingProduction ? "Downloading…" : "Download from production"}
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            size="default"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            data-testid="button-refresh-error-log"
+          >
+            <IconRefresh className={`w-4 h-4 mr-2 ${isFetching ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-start gap-3 rounded-md border bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
@@ -473,6 +539,11 @@ function ErrorLogPageInner() {
               <li>server/utils/error-log-fingerprint.ts — message normalize</li>
               <li>server/utils/error-log-context.ts — what is saved in Context, sensitive keys redacted, 4 KB cap</li>
               <li>server/routes/admin.ts — GET /api/admin/error-log, GET /api/admin/error-log/:id</li>
+              <li>server/routes/admin.ts — GET /api/admin/error-log/export (full 48h dump incl. stack + context)</li>
+              <li>
+                server/error-log/pull-production.ts — POST /api/admin/error-log/pull-production (dev only:
+                saves production&apos;s log as a JSON file; local log unchanged)
+              </li>
             </ul>
           </details>
         </div>

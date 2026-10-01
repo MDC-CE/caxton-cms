@@ -20,7 +20,7 @@ import { hasTrackingConsentCookie, readAdContext, type AdContext } from "./ad-co
 import { pruneConsentDaily } from "./consent-store";
 import { CONSENT_COOKIE_NAME, isGrantedDecision, parseConsentCookie } from "@shared/consent";
 import { emailMatchesPattern } from "@shared/ads-settings";
-import { CLICK_ID_PARAMS, classifyTraffic, normalizeLandingPath, type ClickIdParam } from "@shared/paid-traffic";
+import { adIdFromTag, CLICK_ID_PARAMS, classifyTraffic, normalizeLandingPath, type ClickIdParam } from "@shared/paid-traffic";
 import type { PaidLandingRef } from "@shared/session";
 import { child } from "../logger";
 
@@ -59,6 +59,15 @@ export type LedgerRow = {
   last_paid_host: string | null;
   last_paid_path: string | null;
   last_paid_at: number | null;
+  /** Platform + ids of the paid landings (null on rows recorded before migration 30). */
+  first_paid_platform?: string | null;
+  first_paid_campaign_id?: string | null;
+  first_paid_adset_id?: string | null;
+  first_paid_ad_id?: string | null;
+  last_paid_platform?: string | null;
+  last_paid_campaign_id?: string | null;
+  last_paid_adset_id?: string | null;
+  last_paid_ad_id?: string | null;
   experiment_id: string | null;
   variant: string | null;
   is_test: 0 | 1;
@@ -91,18 +100,20 @@ function landingFromBody(body: Record<string, unknown>, prefix: "first" | "last"
   const path = str(body[`${prefix}_paid_landing_path`]);
   const at = num(body[`${prefix}_paid_landing_at`]);
   if (!host || !path || at == null) return undefined;
-  return { host: host.toLowerCase(), path: normalizeLandingPath(path), at };
+  const ref: PaidLandingRef = { host: host.toLowerCase(), path: normalizeLandingPath(path), at };
+  const platform = str(body[`${prefix}_paid_landing_platform`], 20);
+  if (platform) ref.platform = platform;
+  for (const k of ["campaign_id", "adset_id", "ad_id"] as const) {
+    const id = adIdFromTag(str(body[`${prefix}_paid_landing_${k}`], 30));
+    if (id) ref[k] = id;
+  }
+  return ref;
 }
 
 function consentStateFrom(req: Request): ConsentState {
   const parsed = parseConsentCookie(req.cookies?.[CONSENT_COOKIE_NAME]);
   if (!parsed) return "unset";
   return isGrantedDecision(parsed.decision) ? "granted" : "denied";
-}
-
-/** Numeric Meta ids only (template: utm_id=campaign.id, utm_term=adset.id, utm_content=ad.id). */
-function metaId(v: string | null | undefined): string | null {
-  return v && /^\d{6,25}$/.test(v) ? v : null;
 }
 
 function resolvePageVersion(req: Request, body: Record<string, unknown>): { experiment_id: string; variant: string } | null {
@@ -198,6 +209,7 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
   const landingUrl = str(body.landing_url, 1000);
   const conversionUrl = str(body.conversion_url, 1000);
   const firstClick = CLICK_ID_PARAMS.find((c) => clickIds[c]) ?? null;
+  const idPlatform = cls.platform === "meta" || cls.platform === "google";
 
   const row: LedgerRow = {
     submission_id: submissionId,
@@ -212,9 +224,10 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
     utm_content: utm.utm_content,
     utm_term: utm.utm_term,
     platform: cls.status === "organic" ? null : cls.platform,
-    campaign_id: cls.platform === "meta" ? metaId(utm.utm_id) : null,
-    adset_id: cls.platform === "meta" ? metaId(utm.utm_term) : null,
-    ad_id: cls.platform === "meta" ? metaId(utm.utm_content) : null,
+    // Numeric ids from the Meta URL template or the Google final URL suffix (same slots).
+    campaign_id: idPlatform ? adIdFromTag(utm.utm_id) : null,
+    adset_id: idPlatform ? adIdFromTag(utm.utm_term) : null,
+    ad_id: idPlatform ? adIdFromTag(utm.utm_content) : null,
     click_id_type: firstClick,
     landing_path: pathOf(landingUrl),
     conversion_path: pathOf(conversionUrl),
@@ -224,6 +237,14 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
     last_paid_host: lastPaid?.host ?? null,
     last_paid_path: lastPaid?.path ?? null,
     last_paid_at: lastPaid?.at ?? null,
+    first_paid_platform: firstPaid?.platform ?? null,
+    first_paid_campaign_id: firstPaid?.campaign_id ?? null,
+    first_paid_adset_id: firstPaid?.adset_id ?? null,
+    first_paid_ad_id: firstPaid?.ad_id ?? null,
+    last_paid_platform: lastPaid?.platform ?? null,
+    last_paid_campaign_id: lastPaid?.campaign_id ?? null,
+    last_paid_adset_id: lastPaid?.adset_id ?? null,
+    last_paid_ad_id: lastPaid?.ad_id ?? null,
     experiment_id: version?.experiment_id ?? null,
     variant: version?.variant ?? null,
     is_test: testReason ? 1 : 0,
@@ -279,6 +300,9 @@ export const LEDGER_ONLY_BODY_KEYS = new Set([
   "last_paid_landing_host",
   "last_paid_landing_path",
   "last_paid_landing_at",
+  ...(["first", "last"] as const).flatMap((p) =>
+    ["platform", "campaign_id", "adset_id", "ad_id"].map((k) => `${p}_paid_landing_${k}`),
+  ),
   "page_experiment_id",
 ]);
 
@@ -365,6 +389,8 @@ const LEDGER_COLUMNS: (keyof LedgerRow)[] = [
   "landing_path", "conversion_path",
   "first_paid_host", "first_paid_path", "first_paid_at",
   "last_paid_host", "last_paid_path", "last_paid_at",
+  "first_paid_platform", "first_paid_campaign_id", "first_paid_adset_id", "first_paid_ad_id",
+  "last_paid_platform", "last_paid_campaign_id", "last_paid_adset_id", "last_paid_ad_id",
   "experiment_id", "variant", "is_test", "test_reason", "is_repeat", "repeat_of", "consent_state",
 ];
 

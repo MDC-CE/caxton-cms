@@ -6,6 +6,81 @@ window_days: 6
 
 entries:
   - date: "2026-09-30"
+    summary: "get_paid_traffic diagnostics: Meta missing-tracking verified against GA4 utm_content (meta_auto hidden; unverified info; Fix only on confirmed)"
+    agent_impact:
+      - "missing_tracking_params is confirmed-only (clicks ≥ tracking_missing_min_clicks and GA4 sessions with utm_content=ad_id below both-conditions). New tracking_params_unverified (info, platform meta) when too few clicks/complete days or only utm_id missing — no Fix via Meta. Ads Meta auto-tags at click time (sessions ≥ tracking_tagged_min_sessions and sessions/clicks ≥ tracking_missing_max_visit_pct) are hidden."
+      - "details.ads may include tagging_source, ga4_tagged_sessions, checked_clicks. Dubious utm_content (not {{ad.id}} / own id) is not fully tagged. Unchecked setups: discard-only if GA4 marks meta_auto; never confirmed-missing without readable setup. Reports use their own dates for meta_auto / untagged_clicks."
+      - "Thresholds at ads.alert_thresholds: tracking_tagged_min_sessions (3), tracking_missing_min_clicks (20), tracking_missing_max_visit_pct (10), tracking_check_days (7). Complete GA4 days only; <4 complete days → unverifiable. Per-ad skip when that ad's Meta landing is broken or zero-visit."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/ads.md
+      - server/ads/observed-tagging.ts
+      - server/ads/ads-diagnostics.ts
+      - server/ads/ads-report.ts
+      - shared/ads-settings.ts
+      - shared/ads-diagnostics-rules.ts
+  - date: "2026-09-30"
+    summary: "Google Ads setup checklist: short / in-progress 90-day backfill no longer blocks connecting accounts"
+    agent_impact:
+      - "Staff can Use these settings as soon as accounts appear; incomplete history is a Check (warning), not a To do gate. Sync still picks up backfilled days later; google_history_short remains info."
+      - "Explain topic ads → Setup: short / in-progress history is non-blocking."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/ads.md
+      - server/ads/google-ads-setup.ts
+      - client/src/components/settings/GoogleAdsSetupGuide.tsx
+  - date: "2026-09-30"
+    summary: "get_paid_traffic page rows: Meta CTR, CPC, CPM, Meta conversion rate, Meta CPL, landing rate, visits/page-loads, click vs saw-the-ad-only"
+    agent_impact:
+      - "New page/destination fields: impressions, pixel_leads_click, ctr, landing_rate, meta_conversion_rate (meta_leads÷landing_page_views, null with 0 page loads), lpv_to_visits (matched_visits÷tagged Meta LPV on GA4 days; >1.1 = mismatch), cpc, cpm, meta_cost_per_lead, meta_low_sample. totals gains impressions + pixel_leads_click; report gains meta_split_days {covered,total}."
+      - "Derive saw-the-ad-only as max(0, meta_leads − pixel_leads_click). Under platform=all, site metrics can mix platforms; Meta fields stay Meta-only. Explain topic ads → Meta metrics on page rows."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/ads.md
+      - server/ads/ads-report.ts
+      - server/ads/meta-client.ts
+      - server/ads/meta-ads-days.ts
+      - client/src/components/ads/PaidPageRow.tsx
+  - date: "2026-09-30"
+    summary: "get_paid_traffic: Meta leads now count only the conversions staff pick (fallback standard Lead); per-conversion breakdowns and three new Meta issue codes"
+    agent_impact:
+      - "meta_leads (totals, pages, campaigns, meta_platforms) = sum of settings.yml ads.meta.lead_conversions (fb_pixel_lead or custom conversion ids); none picked → standard Lead event. Changing picks recalculates every window. summary mode gains lead_conversions { meta_picked, meta_changed_at, meta[], site[], meta_incomplete_days, snapshot_lacks_conversions }; Meta diagnostics KPIs gain meta_conversions, site_conversions, meta_lead_conversions_picked, lead_conversions_changed_at, meta_conversions_incomplete_days, snapshot_lacks_conversions."
+      - "New Meta issues lead_conversions_overlap (picks likely counting the same lead twice), pixel_events_lockstep (two pixel events always fire together), lead_conversion_stopped (picked conversion missing / archived / not shared). Numbers in issue.evidence; issue.action (unpick_lead_conversion / mark_expected_event_pair) is a staff-only settings write after a confirm — suggest it, there is no MCP write."
+      - "meta_incomplete_days > 0 → the Meta number is a floor until the one-time 90-day re-download finishes. Explain topic ads → Meta lead conversions."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/ads-report.ts
+      - server/ads/ads-diagnostics.ts
+      - server/ads/lead-conversion-issues.ts
+      - server/ads/meta-conversion-options.ts
+      - server/ads/meta-ads-days.ts
+      - server/routes/ads.ts
+      - shared/ads-settings.ts
+      - shared/ads-diagnostics-rules.ts
+  - date: "2026-09-30"
+    summary: "get_paid_traffic: Google Ads (BigQuery transfer) spend, leads, networks and diagnostics; diagnostics without platform now returns a cross-platform overview"
+    agent_impact:
+      - "BREAKING diagnostics shape: mode diagnostics with no platform returns the overview (platforms.meta / platforms.google cards, shared_issues, totals) plus next_actions per platform with open issues. Pass platform: meta for the old Meta issue list (snapshot_id / issue_ids / id filters without platform default to meta with diagnostics_platform_defaulted). platform: google → Google issues, KPIs, networks, matching; no snapshots / per-ad lists (google_diagnostics_args_ignored). Other platforms → diagnostics_platform_unsupported."
+      - "Report modes: platform now filters spend (meta | google). Google spend / clicks / google_leads join totals, pages, campaigns; spend that never reaches the site goes to destinations google_lead_form / calls / video_views / app (excluded from cost per lead). New blocks google { accounts, data_through, visit_match, unconnected_accounts } and google_networks. google_leads are never summed with Meta or site leads."
+      - "Id filters accept Google ids (ad groups in adset_ids) and account accepts 123-456-7890. With both platforms connected, id filters need platform (error code platform_required_for_ids)."
+      - "New warnings: google_not_connected, google_data_through (newest 1–2 days missing, not zero), google_transfer_stale, google_account_not_synced, google_network_not_split, lead_platform_legacy. refresh: true now calls /api/ads/sync (Meta + Google + GA4) with side effects meta_sync_enqueued + google_sync_enqueued; it cannot force Google's transfer. Google diagnostics side effect issue_state_recorded (.cache/{site}/ads-issues-google.json)."
+      - "Every diagnostics issue carries platform meta | google | shared. Explain topic ads → Google Ads + Google diagnostics issue codes. Reconnect the MCP to pick up the new tool description."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - server/ads/google-ads-bq.ts
+      - server/ads/google-ads-days.ts
+      - server/ads/google-ads-diagnostics.ts
+      - server/ads/ads-diagnostics-overview.ts
+      - server/ads/ads-report.ts
+      - server/ads/paid-detection.ts
+      - server/ads/lead-ledger.ts
+      - server/routes/ads.ts
+      - shared/ads-diagnostics-rules.ts
+  - date: "2026-09-30"
     summary: "get_paid_traffic: local 'Download from production' copies show up as meta.source production_snapshot"
     agent_impact:
       - "On a local/dev server, staff can replace Ads data (Meta + GA4 cache, optionally leads + consent) with production's. Reports then show that copy even without a Meta token: meta.source = production_snapshot with pulled_at, last_date, production_origin."

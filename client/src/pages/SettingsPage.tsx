@@ -17,6 +17,7 @@ import {
   IconServer,
   IconRobot,
   IconSettings,
+  IconChevronDown,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { BRAND_LOGO_ENSURE_TAGS, OG_IMAGE_ENSURE_TAGS } from "@shared/standardMediaTags";
@@ -34,6 +35,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -188,6 +190,8 @@ export default function SettingsPage() {
   const [legalTermsUrl, setLegalTermsUrl] = useState("");
   const [legalPrivacyUrl, setLegalPrivacyUrl] = useState("");
   const [legalSaving, setLegalSaving] = useState<string | null>(null);
+  const [legalUrlsOpen, setLegalUrlsOpen] = useState(false);
+  const [consentMessagesOpen, setConsentMessagesOpen] = useState(false);
 
   const { data: consentDataRaw, refetch: refetchConsent } = useQuery({
     queryKey: ["/api/settings/consent"],
@@ -1123,185 +1127,211 @@ export default function SettingsPage() {
             <RobotsTab />
           </TabsContent>
 
-          <TabsContent value="legal" className="mt-0">
+          <TabsContent value="legal" className="mt-0 space-y-4">
             <Card>
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconScale className="h-5 w-5 text-muted-foreground" />
-                <CardTitle className="text-base">Legal URLs</CardTitle>
+              <CardHeader className="pb-4">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 text-left"
+                  aria-expanded={legalUrlsOpen}
+                  onClick={() => setLegalUrlsOpen((v) => !v)}
+                  data-testid="button-legal-urls-toggle"
+                >
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <IconScale className="h-5 w-5 text-muted-foreground" />
+                    Legal URLs
+                  </CardTitle>
+                  <IconChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", legalUrlsOpen && "rotate-180")} />
+                </button>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {legalLoading ? (
-                  <div className="flex items-center justify-center py-8">
-                    <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                ) : (
-                  <>
-                    <div className="space-y-1">
-                      <p className="text-sm text-muted-foreground">
-                        These URLs are stored as <code className="font-mono">reserved.legal_terms_url</code> and <code className="font-mono">reserved.legal_privacy_url</code> in <code className="font-mono">variables.yml</code> and are automatically available as <code className="font-mono">global.*</code> variables site-wide.
-                      </p>
+              {legalUrlsOpen && (
+                <CardContent className="space-y-4">
+                  {legalLoading ? (
+                    <div className="flex items-center justify-center py-8">
+                      <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                     </div>
-
-                    <div className="space-y-4 pt-2">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium" htmlFor="input-legal-terms-url">
-                          Terms &amp; Conditions URL
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/terms-conditions</code>).
+                  ) : (
+                    <>
+                      <div className="space-y-1">
+                        <p className="text-sm text-muted-foreground">
+                          These URLs are stored as <code className="font-mono">reserved.legal_terms_url</code> and <code className="font-mono">reserved.legal_privacy_url</code> in <code className="font-mono">variables.yml</code> and are automatically available as <code className="font-mono">global.*</code> variables site-wide.
                         </p>
-                        <div className="flex items-center gap-2">
-                          <LinkPicker
-                            value={legalTermsUrl}
-                            onChange={(v) => { setLegalTermsUrl(v); handleLegalSave("legal_terms_url", v); }}
-                            testId="link-picker-legal-terms-url"
-                            allowedTypes={["internal", "external"]}
-                          />
-                          {legalSaving === "legal_terms_url" && (
-                            <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          )}
-                        </div>
                       </div>
 
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium" htmlFor="input-legal-privacy-url">
-                          Privacy Policy URL
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/privacy-policy</code>).
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <LinkPicker
-                            value={legalPrivacyUrl}
-                            onChange={(v) => { setLegalPrivacyUrl(v); handleLegalSave("legal_privacy_url", v); }}
-                            testId="link-picker-legal-privacy-url"
-                            allowedTypes={["internal", "external"]}
-                          />
-                          {legalSaving === "legal_privacy_url" && (
-                            <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          )}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                        <div className="space-y-2 min-w-0">
+                          <label className="text-sm font-medium" htmlFor="input-legal-terms-url">
+                            Terms &amp; Conditions URL
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/terms-conditions</code>).
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <LinkPicker
+                              value={legalTermsUrl}
+                              onChange={(v) => { setLegalTermsUrl(v); handleLegalSave("legal_terms_url", v); }}
+                              testId="link-picker-legal-terms-url"
+                              allowedTypes={["internal", "external"]}
+                            />
+                            {legalSaving === "legal_terms_url" && (
+                              <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 min-w-0">
+                          <label className="text-sm font-medium" htmlFor="input-legal-privacy-url">
+                            Privacy Policy URL
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/privacy-policy</code>).
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <LinkPicker
+                              value={legalPrivacyUrl}
+                              onChange={(v) => { setLegalPrivacyUrl(v); handleLegalSave("legal_privacy_url", v); }}
+                              testId="link-picker-legal-privacy-url"
+                              allowedTypes={["internal", "external"]}
+                            />
+                            {legalSaving === "legal_privacy_url" && (
+                              <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </>
-                )}
-              </CardContent>
+                    </>
+                  )}
+                </CardContent>
+              )}
             </Card>
 
-            <Card className="mt-4">
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconMessage className="h-5 w-5 text-muted-foreground" />
-                <div className="flex-1">
-                  <CardTitle className="text-base">Consent Messages</CardTitle>
+            <Card>
+              <CardHeader className="pb-4">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                    aria-expanded={consentMessagesOpen}
+                    onClick={() => setConsentMessagesOpen((v) => !v)}
+                    data-testid="button-consent-messages-toggle"
+                  >
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <IconMessage className="h-5 w-5 text-muted-foreground" />
+                      Consent Messages
+                    </CardTitle>
+                    <IconChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", consentMessagesOpen && "rotate-180")} />
+                  </button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={openAddConsent}
+                    data-testid="button-add-consent"
+                  >
+                    <IconPlus className="h-4 w-4 mr-1" />
+                    Add consent
+                  </Button>
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={openAddConsent}
-                  data-testid="button-add-consent"
-                >
-                  <IconPlus className="h-4 w-4 mr-1" />
-                  Add consent
-                </Button>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  Site-wide checkbox copy for lead forms, stored as <code className="font-mono">reserved.consent_*</code> variables.
-                  Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel (Marketing, SMS, WhatsApp, …) on.
-                  Only one can be Default; others stay off until you turn the current one off.
-                  Stored in <code className="font-mono">settings.yml</code> as <code className="font-mono">consent.fallback</code>. Off means no extra checkbox.
-                  <span className="font-medium text-foreground"> Marketing</span> is the copy for the Marketing switch.
-                  The default locale is <code className="font-mono">default</code>; other locales are <code className="font-mono">conditions</code> with <code className="font-mono">query.locale</code>.
-                  Empty builtins show the form&apos;s built-in copy so you can edit from it. Links and formatting use the rich-text editor.
-                </p>
-                <details className="text-xs text-muted-foreground">
-                  <summary className="cursor-pointer select-none">Read more (advanced)</summary>
-                  <p className="mt-1 leading-snug">
-                    Default writes <code className="font-mono">consent.fallback</code> in{" "}
-                    <code className="font-mono">site_*/settings.yml</code> via{" "}
-                    <code className="font-mono">PUT /api/settings/consent/fallback</code>
-                    {" "}(<code className="font-mono">server/settings.ts</code>).
-                    The form reads it in{" "}
-                    <code className="font-mono">client/src/components/lead_form/variants/LeadFormDefault.tsx</code>
-                    {" "}(<code className="font-mono">shouldShowFallbackConsent</code>).
-                    Default is not a YAML channel toggle — ConsentCard still uses{" "}
-                    <code className="font-mono">consent.marketing</code> / SMS / WhatsApp.
-                    General fallback does not set CRM <code className="font-mono">has_marketing_consent</code>.
+              {consentMessagesOpen && (
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    Site-wide checkbox copy for lead forms, stored as <code className="font-mono">reserved.consent_*</code> variables.
+                    Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel (Marketing, SMS, WhatsApp, …) on.
+                    Only one can be Default; others stay off until you turn the current one off.
+                    Stored in <code className="font-mono">settings.yml</code> as <code className="font-mono">consent.fallback</code>. Off means no extra checkbox.
+                    <span className="font-medium text-foreground"> Marketing</span> is the copy for the Marketing switch.
+                    The default locale is <code className="font-mono">default</code>; other locales are <code className="font-mono">conditions</code> with <code className="font-mono">query.locale</code>.
+                    Empty builtins show the form&apos;s built-in copy so you can edit from it. Links and formatting use the rich-text editor.
                   </p>
-                </details>
-                <div className="divide-y">
-                  {consentKeys.map((key) => {
-                    const stored = consentData?.[key] ?? {};
-                    const seen = new Set<string>();
-                    const localePreviews: { code: string; text: string; builtin: boolean }[] = [];
-                    for (const loc of supportedLocalesForConsent) {
-                      const storedText = stored[loc.code];
-                      const builtin = isBlankConsentHtml(storedText);
-                      const raw = builtin ? getBuiltinConsentFallback(key, loc.code) : storedText;
-                      const text = stripConsentHtml(raw ?? "");
-                      if (!text) continue;
-                      seen.add(loc.code);
-                      localePreviews.push({ code: loc.code, text, builtin });
-                    }
-                    for (const [code, raw] of Object.entries(stored)) {
-                      if (seen.has(code) || isBlankConsentHtml(raw)) continue;
-                      localePreviews.push({ code, text: stripConsentHtml(raw), builtin: false });
-                    }
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center gap-3 py-3"
-                        data-testid={`row-consent-${key}`}
-                      >
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm font-medium">{consentLabelFromKey(key)}</span>
-                            <Badge variant="secondary" className="font-mono text-xs">
-                              reserved.{key}
-                            </Badge>
-                            {consentFallback === key ? (
-                              <Badge data-testid={`badge-consent-fallback-${key}`}>
-                                Default
-                              </Badge>
-                            ) : null}
-                          </div>
-                          {localePreviews.length > 0 ? (
-                            <div className="space-y-1">
-                              {localePreviews.map(({ code, text, builtin }) => (
-                                <div key={code} className="flex items-center gap-2 min-w-0">
-                                  <Badge variant="outline" className="font-mono text-[10px] px-1.5 py-0 shrink-0">
-                                    {code}
-                                  </Badge>
-                                  {builtin ? (
-                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0 font-normal">
-                                      built-in
-                                    </Badge>
-                                  ) : null}
-                                  <p className={`text-xs truncate ${builtin ? "text-muted-foreground/70 italic" : "text-muted-foreground"}`}>
-                                    {text}
-                                  </p>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-xs text-muted-foreground/60 italic">
-                              No default set
-                            </p>
-                          )}
-                        </div>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => openEditConsent(key)}
-                          data-testid={`button-edit-consent-${key}`}
+                  <details className="text-xs text-muted-foreground">
+                    <summary className="cursor-pointer select-none">Read more (advanced)</summary>
+                    <p className="mt-1 leading-snug">
+                      Default writes <code className="font-mono">consent.fallback</code> in{" "}
+                      <code className="font-mono">site_*/settings.yml</code> via{" "}
+                      <code className="font-mono">PUT /api/settings/consent/fallback</code>
+                      {" "}(<code className="font-mono">server/settings.ts</code>).
+                      The form reads it in{" "}
+                      <code className="font-mono">client/src/components/lead_form/variants/LeadFormDefault.tsx</code>
+                      {" "}(<code className="font-mono">shouldShowFallbackConsent</code>).
+                      Default is not a YAML channel toggle — ConsentCard still uses{" "}
+                      <code className="font-mono">consent.marketing</code> / SMS / WhatsApp.
+                      General fallback does not set CRM <code className="font-mono">has_marketing_consent</code>.
+                    </p>
+                  </details>
+                  <div className="divide-y">
+                    {consentKeys.map((key) => {
+                      const stored = consentData?.[key] ?? {};
+                      const seen = new Set<string>();
+                      const localePreviews: { code: string; text: string; builtin: boolean }[] = [];
+                      for (const loc of supportedLocalesForConsent) {
+                        const storedText = stored[loc.code];
+                        const builtin = isBlankConsentHtml(storedText);
+                        const raw = builtin ? getBuiltinConsentFallback(key, loc.code) : storedText;
+                        const text = stripConsentHtml(raw ?? "");
+                        if (!text) continue;
+                        seen.add(loc.code);
+                        localePreviews.push({ code: loc.code, text, builtin });
+                      }
+                      for (const [code, raw] of Object.entries(stored)) {
+                        if (seen.has(code) || isBlankConsentHtml(raw)) continue;
+                        localePreviews.push({ code, text: stripConsentHtml(raw), builtin: false });
+                      }
+                      return (
+                        <div
+                          key={key}
+                          className="flex items-center gap-3 py-3"
+                          data-testid={`row-consent-${key}`}
                         >
-                          Edit
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </CardContent>
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium">{consentLabelFromKey(key)}</span>
+                              <Badge variant="secondary" className="font-mono text-xs">
+                                reserved.{key}
+                              </Badge>
+                              {consentFallback === key ? (
+                                <Badge data-testid={`badge-consent-fallback-${key}`}>
+                                  Default
+                                </Badge>
+                              ) : null}
+                            </div>
+                            {localePreviews.length > 0 ? (
+                              <div className="space-y-1">
+                                {localePreviews.map(({ code, text, builtin }) => (
+                                  <div key={code} className="flex items-center gap-2 min-w-0">
+                                    <Badge variant="outline" className="font-mono text-[10px] px-1.5 py-0 shrink-0">
+                                      {code}
+                                    </Badge>
+                                    {builtin ? (
+                                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0 font-normal">
+                                        built-in
+                                      </Badge>
+                                    ) : null}
+                                    <p className={`text-xs truncate ${builtin ? "text-muted-foreground/70 italic" : "text-muted-foreground"}`}>
+                                      {text}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground/60 italic">
+                                No default set
+                              </p>
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => openEditConsent(key)}
+                            data-testid={`button-edit-consent-${key}`}
+                          >
+                            Edit
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              )}
             </Card>
 
             <ConsentWindowCard
