@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Braces, Check, ChevronDown, Clock, Cpu, FileText, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Braces, Check, ChevronDown, ChevronRight, Clock, Cpu, FileText, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -11,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
+import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import { ServerSectionHeader } from "@/components/process-stats/ServerSectionHeader";
@@ -41,6 +43,62 @@ const COLOR = {
   c4: "hsl(var(--chart-4))",
   c5: "hsl(262 55% 55%)",
 };
+
+const MAX_PINS = 6;
+/** Left to right: purple, yellow, pink, cyan, dark green, black. */
+const PIN_COLORS = [
+  "hsl(262 72% 52%)",
+  "hsl(50 98% 64%)",
+  "hsl(336 78% 62%)",
+  "hsl(188 72% 42%)",
+  "hsl(142 45% 28%)",
+  "hsl(0 0% 18%)",
+];
+
+type ChartPin = {
+  kind: "api" | "pages";
+  method: string | null;
+  route: string;
+  shown: boolean;
+  excluded: boolean;
+  /** Set when the pin is created. Stays with that box. */
+  colorIndex: number;
+};
+
+function nextPinColor(list: ChartPin[]): number {
+  const used = new Set(list.map((pin) => pin.colorIndex));
+  for (let i = 0; i < PIN_COLORS.length; i++) if (!used.has(i)) return i;
+  return 0;
+}
+
+function ChartSpinner({ minHeight }: { minHeight: number }) {
+  return (
+    <div
+      className="flex items-center justify-center rounded-lg border bg-card"
+      style={{ minHeight }}
+      aria-busy="true"
+      aria-label="Loading"
+    >
+      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
+
+function pinTint(color: string): string {
+  const end = color.lastIndexOf(")");
+  return `${color.slice(0, end)} / 0.12)`;
+}
+
+function pinName(pin: { method: string | null; route: string }): string {
+  return pin.method ? `${pin.method} ${pin.route}` : pin.route;
+}
+
+function samePin(
+  a: { kind: string; method: string | null; route: string },
+  b: { kind: string; method: string | null; route: string },
+): boolean {
+  return a.kind === b.kind && a.route === b.route && (a.kind === "pages" || a.method === b.method);
+}
 
 type Traffic = {
   count: number;
@@ -85,6 +143,7 @@ type ChartResponse = {
   boundsMs: number[];
   restarts?: Array<{ timestamp: number }>;
   windows: StatsWindow[];
+  routes?: RouteSeries[];
 };
 
 type DetailRoute = {
@@ -129,14 +188,56 @@ const RANGE_LABEL: Record<RangePreset, string> = {
   "7d": "7 d",
 };
 
-function formatClock(ts: number): string {
-  return new Date(ts).toLocaleString("en", {
+function formatClock(ts: number, withSeconds = false): string {
+  const shown = withSeconds ? Math.floor(ts / 1000) * 1000 : ts;
+  return new Date(shown).toLocaleString("en", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    ...(withSeconds ? { second: "2-digit" as const } : {}),
     hour12: false,
   });
+}
+
+/** One sample window, named by its step. A dragged span uses the full length instead. */
+function formatStepName(stepMs: number): string {
+  if (stepMs === 30_000) return "30s";
+  if (stepMs === 90_000) return "90s";
+  if (stepMs === 5 * 60_000) return "5 min";
+  if (stepMs === 30 * 60_000) return "30 min";
+  return formatWindowSize(stepMs);
+}
+
+function formatWindowSize(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest === 0 ? `${minutes} min` : `${minutes} min ${rest}s`;
+  const hours = Math.floor(minutes / 60);
+  const minRest = minutes % 60;
+  if (minRest === 0) return `${hours} h`;
+  return `${hours} h ${minRest} min`;
+}
+
+/** Clock span of the detail. Sub-minute steps keep seconds: 19:16:23 – 19:16:53. */
+function formatWindow(from: number, toExclusive: number, stepMs: number): string {
+  const start = new Date(from);
+  const end = new Date(toExclusive);
+  const withSeconds = stepMs < 60_000 || start.getSeconds() !== 0 || end.getSeconds() !== 0;
+  const endShown = withSeconds ? new Date(Math.floor(toExclusive / 1000) * 1000) : end;
+  const sameDay = start.getFullYear() === endShown.getFullYear()
+    && start.getMonth() === endShown.getMonth()
+    && start.getDate() === endShown.getDate();
+  if (!sameDay) return `${formatClock(from, withSeconds)} – ${formatClock(toExclusive, withSeconds)}`;
+  const time = endShown.toLocaleTimeString("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(withSeconds ? { second: "2-digit" as const } : {}),
+    hour12: false,
+  });
+  return `${formatClock(from, withSeconds)} – ${time}`;
 }
 
 function formatSpan(from: number, to: number): string {
@@ -148,6 +249,17 @@ function formatSpan(from: number, to: number): string {
   if (!sameDay) return `${formatClock(from)} – ${formatClock(to)}`;
   const time = end.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", hour12: false });
   return `${formatClock(from)} – ${time}`;
+}
+
+function formatDetailRange(from: number, to: number): string {
+  const start = new Date(from);
+  const end = new Date(to);
+  const sameDay = start.getFullYear() === end.getFullYear()
+    && start.getMonth() === end.getMonth()
+    && start.getDate() === end.getDate();
+  if (!sameDay) return `${formatClock(from)} to ${formatClock(to)}`;
+  const time = end.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${formatClock(from)} to ${time}`;
 }
 
 function formatMs(value: number, floorNote: boolean): string {
@@ -172,6 +284,103 @@ function countLine(counts: Record<string, number> | undefined, labels?: Record<s
     .filter(([, n]) => n > 0)
     .map(([key, n]) => `${n} × ${labels?.[key] ?? key}`)
     .join(", ");
+}
+
+/** 2xx and 3xx finished fine. 304 is a hit, not a failure. */
+function isOkStatus(code: string): boolean {
+  const n = Number(code);
+  return Number.isInteger(n) && n >= 200 && n < 400;
+}
+
+function statusEntries(counts: Record<string, number> | undefined): Array<[string, number]> {
+  if (!counts) return [];
+  return Object.entries(counts)
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => {
+      const na = Number(a[0]);
+      const nb = Number(b[0]);
+      const aNum = Number.isInteger(na);
+      const bNum = Number.isInteger(nb);
+      if (aNum && bNum) return na - nb;
+      if (aNum) return -1;
+      if (bNum) return 1;
+      return a[0].localeCompare(b[0]);
+    });
+}
+
+function statusClass(code: string): string {
+  const n = Number(code);
+  if (!Number.isInteger(n)) return "text-muted-foreground";
+  if (n >= 200 && n < 300) return "text-emerald-700";
+  if (n >= 300 && n < 400) return "text-amber-600";
+  if (n >= 400 && n < 500) return "text-orange-600";
+  if (n >= 500 && n < 600) return "text-red-600";
+  return "text-muted-foreground";
+}
+
+function statusBadgeClass(code: string): string {
+  const n = Number(code);
+  if (!Number.isInteger(n)) return "border-transparent bg-muted";
+  if (n >= 200 && n < 300) return "border-transparent bg-emerald-100";
+  if (n >= 300 && n < 400) return "border-transparent bg-amber-100";
+  if (n >= 400 && n < 500) return "border-transparent bg-orange-100";
+  if (n >= 500 && n < 600) return "border-transparent bg-red-100";
+  return "border-transparent bg-muted";
+}
+
+function StatusCountBadges({ counts }: { counts: Record<string, number> | undefined }) {
+  const entries = statusEntries(counts);
+  if (entries.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-2">
+      {entries.map(([code, n]) => (
+        <Badge key={code} variant="secondary" className={cn("rounded-full tabular-nums", statusBadgeClass(code))}>
+          <span className="text-foreground">{n}</span>
+          <span className={statusClass(code)}> · {code}</span>
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+function StatusCounts({ counts }: { counts: Record<string, number> | undefined }) {
+  const entries = statusEntries(counts);
+  if (entries.length === 0) return <span className="text-xs text-muted-foreground">—</span>;
+  return (
+    <span className="inline-flex flex-col items-start gap-0 text-xs leading-none tabular-nums">
+      {entries.map(([code, n]) => (
+        <span key={code} className="whitespace-nowrap">
+          <span className="text-foreground">{n}</span>
+          <span className={statusClass(code)}> · {code}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function StatusShare({ counts }: { counts: Record<string, number> | undefined }) {
+  const entries = statusEntries(counts);
+  if (entries.length === 0) return null;
+  let ok = 0;
+  let bad = 0;
+  for (const [code, n] of entries) {
+    if (isOkStatus(code)) ok += n;
+    else bad += n;
+  }
+  const total = ok + bad;
+  const okPct = total > 0 ? (ok / total) * 100 : 0;
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-red-500" aria-hidden>
+        <div className="h-full" style={{ width: `${okPct}%`, backgroundColor: "#059669" }} />
+      </div>
+      <div className="shrink-0 text-xs font-medium tabular-nums">
+        <span className="text-emerald-600">{ok}</span>
+        <span className="text-muted-foreground"> / </span>
+        <span className="text-red-600">{bad}</span>
+      </div>
+    </div>
+  );
 }
 
 function emptyWindow(timestamp: number, stepMs: number): StatsWindow {
@@ -208,6 +417,20 @@ function insertGaps(windows: StatsWindow[], stepMs: number): StatsWindow[] {
   return out;
 }
 
+/** Closest sample to this time, at most one step away. Another process ticks on its own clock. */
+function nearestWindow(windows: StatsWindow[], stepMs: number, time: number): StatsWindow | null {
+  let best: StatsWindow | null = null;
+  let dist = stepMs;
+  for (const row of windows) {
+    const gap = Math.abs(row.timestamp - time);
+    if (gap <= dist) {
+      dist = gap;
+      best = row;
+    }
+  }
+  return best;
+}
+
 /** Inclusive sample range of the windows this selection covers. A coarse point covers its whole bucket. */
 function selectionCoverage(
   windows: StatsWindow[],
@@ -216,7 +439,8 @@ function selectionCoverage(
   to: number,
 ): { from: number; to: number } | null {
   if (stepMs <= 0 || windows.length === 0) return null;
-  const hit = windows.filter((row) => row.timestamp <= to && row.timestamp + stepMs > from);
+  const placed = selectionOnChart(windows, stepMs, from, to);
+  const hit = windows.filter((row) => row.timestamp >= placed.from && row.timestamp <= placed.to);
   if (hit.length === 0) return null;
   const start = hit[0].timestamp;
   const last = hit[hit.length - 1].timestamp;
@@ -231,10 +455,23 @@ function selectionOnChart(
   to: number,
 ): { from: number; to: number } {
   if (stepMs <= 0 || windows.length === 0) return { from, to };
+  if (from === to) {
+    const exact = windows.find((row) => row.timestamp === from);
+    if (exact) return { from: exact.timestamp, to: exact.timestamp };
+    const owners = windows.filter((row) => row.timestamp <= from && row.timestamp + stepMs > from);
+    const owner = owners.length > 0 ? owners[owners.length - 1] : nearestWindow(windows, stepMs, from);
+    if (owner) return { from: owner.timestamp, to: owner.timestamp };
+    return { from, to };
+  }
   const hit = windows.filter((row) => row.timestamp <= to && row.timestamp + stepMs > from);
-  if (hit.length === 0) return { from, to };
-  if (from === to || hit.length === 1) return { from: hit[0].timestamp, to: hit[0].timestamp };
-  return { from: hit[0].timestamp, to: hit[hit.length - 1].timestamp };
+  if (hit.length > 0) return { from: hit[0].timestamp, to: hit[hit.length - 1].timestamp };
+  const start = nearestWindow(windows, stepMs, from);
+  const end = nearestWindow(windows, stepMs, to);
+  if (!start || !end) return { from, to };
+  return {
+    from: Math.min(start.timestamp, end.timestamp),
+    to: Math.max(start.timestamp, end.timestamp),
+  };
 }
 
 function snapRestart(timestamp: number, stepMs: number, windows: StatsWindow[]): number | null {
@@ -256,6 +493,24 @@ function bucketLabel(index: number, bounds: number[]): string {
   if (index <= 0) return `<${bounds[0] ?? 10}`;
   if (index >= bounds.length) return `≥${bounds[bounds.length - 1] ?? 5000}`;
   return `${bounds[index - 1]}–${bounds[index]}`;
+}
+
+/** Blue under 500 ms, orange through 2500 ms, red after that. */
+function durationBarClass(index: number, bounds: number[]): string {
+  const orangeFrom = bounds.indexOf(500) + 1;
+  const redFrom = bounds.indexOf(2500) + 1;
+  if (redFrom > 0 && index >= redFrom) return "bg-destructive";
+  if (orangeFrom > 0 && index >= orangeFrom) return "bg-orange-500";
+  return "bg-primary/70";
+}
+
+/** 0% slow is green. A larger share of calls at 500 ms or more shifts toward red. */
+function slowShareClass(pct: number): string {
+  if (pct <= 0) return "border-transparent bg-emerald-100 text-emerald-900";
+  if (pct < 15) return "border-transparent bg-lime-100 text-lime-900";
+  if (pct < 40) return "border-transparent bg-amber-100 text-amber-900";
+  if (pct < 70) return "border-transparent bg-orange-100 text-orange-900";
+  return "border-transparent bg-red-100 text-red-900";
 }
 
 function sumDuration(routes: DetailRoute[], width: number): number[] {
@@ -292,17 +547,28 @@ function PerformanceInner() {
   const [pathname, setLocation] = useLocation();
   const parsed = useMemo(() => parsePerformanceSearch(search), [search]);
   const [tab, setTab] = useState(parsed.tab);
-  const [savedRoute, setSavedRoute] = useState<{
-    api: { route: string; method: string | null } | null;
-    pages: string | null;
-  }>(() => ({
-    api: parsed.tab === "api" && parsed.route ? { route: parsed.route, method: parsed.method } : null,
-    pages: parsed.tab === "pages" && parsed.route ? parsed.route : null,
-  }));
+  const [pins, setPins] = useState<{ api: ChartPin[]; pages: ChartPin[] }>(() => {
+    const empty = { api: [] as ChartPin[], pages: [] as ChartPin[] };
+    if (!parsed.route || (parsed.tab !== "api" && parsed.tab !== "pages")) return empty;
+    const pin: ChartPin = {
+      kind: parsed.tab,
+      method: parsed.tab === "api" ? parsed.method : null,
+      route: parsed.route,
+      shown: false,
+      excluded: false,
+      colorIndex: 0,
+    };
+    empty[parsed.tab] = [pin];
+    return empty;
+  });
+  const [pinScroll, setPinScroll] = useState(0);
+  const [detailFolded, setDetailFolded] = useState<Record<string, boolean>>({});
+  const chartsRef = useRef<HTMLDivElement>(null);
+  const scrollToCharts = useRef(false);
   const [legendOn, setLegendOn] = useState<Record<string, boolean>>({
     cpu: true,
-    elP50: false,
-    elP99: false,
+    elP50: true,
+    elP99: true,
     elMax: true,
     heap: true,
     rss: true,
@@ -334,17 +600,7 @@ function PerformanceInner() {
     const next: PerformanceView = { ...parsed, tab, ...patch, route: null, method: null };
     if (next.process !== "web") next.tab = "process";
     const dropSaved = (patch.process != null && patch.process !== parsed.process) || next.process !== "web";
-    if (dropSaved) setSavedRoute({ api: null, pages: null });
-    else if (patch.route !== undefined) {
-      const kind = patch.tab === "api" || patch.tab === "pages" ? patch.tab : next.tab;
-      setSavedRoute((prev) => {
-        if (kind === "api") {
-          return { ...prev, api: patch.route ? { route: patch.route, method: patch.method ?? null } : null };
-        }
-        if (kind === "pages") return { ...prev, pages: patch.route };
-        return prev;
-      });
-    }
+    if (dropSaved) setPins({ api: [], pages: [] });
     if (next.tab !== tab) setTab(next.tab);
     const qs = serializePerformanceSearch(next, search);
     const pathOnly = pathname.split("?")[0];
@@ -355,8 +611,25 @@ function PerformanceInner() {
 
   const viewTab = parsed.process === "web" ? tab : "process";
   const chartView = viewTab;
-  const activeRoute = viewTab === "api" ? savedRoute.api?.route ?? null : viewTab === "pages" ? savedRoute.pages : null;
-  const activeMethod = viewTab === "api" ? savedRoute.api?.method ?? null : null;
+  const tabPins = viewTab === "api" || viewTab === "pages" ? pins[viewTab] : [];
+
+  useEffect(() => {
+    if (!scrollToCharts.current) return;
+    const el = chartsRef.current;
+    if (!el) return;
+    scrollToCharts.current = false;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const behavior = reduce ? "auto" : "smooth";
+    const gap = 140;
+    const parent = scrollableParent(el);
+    if (parent === window) {
+      const top = window.scrollY + el.getBoundingClientRect().top - gap;
+      window.scrollTo({ top: Math.max(0, top), behavior });
+      return;
+    }
+    const top = parent.scrollTop + el.getBoundingClientRect().top - parent.getBoundingClientRect().top - gap;
+    parent.scrollTo({ top: Math.max(0, top), behavior });
+  }, [pinScroll, viewTab]);
   const selected = parsed.startingAt != null && parsed.endingAt != null;
 
   const detailPeeking = () => {
@@ -426,12 +699,17 @@ function PerformanceInner() {
     ? formatSpan(parsed.zoomFrom, parsed.zoomTo)
     : RANGE_LABEL[parsed.range];
 
+  const routeOn = viewTab === "api" || viewTab === "pages";
+  const shownPins = tabPins.flatMap((pin, index) => (pin.shown ? [{ pin, index }] : []));
+  const excludedPins = tabPins.filter((pin) => pin.excluded);
   const chartQuery = useQuery({
     queryKey: [
       "process-stats",
       parsed.process,
       chartZoomed ? parsed.zoomFrom : parsed.range,
       chartZoomed ? parsed.zoomTo : "preset",
+      shownPins.map((item) => `${item.pin.kind}:${item.pin.method ?? ""}:${item.pin.route}`).join("|"),
+      excludedPins.map((pin) => `${pin.kind}:${pin.method ?? ""}:${pin.route}`).join("|"),
     ],
     queryFn: async () => {
       const bounds = chartBounds(parsed, Date.now());
@@ -440,39 +718,31 @@ function PerformanceInner() {
         starting_at: String(bounds.from),
         ending_at: String(bounds.to),
       });
-      const res = await apiFetch(`/api/admin/process-stats?${params}`);
+      const body = shownPins.length > 0 || excludedPins.length > 0
+        ? {
+            routes: shownPins.map((item) => ({
+              kind: item.pin.kind,
+              ...(item.pin.method ? { method: item.pin.method } : {}),
+              route: item.pin.route,
+            })),
+            exclude: excludedPins.map((pin) => ({
+              kind: pin.kind,
+              ...(pin.method ? { method: pin.method } : {}),
+              route: pin.route,
+            })),
+          }
+        : null;
+      const res = await apiFetch(`/api/admin/process-stats?${params}`, body ? {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      } : undefined);
       if (!res.ok) throw new Error("Could not read statistics");
       return (await res.json()) as ChartResponse;
     },
+    placeholderData: keepPreviousData,
   });
-
-  const routeOn = viewTab === "api" || viewTab === "pages";
-  const routeQuery = useQuery({
-    queryKey: [
-      "process-stats-route",
-      parsed.process,
-      chartZoomed ? parsed.zoomFrom : parsed.range,
-      chartZoomed ? parsed.zoomTo : "preset",
-      viewTab,
-      activeRoute,
-      activeMethod,
-    ],
-    enabled: routeOn && activeRoute != null,
-    queryFn: async () => {
-      const bounds = chartBounds(parsed, Date.now());
-      const params = new URLSearchParams({
-        process: parsed.process,
-        kind: viewTab,
-        route: activeRoute ?? "",
-        starting_at: String(bounds.from),
-        ending_at: String(bounds.to),
-      });
-      if (viewTab === "api" && activeMethod) params.set("method", activeMethod);
-      const res = await apiFetch(`/api/admin/process-stats/route?${params}`);
-      if (!res.ok) throw new Error("Could not read the route");
-      return (await res.json()) as RouteSeries;
-    },
-  });
+  const chartBusy = chartQuery.isLoading || chartQuery.isPlaceholderData;
 
   const chart = chartQuery.data;
   const windows = useMemo(() => insertGaps(chart?.windows ?? [], chart?.stepMs ?? 0), [chart]);
@@ -495,18 +765,46 @@ function PerformanceInner() {
     ? (covered?.to ?? (chartQuery.isPending ? null : parsed.endingAt))
     : chart?.endingAt;
   const wantDetail = viewTab !== "process" || selected;
+  const step = chart?.stepMs ?? 30_000;
+  const detailSpan = (() => {
+    if (covered) return { from: covered.from, toExclusive: covered.to + 1 };
+    if (!selected || selectionIsZoom || parsed.startingAt == null || parsed.endingAt == null) return null;
+    const point = parsed.startingAt === parsed.endingAt
+      || (step > 30_000 && parsed.endingAt - parsed.startingAt === step - 1);
+    const from = parsed.startingAt;
+    return { from, toExclusive: point ? from + step : parsed.endingAt + step };
+  })();
+  const detailRange = (() => {
+    const zoomSpan = chartZoomed && parsed.zoomFrom != null && parsed.zoomTo != null;
+    if (!selected || selectionIsZoom) {
+      if (zoomSpan) return formatDetailRange(parsed.zoomFrom!, parsed.zoomTo!);
+      return `the last ${RANGE_LABEL[parsed.range]}`;
+    }
+    if (detailSpan) return formatWindow(detailSpan.from, detailSpan.toExclusive, step);
+    return formatClock(parsed.startingAt!);
+  })();
+  const windowBadge = (() => {
+    if (detailSpan) {
+      const spanMs = detailSpan.toExclusive - detailSpan.from;
+      return spanMs <= step ? formatStepName(step) : formatWindowSize(spanMs);
+    }
+    if (chartZoomed && parsed.zoomFrom != null && parsed.zoomTo != null && (!selected || selectionIsZoom)) {
+      return formatWindowSize(parsed.zoomTo - parsed.zoomFrom);
+    }
+    return null;
+  })();
 
   const detailQuery = useQuery({
-    queryKey: ["process-stats-detail", parsed.process, detailFrom, detailTo, selected],
-    enabled: wantDetail && detailFrom != null && detailTo != null,
+    queryKey: ["process-stats-detail", parsed.process, detailFrom, detailTo],
+    enabled: detailFrom != null && detailTo != null,
     placeholderData: keepPreviousData,
     queryFn: async () => {
       const params = new URLSearchParams({
         process: parsed.process,
         starting_at: String(detailFrom),
         ending_at: String(detailTo),
+        logs: "1",
       });
-      if (selected) params.set("logs", "1");
       const res = await apiFetch(`/api/admin/process-stats/detail?${params}`);
       if (!res.ok) throw new Error("Could not read the detail");
       return (await res.json()) as DetailResponse;
@@ -520,13 +818,12 @@ function PerformanceInner() {
     const source = selected && detailFrom != null && detailTo != null
       ? windows.filter((row) => row.timestamp >= detailFrom && row.timestamp <= detailTo)
       : windows;
-    const rows: Array<{ timestamp: number; method: string; route: string; count: number; maxMs: number }> = [];
-    for (const row of source) {
-      for (const call of row.openCalls ?? []) {
-        rows.push({ timestamp: row.timestamp, ...call });
-      }
-    }
-    return rows.sort((a, b) => b.maxMs - a.maxMs || b.timestamp - a.timestamp);
+    const last = [...source].reverse().find((row) =>
+      row.cpuProcessPercent != null || row.eventLoop != null || row.heapUsedMb != null || row.api != null || row.pages != null,
+    );
+    return (last?.openCalls ?? [])
+      .map((call) => ({ timestamp: last!.timestamp, ...call }))
+      .sort((a, b) => b.maxMs - a.maxMs || b.count - a.count);
   }, [windows, selected, detailFrom, detailTo]);
   const restarts = useMemo(
     () => (chart?.restarts ?? [])
@@ -570,33 +867,131 @@ function PerformanceInner() {
     { key: "heap", label: "heap", color: COLOR.c1, on: legendOn.heap },
     { key: "rss", label: "RSS", color: COLOR.c2, on: legendOn.rss, filled: true },
   ];
-  const routeSeries = activeRoute && routeOn
-    ? { label: activeRoute, color: COLOR.c5, on: true, pinned: true as const }
-    : null;
+  const clampPinLabel = tabPins.length >= 3;
+  const routeSeriesList: ChartSeries[] = shownPins.map((item) => ({
+    key: `p${item.index}`,
+    label: pinName(item.pin),
+    color: PIN_COLORS[item.pin.colorIndex ?? tabPins.length - 1 - item.index] ?? COLOR.c5,
+    on: true,
+    pinned: true as const,
+    clamp: clampPinLabel,
+  }));
   const trafficSeries: ChartSeries[] = [
     { key: "p50", label: "p50", color: COLOR.c1, on: legendOn.p50 },
     { key: "p95", label: "p95", color: COLOR.c2, on: legendOn.p95 },
     { key: "p99", label: "p99", color: COLOR.c3, on: legendOn.p99 },
     { key: "max", label: "peak", color: COLOR.c4, on: legendOn.max, filled: true },
-    ...(routeSeries ? [{ ...routeSeries, key: "route" }] : []),
+    ...routeSeriesList,
   ];
   const countSeries: ChartSeries[] = [
     { key: "count", label: "Calls", color: COLOR.c1, on: legendOn.calls, filled: true },
-    ...(routeSeries ? [{ ...routeSeries, key: "routeCount" }] : []),
+    ...routeSeriesList.map((item) => ({ ...item, key: `${item.key}Count` })),
   ];
-  const routeBadge = activeRoute ? (
-    <button
-      type="button"
-      className="inline-flex max-w-56 items-center gap-1 rounded-full bg-foreground/10 px-2 py-0.5 text-xs text-foreground"
-      aria-label={activeMethod ? `Remove ${activeMethod} ${activeRoute} from the chart` : `Remove ${activeRoute} from the chart`}
-      title="Remove this route from the chart"
-      onClick={() => write({ route: null, method: null })}
-    >
-      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: COLOR.c5 }} />
-      <span className="truncate">{activeMethod ? `${activeMethod} ${activeRoute}` : activeRoute}</span>
-      <X className="size-4 shrink-0" strokeWidth={2} />
-    </button>
-  ) : null;
+  const updatePin = (pin: ChartPin, patch: Partial<ChartPin>) => {
+    setPins((prev) => ({
+      ...prev,
+      [pin.kind]: prev[pin.kind].map((item) => (samePin(item, pin) ? { ...item, ...patch } : item)),
+    }));
+  };
+  const dropPin = (pin: ChartPin) => {
+    setPins((prev) => ({
+      ...prev,
+      [pin.kind]: prev[pin.kind].filter((item) => !samePin(item, pin)),
+    }));
+  };
+  const pinDot = (on: boolean, color: string) => (
+    <span
+      className="inline-block h-2 w-2 shrink-0 rounded-full border"
+      style={on ? { background: color, borderColor: color } : { borderColor: color }}
+    />
+  );
+  const pinCard = (pin: ChartPin, index: number, stacked: boolean) => {
+    const color = PIN_COLORS[pin.colorIndex ?? tabPins.length - 1 - index] ?? COLOR.c5;
+    const name = pinName(pin);
+    const controls = (
+      <>
+        <button
+          type="button"
+          aria-pressed={pin.shown}
+          title="Show occurrences"
+          className={cn(
+            "inline-flex items-center gap-1 text-foreground",
+            clampPinLabel ? "min-w-0" : "shrink-0 whitespace-nowrap",
+          )}
+          onClick={() => updatePin(pin, { shown: !pin.shown })}
+        >
+          {pinDot(pin.shown, color)}
+          <span className={cn(clampPinLabel && "truncate")}>Show occurrences</span>
+        </button>
+        <button
+          type="button"
+          aria-pressed={pin.excluded}
+          title="Exclude occurrences"
+          className={cn(
+            "inline-flex items-center gap-1 text-foreground",
+            clampPinLabel ? "min-w-0" : "shrink-0 whitespace-nowrap",
+          )}
+          onClick={() => updatePin(pin, { excluded: !pin.excluded })}
+        >
+          {pinDot(pin.excluded, color)}
+          <span className={cn(clampPinLabel && "truncate")}>Exclude occurrences</span>
+        </button>
+      </>
+    );
+    return (
+      <div
+        key={`${pin.kind}-${pin.method ?? ""}-${pin.route}`}
+        className={cn(
+          "max-w-full rounded-md px-2 py-1 text-xs",
+          stacked ? "flex w-max min-w-0 max-w-full shrink flex-col gap-1" : "flex flex-wrap items-center gap-x-1.5 gap-y-1",
+        )}
+        style={{ backgroundColor: pinTint(color) }}
+      >
+        <span
+          className={cn("min-w-0 items-center gap-1.5", stacked ? "grid w-full" : "flex")}
+          style={stacked ? { gridTemplateColumns: "1.25rem minmax(0, 1fr) 1.25rem" } : undefined}
+        >
+          <Pin className="size-4 shrink-0" style={{ color }} />
+          <span className={cn("min-w-0 text-center font-medium", clampPinLabel && "truncate")} title={clampPinLabel ? name : undefined}>{name}</span>
+          {stacked && (
+            <button
+              type="button"
+              className="inline-flex size-5 shrink-0 items-center justify-self-end rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label={`Unpin ${name}`}
+              title="Unpin"
+              onClick={() => dropPin(pin)}
+            >
+              <X className="size-3.5" strokeWidth={2} />
+            </button>
+          )}
+        </span>
+        {stacked ? (
+          <span className="flex min-w-0 items-center gap-2">{controls}</span>
+        ) : (
+          <>
+            <span className="mx-1.5 inline-block h-4 w-px shrink-0" style={{ backgroundColor: "hsl(262 35% 35% / 0.45)" }} aria-hidden />
+            {controls}
+            <button
+              type="button"
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label={`Unpin ${name}`}
+              title="Unpin"
+              onClick={() => dropPin(pin)}
+            >
+              <X className="size-3.5" strokeWidth={2} />
+            </button>
+          </>
+        )}
+      </div>
+    );
+  };
+  const pinBox = tabPins.length === 0 ? null : tabPins.length === 1 ? (
+    pinCard(tabPins[0], 0, false)
+  ) : (
+    <div className={cn("flex justify-end gap-2", clampPinLabel ? "w-full min-w-0 flex-nowrap" : "flex-wrap items-start")}>
+      {tabPins.map((pin, index) => pinCard(pin, index, true))}
+    </div>
+  );
 
   const cpuRows = windows.map((row) => ({ ...row, cpu: row.cpuProcessPercent }));
   const loopRows = windows.map((row) => ({
@@ -618,13 +1013,25 @@ function PerformanceInner() {
   const latencyFloor = chart?.boundsMs?.[0] ?? 50;
   const trafficKey = viewTab === "pages" ? "pages" : "api";
   const routeByTime = useMemo(() => {
-    const map = new Map<number, RouteSeries["windows"][number]>();
-    for (const row of routeQuery.data?.windows ?? []) map.set(row.timestamp, row);
+    const map = new Map<number, Map<number, RouteSeries["windows"][number]>>();
+    const series = chart?.routes ?? [];
+    shownPins.forEach((item, order) => {
+      const byTime = new Map<number, RouteSeries["windows"][number]>();
+      for (const row of series[order]?.windows ?? []) byTime.set(row.timestamp, row);
+      map.set(item.index, byTime);
+    });
     return map;
-  }, [routeQuery.data]);
+  }, [chart?.routes, shownPins]);
   const trafficRows = windows.map((row) => {
     const lat = row[trafficKey];
-    const hit = routeByTime.get(row.timestamp) ?? null;
+    const hits: Array<{ name: string; count: number; maxMs: number }> = [];
+    const plotted: Record<string, number | null> = {};
+    for (const item of shownPins) {
+      const hit = routeByTime.get(item.index)?.get(row.timestamp) ?? null;
+      plotted[`p${item.index}`] = hit ? plotMs(hit.maxMs, latencyFloor) : null;
+      plotted[`p${item.index}Count`] = hit ? hit.count : null;
+      if (hit) hits.push({ name: pinName(item.pin), count: hit.count, maxMs: hit.maxMs });
+    }
     return {
       timestamp: row.timestamp,
       intervalMs: row.intervalMs,
@@ -633,9 +1040,8 @@ function PerformanceInner() {
       p95: plotMs(lat?.p95Ms ?? null, latencyFloor),
       p99: plotMs(lat?.p99Ms ?? null, latencyFloor),
       max: lat ? plotMs(lat.maxMs, latencyFloor) : null,
-      route: hit ? plotMs(hit.maxMs, latencyFloor) : null,
-      routeCount: hit ? hit.count : null,
-      routeHit: hit,
+      ...plotted,
+      routeHits: hits,
       raw: lat,
     };
   });
@@ -684,7 +1090,7 @@ function PerformanceInner() {
           className="min-w-0 flex-1"
           listClassName="flex w-full bg-transparent"
           value={parsed.process}
-          onValueChange={(value) => write({ process: value as ProcessName, startingAt: null, endingAt: null, zoomed: false })}
+          onValueChange={(value) => write({ process: value as ProcessName, zoomed: false })}
         >
           {PROCESS_NAMES.map((name) => (
             <ToggleButtonBarTrigger key={name} value={name} className="flex-1" data-testid={`process-${name}`}>{name}</ToggleButtonBarTrigger>
@@ -693,7 +1099,7 @@ function PerformanceInner() {
         <div className="flex shrink-0 items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="sm" className="gap-1 tabular-nums" data-testid="button-range">
+              <Button type="button" variant="outline" size="sm" className={cn("gap-1 tabular-nums", chartZoomed && "bg-secondary hover:bg-secondary")} data-testid="button-range">
                 <Clock />
                 {rangeLabel}
                 <ChevronDown />
@@ -787,10 +1193,10 @@ function PerformanceInner() {
 
         <div className="min-w-0 flex-1 space-y-3">
           {chartQuery.isError && <p className="text-sm text-destructive">Could not read statistics.</p>}
-          {chartQuery.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-          {chart && windows.length === 0 && <p className="text-sm text-muted-foreground">No data in this range.</p>}
+          {chart && windows.length === 0 && !chartBusy && <p className="text-sm text-muted-foreground">No data in this range.</p>}
 
-          {viewTab === "process" && windows.length > 0 && (
+          {viewTab === "process" && chartBusy && <ChartSpinner minHeight={height * 3 + 24} />}
+          {viewTab === "process" && !chartBusy && windows.length > 0 && (
             <div className="space-y-3">
               <ProcessLineChart
                   title="CPU"
@@ -881,8 +1287,13 @@ function PerformanceInner() {
             </div>
           )}
 
-          {routeOn && windows.length > 0 && (
-            <div className="space-y-2">
+          {routeOn && (tabPins.length > 0 || windows.length > 0 || chartBusy) && (
+            <div ref={chartsRef} className="space-y-2">
+                {pinBox && <div className="flex w-full min-w-0 justify-end">{pinBox}</div>}
+                {chartBusy ? (
+                  <ChartSpinner minHeight={logHeight + 140 + 8} />
+                ) : windows.length > 0 ? (
+                <>
                 <ProcessLineChart
                     title="Latency"
                     rows={trafficRows}
@@ -902,13 +1313,12 @@ function PerformanceInner() {
                     detailButton={detailButtonFor("latency")}
                     onShowDetail={showDetail}
                     onDismissDetail={dismissCue}
-                    legendExtra={routeBadge}
                     tooltip={(row) => {
                       const lat = row.raw as Traffic | null;
-                      const hit = row.routeHit as RouteSeries["windows"][number] | null;
+                      const hits = row.routeHits as Array<{ name: string; count: number; maxMs: number }>;
                       if (!lat || lat.count <= 0) {
-                        return hit
-                          ? <div>{hit.count} calls · peak {formatMs(hit.maxMs, true)}</div>
+                        return hits.length > 0
+                          ? <div className="space-y-0.5">{hits.map((hit) => <div key={hit.name}>{hit.name}: {hit.count} calls · peak {formatMs(hit.maxMs, true)}</div>)}</div>
                           : <div>no calls</div>;
                       }
                       return (
@@ -919,7 +1329,7 @@ function PerformanceInner() {
                           <div>{missingPercentile("p99", lat.p99Ms, lat.count, P99_MIN)}</div>
                           <div>avg {formatMs(lat.avgMs, true)}</div>
                           <div>peak {formatMs(lat.maxMs, true)}</div>
-                          {hit && <div>{activeMethod ? `${activeMethod} ` : ""}{activeRoute}: {hit.count} calls, peak {formatMs(hit.maxMs, true)}</div>}
+                          {hits.map((hit) => <div key={hit.name}>{hit.name}: {hit.count} calls, peak {formatMs(hit.maxMs, true)}</div>)}
                           {row.intervalMs !== 30000 && <div>window {Math.round(Number(row.intervalMs) / 1000)} s</div>}
                         </div>
                       );
@@ -943,16 +1353,14 @@ function PerformanceInner() {
                     detailButton={detailButtonFor("calls")}
                     onShowDetail={showDetail}
                     onDismissDetail={dismissCue}
-                    legendExtra={routeBadge}
                     tooltip={(row) => {
-                      const hit = row.routeHit as RouteSeries["windows"][number] | null;
+                      const hits = row.routeHits as Array<{ name: string; count: number }>;
                       const total = row.count == null ? "no calls" : `${row.count} calls`;
-                      if (!hit) return <div>{total}</div>;
-                      const name = activeMethod ? `${activeMethod} ${activeRoute}` : activeRoute;
+                      if (hits.length === 0) return <div>{total}</div>;
                       return (
                         <div className="space-y-0.5">
                           <div>{total}</div>
-                          <div>{name}: {hit.count} calls</div>
+                          {hits.map((hit) => <div key={hit.name}>{hit.name}: {hit.count} calls</div>)}
                         </div>
                       );
                     }}
@@ -962,6 +1370,8 @@ function PerformanceInner() {
                       Few calls per window; try a wider range to see p50 and p95.
                     </p>
                   )}
+                </>
+                ) : null}
             </div>
           )}
 
@@ -969,13 +1379,19 @@ function PerformanceInner() {
         </div>
       </div>
 
-      {wantDetail && (
-        <div ref={detailRef}>
-          {selected && (
-            <h2 className="mb-3 text-sm font-medium">
-              Detail
+      {(wantDetail || (detailFrom != null && detailTo != null)) && (
+        <div ref={detailRef} className="rounded-lg border bg-muted/40 p-4">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <h2 className="text-lg font-semibold">
+              Details <span className="font-semibold text-muted-foreground">({detailRange})</span>
             </h2>
-          )}
+            {windowBadge && (
+              <Badge variant="secondary" className="mt-1 shrink-0 gap-1 rounded-full font-normal">
+                <Clock className="size-3.5" />
+                {windowBadge}
+              </Badge>
+            )}
+          </div>
           <DetailBlock
           loading={detailQuery.isLoading}
           error={detailQuery.isError}
@@ -987,23 +1403,65 @@ function PerformanceInner() {
           bounds={detail?.boundsMs ?? []}
           callTotal={callTotal}
           slowPct={slowPct}
-          statusLine={countLine(statusTotals.acc)}
+          statusCounts={statusTotals.acc}
           ssrLine={countLine(statusTotals.ssr, SSR_LABELS)}
-          showLogs={selected}
+          showSpan={wantDetail}
           showTraffic={viewTab !== "process"}
-          pickedRoute={activeRoute}
-          pickedMethod={activeMethod}
-          onPickRoute={(row) => write({
-            tab: row.kind,
-            route: row.route,
-            method: row.kind === "api" ? row.method : null,
-          })}
+          folded={detailFolded}
+          onToggleFold={(id) => setDetailFolded((prev) => ({ ...prev, [id]: !prev[id] }))}
+          pins={pins}
+          onPinRoute={(row) => {
+            const method = row.kind === "api" ? row.method : null;
+            const next = { kind: row.kind, method, route: row.route };
+            const list = pins[row.kind];
+            const exists = list.some((pin) => samePin(pin, next));
+            if (!exists && list.length >= MAX_PINS) return;
+            if (!exists && list.length === 0) {
+              scrollToCharts.current = true;
+              setPinScroll((n) => n + 1);
+            }
+            setPins((prev) => {
+              const stamped = prev[row.kind].map((pin, index, list) =>
+                pin.colorIndex != null ? pin : { ...pin, colorIndex: list.length - 1 - index },
+              );
+              return {
+                ...prev,
+                [row.kind]: exists
+                  ? stamped.filter((pin) => !samePin(pin, next))
+                  : [{ ...next, shown: false, excluded: false, colorIndex: nextPinColor(stamped) }, ...stamped],
+              };
+            });
+            if (viewTab !== row.kind) write({ tab: row.kind });
+          }}
           openRows={openRows}
-          showOpenTimes={new Set(openRows.map((row) => row.timestamp)).size > 1}
-          coarseOpenNote={coarse && (selected || openRows.length > 0)}
         />
         </div>
       )}
+    </div>
+  );
+}
+
+function DetailCardTitle({
+  title,
+  folded,
+  onToggle,
+}: {
+  title: string;
+  folded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <CardTitle className="text-base">{title}</CardTitle>
+      <button
+        type="button"
+        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+        aria-expanded={!folded}
+        aria-label={folded ? `Show ${title}` : `Hide ${title}`}
+        onClick={onToggle}
+      >
+        {folded ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
+      </button>
     </div>
   );
 }
@@ -1019,16 +1477,15 @@ function DetailBlock({
   bounds,
   callTotal,
   slowPct,
-  statusLine,
+  statusCounts,
   ssrLine,
-  showLogs,
+  showSpan,
   showTraffic,
-  pickedRoute,
-  pickedMethod,
-  onPickRoute,
+  folded,
+  onToggleFold,
+  pins,
+  onPinRoute,
   openRows,
-  showOpenTimes,
-  coarseOpenNote,
 }: {
   loading: boolean;
   error: boolean;
@@ -1040,17 +1497,28 @@ function DetailBlock({
   bounds: number[];
   callTotal: number;
   slowPct: number;
-  statusLine: string;
+  statusCounts: Record<string, number>;
   ssrLine: string;
-  showLogs: boolean;
+  showSpan: boolean;
   showTraffic: boolean;
-  pickedRoute: string | null;
-  pickedMethod: string | null;
-  onPickRoute: (row: DetailRoute) => void;
+  folded: Record<string, boolean>;
+  onToggleFold: (id: string) => void;
+  pins: { api: ChartPin[]; pages: ChartPin[] };
+  onPinRoute: (row: { kind: "api" | "pages"; method: string; route: string }) => void;
   openRows: Array<{ timestamp: number; method: string; route: string; count: number; maxMs: number }>;
-  showOpenTimes: boolean;
-  coarseOpenNote: boolean;
 }) {
+  const [routesOpen, setRoutesOpen] = useState(false);
+  const pinOf = (row: { kind: "api" | "pages"; method: string; route: string }) => {
+    const method = row.kind === "api" ? row.method : null;
+    return pins[row.kind].some((pin) => samePin(pin, { kind: row.kind, method, route: row.route }));
+  };
+  const pinLocked = (row: { kind: "api" | "pages" }) => pins[row.kind].length >= MAX_PINS;
+  const pinnedPastFold = routes.some((row, index) => index >= 10 && pinOf(row));
+  useEffect(() => {
+    if (pinnedPastFold) setRoutesOpen(true);
+  }, [pinnedPastFold]);
+  const visibleRoutes = routesOpen ? routes : routes.slice(0, 10);
+  const hiddenRoutes = routes.length - visibleRoutes.length;
   if (loading) {
     return (
       <div className="min-h-80 space-y-3" aria-busy="true">
@@ -1064,139 +1532,226 @@ function DetailBlock({
   const maxBar = Math.max(1, ...duration);
   return (
     <div className="space-y-4">
-      {showTraffic && detail.mixedBounds && (
-        <p className="text-sm text-muted-foreground">
-          This span mixes two different bucket sets, so percentiles are not calculated.
-        </p>
-      )}
-      {showTraffic && !detail.mixedBounds && duration.some((n) => n > 0) && (
-        <div className="space-y-2">
-          <div className="flex h-24 items-end gap-1">
-            {duration.map((n, i) => (
-              <div key={i} className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1">
-                {n > 0 && <span className="text-[10px] tabular-nums">{n}</span>}
-                <div
-                  className="w-full rounded-sm bg-primary/70"
-                  style={{ height: n > 0 ? `${Math.max(8, (n / maxBar) * 100)}%` : 0 }}
-                />
-                <span className="text-[10px] text-muted-foreground">{bucketLabel(i, bounds)}</span>
-              </div>
-            ))}
-          </div>
-          <p className="text-sm">{callTotal} calls, {slowPct}% at 500 ms or more</p>
-        </div>
+      {showSpan && showTraffic && !detail.mixedBounds && duration.some((n) => n > 0) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <DetailCardTitle title="Calls by duration" folded={!!folded.duration} onToggle={() => onToggleFold("duration")} />
+            {!folded.duration && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Count of every call in this span, grouped by response duration.
+            </p>
+            )}
+          </CardHeader>
+          {!folded.duration && (
+          <CardContent className="space-y-3">
+            <div className="flex h-24 items-end gap-1">
+              {duration.map((n, i) => (
+                <div key={i} className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1">
+                  {n > 0 && <span className="text-[10px] tabular-nums">{n}</span>}
+                  <div
+                    className={cn("w-full rounded-sm", durationBarClass(i, bounds))}
+                    style={{ height: n > 0 ? `${Math.max(8, (n / maxBar) * 100)}%` : 0 }}
+                  />
+                  <span className="text-center text-[10px] leading-tight text-muted-foreground">
+                    {bucketLabel(i, bounds)}
+                    <span className="block">ms</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary" className="rounded-full">{callTotal} total calls</Badge>
+              <Badge className={cn("rounded-full", slowShareClass(slowPct))}>{slowPct}% at 500 ms or more</Badge>
+            </div>
+          </CardContent>
+          )}
+        </Card>
       )}
 
-      {showTraffic && (statusLine || ssrLine) && (
-        <p className="text-xs text-muted-foreground">
-          {[statusLine, ssrLine].filter(Boolean).join(" · ")}
-        </p>
-      )}
-
-      {routes.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-xs text-muted-foreground">
-            The first row is the slowest, not necessarily the cause. Click a route to draw its peak on the latency chart.
-          </p>
+      {showSpan && routes.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <DetailCardTitle title="Routes Count" folded={!!folded.routes} onToggle={() => onToggleFold("routes")} />
+            {!folded.routes && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Each row is one route. Calls is how many times it finished in this span, not how many started then. {routes.some((row) => row.kind === "api") && "The MCP and OAuth proxy is left out because this process only holds those connections open and forwards them; they stay open for minutes and would pin the peak, while the work itself already shows up as the /api calls made back here. "}Avg time is the average of those finishes, and Peak time is the slowest one. Rows are ordered by that peak, highest first. The top row is the slowest peak, not necessarily the cause. Pin a route to show or exclude it on the charts.
+            </p>
+            )}
+          </CardHeader>
+          {!folded.routes && (
+          <CardContent className="space-y-3">
+          {showTraffic && statusEntries(statusCounts).length > 0 && (
+            <StatusCountBadges counts={statusCounts} />
+          )}
+          {showTraffic && ssrLine && (
+            <p className="text-xs text-muted-foreground">{ssrLine}</p>
+          )}
           <Table>
             <TableHeader>
               <TableRow>
-                {showKind && <TableHead>Kind</TableHead>}
-                <TableHead>Method</TableHead>
-                <TableHead>Route</TableHead>
-                <TableHead className="text-right">Calls</TableHead>
-                <TableHead className="text-right">Avg</TableHead>
-                <TableHead className="text-right">Peak</TableHead>
-                <TableHead>Status</TableHead>
-                {showSsr && <TableHead>Render</TableHead>}
+                {showKind && <TableHead className="h-8 px-3">Kind</TableHead>}
+                <TableHead className="h-8 px-3">Method</TableHead>
+                <TableHead className="h-8 px-3">Route</TableHead>
+                <TableHead className="h-8 px-3 text-right">Calls</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-right">Avg time</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-right">Peak time</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3">Successful / Failed</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3">Status count</TableHead>
+                {showSsr && <TableHead className="h-8 px-3">Render</TableHead>}
+                <TableHead className="h-8 px-3"><span className="sr-only">Pin</span></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {routes.map((row) => {
-                const picked = row.route === pickedRoute && (pickedMethod == null || row.method === pickedMethod);
+              {visibleRoutes.map((row) => {
+                const picked = pinOf(row);
+                const locked = !picked && pinLocked(row);
                 return (
                   <TableRow
                     key={`${row.kind}-${row.method}-${row.route}`}
-                    className={cn("cursor-pointer", picked && "bg-muted")}
-                    onClick={() => onPickRoute(row)}
+                    className={cn(picked && "bg-muted")}
                   >
-                    {showKind && <TableCell>{row.kind === "pages" ? "page" : "API"}</TableCell>}
-                    <TableCell>{row.method}</TableCell>
-                    <TableCell>
+                    {showKind && <TableCell className="px-3 py-2.5">{row.kind === "pages" ? "page" : "API"}</TableCell>}
+                    <TableCell className="px-3 py-2.5">{row.method}</TableCell>
+                    <TableCell className="px-3 py-2.5">
                       <div>{row.route}</div>
                       {row.path && <div className="text-xs text-muted-foreground">{row.path}</div>}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">{row.count}</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.avgMs} ms</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.maxMs} ms</TableCell>
-                    <TableCell className="text-xs">{countLine(row.statusCounts) || "—"}</TableCell>
-                    {showSsr && <TableCell className="text-xs">{countLine(row.ssrCounts, SSR_LABELS) || "—"}</TableCell>}
+                    <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.count}</TableCell>
+                    <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.avgMs} ms</TableCell>
+                    <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.maxMs} ms</TableCell>
+                    <TableCell className="px-3 py-2.5">
+                      <StatusShare counts={row.statusCounts} />
+                    </TableCell>
+                    <TableCell className="px-3 py-2.5">
+                      <StatusCounts counts={row.statusCounts} />
+                    </TableCell>
+                    {showSsr && <TableCell className="px-3 py-2.5 text-xs">{countLine(row.ssrCounts, SSR_LABELS) || "—"}</TableCell>}
+                    <TableCell className="px-3 py-2.5 text-right">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-pressed={picked}
+                        disabled={locked}
+                        aria-label={picked ? `Unpin ${row.route}` : `Pin ${row.route} to the charts`}
+                        title={locked ? "6 routes are already pinned" : picked ? "Unpin" : "Pin to the charts"}
+                        onClick={() => onPinRoute(row)}
+                      >
+                        <Pin
+                          className="!size-[22px]"
+                          style={picked ? { color: COLOR.c5 } : undefined}
+                          fill={picked ? "currentColor" : "none"}
+                        />
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 );
               })}
             </TableBody>
           </Table>
-        </div>
+          {(hiddenRoutes > 0 || (routesOpen && routes.length > 10)) && (
+            <div className="flex justify-center">
+              {hiddenRoutes > 0 ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => setRoutesOpen(true)}>
+                  See more ({hiddenRoutes})
+                </Button>
+              ) : (
+                <Button type="button" variant="outline" size="sm" onClick={() => setRoutesOpen(false)}>
+                  See less
+                </Button>
+              )}
+            </div>
+          )}
+          </CardContent>
+          )}
+        </Card>
       )}
 
-      {(openRows.length > 0 || coarseOpenNote) && (
-        <div className="space-y-1">
-          <p className="text-sm">Open at close</p>
-          <p className="text-xs text-muted-foreground">
-            Still open when the window closed, and already at 500 ms or more. The peak is that elapsed time, not how long they took to finish.
-          </p>
-          {coarseOpenNote && (
-            <p className="text-xs text-muted-foreground">
-              This list is the 30 s cut with the worst event loop. The other cuts in that point are not mixed in.
+      {showSpan && openRows.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <DetailCardTitle title="Requests still running" folded={!!folded.running} onToggle={() => onToggleFold("running")} />
+            {!folded.running && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Requests still open when this span ended, and already running for 500 ms or more. Earlier points in the span are not listed, and a request open for less than 500 ms is not listed either. They are missing from Routes Count for this span until they finish: that table only lists calls that finished in the span. Open calls is how many were still open. Running for (peak) is how long the slowest of them had already been going.
             </p>
-          )}
-          {openRows.length > 0 && (
+            )}
+          </CardHeader>
+          {!folded.running && (
+          <CardContent className="space-y-3">
             <Table>
               <TableHeader>
                 <TableRow>
-                  {showOpenTimes && <TableHead>Cut</TableHead>}
-                  <TableHead>Method</TableHead>
-                  <TableHead>Route</TableHead>
-                  <TableHead className="text-right">Open</TableHead>
-                  <TableHead className="text-right">Peak</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead className="h-8 px-3">Method</TableHead>
+                  <TableHead className="h-8 px-3">Route</TableHead>
+                  <TableHead className="h-8 whitespace-nowrap px-3 text-right">Open calls</TableHead>
+                  <TableHead className="h-8 whitespace-nowrap px-3 text-right">Running for (peak)</TableHead>
+                  <TableHead className="h-8 px-3"><span className="sr-only">Pin</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {openRows.map((row) => (
-                  <TableRow key={`${row.timestamp}-${row.method}-${row.route}`}>
-                    {showOpenTimes && <TableCell className="tabular-nums">{formatClock(row.timestamp)}</TableCell>}
-                    <TableCell>{row.method}</TableCell>
-                    <TableCell>{row.route}</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.count}</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.maxMs} ms</TableCell>
-                    <TableCell className="text-xs">—</TableCell>
-                  </TableRow>
-                ))}
+                {openRows.map((row) => {
+                  const kind = row.route === "/health" || row.route.startsWith("/api") ? "api" : "pages";
+                  const picked = pinOf({ kind, method: row.method, route: row.route });
+                  const locked = !picked && pinLocked({ kind });
+                  return (
+                    <TableRow key={`${row.method}-${row.route}`} className={cn(picked && "bg-muted")}>
+                      <TableCell className="px-3 py-2.5">{row.method}</TableCell>
+                      <TableCell className="px-3 py-2.5">{row.route}</TableCell>
+                      <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.count}</TableCell>
+                      <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.maxMs} ms</TableCell>
+                      <TableCell className="px-3 py-2.5 text-right">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-pressed={picked}
+                          disabled={locked}
+                          aria-label={picked ? `Unpin ${row.route}` : `Pin ${row.route} to the charts`}
+                          title={locked ? "6 routes are already pinned" : picked ? "Unpin" : "Pin to the charts"}
+                          onClick={() => onPinRoute({ kind, method: row.method, route: row.route })}
+                        >
+                          <Pin
+                            className="!size-[22px]"
+                            style={picked ? { color: COLOR.c5 } : undefined}
+                            fill={picked ? "currentColor" : "none"}
+                          />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
+          </CardContent>
           )}
-          {openRows.length === 0 && (
-            <p className="text-xs text-muted-foreground">No call had been open for 500 ms at that cut.</p>
-          )}
-        </div>
+        </Card>
       )}
 
-      {showLogs && (
-        <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">The log covers every process. It only keeps 48 h.</p>
+      <Card>
+          <CardHeader className="pb-3">
+            <DetailCardTitle title="Error and warning logs" folded={!!folded.logs} onToggle={() => onToggleFold("logs")} />
+            {!folded.logs && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Errors and warnings that happened in this span, across every process. The log only keeps 48 h. Same message shape is collapsed. Errors come first, then by count, unless you sort by Count or Last seen (click again to flip, a third time to reset). Last seen is the most recent occurrence.
+            </p>
+            )}
+          </CardHeader>
+          {!folded.logs && (
+          <CardContent className="space-y-3">
           {detail.logsCoverage === "none" && (
             <p className="text-sm text-muted-foreground">No data before {formatClock(detail.endingAt)}.</p>
           )}
           {detail.logsCoverage === "partial" && detail.logsSince != null && (
             <p className="text-sm text-muted-foreground">No data before {formatClock(detail.logsSince)}.</p>
           )}
-          <ErrorLogIssueTable issues={detail.logs ?? []} />
+          <ErrorLogIssueTable bare issues={detail.logs ?? []} />
           {(detail.logs ?? []).length === 0 && detail.logsCoverage !== "none" && (
             <p className="text-sm text-muted-foreground">No logs in this span.</p>
           )}
-        </div>
-      )}
+          </CardContent>
+          )}
+        </Card>
     </div>
   );
 }

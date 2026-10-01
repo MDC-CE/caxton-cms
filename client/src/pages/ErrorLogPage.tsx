@@ -312,7 +312,7 @@ function SortableHead({
   );
 }
 
-export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
+export function ErrorLogIssueTable({ issues, bare = false }: { issues: UniqueIssue[]; bare?: boolean }) {
   const [openIssue, setOpenIssue] = useState<string | null>(null);
   const [pathname, setLocation] = useLocation();
   const searchString = useSearch();
@@ -327,16 +327,7 @@ export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
   );
   const sortedIssues = useMemo(() => sortErrorLogIssues(issues, sort), [issues, sort]);
   if (issues.length === 0) return null;
-  return (
-    <Card data-testid="card-unique-issues">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">Top unique issues</CardTitle>
-        <p className="text-xs text-muted-foreground mt-1">
-          Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
-          (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
-        </p>
-      </CardHeader>
-      <CardContent className="p-0">
+  const table = (
         <Table>
           <TableHeader>
             <TableRow>
@@ -394,6 +385,19 @@ export function ErrorLogIssueTable({ issues }: { issues: UniqueIssue[] }) {
             })}
           </TableBody>
         </Table>
+  );
+  if (bare) return table;
+  return (
+    <Card data-testid="card-unique-issues">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Top unique issues</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
+          (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        {table}
       </CardContent>
     </Card>
   );

@@ -479,17 +479,31 @@ describe("open calls at close", () => {
     expect(routes).toEqual(["/api/content/:contentType/:slug", "/api/jobs/42"]);
   });
 
-  it("on a 5 minute point keeps the open calls of the worst event-loop slice", () => {
+  it("stores the request path when the Express route is a wildcard", () => {
+    const t0 = 1_700_000_450_000;
+    beginRequest({
+      method: "POST",
+      path: "/mcp/role/copy_editor",
+      baseUrl: "/mcp",
+      route: { path: "/*" },
+    }, t0 - 800);
+    flushTick(t0);
+    const routes = readProcessStats({ from: t0 - 1, to: t0, now: t0, processName: "web" }).windows[0]
+      .openCalls?.map((row) => row.route);
+    expect(routes).toEqual(["/mcp/role/copy_editor"]);
+  });
+
+  it("on a 5 minute point keeps the open calls of the last 30s slice", () => {
     const base = 1_700_000_500_000;
-    const quiet = {
-      ...sample(base + 10_000, 11),
-      eventLoopMaxMs: 12,
-      openCalls: [{ method: "GET", route: "/api/quiet", count: 1, maxMs: 800 }],
-    };
     const loud = {
-      ...sample(base + 40_000, 11),
+      ...sample(base + 10_000, 11),
       eventLoopMaxMs: 3_700,
       openCalls: [{ method: "GET", route: "/api/admin/system-alerts", count: 1, maxMs: 3_600 }],
+    };
+    const quiet = {
+      ...sample(base + 40_000, 11),
+      eventLoopMaxMs: 12,
+      openCalls: [{ method: "GET", route: "/api/quiet", count: 1, maxMs: 800 }],
     };
     const line = (processRow: typeof quiet) => JSON.stringify({
       timestamp: processRow.timestamp,
@@ -500,14 +514,14 @@ describe("open calls at close", () => {
       api: [],
       pages: [],
     });
-    fs.writeFileSync(path.join(dir, "web-11.jsonl"), `${line(quiet)}\n${line(loud)}\n`);
+    fs.writeFileSync(path.join(dir, "web-11.jsonl"), `${line(loud)}\n${line(quiet)}\n`);
     ingestStatsFiles(dir);
     const span = 7 * 60 * 60 * 1000;
     const stats = readProcessStats({ from: base, to: base + span, now: base + span, processName: "web" });
     expect(stats.stepMs).toBe(5 * 60 * 1000);
     const point = stats.windows.find((row) => row.eventLoop?.maxMs === 3_700);
     expect(point?.openCalls).toEqual([
-      { method: "GET", route: "/api/admin/system-alerts", count: 1, maxMs: 3_600 },
+      { method: "GET", route: "/api/quiet", count: 1, maxMs: 800 },
     ]);
   });
 
@@ -885,6 +899,66 @@ describe("GET /api/admin/process-stats", () => {
     expect(swapped.ok && swapped.stats.startingAt).not.toBe(20);
     const both = resolveProcessStatsDetailRequest({ process: "web", starting_at: ts - 1, ending_at: ts + 1 }, ts + 1);
     expect(both.ok && both.stats.routes.every((row) => row.kind === "api")).toBe(true);
+  });
+
+  it("leaves routes out of Calls and Latency from the body, and returns their lines", () => {
+    const closedAt = 1_800_000_000_000;
+    noteApi("GET", "/api/admin/system-alerts", 2_000, 200);
+    noteApi("GET", "/api/fast", 40, 200);
+    notePage("/es/:slug", "/es/blog", 8_000, 200, "ssr_ok");
+    notePage("/en/:slug", "/en/home", 80, 200, "ssr_ok");
+    flushTick(closedAt);
+    const from = closedAt - 1;
+    const to = closedAt + 1;
+    const full = readProcessStats({ from, to, now: to, processName: "web" });
+    expect(full.windows[0].api).toMatchObject({ count: 2, maxMs: 2_000 });
+    expect(full.windows[0].pages).toMatchObject({ count: 2, maxMs: 8_000 });
+    const api = readProcessStats({
+      from, to, now: to, processName: "web",
+      omit: [{ kind: "api", method: "GET", route: "/api/admin/system-alerts" }],
+    });
+    expect(api.windows[0].api).toMatchObject({ count: 1, maxMs: 40 });
+    expect(api.windows[0].pages).toMatchObject({ count: 2, maxMs: 8_000 });
+    expect(api.windows[0].eventLoop).not.toBeNull();
+    const both = readProcessStats({
+      from, to, now: to, processName: "web",
+      omit: [
+        { kind: "api", method: "GET", route: "/api/fast" },
+        { kind: "pages", method: null, route: "/es/:slug" },
+      ],
+    });
+    expect(both.windows[0].api).toMatchObject({ count: 1, maxMs: 2_000 });
+    expect(both.windows[0].pages).toMatchObject({ count: 1, maxMs: 80 });
+    const fromBody = resolveProcessStatsRequest({
+      process: "web",
+      starting_at: from,
+      ending_at: to,
+    }, to, {
+      exclude: [{ kind: "api", method: "GET", route: "/api/admin/system-alerts" }],
+      routes: [{ kind: "api", method: "GET", route: "/api/fast" }],
+    });
+    expect(fromBody.ok && fromBody.stats.windows[0].api?.count).toBe(1);
+    expect(fromBody.ok && fromBody.stats.routes?.[0]).toMatchObject({ route: "/api/fast", method: "GET" });
+    expect(fromBody.ok && fromBody.stats.routes?.[0].windows[0].count).toBe(1);
+    const queryIgnored = resolveProcessStatsRequest({
+      process: "web",
+      starting_at: from,
+      ending_at: to,
+      kind: "api",
+      method: "GET",
+      route: "/api/fast",
+    }, to, { process: "web", route: "/api/admin/system-alerts", kind: "api", method: "GET" });
+    expect(queryIgnored.ok && queryIgnored.stats.routes?.[0].route).toBe("/api/admin/system-alerts");
+    expect(queryIgnored.ok && queryIgnored.stats.windows[0].api?.count).toBe(2);
+    expect(resolveProcessStatsRequest({ process: "web" }, to, {
+      exclude: [{ kind: "api", route: "/api/fast" }],
+    })).toEqual({ ok: false, error: "exclude[0] method is required" });
+    expect(resolveProcessStatsRequest({ process: "web" }, to, {
+      exclude: "GET /api/fast",
+    })).toEqual({ ok: false, error: "exclude must be an array" });
+    expect(resolveProcessStatsRequest({ process: "web" }, to, {
+      routes: Array.from({ length: 7 }, () => ({ kind: "pages", route: "/x" })),
+    }).ok).toBe(false);
   });
 });
 

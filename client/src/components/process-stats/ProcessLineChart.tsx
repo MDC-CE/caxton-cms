@@ -19,8 +19,10 @@ export type ChartSeries = {
   label: string;
   color: string;
   on: boolean;
-  /** Drawn solid and on top, omitted from the toggle legend. */
+  /** Drawn solid and on top. Shown at the left of the legend, not as a toggle. */
   pinned?: boolean;
+  /** Cut the legend label once several routes are pinned. */
+  clamp?: boolean;
   /** Flat fill under the line. Charts with one series fill that line. */
   filled?: boolean;
 };
@@ -134,16 +136,41 @@ export function SeriesLegend({
   onToggle: (key: string) => void;
   extra?: ReactNode;
 }) {
+  const pinned = series.filter((item) => item.pinned && item.on);
   const toggles = series.filter((item) => !item.pinned);
+  const clamps = pinned.some((item) => item.clamp);
   return (
-    <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1" role="group" aria-label="Series">
+    <div
+      className={cn(
+        "flex items-center justify-end gap-x-3",
+        clamps ? "min-w-0 flex-1 flex-nowrap overflow-hidden" : "flex-wrap gap-y-1",
+      )}
+      role="group"
+      aria-label="Series"
+    >
       {extra}
+      {pinned.map((item) => (
+        <span
+          key={item.key}
+          className={cn(
+            "inline-flex items-center gap-1.5 text-xs text-foreground",
+            item.clamp && "min-w-0 shrink overflow-hidden",
+          )}
+          title={item.clamp ? item.label : undefined}
+        >
+          <span
+            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            style={{ background: item.color, boxShadow: `inset 0 0 0 1.5px ${item.color}` }}
+          />
+          <span className={cn("min-w-0", item.clamp && "truncate")}>{item.label}</span>
+        </span>
+      ))}
       {toggles.map((item) => (
         <button
           key={item.key}
           type="button"
           className={cn(
-            "inline-flex items-center gap-1.5 text-xs",
+            "inline-flex shrink-0 items-center gap-1.5 text-xs",
             item.on ? "text-foreground" : "text-muted-foreground opacity-40",
           )}
           aria-pressed={item.on}
@@ -243,7 +270,6 @@ export function ProcessLineChart({
   onDismissDetail,
   selectionHot = false,
   onDetailHot,
-  legendExtra,
 }: {
   title: string;
   rows: Row[];
@@ -266,7 +292,6 @@ export function ProcessLineChart({
   /** Stronger selection marks, shared across charts with the same sync id. */
   selectionHot?: boolean;
   onDetailHot?: (hot: boolean) => void;
-  legendExtra?: ReactNode;
 }) {
   const drag = useRef<{ x: number; y: number; from: number; to: number } | null>(null);
   const onPickRef = useRef(onPick);
@@ -348,11 +373,12 @@ export function ProcessLineChart({
     return { x, y: Math.max(0, restartTip.cy - DOT_R) };
   })();
 
+  const legendClamps = series.some((item) => item.pinned && item.clamp);
   const header = (
-    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-      <h3 className="text-sm font-medium">{title}</h3>
-      <div className="flex items-center gap-1">
-        <SeriesLegend series={series} onToggle={onToggle} extra={legendExtra} />
+    <div className={cn("flex items-center gap-x-4", legendClamps ? "flex-nowrap" : "flex-wrap justify-between gap-y-1")}>
+      <h3 className="shrink-0 text-sm font-medium">{title}</h3>
+      <div className={cn("flex items-center gap-1", legendClamps && "min-w-0 flex-1 justify-end")}>
+        <SeriesLegend series={series} onToggle={onToggle} />
         <button
           type="button"
           className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
