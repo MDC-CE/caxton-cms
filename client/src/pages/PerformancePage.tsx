@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Braces, Check, ChevronDown, ChevronRight, Clock, Cpu, FileText, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Braces, Check, ChevronDown, ChevronRight, Clock, Cpu, FileText, Info, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import { ServerSectionHeader } from "@/components/process-stats/ServerSectionHeader";
@@ -35,6 +36,41 @@ import {
 const P50_MIN = 5;
 const P95_MIN = 20;
 const P99_MIN = 100;
+
+function LatencyPercentiles({ unit }: { unit: "pages" | "requests" }) {
+  const one = unit === "pages" ? "page" : "request";
+  return (
+    <>
+      <p>
+        p50 is the time half the {unit} finished within. p95 is that time for 95% of them, and p99 for 99%. The peak is the slowest {one}. The average is total time divided by how many finished.
+      </p>
+      <p>
+        A 30-second point uses the {unit} from that sample. When a point groups several samples, p50, p95, and p99 are read from every {one} in the group together. A sample with many {unit} pulls the lines more than a sample with a few.
+      </p>
+    </>
+  );
+}
+
+function ChartInfo({ label, children }: { label: string; children: ReactNode }) {
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label={`About ${label}`}
+          data-testid={`button-chart-info-${slug}`}
+        >
+          <Info className="size-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 space-y-2 text-sm leading-relaxed text-muted-foreground">
+        {children}
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 const COLOR = {
   c1: "hsl(var(--chart-1))",
@@ -198,6 +234,40 @@ function formatClock(ts: number, withSeconds = false): string {
     ...(withSeconds ? { second: "2-digit" as const } : {}),
     hour12: false,
   });
+}
+
+const SAMPLE_MS = 30_000;
+
+function windowsOf(ms: number): number {
+  return Math.max(1, Math.round(ms / SAMPLE_MS));
+}
+
+/** How the badge duration is built from 30-second samples. */
+function windowBadgeCopy(stepMs: number, spanMs: number): { lead: string; detail: string } {
+  const perPoint = windowsOf(stepMs);
+  const point = formatStepName(stepMs);
+  const lead = "Every 30 seconds the server saves a sample: a snapshot of that slice of this process, including the calls that finished then. The chart is drawn from those samples. A point is one sample, or several samples grouped into the time the range allows.";
+  if (spanMs <= stepMs) {
+    if (stepMs <= SAMPLE_MS) {
+      return { lead, detail: "This badge is one chart point. It is a single sample, the 30 seconds it covers." };
+    }
+    return {
+      lead,
+      detail: `This badge is one chart point, ${point}. That point groups the ${perPoint} samples saved during those ${point}, and the lines are read from all ${perPoint} together.`,
+    };
+  }
+  const total = windowsOf(spanMs);
+  const span = formatWindowSize(spanMs);
+  if (stepMs <= SAMPLE_MS) {
+    return {
+      lead,
+      detail: `This badge is the selection, ${span}. That is ${total} samples. Each chart point inside it is one of those samples.`,
+    };
+  }
+  return {
+    lead,
+    detail: `This badge is the selection, ${span}. That is ${total} samples. Each chart point inside it is ${point} and groups ${perPoint} samples.`,
+  };
 }
 
 /** One sample window, named by its step. A dragged span uses the full length instead. */
@@ -786,13 +856,18 @@ function PerformanceInner() {
   const windowBadge = (() => {
     if (detailSpan) {
       const spanMs = detailSpan.toExclusive - detailSpan.from;
-      return spanMs <= step ? formatStepName(step) : formatWindowSize(spanMs);
+      return {
+        label: spanMs <= step ? formatStepName(step) : formatWindowSize(spanMs),
+        spanMs,
+      };
     }
     if (chartZoomed && parsed.zoomFrom != null && parsed.zoomTo != null && (!selected || selectionIsZoom)) {
-      return formatWindowSize(parsed.zoomTo - parsed.zoomFrom);
+      const spanMs = parsed.zoomTo - parsed.zoomFrom;
+      return { label: formatWindowSize(spanMs), spanMs };
     }
     return null;
   })();
+  const badgeCopy = windowBadge ? windowBadgeCopy(step, windowBadge.spanMs) : null;
 
   const detailQuery = useQuery({
     queryKey: ["process-stats-detail", parsed.process, detailFrom, detailTo],
@@ -1081,8 +1156,15 @@ function PerformanceInner() {
     <div className="p-6 space-y-4 max-w-6xl mx-auto" data-testid="page-performance">
       <ServerSectionHeader
         section="performance"
-        title="Logs and performance"
-        description="Performance is for this process, not for a site."
+        title="Performance of each process"
+        description={
+          <>
+            <p>How busy the process you select is, and how long its work took. This is that process alone, not a site and not the whole machine.</p>
+            <p>
+              A sample is saved every 30 seconds (a snapshot of that slice of the process) and kept for 7 days. The chart is drawn from those samples. The time range sets what one point covers: one sample (30 seconds) up to 2 hours, then samples grouped into 90 seconds up to 6 hours, 5 minutes up to a day, and 30 minutes after that. Zoom in for a finer point.
+            </p>
+          </>
+        }
       />
 
       <div className="flex items-center gap-2">
@@ -1200,6 +1282,12 @@ function PerformanceInner() {
             <div className="space-y-3">
               <ProcessLineChart
                   title="CPU"
+                  info={
+                    <ChartInfo label="CPU">
+                      <p>CPU time this process used, as a share of one core. 100% means it kept one core busy for the whole sample. It can go above 100% because Node also runs work on other threads, such as file reads and compression: 200% is about two cores. Other processes on the machine are not included.</p>
+                      <p>Samples are taken every 30 seconds. When a point covers more than one sample, it shows the highest of those readings, not their average.</p>
+                    </ChartInfo>
+                  }
                   rows={cpuRows}
                   series={cpuSeries}
                   onToggle={toggle}
@@ -1232,6 +1320,12 @@ function PerformanceInner() {
                 />
               <ProcessLineChart
                   title="Event loop"
+                  info={
+                    <ChartInfo label="Event loop">
+                      <p>How long this process waited before it could run JavaScript. p50 is a typical wait in that sample, p99 the slow tail, and max the longest stall.</p>
+                      <p>Samples are taken every 30 seconds. When a point covers more than one sample, p50 and p99 are the worst of those readings. They are not a percentile of the whole point.</p>
+                    </ChartInfo>
+                  }
                   rows={loopRows}
                   series={loopSeries}
                   onToggle={toggle}
@@ -1260,6 +1354,12 @@ function PerformanceInner() {
                 />
               <ProcessLineChart
                   title="Memory of this process"
+                  info={
+                    <ChartInfo label="Memory">
+                      <p>Heap is the memory V8 uses for JavaScript in this process. RSS is all the RAM this process holds. Neither is the memory of the machine.</p>
+                      <p>Samples are taken every 30 seconds. When a point covers more than one sample, it shows the highest of those readings, not their average.</p>
+                    </ChartInfo>
+                  }
                   rows={ramRows}
                   series={ramSeries}
                   onToggle={toggle}
@@ -1296,6 +1396,16 @@ function PerformanceInner() {
                 <>
                 <ProcessLineChart
                     title="Latency"
+                    info={
+                      <ChartInfo label="Latency">
+                        {viewTab === "pages" ? (
+                          <p>This chart is only the server. It measures from when the request reaches the page handler until the HTML response is sent, including the server render. Nothing the browser does after that — download, scripts, or paint — is included. A cached page is skipped, because the server does not build it.</p>
+                        ) : (
+                          <p>How long an API request took to finish on this process.</p>
+                        )}
+                        <LatencyPercentiles unit={viewTab === "pages" ? "pages" : "requests"} />
+                      </ChartInfo>
+                    }
                     rows={trafficRows}
                     series={trafficSeries}
                     onToggle={toggle}
@@ -1337,6 +1447,15 @@ function PerformanceInner() {
                   />
                   <ProcessLineChart
                     title="Calls"
+                    info={
+                      <ChartInfo label="Calls">
+                        {viewTab === "pages" ? (
+                          <p>How many page responses this server finished building in each point. A cached page is not counted. When a point groups several 30-second samples, the count is the sum of those samples.</p>
+                        ) : (
+                          <p>How many API requests finished in each point. When a point groups several 30-second samples, the count is the sum of those samples, not the busiest one.</p>
+                        )}
+                      </ChartInfo>
+                    }
                     rows={trafficRows}
                     series={countSeries}
                     onToggle={toggle}
@@ -1386,10 +1505,16 @@ function PerformanceInner() {
               Details <span className="font-semibold text-muted-foreground">({detailRange})</span>
             </h2>
             {windowBadge && (
-              <Badge variant="secondary" className="mt-1 shrink-0 gap-1 rounded-full font-normal">
-                <Clock className="size-3.5" />
-                {windowBadge}
-              </Badge>
+              <div className="mt-1 flex shrink-0 items-center gap-0.5">
+                <Badge variant="secondary" className="shrink-0 gap-1 rounded-full font-normal">
+                  <Clock className="size-3.5" />
+                  {windowBadge.label}
+                </Badge>
+                <ChartInfo label="Window size">
+                  <p>{badgeCopy?.lead}</p>
+                  <p>{badgeCopy?.detail}</p>
+                </ChartInfo>
+              </div>
             )}
           </div>
           <DetailBlock
@@ -1573,9 +1698,16 @@ function DetailBlock({
           <CardHeader className="pb-3">
             <DetailCardTitle title="Routes Count" folded={!!folded.routes} onToggle={() => onToggleFold("routes")} />
             {!folded.routes && (
+            <>
             <p className="mt-1 text-xs text-muted-foreground">
               Each row is one route. Calls is how many times it finished in this span, not how many started then. {routes.some((row) => row.kind === "api") && "The MCP and OAuth proxy is left out because this process only holds those connections open and forwards them; they stay open for minutes and would pin the peak, while the work itself already shows up as the /api calls made back here. "}Avg time is the average of those finishes, and Peak time is the slowest one. Rows are ordered by that peak, highest first. The top row is the slowest peak, not necessarily the cause. Pin a route to show or exclude it on the charts.
             </p>
+            {showSsr && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Render is how this server produced the HTML. Rendered: the page was built on the server. Client only: the browser got an empty page and built it itself. Empty #root: the server tried to render and the body came back empty, so the browser built it. Render error: rendering failed and the browser built it. ssr_skipped_non_200: the response was not a success, usually a 404, so the server skipped rendering.
+            </p>
+            )}
+            </>
             )}
           </CardHeader>
           {!folded.routes && (

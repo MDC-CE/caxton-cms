@@ -252,6 +252,7 @@ function DetailJumpPopover({
 
 export function ProcessLineChart({
   title,
+  info,
   rows,
   series,
   onToggle,
@@ -272,6 +273,8 @@ export function ProcessLineChart({
   onDetailHot,
 }: {
   title: string;
+  /** Sits immediately to the right of the title. */
+  info?: ReactNode;
   rows: Row[];
   series: ChartSeries[];
   onToggle: (key: string) => void;
@@ -376,7 +379,10 @@ export function ProcessLineChart({
   const legendClamps = series.some((item) => item.pinned && item.clamp);
   const header = (
     <div className={cn("flex items-center gap-x-4", legendClamps ? "flex-nowrap" : "flex-wrap justify-between gap-y-1")}>
-      <h3 className="shrink-0 text-sm font-medium">{title}</h3>
+      <div className="flex shrink-0 items-center gap-0.5">
+        <h3 className="text-sm font-medium">{title}</h3>
+        {info}
+      </div>
       <div className={cn("flex items-center gap-1", legendClamps && "min-w-0 flex-1 justify-end")}>
         <SeriesLegend series={series} onToggle={onToggle} />
         <button
