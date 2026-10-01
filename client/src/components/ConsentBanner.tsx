@@ -26,7 +26,7 @@ function isStaffPath(path: string): boolean {
 
 /**
  * Non-blocking bottom bar for tracking consent.
- * - Ask regions: Accept / Reject with equal weight; ignoring it means no consent.
+ * - Ask regions: Accept (primary) then Reject; ignoring it means no consent.
  * - Notice regions: OK, or the first scroll, counts as consent.
  * - The footer "Privacy choices" link reopens it with Accept / Reject everywhere.
  */
@@ -133,21 +133,20 @@ export function ConsentBanner() {
             <>
               <Button
                 size="sm"
+                className="min-w-24"
+                onClick={() => decide("granted_explicit")}
+                data-testid="button-consent-accept"
+              >
+                {copy.cookie_banner_accept}
+              </Button>
+              <Button
+                size="sm"
                 variant="outline"
                 className="min-w-24"
                 onClick={() => decide("denied")}
                 data-testid="button-consent-reject"
               >
                 {copy.cookie_banner_reject}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="min-w-24"
-                onClick={() => decide("granted_explicit")}
-                data-testid="button-consent-accept"
-              >
-                {copy.cookie_banner_accept}
               </Button>
             </>
           )}

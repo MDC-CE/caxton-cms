@@ -41,6 +41,7 @@ export function metaRowToSpend(m: MetaAdDayRow, leadKeys: readonly string[] = [M
     platform_leads: metaLeadsFor(m, leadKeys),
     form_leads: m.instant_form_leads,
     conversions: m.conversions,
+    ...(m.pixel_leads_click !== undefined ? { pixel_leads_click: m.pixel_leads_click } : {}),
   };
 }
 

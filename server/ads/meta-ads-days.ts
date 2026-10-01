@@ -37,6 +37,9 @@ export const META_RETENTION_DAYS = 395;
 export const META_STALE_MS = 24 * 60 * 60 * 1000;
 const FETCH_CHUNK_DAYS = 15;
 
+/** Bump when day-row fields need a one-time 90-day re-read (click/view lead split). */
+export const META_ROW_SHAPE = 2;
+
 export type MetaAdsDayFile = {
   date: string;
   fetched_at: string;
@@ -87,6 +90,8 @@ export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "a
   conversions_loaded_at?: string;
   /** Why the last custom conversion / pixel read failed; cleared on success. */
   conversions_error?: string;
+  /** Day-row field shape last fully loaded (see `META_ROW_SHAPE`). Missing or lower → one-time 90-day re-read. */
+  row_shape?: number;
 };
 
 /** Custom conversions shared with each ad account (read every sync). */
@@ -246,6 +251,40 @@ export function metaDaysMissingConversions(site: string, since: string, until: s
     if (file?.rows.some((r) => (!allow || allow.has(r.account_id)) && r.conversions === undefined)) out.push(date);
   }
   return out;
+}
+
+/**
+ * How many days in the inclusive window have the click/view lead split on every in-scope row.
+ * Days with no cached file are not covered. Empty in-scope days count as covered.
+ */
+export function loadMetaSplitCoverage(
+  site: string,
+  since: string,
+  until: string,
+  accountIds?: string[],
+): { covered: number; total: number } {
+  const allow = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
+  const dates = dateRange(since, until);
+  let covered = 0;
+  for (const date of dates) {
+    const file = loadMetaDay(site, date);
+    if (!file) continue;
+    const rows = file.rows.filter((r) => !allow || allow.has(r.account_id));
+    if (rows.every((r) => r.pixel_leads_click !== undefined)) covered += 1;
+  }
+  return { covered, total: dates.length };
+}
+
+/**
+ * Whether a refresh should widen to a 90-day backfill for this account.
+ * Accounts with a current sync_error are skipped so they cannot pin every sync to 90 days.
+ */
+export function accountNeedsMetaShapeBackfill(account: MetaAccountSyncInfo | undefined): boolean {
+  if (account?.sync_error) return false;
+  if (!account?.history_loaded_at) return true;
+  if (!account.conversions_loaded_at) return true;
+  if ((account.row_shape ?? 0) < META_ROW_SHAPE) return true;
+  return false;
 }
 
 /** Rows for configured accounts only, inclusive window. */
@@ -452,12 +491,13 @@ export function platformWindowFor(
 }
 
 /**
- * A refresh becomes a 90-day backfill while any configured account has never finished one,
- * or has not yet re-read 90 days with per-conversion counts (one-time refill; retried until it finishes).
+ * A refresh becomes a 90-day backfill while any eligible account has never finished one,
+ * lacks per-conversion counts, or is behind `META_ROW_SHAPE` (click/view lead split).
+ * Accounts with an active sync_error do not trigger backfill.
  */
 export function effectiveMetaSyncMode(mode: MetaSyncMode, accountIds: string[], state: MetaAdsSyncState): MetaSyncMode {
   if (mode !== "refresh") return mode;
-  return accountIds.some((id) => !state.accounts[id]?.history_loaded_at || !state.accounts[id]?.conversions_loaded_at) ? "backfill" : mode;
+  return accountIds.some((id) => accountNeedsMetaShapeBackfill(state.accounts[id])) ? "backfill" : mode;
 }
 
 /** Step total for a sync that would start now; 0 when it would skip or has nothing to fetch. */
@@ -575,6 +615,7 @@ export async function syncMetaAds(opts: {
           platform_error: prev?.platform_error,
           conversions_loaded_at: prev?.conversions_loaded_at,
           conversions_error: prev?.conversions_error,
+          row_shape: prev?.row_shape,
         };
         for (const [start, end] of chunks(window)) {
           opts.onStep?.(`Meta: ${account}, ${shortDateRange(start, end)}`);
@@ -666,6 +707,7 @@ export async function syncMetaAds(opts: {
       if (loadsFullHistory) {
         state.accounts[id].history_loaded_at = fetchedAt;
         state.accounts[id].conversions_loaded_at = fetchedAt;
+        state.accounts[id].row_shape = META_ROW_SHAPE;
       }
     }
     const dates = listMetaDayDates(opts.site);

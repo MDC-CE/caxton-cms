@@ -66,6 +66,8 @@ export type AdsPageRow = {
   instant_form_leads: number;
   /** Google-reported lead conversions (never summed with Meta or site leads). */
   google_leads?: number;
+  impressions: number;
+  pixel_leads_click: number;
   unique_leads: number;
   submissions: number;
   repeat_submissions: number;
@@ -73,11 +75,19 @@ export type AdsPageRow = {
   started_here: number;
   closed_here: number;
   conversion_rate: number | null;
+  meta_conversion_rate: number | null;
+  ctr: number | null;
+  landing_rate: number | null;
+  lpv_to_visits: number | null;
   cost_per_visit: MoneyByCurrency;
   cost_per_lead: MoneyByCurrency;
+  cpc: MoneyByCurrency;
+  cpm: MoneyByCurrency;
+  meta_cost_per_lead: MoneyByCurrency;
   clicks_to_visits: number | null;
   organic: { sessions: number; bounce_rate: number | null; lead_rate: number | null } | null;
   low_sample: boolean;
+  meta_low_sample: boolean;
   platforms: AdPlatform[];
   campaigns: AdsCampaignRef[];
   versions?: AdsVersionRow[];
@@ -159,6 +169,8 @@ export type AdsReport = {
     unsynced_account_visits: number;
     ratio_clicks: number;
     untagged_clicks: number;
+    impressions: number;
+    pixel_leads_click: number;
     meta_leads: number;
     instant_form_leads: number;
     google_leads?: number;
@@ -168,6 +180,7 @@ export type AdsReport = {
     repeat_submissions: number;
     test_submissions: number;
   };
+  meta_split_days?: { covered: number; total: number };
   pages: AdsPageRow[];
   destinations: AdsPageRow[];
   campaigns: AdsCampaignGroup[];

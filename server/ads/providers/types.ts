@@ -35,6 +35,8 @@ export type AdSpendDayRow = {
   form_leads: number;
   /** Meta only: `fb_pixel_lead` + custom conversion ids → count (absent on days cached before per-conversion counts). */
   conversions?: Record<string, number>;
+  /** Meta only: standard Lead in the 7-day click window (absent on days cached before the attribution split). */
+  pixel_leads_click?: number;
   /** Final URL the platform reported for this spend (Google landing page stats). */
   landing_url?: string | null;
   /** Spend with no website link. */

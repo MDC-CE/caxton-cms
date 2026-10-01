@@ -52,6 +52,10 @@ export type MetaAdDayRow = {
   pixel_leads: number;
   /** Instant Form leads (`lead` / `onsite_conversion.lead_grouped`). */
   instant_form_leads: number;
+  /** `fb_pixel_lead` in the 7-day click window. Absent on days cached before the attribution split. */
+  pixel_leads_click?: number;
+  /** `fb_pixel_lead` in the 1-day view window (raw Meta; UI derives saw-the-ad-only from total − click). */
+  pixel_leads_view?: number;
   /** `fb_pixel_lead` + custom conversion ids → count. Absent on days cached before per-conversion counts. */
   conversions?: Record<string, number>;
 };
@@ -232,6 +236,22 @@ function actionValue(actions: unknown, types: string[]): number {
   return total;
 }
 
+export type MetaActionWindow = "7d_click" | "1d_view";
+
+/**
+ * Sum of an action type's per-window count (Meta returns these when
+ * `action_attribution_windows` is set). Falls back to 0 when the window field is absent.
+ */
+export function actionWindowValue(actions: unknown, types: string[], window: MetaActionWindow): number {
+  if (!Array.isArray(actions)) return 0;
+  let total = 0;
+  for (const a of actions as Array<Record<string, unknown>>) {
+    if (!a || typeof a.action_type !== "string" || !types.includes(a.action_type)) continue;
+    total += toNum(a[window]);
+  }
+  return total;
+}
+
 /** Parse one Graph insights row (level=ad, time_increment=1). */
 export function parseInsightRow(raw: Record<string, unknown>, fallbackCurrency = ""): MetaAdDayRow | null {
   const date = typeof raw.date_start === "string" ? raw.date_start : "";
@@ -255,6 +275,8 @@ export function parseInsightRow(raw: Record<string, unknown>, fallbackCurrency =
     landing_page_views: Math.round(actionValue(raw.actions, ["landing_page_view", "omni_landing_page_view"])),
     pixel_leads: Math.round(actionValue(raw.actions, ["offsite_conversion.fb_pixel_lead"])),
     instant_form_leads: Math.round(actionValue(raw.actions, ["lead", "onsite_conversion.lead_grouped"])),
+    pixel_leads_click: Math.round(actionWindowValue(raw.actions, ["offsite_conversion.fb_pixel_lead"], "7d_click")),
+    pixel_leads_view: Math.round(actionWindowValue(raw.actions, ["offsite_conversion.fb_pixel_lead"], "1d_view")),
     conversions: conversionCounts(raw.actions),
   };
 }
@@ -386,12 +408,23 @@ export async function fetchAdPlatformInsights(
   return rows;
 }
 
+/** Fields `parseCreative` actually reads — keep nested specs narrow so large accounts fit one Graph page. */
+export const META_AD_CREATIVE_FIELDS =
+  "id,campaign_id,adset_id,effective_status,adset{promoted_object},creative{link_url,url_tags,object_story_spec{link_data{link,call_to_action,child_attachments{link,call_to_action}},video_data{call_to_action}},asset_feed_spec{link_urls}}";
+
+function isReduceDataError(err: unknown): boolean {
+  return err instanceof MetaApiError && /reduce the amount of data/i.test(err.message);
+}
+
 export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativeInfo[]> {
-  const raw = await graphGetAll(`act_${accountId}/ads`, {
-    fields:
-      "id,campaign_id,adset_id,effective_status,adset{promoted_object},creative{link_url,url_tags,object_story_spec,asset_feed_spec{link_urls}}",
-    limit: "200",
-  });
+  const run = (limit: string) => graphGetAll(`act_${accountId}/ads`, { fields: META_AD_CREATIVE_FIELDS, limit });
+  let raw: Record<string, unknown>[];
+  try {
+    raw = await run("50");
+  } catch (err) {
+    if (!isReduceDataError(err)) throw err;
+    raw = await run("25");
+  }
   return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
 }
 

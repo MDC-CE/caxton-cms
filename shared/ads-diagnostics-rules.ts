@@ -17,6 +17,7 @@ export type AdsIssueCode =
   | "ad_url_redirects"
   | "missing_tracking_params"
   | "tracking_params_unchecked"
+  | "tracking_params_unverified"
   | "non_paid_medium"
   | "pixel_not_reporting_leads"
   | "lead_conversions_overlap"
@@ -136,9 +137,17 @@ export type AdsIssueAd = {
   url_tags: string | null;
   /** Template params this ad lacks (missing_tracking_params). */
   missing?: string[];
+  /** Setup has utm_content that is neither {{ad.id}} nor this ad's id. */
+  dubious_utm_content?: boolean;
   /** utm_medium the ad sets when it is not a paid medium (non_paid_medium). */
   medium?: string;
   unchecked_reason?: AdsUncheckedReason;
+  /** GA4 sessions with utm_content = this ad id over the check window. */
+  ga4_tagged_sessions?: number;
+  /** Meta link clicks summed on the same complete GA4 days as ga4_tagged_sessions. */
+  checked_clicks?: number;
+  /** Where tagging evidence came from for this issue row. */
+  tagging_source?: "setup" | "meta_auto" | "none";
 };
 
 /** GA4 paid visits that landed on a destination with no synced ad behind it. */

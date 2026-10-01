@@ -170,6 +170,17 @@ describe("indexAds", () => {
     expect(pub).not.toHaveProperty("state");
     expect(pub.ad_id).toBe("a1");
   });
+
+  it("flags dubious utm_content (other ad id) as needing a GA4 check", () => {
+    const tags = TAGS.replace("{{ad.id}}", "other-ad");
+    const a = indexAds({
+      creatives: creatives(creative("a1", { url_tags: tags })).ads,
+      rows: [row("a1", 10)],
+      accounts,
+    }).get("a1")!;
+    expect(a.dubious_utm_content).toBe(true);
+    expect(a.missing).toBeUndefined();
+  });
 });
 
 describe("setupLastReadAt", () => {

@@ -42,6 +42,14 @@ export interface AdsAlertThresholds {
   lockstep_min_events: number;
   /** … and fire in lockstep when their totals differ by at most this %. */
   lockstep_count_pct: number;
+  /** Meta ad counts as GA4-tagged when at least this many sessions carry its utm_content. */
+  tracking_tagged_min_sessions: number;
+  /** Minimum Meta link clicks (on complete GA4 days) before a missing-template ad can be confirmed missing. */
+  tracking_missing_min_clicks: number;
+  /** Max GA4-tagged sessions / clicks (%) still treated as confirmed missing (also the floor for meta_auto). */
+  tracking_missing_max_visit_pct: number;
+  /** Primary verification window: last N complete GA4 days (diagnostics; reports use their own range). */
+  tracking_check_days: number;
 }
 
 /** A campaign staff know about but don't connect (agency, partner). Still shown, never counted as a problem. */
@@ -123,6 +131,10 @@ export const DEFAULT_ADS_ALERT_THRESHOLDS: AdsAlertThresholds = {
   conversion_overlap_count_pct: 20,
   lockstep_min_events: 20,
   lockstep_count_pct: 2,
+  tracking_tagged_min_sessions: 3,
+  tracking_missing_min_clicks: 20,
+  tracking_missing_max_visit_pct: 10,
+  tracking_check_days: 7,
 };
 
 export const MAX_KNOWN_EXTERNAL_CAMPAIGNS = 100;
@@ -244,6 +256,10 @@ export function parseAdsAlertThresholds(raw: unknown): AdsAlertThresholds {
     conversion_overlap_count_pct: num(r.conversion_overlap_count_pct, d.conversion_overlap_count_pct, 0, 100),
     lockstep_min_events: Math.round(num(r.lockstep_min_events, d.lockstep_min_events, 1)),
     lockstep_count_pct: num(r.lockstep_count_pct, d.lockstep_count_pct, 0, 100),
+    tracking_tagged_min_sessions: Math.round(num(r.tracking_tagged_min_sessions, d.tracking_tagged_min_sessions, 1)),
+    tracking_missing_min_clicks: Math.round(num(r.tracking_missing_min_clicks, d.tracking_missing_min_clicks, 1)),
+    tracking_missing_max_visit_pct: num(r.tracking_missing_max_visit_pct, d.tracking_missing_max_visit_pct, 0, 100),
+    tracking_check_days: Math.round(num(r.tracking_check_days, d.tracking_check_days, 3, 28)),
   };
 }
 

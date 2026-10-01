@@ -17,11 +17,17 @@ const h = vi.hoisted(() => ({
   unrecognized: undefined as AdsUnrecognizedCampaigns | undefined,
   offSite: null as AdsPageRow | null,
   rows: null as MetaAdDayRow[] | null,
+  creatives: null as Record<string, MetaAdCreativeInfo> | null,
   leadConversions: [] as string[],
   expectedPairs: [] as Array<{ pixel_id: string; events: [string, string] }>,
   pixels: {} as Record<string, unknown>,
   customConversions: {} as Record<string, unknown>,
   reportLeadConversions: undefined as Record<string, unknown> | undefined,
+  ga4Days: [] as Array<{
+    date: string;
+    complete: boolean;
+    candidates: Array<{ utm_content: string | null; sessions: number }>;
+  }>,
 }));
 h.cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "ads-diagnostics-build-test-"));
 
@@ -170,7 +176,7 @@ vi.mock("./ads-report", () => ({
 vi.mock("./meta-ads-days", async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   loadMetaRows: () => h.rows ?? ROWS,
-  loadMetaCreatives: () => ({ fetched_at: READ_111, ads: CREATIVES }),
+  loadMetaCreatives: () => ({ fetched_at: READ_111, ads: h.creatives ?? CREATIVES }),
   loadMetaPixelEvents: () => ({ fetched_at: READ_111, since: "2026-09-22", pixels: h.pixels }),
   loadMetaCustomConversions: () => ({ fetched_at: READ_111, accounts: h.customConversions }),
   metaConversionNames: () => new Map([["1086440567304045", "request_more_info"]]),
@@ -184,7 +190,10 @@ vi.mock("./meta-ads-days", async (orig) => ({
     },
   }),
 }));
-vi.mock("./paid-detection", () => ({ lastCompleteGa4Date: () => "2026-09-27" }));
+vi.mock("./paid-detection", () => ({
+  lastCompleteGa4Date: () => "2026-09-27",
+  loadPaidLandingDays: () => h.ga4Days,
+}));
 vi.mock("./lead-ledger", () => ({ ledgerLastRecordedAt: () => null }));
 vi.mock("./ads-refresh", () => ({ isMetaConnected: () => h.connected, hasMetaData: () => h.connected }));
 vi.mock("../legal/legal-diagnostics", () => ({
@@ -210,13 +219,15 @@ beforeEach(() => {
   h.syncFailures = 0;
   h.known = [];
   h.unrecognized = undefined;
-  h.offSite = null;
+  h.offSite = OFF_SITE;
   h.rows = null;
+  h.creatives = null;
   h.leadConversions = [];
   h.expectedPairs = [];
   h.pixels = {};
   h.customConversions = {};
   h.reportLeadConversions = undefined;
+  h.ga4Days = [];
 });
 
 afterAll(() => {
@@ -505,5 +516,169 @@ describe("buildAdsDiagnostics lead conversions", () => {
     h.leadConversions = [];
     d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
     expect(d.issues.find((i) => i.code === "pixel_not_reporting_leads")!.why).toContain("the standard Lead event (no conversions are picked");
+  });
+});
+
+function completeGa4Days(adSessions: Record<string, number>, dates = ["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"]) {
+  return dates.map((date, i) => ({
+    date,
+    complete: true,
+    // Put the full session count on the first complete day so totals match the map exactly.
+    candidates:
+      i === 0
+        ? Object.entries(adSessions).map(([utm_content, sessions]) => ({ utm_content, sessions }))
+        : Object.keys(adSessions).map((utm_content) => ({ utm_content, sessions: 0 })),
+  }));
+}
+
+describe("buildAdsDiagnostics GA4-verified tracking", () => {
+  const missingTags = "utm_source=facebook&utm_medium=paid_social";
+
+  it("hides meta_auto ads that GA4 sees tagged with the ad id", async () => {
+    h.ga4Configured = true;
+    h.creatives = {
+      a1: {
+        ad_id: "a1",
+        campaign_id: "c1",
+        adset_id: "s-c1",
+        effective_status: "ACTIVE",
+        links: ["https://4geeks.com/landing/x"],
+        url_tags: missingTags,
+        instant_form: false,
+      },
+    };
+    h.rows = [{ ...row("a1", 50, "c1"), date: "2026-09-22", link_clicks: 100 }];
+    // 25 sessions / 100 clicks = 25% ≥ 10%, sessions ≥ 3
+    h.ga4Days = completeGa4Days({ a1: 25 });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
+    expect(d.issues.find((i) => i.code === "tracking_params_unverified")).toBeUndefined();
+  });
+
+  it("warns when many clicks produce almost no GA4 sessions with the ad id", async () => {
+    h.ga4Configured = true;
+    h.creatives = {
+      a1: {
+        ad_id: "a1",
+        campaign_id: "c1",
+        adset_id: "s-c1",
+        effective_status: "ACTIVE",
+        links: ["https://4geeks.com/landing/x"],
+        url_tags: missingTags,
+        instant_form: false,
+      },
+    };
+    h.rows = [{ ...row("a1", 80, "c1"), date: "2026-09-22", link_clicks: 300 }];
+    h.ga4Days = completeGa4Days({ a1: 3 });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
+    expect(missing.severity).toBe("warning");
+    expect(missing.details!.ads[0]).toMatchObject({
+      ad_id: "a1",
+      tagging_source: "none",
+      checked_clicks: 300,
+      ga4_tagged_sessions: 3,
+    });
+  });
+
+  it("emits tracking_params_unverified (info) when clicks are too low to confirm", async () => {
+    h.ga4Configured = true;
+    h.creatives = {
+      a1: {
+        ad_id: "a1",
+        campaign_id: "c1",
+        adset_id: "s-c1",
+        effective_status: "ACTIVE",
+        links: ["https://4geeks.com/landing/x"],
+        url_tags: missingTags,
+        instant_form: false,
+      },
+    };
+    h.rows = [{ ...row("a1", 40, "c1"), date: "2026-09-22", link_clicks: 5 }];
+    h.ga4Days = completeGa4Days({ a1: 0 });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
+    const unverified = d.issues.find((i) => i.id === "tracking_params_unverified:c1")!;
+    expect(unverified).toMatchObject({ severity: "info", platform: "meta" });
+  });
+
+  it("treats fewer than 4 complete GA4 days as unverifiable", async () => {
+    h.ga4Configured = true;
+    h.creatives = {
+      a1: {
+        ad_id: "a1",
+        campaign_id: "c1",
+        adset_id: "s-c1",
+        effective_status: "ACTIVE",
+        links: ["https://4geeks.com/landing/x"],
+        url_tags: missingTags,
+        instant_form: false,
+      },
+    };
+    h.rows = [{ ...row("a1", 40, "c1"), date: "2026-09-22", link_clicks: 100 }];
+    h.ga4Days = completeGa4Days({ a1: 0 }, ["2026-09-25", "2026-09-26", "2026-09-27"]);
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
+    expect(d.issues.find((i) => i.id === "tracking_params_unverified:c1")).toBeTruthy();
+  });
+
+  it("drops unchecked ads that GA4 marks meta_auto", async () => {
+    h.ga4Configured = true;
+    h.creatives = {};
+    h.rows = [{ ...row("a3", 30, "c2", "222"), date: "2026-09-22", link_clicks: 100 }];
+    h.ga4Days = completeGa4Days({ a3: 40 });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")).toBeUndefined();
+  });
+
+  it("keeps unchecked ads when GA4 does not confirm meta_auto", async () => {
+    h.ga4Configured = true;
+    h.creatives = {};
+    h.rows = [{ ...row("a3", 30, "c2", "222"), date: "2026-09-22", link_clicks: 100 }];
+    h.ga4Days = completeGa4Days({ a3: 0 });
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")).toMatchObject({ severity: "info" });
+  });
+
+  it("hides dubious utm_content when GA4 marks meta_auto, warns when it does not", async () => {
+    h.ga4Configured = true;
+    const dubious = {
+      ad_id: "a1",
+      campaign_id: "c1",
+      adset_id: "s-c1",
+      effective_status: "ACTIVE" as const,
+      links: ["https://4geeks.com/landing/x"],
+      url_tags: "utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content=other-ad",
+      instant_form: false,
+    };
+    h.creatives = { a1: dubious };
+    h.rows = [{ ...row("a1", 50, "c1"), date: "2026-09-22", link_clicks: 100 }];
+    h.ga4Days = completeGa4Days({ a1: 30 });
+    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
+
+    h.ga4Days = completeGa4Days({ a1: 0 });
+    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
+    expect(missing.why).toMatch(/wrong or incomplete/i);
+    expect(missing.details!.ads[0]!.dubious_utm_content).toBe(true);
+  });
+
+  it("warns on dubious utm_content when GA4 is not configured", async () => {
+    h.ga4Configured = false;
+    h.creatives = {
+      a1: {
+        ad_id: "a1",
+        campaign_id: "c1",
+        adset_id: "s-c1",
+        effective_status: "ACTIVE",
+        links: ["https://4geeks.com/landing/x"],
+        url_tags: "utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content=other-ad",
+        instant_form: false,
+      },
+    };
+    h.rows = [row("a1", 50, "c1")];
+    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    expect(d.issues.find((i) => i.id === "missing_tracking_params:c1")!.details!.ads[0]!.dubious_utm_content).toBe(true);
   });
 });

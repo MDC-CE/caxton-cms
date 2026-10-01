@@ -48,6 +48,7 @@ import {
   loadMetaCreatives,
   loadMetaPlatformRows,
   loadMetaRows,
+  loadMetaSplitCoverage,
   loadMetaState,
   META_RETENTION_DAYS,
   metaConversionNames,
@@ -61,6 +62,7 @@ import {
   loadPaidLandingState,
   type PaidLandingCandidateRow,
 } from "./paid-detection";
+import { isDubiousUtmContent, metaAutoTaggedAdIds } from "./observed-tagging";
 import { ledgerCollectingSince, listLedgerRows, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, summarizeConsentRates } from "./consent-store";
 import {
@@ -181,6 +183,10 @@ export type AdsPageRow = {
   instant_form_leads: number;
   /** Google-reported lead conversions (never summed with Meta or site leads). */
   google_leads: number;
+  /** Meta impressions for ads landing here (and Google impressions when that spend is on the row). */
+  impressions: number;
+  /** Standard Meta Lead in the 7-day click window (0 when the split is not yet on cached days). */
+  pixel_leads_click: number;
   unique_leads: number;
   submissions: number;
   repeat_submissions: number;
@@ -188,12 +194,28 @@ export type AdsPageRow = {
   started_here: number;
   closed_here: number;
   conversion_rate: number | null;
+  /** Meta pixel leads ÷ Meta landing page views; null when Meta reports no page loads. */
+  meta_conversion_rate: number | null;
+  /** clicks ÷ impressions. */
+  ctr: number | null;
+  /** landing page views ÷ clicks. */
+  landing_rate: number | null;
+  /** matched_visits ÷ tagged Meta landing page views on GA4 days; can exceed 1 on a measurement mismatch. */
+  lpv_to_visits: number | null;
   cost_per_visit: MoneyByCurrency;
   cost_per_lead: MoneyByCurrency;
+  /** spend ÷ clicks. */
+  cpc: MoneyByCurrency;
+  /** spend ÷ impressions × 1000. */
+  cpm: MoneyByCurrency;
+  /** spend ÷ Meta leads. */
+  meta_cost_per_lead: MoneyByCurrency;
   /** matched_visits / link clicks from tagged ads on days GA4 exported; can exceed 1 on a measurement mismatch. */
   clicks_to_visits: number | null;
   organic: { sessions: number; bounce_rate: number | null; lead_rate: number | null } | null;
   low_sample: boolean;
+  /** True when Meta landing page views are below the rates threshold. */
+  meta_low_sample: boolean;
   platforms: AdPlatform[];
   campaigns: AdsCampaignRef[];
   versions?: AdsVersionRow[];
@@ -364,6 +386,8 @@ export type AdsReport = {
     ratio_clicks: number;
     /** Link clicks from ads missing the URL parameters template, landing on this site. */
     untagged_clicks: number;
+    impressions: number;
+    pixel_leads_click: number;
     meta_leads: number;
     instant_form_leads: number;
     google_leads: number;
@@ -373,6 +397,8 @@ export type AdsReport = {
     repeat_submissions: number;
     test_submissions: number;
   };
+  /** Days in the window whose Meta day rows include the click/view lead split. */
+  meta_split_days: { covered: number; total: number };
   /** What sits behind `totals.meta_leads` and `totals.unique_leads`, per conversion name (Leads card badges). */
   lead_conversions: AdsLeadConversions;
   pages: AdsPageRow[];
@@ -400,6 +426,8 @@ type Agg = {
   ga4Ads?: Map<string, AdsGa4AdRef>;
   ga4Untagged?: number;
   ratioClicks: number;
+  /** Tagged Meta landing page views on GA4 days (denominator of `lpv_to_visits`). */
+  ratioLandingPageViews: number;
 };
 
 function clampDays(raw: unknown): number {
@@ -540,6 +568,14 @@ function divMoney(money: MoneyByCurrency, denom: number): MoneyByCurrency {
   const out: MoneyByCurrency = {};
   if (denom <= 0) return out;
   for (const [c, v] of Object.entries(money)) out[c] = Math.round((v / denom) * 100) / 100;
+  return out;
+}
+
+/** Cost per thousand impressions (spend ÷ impressions × 1000). */
+function cpmMoney(money: MoneyByCurrency, impressions: number): MoneyByCurrency {
+  const out: MoneyByCurrency = {};
+  if (impressions <= 0) return out;
+  for (const [c, v] of Object.entries(money)) out[c] = Math.round((v / impressions) * 1000 * 100) / 100;
   return out;
 }
 
@@ -725,6 +761,8 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
     meta_leads: 0,
     instant_form_leads: 0,
     google_leads: 0,
+    impressions: 0,
+    pixel_leads_click: 0,
     unique_leads: 0,
     submissions: 0,
     repeat_submissions: 0,
@@ -732,11 +770,19 @@ function emptyRow(r: Resolved, primaryHost: string): AdsPageRow {
     started_here: 0,
     closed_here: 0,
     conversion_rate: null,
+    meta_conversion_rate: null,
+    ctr: null,
+    landing_rate: null,
+    lpv_to_visits: null,
     cost_per_visit: {},
     cost_per_lead: {},
+    cpc: {},
+    cpm: {},
+    meta_cost_per_lead: {},
     clicks_to_visits: null,
     organic: null,
     low_sample: true,
+    meta_low_sample: true,
     platforms: [],
     campaigns: [],
   };
@@ -857,11 +903,12 @@ function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, conn
   return { ...cls, matched };
 }
 
-/** False only when the ad setup was read and lacks the URL parameters template (unknown setups count as tagged). */
-function adIsTagged(creative: { links: string[]; url_tags?: string | null } | undefined): boolean {
+/** False when the ad setup was read and lacks the template or has a dubious utm_content (unknown setups count as tagged). */
+function adIsTagged(adId: string, creative: { links: string[]; url_tags?: string | null } | undefined): boolean {
   if (!creative || creative.links.length === 0) return true;
   const params = { ...parseTrackingParams(creative.links[0]), ...parseTrackingParams(creative.url_tags) };
-  return missingTemplateParams(params).length === 0;
+  if (missingTemplateParams(params).length > 0) return false;
+  return !isDubiousUtmContent(adId, params);
 }
 
 export function buildAdsReport(opts: AdsReportOpts): AdsReport {
@@ -892,6 +939,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         platforms: new Set(),
         versions: new Map(),
         ratioClicks: 0,
+        ratioLandingPageViews: 0,
       };
       aggs.set(r.key, a);
     } else if (r.redirected_from && !a.row.redirected_from.includes(r.redirected_from)) {
@@ -940,6 +988,8 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     unsynced_account_visits: 0,
     ratio_clicks: 0,
     untagged_clicks: 0,
+    impressions: 0,
+    pixel_leads_click: 0,
     meta_leads: 0,
     instant_form_leads: 0,
     google_leads: 0,
@@ -1198,12 +1248,34 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   };
 
   const spendRows: AdSpendDayRow[] = [...(includeMeta ? metaSpend : []), ...(includeGoogle ? googleSpend : [])];
+  const metaAuto =
+    includeMeta && metaConnected
+      ? metaAutoTaggedAdIds({
+          site: opts.site,
+          since: start,
+          until: end,
+          rows: metaRowsAll,
+          knownAdIds: known.ads,
+          thresholds: adsThresholds(settings),
+          candidateAdIds: new Set(
+            Object.entries(creatives())
+              .filter(([adId, c]) => {
+                if (!c.links.length) return false;
+                const params = { ...parseTrackingParams(c.links[0]), ...parseTrackingParams(c.url_tags) };
+                return missingTemplateParams(params).length > 0 || isDubiousUtmContent(adId, params);
+              })
+              .map(([adId]) => adId),
+          ),
+        })
+      : new Set<string>();
   for (const m of spendRows) {
     totals.clicks += m.clicks;
     totals.landing_page_views += m.landing_page_views;
+    totals.impressions += m.impressions;
     if (m.platform === "meta") {
       totals.meta_leads += m.platform_leads;
       totals.instant_form_leads += m.form_leads;
+      if (m.pixel_leads_click != null) totals.pixel_leads_click += m.pixel_leads_click;
       for (const k of metaLeadKeys) {
         const n = m.conversions ? (m.conversions[k] ?? 0) : k === META_STANDARD_LEAD_KEY ? m.platform_leads : 0;
         if (n) metaKeyCounts.set(k, (metaKeyCounts.get(k) ?? 0) + n);
@@ -1220,20 +1292,23 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     addMoney(a.row.spend, m.currency, m.spend);
     a.row.clicks += m.clicks;
     a.row.landing_page_views += m.landing_page_views;
+    a.row.impressions += m.impressions;
     if (m.platform === "meta") {
       a.row.meta_leads += m.platform_leads;
       a.row.instant_form_leads += m.form_leads;
+      if (m.pixel_leads_click != null) a.row.pixel_leads_click += m.pixel_leads_click;
     } else {
       a.row.google_leads = Math.round((a.row.google_leads + m.platform_leads) * 1000) / 1000;
     }
     if (r.kind === "entry" || r.kind === "missing_page") {
-      const tagged = m.tagged ?? (m.platform === "meta" ? adIsTagged(creatives()[m.ad_id]) : true);
+      const tagged = m.tagged ?? (m.platform === "meta" ? adIsTagged(m.ad_id, creatives()[m.ad_id]) || metaAuto.has(m.ad_id) : true);
       if (!tagged) {
         a.row.untagged_clicks += m.clicks;
         totals.untagged_clicks += m.clicks;
       } else if (ga4Dates.has(m.date)) {
         a.ratioClicks += m.clicks;
         totals.ratio_clicks += m.clicks;
+        if (m.platform === "meta") a.ratioLandingPageViews += m.landing_page_views;
       }
     }
     if (r.kind === "entry") addMoney(totals.tracked_spend, m.currency, m.spend);
@@ -1396,9 +1471,17 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     row.bounce_rate = visits > 0 ? 1 - row.engaged_sessions / visits : null;
     row.avg_engaged_seconds = visits > 0 ? Math.round(a.engagementMs / visits / 100) / 10 : null;
     row.conversion_rate = visits > 0 ? row.unique_leads / visits : null;
+    row.meta_conversion_rate = row.landing_page_views > 0 ? row.meta_leads / row.landing_page_views : null;
+    row.ctr = row.impressions > 0 ? row.clicks / row.impressions : null;
+    row.landing_rate = row.clicks > 0 ? row.landing_page_views / row.clicks : null;
+    row.lpv_to_visits = a.ratioLandingPageViews > 0 ? row.matched_visits / a.ratioLandingPageViews : null;
     row.cost_per_visit = divMoney(row.spend, visits);
     row.cost_per_lead = divMoney(row.spend, row.unique_leads);
+    row.cpc = divMoney(row.spend, row.clicks);
+    row.cpm = cpmMoney(row.spend, row.impressions);
+    row.meta_cost_per_lead = divMoney(row.spend, row.meta_leads);
     row.clicks_to_visits = a.ratioClicks > 0 ? row.matched_visits / a.ratioClicks : null;
+    row.meta_low_sample = isLowSample(row.landing_page_views, minVisits);
     row.organic =
       a.organicSessions > 0
         ? {
@@ -1747,6 +1830,10 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     refresh,
     collecting_since: collectingSince ? new Date(collectingSince).toISOString() : null,
     covered_days: covered,
+    meta_split_days:
+      includeMeta && metaConnected
+        ? loadMetaSplitCoverage(opts.site, start, end, opts.account ? [opts.account] : settings.meta.ad_account_ids)
+        : { covered: 0, total: 0 },
     data_gaps: { meta_missing_days: metaMissing.length, ga4_missing_days: ga4Missing.length, google_missing_days: googleMissing.length },
     filters,
     lead_gap_compare: leadGapCompare,

@@ -70,6 +70,13 @@ import {
 } from "./lead-conversion-issues";
 import type { MetaAdDayRow } from "./meta-client";
 import { lastCompleteGa4Date } from "./paid-detection";
+import {
+  clicksByAd,
+  ga4TaggedSessionsByAd,
+  isDubiousUtmContent,
+  resolveAdTagging,
+  shortTrackingWindow,
+} from "./observed-tagging";
 import { ledgerLastRecordedAt } from "./lead-ledger";
 import { hasMetaData } from "./ads-refresh";
 import { consentDropPct, consentTotals, loadConsentWindow } from "../legal/legal-diagnostics";
@@ -404,6 +411,7 @@ export function indexAds(input: { creatives: MetaAdsCreatives["ads"]; rows: Meta
       const params = { ...parseTrackingParams(c.links[0]), ...parseTrackingParams(c.url_tags) };
       const missing = missingTemplateParams(params);
       if (missing.length > 0) a.missing = missing;
+      if (isDubiousUtmContent(adId, params)) a.dubious_utm_content = true;
       if (hasNonPaidMedium(params)) a.medium = params.utm_medium!;
     }
     result.set(adId, a);
@@ -452,11 +460,12 @@ export function trackingParamsCoverage(input: {
       continue;
     }
     checked += 1;
-    if (a.missing) {
+    if (a.missing || a.dubious_utm_content) {
       missingAds += 1;
       const m = missingByCampaign.get(a.campaign_id) ?? { spend: {} as MoneyByCurrency, ads: 0, missing: new Set<string>(), name: a.campaign_name };
       m.ads += 1;
-      a.missing.forEach((k) => m.missing.add(k));
+      a.missing?.forEach((k) => m.missing.add(k));
+      if (a.dubious_utm_content) m.missing.add("utm_content");
       addSpend(m.spend, a.spend);
       missingByCampaign.set(a.campaign_id, m);
     }
@@ -734,54 +743,8 @@ export async function buildAdsDiagnostics(opts: {
     }
   }
 
-  // Creative URL params (missing template / non-paid medium / unchecked) + landing probes
+  // Non-paid medium now; missing / unchecked tracking wait until after probes (broken-link skip)
   const coverage = trackingParamsCoverage({ creatives: { fetched_at: "", ads: creatives }, rows: metaRows, windowDays: issueDays, index: adIndex });
-  for (const m of coverage.campaigns) {
-    const camp = campaignAds(m.id);
-    const unchecked = camp.filter((a) => a.state === "unchecked");
-    const ads = [...camp.filter((a) => a.state === "checked" && a.missing), ...unchecked];
-    issues.push({
-      id: `missing_tracking_params:${m.id}`,
-      code: "missing_tracking_params",
-      severity: "warning",
-      title: `Ads missing tracking parameters: ${m.name}`,
-      why: `${m.ads} ad(s) in this campaign are missing ${m.missing.join(", ")}. Without them we cannot match visits and leads to the exact campaign and ad.`,
-      how_to_fix:
-        "In Meta Ads Manager, paste the URL parameters template below into each ad (Tracking → URL parameters). Staff with Edit live ads can use Fix via Meta here instead.",
-      spend_affected: m.spend,
-      scope: { campaign_id: m.id, campaign_name: m.name, account_id: accountOf(camp) },
-      site_fixable: false,
-      details: detailsFor(ads, unchecked.length > 0 ? { unchecked: summarizeUnchecked(unchecked) } : {}),
-    });
-  }
-  const flaggedCampaigns = new Set(coverage.campaigns.map((c) => c.id));
-  const uncheckedByCampaign = new Map<string, IndexedAd[]>();
-  for (const a of spendingAds) {
-    if (a.state !== "unchecked" || flaggedCampaigns.has(a.campaign_id)) continue;
-    const list = uncheckedByCampaign.get(a.campaign_id) ?? [];
-    list.push(a);
-    uncheckedByCampaign.set(a.campaign_id, list);
-  }
-  for (const [campaignId, ads] of Array.from(uncheckedByCampaign.entries())) {
-    const summary = summarizeUnchecked(ads);
-    const spend: MoneyByCurrency = {};
-    ads.forEach((a) => addSpend(spend, a.spend));
-    issues.push({
-      id: `tracking_params_unchecked:${campaignId}`,
-      code: "tracking_params_unchecked",
-      severity: "info",
-      title: `Couldn't check tracking parameters: ${ads[0]!.campaign_name}`,
-      why: `${ads.length} ad(s) with spend in this campaign could not be checked against the URL parameters template (${summary
-        .map((u) => `${u.ads}: ${ADS_UNCHECKED_REASON_LABELS[u.reason]}`)
-        .join("; ")}).`,
-      how_to_fix:
-        "Press Resync to read the ad setups from Meta again. Removed ads need no action; ads without a website link cannot carry URL parameters.",
-      spend_affected: roundMoney(spend),
-      scope: { campaign_id: campaignId, campaign_name: ads[0]!.campaign_name, account_id: accountOf(ads) },
-      site_fixable: false,
-      details: detailsFor(ads, { unchecked: summary }),
-    });
-  }
   for (const n of coverage.non_paid_campaigns) {
     const camp = campaignAds(n.id);
     issues.push({
@@ -848,7 +811,7 @@ export async function buildAdsDiagnostics(opts: {
     }
   }
 
-  const state = loadIssueState(opts.site);
+  const state = loadIssueState(opts.site, META_ISSUE_STATE_FILE);
 
   // Ads whose URL goes through one of our content redirects (paths only — www/http hops are not checked)
   const dropsParams = new Set(issues.filter((i) => i.code === "redirect_drops_params").map((i) => i.scope.url));
@@ -861,6 +824,204 @@ export async function buildAdsDiagnostics(opts: {
     issues.push({ ...issue, scope: { ...issue.scope, account_id: accountOf(ads) }, details: detailsFor(ads) });
   }
 
+  // Broken links / zero-visit pages — skip confirmed-missing for those ads only
+  const brokenLinks = new Set<string>();
+  for (const i of issues) {
+    if ((i.code === "landing_http_error" || i.code === "redirect_drops_params") && i.scope.url) brokenLinks.add(i.scope.url);
+  }
+  if (opts.probe === false) {
+    for (const id of Object.keys(state.open)) {
+      if (id.startsWith("landing_http_error:")) brokenLinks.add(id.slice("landing_http_error:".length));
+      if (id.startsWith("redirect_drops_params:")) brokenLinks.add(id.slice("redirect_drops_params:".length));
+    }
+  }
+  const zeroVisitPages = new Set(
+    issues.filter((i) => i.code === "spend_zero_visits" && i.scope.page_key).map((i) => i.scope.page_key!),
+  );
+  const adsOnZeroVisit = new Set<string>();
+  for (const [key, list] of Array.from(adsByDest.entries())) {
+    if (!zeroVisitPages.has(key)) continue;
+    for (const a of list) adsOnZeroVisit.add(a.ad_id);
+  }
+
+  // GA4-verified missing / dubious / unchecked tracking
+  const knownAdIds = new Set(Array.from(adIndex.keys()));
+  const shortWin = shortTrackingWindow(now, t.tracking_check_days);
+  const issueSince = report.window.start;
+  const issueUntil = report.window.end;
+  const shortGa4 = report.ga4.configured
+    ? ga4TaggedSessionsByAd(opts.site, shortWin.since, shortWin.until, knownAdIds)
+    : { sessions: new Map<string, number>(), completeDates: new Set<string>() };
+  const issueGa4 = report.ga4.configured
+    ? ga4TaggedSessionsByAd(opts.site, issueSince, issueUntil, knownAdIds)
+    : { sessions: new Map<string, number>(), completeDates: new Set<string>() };
+  const shortClicksMap = clicksByAd(metaRows, shortGa4.completeDates);
+  const issueClicksMap = clicksByAd(metaRows, issueGa4.completeDates);
+
+  type Tracked = IndexedAd & { tagging_source: "none"; checked_clicks: number; ga4_tagged_sessions: number; verdict: "missing" | "unverified" };
+  const confirmedByCampaign = new Map<string, Tracked[]>();
+  const unverifiedByCampaign = new Map<string, Tracked[]>();
+
+  const classifyChecked = (a: IndexedAd): Tracked | "meta_auto" | null => {
+    const needs = !!(a.missing?.length || a.dubious_utm_content);
+    if (!needs) return null;
+    if (!report.ga4.configured) {
+      const onlyUtmId = !a.dubious_utm_content && a.missing?.length === 1 && a.missing[0] === "utm_id";
+      return {
+        ...a,
+        tagging_source: "none",
+        checked_clicks: a.link_clicks,
+        ga4_tagged_sessions: 0,
+        verdict: onlyUtmId ? "unverified" : "missing",
+      };
+    }
+    const resolved = resolveAdTagging({
+      shortClicks: shortClicksMap.get(a.ad_id) ?? 0,
+      shortSessions: shortGa4.sessions.get(a.ad_id) ?? 0,
+      shortCompleteDays: shortGa4.completeDates.size,
+      fallbackClicks: issueClicksMap.get(a.ad_id) ?? 0,
+      fallbackSessions: issueGa4.sessions.get(a.ad_id) ?? 0,
+      fallbackCompleteDays: issueGa4.completeDates.size,
+      thresholds: t,
+    });
+    if (resolved.state === "meta_auto") return "meta_auto";
+    const onlyUtmId = !a.dubious_utm_content && a.missing?.length === 1 && a.missing[0] === "utm_id";
+    const verdict: "missing" | "unverified" = resolved.state === "unverified" || onlyUtmId ? "unverified" : "missing";
+    if (verdict === "missing" && (brokenLinks.has(bareOf(a) ?? "") || adsOnZeroVisit.has(a.ad_id))) return null;
+    return {
+      ...a,
+      tagging_source: "none",
+      checked_clicks: resolved.checked_clicks,
+      ga4_tagged_sessions: resolved.ga4_tagged_sessions,
+      verdict,
+    };
+  };
+
+  for (const a of spendingAds) {
+    if (a.state !== "checked") continue;
+    const c = classifyChecked(a);
+    if (!c || c === "meta_auto") continue;
+    const map = c.verdict === "missing" ? confirmedByCampaign : unverifiedByCampaign;
+    const list = map.get(a.campaign_id) ?? [];
+    list.push(c);
+    map.set(a.campaign_id, list);
+  }
+
+  const evidenceDetails = (ads: Tracked[], extra: Partial<AdsIssueDetails> = {}) =>
+    detailsFor(
+      ads.map((a) => {
+        const { verdict: _v, ...rest } = a;
+        return rest;
+      }),
+      extra,
+    );
+
+  // Unchecked setups: drop ads GA4 already proves as meta_auto; fold the rest into
+  // confirmed-missing for that campaign (same drawer), else emit tracking_params_unchecked.
+  const uncheckedByCampaign = new Map<string, IndexedAd[]>();
+  for (const a of spendingAds) {
+    if (a.state !== "unchecked") continue;
+    if (report.ga4.configured) {
+      const resolved = resolveAdTagging({
+        shortClicks: shortClicksMap.get(a.ad_id) ?? 0,
+        shortSessions: shortGa4.sessions.get(a.ad_id) ?? 0,
+        shortCompleteDays: shortGa4.completeDates.size,
+        fallbackClicks: issueClicksMap.get(a.ad_id) ?? 0,
+        fallbackSessions: issueGa4.sessions.get(a.ad_id) ?? 0,
+        fallbackCompleteDays: issueGa4.completeDates.size,
+        thresholds: t,
+      });
+      if (resolved.state === "meta_auto") continue;
+    }
+    const list = uncheckedByCampaign.get(a.campaign_id) ?? [];
+    list.push(a);
+    uncheckedByCampaign.set(a.campaign_id, list);
+  }
+
+  for (const [campaignId, ads] of Array.from(confirmedByCampaign.entries())) {
+    const spend: MoneyByCurrency = {};
+    const missingKeys = new Set<string>();
+    ads.forEach((a) => {
+      addSpend(spend, a.spend);
+      a.missing?.forEach((k) => missingKeys.add(k));
+      if (a.dubious_utm_content) missingKeys.add("utm_content");
+    });
+    const folded = uncheckedByCampaign.get(campaignId) ?? [];
+    uncheckedByCampaign.delete(campaignId);
+    folded.forEach((a) => addSpend(spend, a.spend));
+    const checkDays = t.tracking_check_days;
+    const dubious = ads.some((a) => a.dubious_utm_content);
+    const ga4On = report.ga4.configured;
+    const evidenceAds = [
+      ...ads.map((a) => {
+        const { verdict: _v, ...rest } = a;
+        return rest;
+      }),
+      ...folded,
+    ];
+    const missingList = Array.from(missingKeys).join(", ") || "tracking parameters";
+    const why = !ga4On
+      ? dubious
+        ? `${ads.length} ad(s) in this campaign have wrong or incomplete URL parameters (e.g. utm_content that is not this ad's id), so visits and leads can't be matched to them.`
+        : `${ads.length} ad(s) in this campaign are missing ${missingList}, so visits and leads can't be matched to them.`
+      : dubious
+        ? `${ads.length} ad(s) in this campaign have wrong or incomplete URL parameters (e.g. utm_content that is not this ad's id). GA4 received almost no visits with these ads' ids over the last ${checkDays} complete days, so visits and leads can't be matched to them.`
+        : `${ads.length} ad(s) in this campaign are missing ${missingList}. GA4 received almost no visits with these ads' ids over the last ${checkDays} complete days, so visits and leads can't be matched to them.`;
+    issues.push({
+      id: `missing_tracking_params:${campaignId}`,
+      code: "missing_tracking_params",
+      severity: "warning",
+      title: `Ads missing tracking parameters: ${ads[0]!.campaign_name}`,
+      why,
+      how_to_fix: dubious
+        ? "In Meta Ads Manager, paste the URL parameters template below into each ad (Tracking → URL parameters) so utm_content uses {{ad.id}}. Staff with Edit live ads can use Fix via Meta here instead."
+        : "In Meta Ads Manager, paste the URL parameters template below into each ad (Tracking → URL parameters). Staff with Edit live ads can use Fix via Meta here instead.",
+      spend_affected: roundMoney(spend),
+      scope: { campaign_id: campaignId, campaign_name: ads[0]!.campaign_name, account_id: accountOf(ads) },
+      site_fixable: false,
+      details: detailsFor(evidenceAds, folded.length ? { unchecked: summarizeUnchecked(folded) } : {}),
+    });
+  }
+
+  for (const [campaignId, ads] of Array.from(unverifiedByCampaign.entries())) {
+    const spend: MoneyByCurrency = {};
+    ads.forEach((a) => addSpend(spend, a.spend));
+    issues.push({
+      id: `tracking_params_unverified:${campaignId}`,
+      code: "tracking_params_unverified",
+      severity: "info",
+      title: `Not enough data to confirm tracking: ${ads[0]!.campaign_name}`,
+      why: `${ads.length} ad(s) in this campaign look incomplete in Meta, but there aren't enough recent clicks (or complete Google Analytics days) to confirm whether visits arrive tagged.`,
+      how_to_fix: "We'll check again automatically once there are more complete days of clicks. No Fix via Meta until tracking is confirmed missing.",
+      spend_affected: roundMoney(spend),
+      scope: { campaign_id: campaignId, campaign_name: ads[0]!.campaign_name, account_id: accountOf(ads) },
+      site_fixable: false,
+      details: evidenceDetails(ads),
+    });
+  }
+
+  for (const [campaignId, ads] of Array.from(uncheckedByCampaign.entries())) {
+    const summary = summarizeUnchecked(ads);
+    const spend: MoneyByCurrency = {};
+    ads.forEach((a) => addSpend(spend, a.spend));
+    issues.push({
+      id: `tracking_params_unchecked:${campaignId}`,
+      code: "tracking_params_unchecked",
+      severity: "info",
+      title: `Couldn't check tracking parameters: ${ads[0]!.campaign_name}`,
+      why: `${ads.length} ad(s) with spend in this campaign could not be checked against the URL parameters template (${summary
+        .map((u) => `${u.ads}: ${ADS_UNCHECKED_REASON_LABELS[u.reason]}`)
+        .join("; ")}).`,
+      how_to_fix:
+        "Press Resync to read the ad setups from Meta again. Removed ads need no action; ads without a website link cannot carry URL parameters.",
+      spend_affected: roundMoney(spend),
+      scope: { campaign_id: campaignId, campaign_name: ads[0]!.campaign_name, account_id: accountOf(ads) },
+      site_fixable: false,
+      details: detailsFor(ads, { unchecked: summary }),
+    });
+  }
+
+  // Pixel not reporting leads while the site records Meta leads
   // Pixel not reporting leads while the site records Meta leads
   const pickedConversions = settings.meta.lead_conversions ?? [];
   const conversionNames = connected ? metaConversionNames(opts.site) : new Map<string, string>();

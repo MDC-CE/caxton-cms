@@ -435,7 +435,13 @@ function SetupChecklist({
       <ol className="space-y-2">
         {data.steps.map((step, i) => {
           const st = STATE_ICON[step.state];
-          const expanded = step.id === data.next || step.state === "warning" || step.state === "error";
+          // Expand the focused step, problems, short-history check, and in-progress backfill
+          // (backfill no longer blocks connect, but staff still need the progress / copy fields).
+          const expanded =
+            step.id === data.next ||
+            step.state === "warning" ||
+            step.state === "error" ||
+            (step.id === "backfill" && step.state === "waiting");
           return (
             <li
               key={step.id}

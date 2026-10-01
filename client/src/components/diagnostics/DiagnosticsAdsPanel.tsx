@@ -6,6 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { useToast } from "@/hooks/use-toast";
@@ -149,6 +157,16 @@ const LEADS_READINGS: KpiReading[] = [
   { reading: "+ repeats", meaning: "The same person sent the same form again within 24 hours. Not counted as new leads." },
 ];
 
+/** Clear gap only (≥2× or one side empty). No highlight for 0/0 or close pairs. */
+function leadsActiveReading(meta: number, site: number): string | undefined {
+  if (meta === 0 && site === 0) return undefined;
+  if (meta === 0) return "Site much higher";
+  if (site === 0) return "Meta much higher";
+  if (meta >= site * 2) return "Meta much higher";
+  if (site >= meta * 2) return "Site much higher";
+  return undefined;
+}
+
 function leadsRightNow(k: AdsDiagnostics["kpis"], collectingSince: string | null): string {
   const since = collectingSince ? ` Site leads are only recorded since ${collectingSince.slice(0, 10)}.` : "";
   if (k.meta_leads === 0 && k.site_leads === 0) {
@@ -185,6 +203,7 @@ function KpiReadGuide({
   intro,
   readings,
   rightNow,
+  activeReading,
   template,
   footer,
   testId,
@@ -193,6 +212,8 @@ function KpiReadGuide({
   intro: string;
   readings: KpiReading[];
   rightNow: string;
+  /** Situation row that matches the current KPI (e.g. "Site much higher"). */
+  activeReading?: string;
   /** Shows a copy button for the tracking template in the "Right now" box. */
   template?: string;
   footer?: ReactNode;
@@ -200,8 +221,8 @@ function KpiReadGuide({
 }) {
   const { toast } = useToast();
   return (
-    <Popover>
-      <PopoverTrigger asChild>
+    <Dialog>
+      <DialogTrigger asChild>
         <button
           type="button"
           className="whitespace-nowrap text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -209,19 +230,40 @@ function KpiReadGuide({
         >
           How to read this
         </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-96 space-y-3 text-xs leading-relaxed text-muted-foreground">
-        <div className="space-y-1">
-          <p className="text-sm font-medium text-foreground">How to read {title}</p>
-          <p>{intro}</p>
-        </div>
+      </DialogTrigger>
+      <DialogContent
+        className="max-w-md space-y-3 text-xs leading-relaxed text-muted-foreground sm:max-w-md"
+        data-testid={`dialog-kpi-${testId}-guide`}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-base">How to read {title}</DialogTitle>
+          <DialogDescription className="text-xs leading-relaxed">{intro}</DialogDescription>
+        </DialogHeader>
         <dl className="space-y-1.5">
-          {readings.map((r) => (
-            <div key={r.reading} className="grid grid-cols-[7.5rem_1fr] gap-2">
-              <dt className="font-medium text-foreground">{r.reading}</dt>
-              <dd>{r.meaning}</dd>
-            </div>
-          ))}
+          {readings.map((r) => {
+            const active = activeReading != null && r.reading === activeReading;
+            return (
+              <div
+                key={r.reading}
+                className={cn(
+                  "grid grid-cols-[7.5rem_1fr] gap-2 rounded-md px-2 py-1.5 -mx-2",
+                  active && "bg-amber-500/10 ring-1 ring-amber-500/30",
+                )}
+                data-testid={active ? `kpi-${testId}-guide-active` : undefined}
+                data-active={active ? "true" : undefined}
+              >
+                <dt className="font-medium text-foreground">
+                  {r.reading}
+                  {active && (
+                    <span className="mt-0.5 block text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                      Matches now
+                    </span>
+                  )}
+                </dt>
+                <dd>{r.meaning}</dd>
+              </div>
+            );
+          })}
         </dl>
         <div className="space-y-2 rounded-md border bg-muted/40 p-2" data-testid={`kpi-${testId}-guide-now`}>
           <p>
@@ -245,8 +287,8 @@ function KpiReadGuide({
           )}
         </div>
         {footer && <p>{footer}</p>}
-      </PopoverContent>
-    </Popover>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -753,6 +795,7 @@ export function DiagnosticsAdsPanel() {
               intro="Two independent counts of the same leads. They never match exactly — compare them to spot a broken pixel or form, never add them."
               readings={LEADS_READINGS}
               rightNow={leadsRightNow(k, data.collecting_since)}
+              activeReading={leadsActiveReading(k.meta_leads, k.site_leads)}
               testId="leads"
             />
           }

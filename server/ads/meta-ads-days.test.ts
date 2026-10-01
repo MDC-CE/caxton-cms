@@ -37,6 +37,10 @@ const {
   loadMetaCustomConversions,
   loadMetaPixelEvents,
   metaDaysMissingConversions,
+  loadMetaSplitCoverage,
+  META_ROW_SHAPE,
+  accountNeedsMetaShapeBackfill,
+  effectiveMetaSyncMode,
 } = await import("./meta-ads-days");
 const metaClient = await import("./meta-client");
 
@@ -53,7 +57,7 @@ function readDay(date: string): { rows: Array<{ account_id: string; ad_id: strin
   return JSON.parse(fs.readFileSync(path.join(h.cacheDir, SITE, "meta-ads-days", `${date}.json`), "utf-8"));
 }
 
-function seedLoaded(ids: string[], platformLoaded = true, conversionsLoaded = true) {
+function seedLoaded(ids: string[], platformLoaded = true, conversionsLoaded = true, rowShape?: number) {
   const accounts = Object.fromEntries(
     ids.map((id) => [
       id,
@@ -64,6 +68,11 @@ function seedLoaded(ids: string[], platformLoaded = true, conversionsLoaded = tr
         history_loaded_at: "2026-09-01T00:00:00.000Z",
         ...(conversionsLoaded ? { conversions_loaded_at: "2026-09-01T00:00:00.000Z" } : {}),
         ...(platformLoaded ? { platform_history_loaded_at: "2026-09-01T00:00:00.000Z", platform_history_since: "2026-07-01" } : {}),
+        ...(rowShape != null
+          ? { row_shape: rowShape }
+          : conversionsLoaded
+            ? { row_shape: META_ROW_SHAPE }
+            : {}),
       },
     ]),
   );
@@ -274,7 +283,7 @@ describe("syncMetaAds history loading", () => {
 });
 
 describe("syncMetaAds per-conversion refill, custom conversions and pixel events", () => {
-  it("re-reads 90 days once, marks conversions_loaded_at, then refreshes 10 days", async () => {
+  it("re-reads 90 days once, marks conversions_loaded_at and row_shape, then refreshes 10 days", async () => {
     seedDay("2026-09-01", [insightRow("111", "2026-09-01")]);
     seedLoaded(["111"], true, false);
     expect(metaDaysMissingConversions(SITE, "2026-09-01", "2026-09-29", ["111"])).toEqual(["2026-09-01"]);
@@ -282,12 +291,13 @@ describe("syncMetaAds per-conversion refill, custom conversions and pixel events
     expect(first.mode).toBe("backfill");
     expect(first.dates).toHaveLength(90);
     expect(loadMetaState(SITE).accounts["111"].conversions_loaded_at).toBeTruthy();
+    expect(loadMetaState(SITE).accounts["111"].row_shape).toBe(META_ROW_SHAPE);
     const second = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
     expect(second.mode).toBe("refresh");
     expect(second.dates).toHaveLength(10);
   });
 
-  it("keeps retrying the refill while an account fails", async () => {
+  it("does not keep forcing 90-day backfill for an account that still has a sync_error", async () => {
     seedDay("2026-09-01");
     seedLoaded(["111", "222"], true, false);
     h.meta.ad_account_ids = ["111", "222"];
@@ -299,11 +309,30 @@ describe("syncMetaAds per-conversion refill, custom conversions and pixel events
       await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
       const state = loadMetaState(SITE);
       expect(state.accounts["111"].conversions_loaded_at).toBeTruthy();
+      expect(state.accounts["111"].row_shape).toBe(META_ROW_SHAPE);
       expect(state.accounts["222"].conversions_loaded_at).toBeUndefined();
-      expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+      expect(state.accounts["222"].sync_error).toBeTruthy();
+      // Broken account is skipped for shape backfill; healthy account is current → 10-day refresh.
+      expect(effectiveMetaSyncMode("refresh", ["111", "222"], state)).toBe("refresh");
+      expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (1 + 1 + 3) + 2);
     } finally {
       vi.mocked(metaClient.fetchAccountInfo).mockImplementation(async () => ({ id: "", name: "Acct", currency: "USD", account_status: 1 }));
     }
+  });
+
+  it("forces a 90-day re-read when row_shape is behind", async () => {
+    seedDay("2026-09-01");
+    seedLoaded(["111"], true, true, META_ROW_SHAPE - 1);
+    expect(accountNeedsMetaShapeBackfill(loadMetaState(SITE).accounts["111"])).toBe(true);
+    const first = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(first.mode).toBe("backfill");
+    expect(loadMetaState(SITE).accounts["111"].row_shape).toBe(META_ROW_SHAPE);
+  });
+
+  it("counts split coverage only for days with pixel_leads_click on every row", () => {
+    seedDay("2026-09-28", [{ ...insightRow("111", "2026-09-28"), pixel_leads_click: 1, pixel_leads_view: 0 }]);
+    seedDay("2026-09-29", [insightRow("111", "2026-09-29")]);
+    expect(loadMetaSplitCoverage(SITE, "2026-09-28", "2026-09-29", ["111"])).toEqual({ covered: 1, total: 2 });
   });
 
   it("saves custom conversions per account and pixel events deduped across accounts", async () => {

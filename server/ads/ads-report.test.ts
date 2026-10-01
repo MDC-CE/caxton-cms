@@ -27,6 +27,8 @@ const metaRows: MetaAdDayRow[] = [
     link_clicks: 80,
     landing_page_views: 60,
     pixel_leads: 5,
+    pixel_leads_click: 3,
+    pixel_leads_view: 2,
     instant_form_leads: 0,
   },
   {
@@ -198,6 +200,7 @@ vi.mock("./meta-ads-days", async (orig) => {
     loadMetaCreatives: () => ({ ads: fixture.creatives }),
     loadMetaPlatformRows: () => fixture.platformRows ?? [],
     metaConversionNames: () => new Map([["1086440567304045", "request_more_info"]]),
+    loadMetaSplitCoverage: () => fixture.metaSplitDays ?? { covered: 28, total: 28 },
   };
 });
 const ALL_META_DATES: string[] = [];
@@ -216,6 +219,7 @@ const fixture: {
   /** False = no local Meta token (with a downloaded snapshot, the report is in production_snapshot mode). */
   metaConnected?: boolean;
   metaSettings?: Partial<typeof DEFAULT_ADS_SETTINGS.meta>;
+  metaSplitDays?: { covered: number; total: number };
 } = {
   metaRows,
   creatives: BASE_CREATIVES,
@@ -329,6 +333,68 @@ describe("buildAdsReport join", () => {
 
   it("omits GA4 tag groups unless asked", () => {
     expect(page).not.toHaveProperty("ga4_ads");
+  });
+});
+
+describe("buildAdsReport Meta metrics", () => {
+  const TEMPLATE = "utm_source=facebook&utm_medium=paid_social&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
+
+  afterAll(() => {
+    fixture.metaRows = metaRows;
+    fixture.creatives = BASE_CREATIVES;
+    fixture.metaSplitDays = undefined;
+  });
+
+  it("derives CTR, CPC, CPM, Meta conversion rate, Meta CPL, landing rate and lpv_to_visits", () => {
+    fixture.creatives = {
+      ad1: { links: [`https://${HOST}/en/coding-bootcamp`], url_tags: TEMPLATE, instant_form: false },
+      ad2: { links: [], instant_form: true },
+    };
+    const report = buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+    const page = report.pages.find((p) => p.slug === "coding-bootcamp")!;
+    expect(page.impressions).toBe(5000);
+    expect(page.pixel_leads_click).toBe(3);
+    expect(page.ctr).toBeCloseTo(80 / 5000);
+    expect(page.cpc).toEqual({ USD: 1.25 });
+    expect(page.cpm).toEqual({ USD: 20 });
+    expect(page.landing_rate).toBeCloseTo(60 / 80);
+    expect(page.meta_conversion_rate).toBeCloseTo(5 / 60);
+    expect(page.meta_cost_per_lead).toEqual({ USD: 20 });
+    expect(page.lpv_to_visits).toBeCloseTo(50 / 60);
+    expect(page.meta_low_sample).toBe(false);
+    expect(report.totals.impressions).toBe(7000);
+    expect(report.totals.pixel_leads_click).toBe(3);
+    expect(report.meta_split_days).toEqual({ covered: 28, total: 28 });
+  });
+
+  it("leaves Meta conversion rate null when Meta reports no landing page views", () => {
+    fixture.metaRows = [
+      {
+        ...metaRows[0]!,
+        ad_id: "ad-no-lpv",
+        landing_page_views: 0,
+        pixel_leads: 2,
+        pixel_leads_click: 2,
+        link_clicks: 40,
+      },
+    ];
+    fixture.creatives = {
+      ...BASE_CREATIVES,
+      "ad-no-lpv": { links: [`https://${HOST}/en/coding-bootcamp`], url_tags: TEMPLATE, instant_form: false },
+    };
+    const report = buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+    const page = report.pages.find((p) => p.slug === "coding-bootcamp")!;
+    expect(page.landing_page_views).toBe(0);
+    expect(page.clicks).toBe(40);
+    expect(page.meta_conversion_rate).toBeNull();
+  });
+
+  it("passes through partial meta_split_days coverage", () => {
+    fixture.metaRows = metaRows;
+    fixture.creatives = BASE_CREATIVES;
+    fixture.metaSplitDays = { covered: 10, total: 28 };
+    const report = buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+    expect(report.meta_split_days).toEqual({ covered: 10, total: 28 });
   });
 });
 
@@ -515,6 +581,31 @@ describe("buildAdsReport clicks → visits", () => {
     expect(report.totals.paid_visits).toBe(0);
     expect(report.totals.unsynced_account_visits).toBe(9);
     expect(report.totals.unassigned_visits).toBe(0);
+  });
+
+  it("counts Meta-auto-tagged ads as tagged for untagged_clicks when GA4 confirms utm_content", () => {
+    const dates = ["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15"];
+    fixture.creatives = {
+      ad1: { links: [`https://${HOST}/en/coding-bootcamp`], url_tags: TEMPLATE, instant_form: false },
+      ad3: { links: [`https://${HOST}/en/coding-bootcamp?utm_source=facebook`], instant_form: false },
+    };
+    fixture.metaRows = dates.flatMap((date) => [
+      { ...base, date, link_clicks: 20 },
+      { ...base, date, ad_id: "ad3", link_clicks: 25 },
+    ]);
+    fixture.paidDays = dates.map((date, i) => ({
+      ...paidDay,
+      date,
+      complete: true,
+      candidates: [
+        candidate({}),
+        ...(i === 0 ? [candidate({ utm_content: "ad3", utm_id: null, utm_term: null, sessions: 20, engaged_sessions: 10, sessions_with_lead: 0 })] : []),
+      ],
+    }));
+    const report = buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+    // ad3: 100 clicks, 20 sessions (≥3 and ≥10%) → meta_auto; no longer untagged
+    expect(report.totals.untagged_clicks).toBe(0);
+    expect(report.totals.ratio_clicks).toBeGreaterThan(0);
   });
 });
 

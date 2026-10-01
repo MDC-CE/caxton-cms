@@ -153,7 +153,7 @@ export const DEFAULT_COOKIE_BANNER_COPY: Record<CookieBannerKey, Record<string, 
     es: "Usamos cookies para saber qué anuncios y páginas traen estudiantes a nuestros programas. Al seguir navegando, aceptas su uso.",
   },
   cookie_banner_ask: {
-    en: "We'd like to use cookies to see which ads and pages bring students to our programs. You can accept or reject — the site works the same either way.",
+    en: "We'd like to use cookies to see which ads and pages bring students to our programs. You can accept or reject. The site works the same either way.",
     es: "Queremos usar cookies para saber qué anuncios y páginas traen estudiantes a nuestros programas. Puedes aceptar o rechazar: el sitio funciona igual en ambos casos.",
   },
   cookie_banner_ok: { en: "OK", es: "Entendido" },

@@ -13,7 +13,7 @@ import {
   type ConsentDecision,
   type ConsentMode,
 } from '@shared/consent';
-import { readRawCookie } from './sessionCookie';
+import { clearRawCookie, readRawCookie } from './sessionCookie';
 
 export type ConsentState = 'granted' | 'denied' | 'unset';
 
@@ -48,6 +48,16 @@ export function hasTrackingConsent(): boolean {
 export function onConsentChange(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+function notifyListeners(state: ConsentState): void {
+  listeners.forEach((l) => {
+    try {
+      l(state);
+    } catch {
+      /* listener errors must not block consent */
+    }
+  });
 }
 
 function pushSignals(granted: boolean): void {
@@ -98,14 +108,19 @@ export async function saveConsentDecision(
   pushSignals(granted);
   // Listeners may call /api/ad-context, which needs the cookie this request sets.
   await postConsent({ kind: decision, mode, country });
-  const state: ConsentState = granted ? 'granted' : 'denied';
-  listeners.forEach((l) => {
-    try {
-      l(state);
-    } catch {
-      /* listener errors must not block consent */
-    }
-  });
+  notifyListeners(granted ? 'granted' : 'denied');
+}
+
+/**
+ * Staff/debug helper: drop `4g_consent` so the banner can ask again.
+ * Does not write a Reject decision (that would hide the banner for reject_days).
+ */
+export function clearConsentDecision(): void {
+  clearRawCookie(CONSENT_COOKIE_NAME);
+  pushSignals(false);
+  window.__4G_CONSENT__ = { decision: null, mode: null, granted: false };
+  notifyListeners('unset');
+  openConsentBanner();
 }
 
 /** Re-open the banner from the footer "Privacy choices" link. */

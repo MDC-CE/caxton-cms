@@ -180,6 +180,18 @@ export function AdsAlertThresholdsCard({
                 </p>
               </Group>
 
+              <Group title="Meta ads missing tracking parameters" testId="threshold-group-tracking">
+                <p>
+                  Count a Meta ad as tagged when Google Analytics sees at least {num("tracking_tagged_min_sessions", "visits")}{" "}
+                  with its ad id, and at least {num("tracking_missing_max_visit_pct", "%")} of its clicks arrive tagged — even if
+                  the ad&apos;s URL parameters in Meta look empty.
+                </p>
+                <p>
+                  Warn when an ad has at least {num("tracking_missing_min_clicks", "clicks")} but fewer visits with its ad id than
+                  that share.
+                </p>
+              </Group>
+
               <Group title="Lead counts don't match" testId="threshold-group-leads">
                 <p>
                   Warn when the gap between Google Analytics lead counts and our own lead records grows by{" "}
@@ -222,6 +234,11 @@ export function AdsAlertThresholdsCard({
                     <p>
                       Until there are 28 days to compare against, warn when the lead gap is over{" "}
                       {num("ga4_ledger_gap_bootstrap_pct", "%")}.
+                    </p>
+                    <p>
+                      Check Meta tracking over the last {num("tracking_check_days", "complete Google Analytics days")}. Meta may add
+                      parameters at click time even when the ad&apos;s URL parameters field is empty — that is why we confirm with
+                      Google Analytics.
                     </p>
                     <p>
                       In reports, grey out rates for pages with fewer than {num("min_paid_visits_for_rates", "paid visits")}.

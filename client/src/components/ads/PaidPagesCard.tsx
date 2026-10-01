@@ -94,6 +94,10 @@ function CampaignAccordion({ group }: { group: AdsCampaignGroup }) {
           <div className="flex items-center gap-5 text-sm tabular-nums">
             <span>{formatMoney(group.spend)}</span>
             <span className="text-muted-foreground">{formatNum(group.paid_visits)} visits</span>
+            <span className="text-muted-foreground">{formatNum(group.clicks)} clicks</span>
+            {group.platform === "meta" || group.meta_leads > 0 ? (
+              <span className="text-muted-foreground">{formatNum(group.meta_leads)} Meta leads</span>
+            ) : null}
             <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
           </div>
         </button>
@@ -302,6 +306,7 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
                   perspective={perspective}
                   issues={issuesByKey.get(r.key)}
                   coveredDays={data.covered_days}
+                  metaSplitDays={data.meta_split_days}
                   askRejectPct={data.consent.ask_region_reject_pct}
                   primaryHost={primaryHost}
                 />
@@ -326,6 +331,18 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
                   <p>
                     Rates grey out under {data.thresholds.min_paid_visits_for_rates} paid visits. Site leads cover {data.covered_days.covered} of{" "}
                     {data.covered_days.total} days.
+                  </p>
+                  <p>
+                    Meta columns use Meta's own attribution: 7 days after a click, or 1 day after someone only saw the ad. Meta conversion rate is
+                    Meta leads divided by landing page views, and shows "—" when Meta saw no page loads.
+                  </p>
+                  <p>
+                    "Saw the ad only" is Meta leads minus click-attributed leads — those people never clicked, which is why Meta leads can be higher
+                    than site leads.
+                  </p>
+                  <p>
+                    On All platforms, site visits and leads can include Google and others; Meta columns stay Meta-only (the details popover says so
+                    on mixed rows).
                   </p>
                   <p>
                     Visits in ask regions include Consent Mode estimates

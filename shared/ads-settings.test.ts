@@ -7,6 +7,7 @@ import {
   isExpectedEventPair,
   isKnownExternalCampaign,
   normalizeMetaLeadConversionKey,
+  parseAdsAlertThresholds,
   parseAdsSettings,
   parseKnownExternalCampaigns,
 } from "./ads-settings";
@@ -127,6 +128,42 @@ describe("parseAdsSettings", () => {
       conversion_overlap_count_pct: 20,
       lockstep_min_events: 20,
       lockstep_count_pct: 2,
+      tracking_tagged_min_sessions: 3,
+      tracking_missing_min_clicks: 20,
+      tracking_missing_max_visit_pct: 10,
+      tracking_check_days: 7,
+    });
+  });
+
+  it("clamps tracking_check_days to 3–28 and keeps other tracking thresholds", () => {
+    expect(
+      parseAdsAlertThresholds({
+        tracking_check_days: 1,
+        tracking_tagged_min_sessions: 0,
+        tracking_missing_min_clicks: 99,
+        tracking_missing_max_visit_pct: 150,
+      }),
+    ).toMatchObject({
+      tracking_check_days: 3,
+      tracking_tagged_min_sessions: 1,
+      tracking_missing_min_clicks: 99,
+      tracking_missing_max_visit_pct: 100,
+    });
+    expect(parseAdsAlertThresholds({ tracking_check_days: 90 }).tracking_check_days).toBe(28);
+  });
+
+  it("keeps tracking thresholds through a Save-shaped partial payload (routes thresholdsSchema keys)", () => {
+    const saved = parseAdsAlertThresholds({
+      tracking_tagged_min_sessions: 5,
+      tracking_missing_min_clicks: 30,
+      tracking_missing_max_visit_pct: 15,
+      tracking_check_days: 14,
+    });
+    expect(saved).toMatchObject({
+      tracking_tagged_min_sessions: 5,
+      tracking_missing_min_clicks: 30,
+      tracking_missing_max_visit_pct: 15,
+      tracking_check_days: 14,
     });
   });
 });

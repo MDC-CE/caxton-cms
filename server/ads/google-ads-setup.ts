@@ -151,7 +151,7 @@ export function deriveSetupSteps(input: SetupCheckInput): { steps: SetupStep[]; 
     steps.push({
       id: "backfill",
       state: "waiting",
-      detail: `Loading history: ${runsBf.loaded_days} of ${runsBf.total_days} days done (${runsBf.running} running, ${runsBf.pending} queued${runsBf.failed ? `, ${runsBf.failed} failed` : ""}).`,
+      detail: `Loading history: ${runsBf.loaded_days} of ${runsBf.total_days} days done (${runsBf.running} running, ${runsBf.pending} queued${runsBf.failed ? `, ${runsBf.failed} failed` : ""}). You can connect while it loads.`,
     });
   } else if (runsBf && runsBf.failed > 0) {
     steps.push({
@@ -168,11 +168,12 @@ export function deriveSetupSteps(input: SetupCheckInput): { steps: SetupStep[]; 
     const loaded = bf ? bf.loaded_days : daysBetween(since!, input.today);
     steps.push({
       id: "backfill",
-      state: "todo",
+      // Warning (not todo): accounts are usable; short history shouldn't block "Use it here".
+      state: "warning",
       detail:
         bf?.source === "tables"
-          ? `Only ${loaded} of ${bf.total_days} days found. Schedule a backfill for the last ${input.backfillDays} days; if you already did, this count grows as it loads.`
-          : `Only ${loaded} day(s) loaded${since ? ` (since ${since})` : ""}. Schedule a backfill for the last ${input.backfillDays} days.`,
+          ? `Only ${loaded} of ${bf.total_days} days found — you can connect now. Schedule a backfill for the last ${input.backfillDays} days for fuller trends; if you already did, this count grows as it loads.`
+          : `Only ${loaded} day(s) loaded${since ? ` (since ${since})` : ""} — you can connect now. Schedule a backfill for the last ${input.backfillDays} days for fuller trends.`,
     });
   }
 
@@ -184,7 +185,13 @@ export function deriveSetupSteps(input: SetupCheckInput): { steps: SetupStep[]; 
         : { id: "connect", state: "todo", detail: `Found ${customers.length} account(s). Use them here and save.` },
   );
 
-  const next = steps.find((s) => s.state !== "done" && s.state !== "warning")?.id ?? null;
+  // Short / in-progress history is optional once accounts exist — don't keep focus off connect.
+  const next =
+    steps.find((s) => {
+      if (s.state === "done" || s.state === "warning") return false;
+      if (s.id === "backfill" && customers.length > 0 && s.state !== "error") return false;
+      return true;
+    })?.id ?? null;
   return { steps, next };
 }
 

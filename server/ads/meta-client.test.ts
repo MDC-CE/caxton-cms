@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   conversionCounts,
+  fetchAdCreatives,
   listMetaAdAccounts,
   MetaApiError,
   parseAdAccount,
@@ -66,7 +67,12 @@ describe("parseInsightRow", () => {
       inline_link_clicks: "40",
       actions: [
         { action_type: "landing_page_view", value: "30" },
-        { action_type: "offsite_conversion.fb_pixel_lead", value: "3" },
+        {
+          action_type: "offsite_conversion.fb_pixel_lead",
+          value: "3",
+          "7d_click": "2",
+          "1d_view": "1",
+        },
         { action_type: "lead", value: "2" },
       ],
     });
@@ -78,7 +84,20 @@ describe("parseInsightRow", () => {
       landing_page_views: 30,
       pixel_leads: 3,
       instant_form_leads: 2,
+      pixel_leads_click: 2,
+      pixel_leads_view: 1,
     });
+  });
+
+  it("sets click/view lead splits to 0 when window fields are missing", () => {
+    const row = parseInsightRow({
+      date_start: "2026-09-01",
+      ad_id: "a1",
+      actions: [{ action_type: "offsite_conversion.fb_pixel_lead", value: "3" }],
+    });
+    expect(row?.pixel_leads).toBe(3);
+    expect(row?.pixel_leads_click).toBe(0);
+    expect(row?.pixel_leads_view).toBe(0);
   });
 
   it("drops rows without a date or ad id", () => {
@@ -172,6 +191,86 @@ describe("parseCreative", () => {
     expect(withAdset({ pixel_id: "414", custom_conversion_id: "1086440567304045" })).toBe("1086440567304045");
     expect(withAdset({ pixel_id: "414", custom_event_type: "LEAD" })).toBe("fb_pixel_lead");
     expect(withAdset({ pixel_id: "414", custom_event_type: "PURCHASE" })).toBeUndefined();
+  });
+
+  it("parses Instant Form and links from the slim nested story shape", () => {
+    const c = parseCreative({
+      id: "a2",
+      creative: {
+        link_url: "https://4geeks.com/landing/x",
+        object_story_spec: {
+          link_data: {
+            link: "https://4geeks.com/landing/x",
+            call_to_action: { value: { lead_gen_form_id: "form9" } },
+            child_attachments: [{ link: "https://4geeks.com/landing/y", call_to_action: { value: { link: "https://4geeks.com/landing/z" } } }],
+          },
+          video_data: { call_to_action: { value: { link: "https://4geeks.com/landing/v" } } },
+        },
+        asset_feed_spec: { link_urls: [{ website_url: "https://4geeks.com/landing/feed" }] },
+      },
+    });
+    expect(c?.instant_form).toBe(true);
+    expect(c?.links).toEqual(
+      expect.arrayContaining([
+        "https://4geeks.com/landing/x",
+        "https://4geeks.com/landing/y",
+        "https://4geeks.com/landing/z",
+        "https://4geeks.com/landing/v",
+        "https://4geeks.com/landing/feed",
+      ]),
+    );
+  });
+});
+
+describe("fetchAdCreatives", () => {
+  const originalToken = process.env.META_ADS_ACCESS_TOKEN;
+
+  beforeEach(() => {
+    process.env.META_ADS_ACCESS_TOKEN = "test-token";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalToken === undefined) delete process.env.META_ADS_ACCESS_TOKEN;
+    else process.env.META_ADS_ACCESS_TOKEN = originalToken;
+  });
+
+  function jsonResponse(body: unknown, status = 200) {
+    return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
+  }
+
+  it("requests page size 50 with slim fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: "a1", creative: { link_url: "https://4geeks.com/x" } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const ads = await fetchAdCreatives("111");
+    expect(ads).toHaveLength(1);
+    expect(ads[0]?.links).toContain("https://4geeks.com/x");
+    const url = decodeURIComponent(String(fetchMock.mock.calls[0]![0]));
+    expect(url).toContain("limit=50");
+    expect(url).toContain("object_story_spec{link_data{link,call_to_action");
+    expect(url).not.toContain("creative{link_url,url_tags,object_story_spec,asset_feed_spec");
+  });
+
+  it("retries at limit 25 when Meta says to reduce the amount of data", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { message: "Please reduce the amount of data you're asking for, then retry your request", code: 1 } }, 500),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "a9", creative: { url_tags: "utm_content=a9" } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const ads = await fetchAdCreatives("222");
+    expect(ads).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]![0])).toContain("limit=25");
+  });
+
+  it("does not retry unrelated Graph errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ error: { message: "Missing permission", code: 200 } }, 403)),
+    );
+    await expect(fetchAdCreatives("333")).rejects.toMatchObject({ kind: "permission" });
   });
 });
 

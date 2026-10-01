@@ -213,6 +213,10 @@ const thresholdsSchema = z
     conversion_overlap_count_pct: z.number().min(0).max(100),
     lockstep_min_events: z.number().int().min(1),
     lockstep_count_pct: z.number().min(0).max(100),
+    tracking_tagged_min_sessions: z.number().int().min(1),
+    tracking_missing_min_clicks: z.number().int().min(1),
+    tracking_missing_max_visit_pct: z.number().min(0).max(100),
+    tracking_check_days: z.number().int().min(3).max(28),
   })
   .partial();
 

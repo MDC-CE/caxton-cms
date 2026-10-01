@@ -60,9 +60,12 @@ describe("deriveSetupSteps", () => {
     expect(out.steps.find((s) => s.id === "transfer")!.state).toBe("waiting");
   });
 
-  it("short history asks for a backfill; 90 days (minus slack) is done", () => {
-    expect(states({ ...base, transfer: { customers: [customer("2026-09-20")] } }).backfill).toBe("todo");
+  it("short history is a check (not a blocker); 90 days (minus slack) is done", () => {
+    expect(states({ ...base, transfer: { customers: [customer("2026-09-20")] } }).backfill).toBe("warning");
     expect(states({ ...base, transfer: { customers: [customer("2026-07-05")] } }).backfill).toBe("done");
+    const short = deriveSetupSteps({ ...base, transfer: { customers: [customer("2026-09-20")] } });
+    expect(short.next).toBe("connect");
+    expect(short.steps.find((s) => s.id === "backfill")!.detail).toContain("connect now");
   });
 
   it("wrong location is a warning that doesn't block the rest", () => {
@@ -197,23 +200,28 @@ describe("backfill progress", () => {
     expect(out.failed_days).toEqual([{ date: "2026-09-25", message: "boom" }]);
   });
 
-  it("in progress → waiting with counts; failures after it finishes → error", () => {
+  it("in progress → waiting with counts; failures after it finishes → error; waiting does not block connect", () => {
     const running = deriveSetupSteps({ ...withCustomer("2026-09-29"), backfill: bf({ loaded_days: 34, running: 2, pending: 54 }) });
     expect(running.steps.find((s) => s.id === "backfill")).toMatchObject({ state: "waiting" });
     expect(running.steps.find((s) => s.id === "backfill")!.detail).toContain("34 of 90");
+    expect(running.steps.find((s) => s.id === "backfill")!.detail).toContain("connect while it loads");
+    expect(running.next).toBe("connect");
     expect(states({ ...withCustomer("2026-07-02"), backfill: bf({ loaded_days: 87, failed: 3 }) }).backfill).toBe("error");
   });
 
-  it("complete runs → done; no backfill scheduled → todo", () => {
+  it("complete runs → done; no backfill scheduled → warning (connect still next)", () => {
     expect(states({ ...withCustomer("2026-07-02"), backfill: bf({ loaded_days: 90 }) }).backfill).toBe("done");
-    expect(states({ ...withCustomer("2026-09-29"), backfill: bf({ loaded_days: 1 }) }).backfill).toBe("todo");
+    const short = deriveSetupSteps({ ...withCustomer("2026-09-29"), backfill: bf({ loaded_days: 1 }) });
+    expect(short.steps.find((s) => s.id === "backfill")).toMatchObject({ state: "warning" });
+    expect(short.next).toBe("connect");
   });
 
-  it("table fallback: done when history reaches back even with quiet days; otherwise todo that mentions growth", () => {
+  it("table fallback: done when history reaches back even with quiet days; otherwise warning that mentions growth", () => {
     expect(states({ ...withCustomer("2026-07-03"), backfill: bf({ source: "tables", loaded_days: 70 }) }).backfill).toBe("done");
     const out = deriveSetupSteps({ ...withCustomer("2026-09-20"), backfill: bf({ source: "tables", loaded_days: 10 }) });
-    expect(out.steps.find((s) => s.id === "backfill")).toMatchObject({ state: "todo" });
+    expect(out.steps.find((s) => s.id === "backfill")).toMatchObject({ state: "warning" });
     expect(out.steps.find((s) => s.id === "backfill")!.detail).toContain("grows");
+    expect(out.next).toBe("connect");
   });
 });
 
