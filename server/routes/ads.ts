@@ -37,7 +37,9 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { api } from "../rate-limit/api";
 import { getDefaultContentFolder, getDefaultContentRoot } from "../site-config";
-import { getAdsSettings, updateAdsSettings } from "../settings";
+import { AdsConfigUnreadableError, getAdsConfigStatus, getAdsSettings, updateAdsSettings } from "../settings";
+import { utmConventionView } from "../ads/utm-convention-view";
+import { ADS_CONFIG_FILENAME } from "../ads-config";
 import { markFileAsModified } from "../sync-state";
 import { isMcpLoopbackRequest, requireCapability, resolveIssueActor } from "./_helpers";
 import { child } from "../logger";
@@ -46,7 +48,7 @@ import {
   MAX_KNOWN_EXTERNAL_CAMPAIGNS,
   MAX_META_LEAD_CONVERSIONS,
   META_STANDARD_LEAD_KEY,
-  META_UTM_TEMPLATE,
+  metaUtmTemplate,
   isExpectedEventPair,
   isKnownExternalCampaign,
   normalizeAdAccountId,
@@ -54,7 +56,7 @@ import {
   normalizeMetaLeadConversionKey,
 } from "@shared/ads-settings";
 import { parseAttributionModel } from "@shared/paid-attribution";
-import { GOOGLE_URL_SUFFIX_TEMPLATE, type AdPlatform } from "@shared/paid-traffic";
+import type { AdPlatform } from "@shared/paid-traffic";
 import {
   GOOGLE_BACKFILL_DAYS,
   GOOGLE_CONVERSION_REFRESH_DAYS,
@@ -107,15 +109,19 @@ import type { AdsCheckPlatform, AdsRecheckScope } from "@shared/ads-issues";
 import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
 import { listLeadConversionOptions } from "../ads/meta-conversion-options";
 import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
-import { TRACKING_FIX_MAX_ADS } from "@shared/ads-tracking-fix";
+import { TRACKING_FIX_MAX_ADS, TRACKING_FIX_REPLACE_CODES, trackingFixModeFor } from "@shared/ads-tracking-fix";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 
 const log = child({ module: "routes/ads" });
 
 const ADS_ISSUE_ID = /^ads:(meta|google|shared):[a-z0-9_]{1,60}:(account|campaign|adset|ad|none):[\w.-]{1,80}(:[\w.-]{1,80})?$/;
 
+const TRACKING_FIX_ISSUE_ID = new RegExp(
+  `^ads:meta:(missing_tracking_params|${Array.from(TRACKING_FIX_REPLACE_CODES).join("|")}):(campaign|adset|ad|account):\\d{1,30}$`,
+);
+
 const trackingFixSchema = z.object({
-  issue_id: z.string().regex(/^ads:meta:missing_tracking_params:(campaign|adset|ad|account):\d{1,30}$/),
+  issue_id: z.string().regex(TRACKING_FIX_ISSUE_ID),
 });
 
 const trackingFixApplySchema = trackingFixSchema.extend({
@@ -139,10 +145,15 @@ const adsRecheckSchema = z.union([
 
 const adsRunSchema = z.object({ platforms: z.array(z.enum(["meta", "google"])).min(1).max(2).optional() });
 
-/** The open tracking issue from the last Run / Re-check (evidence keeps up to 50 ads). */
+/**
+ * The open issue Fix via Meta can act on (evidence keeps up to 50 ads): missing tracking params,
+ * or a utm_* issue with Meta ads behind it (GA4-only / Google evidence gets no fix).
+ */
 function findTrackingIssue(site: string, issueId: string): AdsIssue | null {
   const issue = adsValidationCache(site)?.getIssueById(issueId);
-  if (!issue?.ads || issue.code !== "missing_tracking_params") return null;
+  const mode = issue ? trackingFixModeFor(issue.code) : null;
+  if (!issue?.ads || !mode) return null;
+  if (mode === "replace" && (issue.ads.platform !== "meta" || (issue.ads.evidence.details?.ads?.length ?? 0) === 0)) return null;
   return { ...issue.ads.evidence, id: issue.id };
 }
 
@@ -155,6 +166,15 @@ function badQueryBody(err: Error): { error: string; code?: string } {
 }
 
 const PLATFORMS: Array<AdPlatform | "all"> = ["all", "meta", "google", "microsoft", "tiktok", "linkedin", "x", "snapchat", "pinterest", "other"];
+
+/** Save failures: 409 when ads-config.yml can't be parsed (nothing was written), else 400. */
+function sendSaveError(res: Response, err: unknown, fallback: string): void {
+  if (err instanceof AdsConfigUnreadableError) {
+    res.status(409).json({ code: err.code, error: err.message });
+    return;
+  }
+  res.status(400).json({ error: err instanceof Error ? err.message : fallback });
+}
 
 function getContentRoot(res: Response): string {
   return (res.locals.site as { contentRoot?: string } | undefined)?.contentRoot ?? getDefaultContentRoot();
@@ -173,11 +193,14 @@ function settingsPayload(res: Response) {
   const ga4 = loadPaidLandingState(site);
   const refresh = getAdsRefreshStatus(site);
   const trackingParams = hasMetaData(site, contentRoot) ? loadTrackingParamsCoverage(site, ads.meta.ad_account_ids) : null;
+  const utm = utmConventionView(site, ads, contentRoot);
   return {
     ads,
     token_configured: isMetaTokenConfigured(),
     api_version: META_GRAPH_VERSION,
-    utm_template: META_UTM_TEMPLATE,
+    utm_template: utm.meta_template,
+    utm_convention: utm,
+    config_status: getAdsConfigStatus(contentRoot),
     tracking_params: trackingParams,
     refreshing: isRefreshActive(refresh),
     refresh,
@@ -193,6 +216,8 @@ function settingsPayload(res: Response) {
       pulled_from_production_at: state.pulled_from_production_at ?? null,
       production_origin: state.production_origin ?? null,
       snapshot_last_date: state.snapshot_last_date ?? null,
+      backup_pushed_at: state.backup_pushed_at ?? null,
+      backup_error: state.backup_error ?? null,
     },
     ga4: {
       configured: isGa4Configured(contentRoot),
@@ -234,6 +259,8 @@ const thresholdsSchema = z
     tracking_missing_min_clicks: z.number().int().min(1),
     tracking_missing_max_visit_pct: z.number().min(0).max(100),
     tracking_check_days: z.number().int().min(3).max(28),
+    utm_issue_min_visits: z.number().int().min(1),
+    utm_issue_error_visits: z.number().int().min(1),
   })
   .partial();
 
@@ -277,11 +304,13 @@ function googleSettingsPayload(res: Response) {
   const days = listGoogleDayDates(site);
   const refresh = getAdsRefreshStatus(site);
   const ticked = new Set(ads.google.customer_ids);
+  const utm = utmConventionView(site, ads, contentRoot);
   return {
     google: ads.google,
     configured: isGoogleConfiguredSettings(ads.google),
     credentials_source: resolveBigQueryCredentials().source,
-    url_suffix_template: GOOGLE_URL_SUFFIX_TEMPLATE,
+    url_suffix_template: utm.google_template,
+    utm_convention: utm,
     refreshing: isRefreshActive(refresh),
     refresh,
     sync: {
@@ -384,7 +413,7 @@ export function registerAdsRoutes(app: Express): void {
         },
         contentRoot,
       );
-      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      markFileAsModified(ADS_CONFIG_FILENAME, undefined, undefined, contentRoot);
       const newAccounts = next.meta.ad_account_ids.filter((id) => !before.ad_account_ids.includes(id));
       const justEnabled = next.meta.enabled && !before.enabled;
       let sync_requested = false;
@@ -395,7 +424,7 @@ export function registerAdsRoutes(app: Express): void {
       res.json({ success: true, sync_requested, ...settingsPayload(res) });
     } catch (err) {
       log.warn({ err }, "[ads] failed to save settings");
-      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save Ads settings" });
+      sendSaveError(res, err, "Failed to save Ads settings");
     }
   });
 
@@ -417,11 +446,11 @@ export function registerAdsRoutes(app: Express): void {
       }
       const entry = parsed.data.note ? { key: parsed.data.key, note: parsed.data.note } : { key: parsed.data.key };
       const next = updateAdsSettings({ meta: { known_external_campaigns: [...current, entry] } }, contentRoot);
-      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      markFileAsModified(ADS_CONFIG_FILENAME, undefined, undefined, contentRoot);
       res.json({ success: true, already_known: false, known_external_campaigns: next.meta.known_external_campaigns });
     } catch (err) {
       log.warn({ err }, "[ads] failed to add known external campaign");
-      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save known campaign" });
+      sendSaveError(res, err, "Failed to save known campaign");
     }
   });
 
@@ -460,7 +489,7 @@ export function registerAdsRoutes(app: Express): void {
       const current = getAdsSettings(contentRoot).meta.lead_conversions;
       if (!current.includes(key)) return res.json({ success: true, already_unpicked: true, lead_conversions: current });
       const next = updateAdsSettings({ meta: { lead_conversions: current.filter((k) => k !== key) } }, contentRoot);
-      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      markFileAsModified(ADS_CONFIG_FILENAME, undefined, undefined, contentRoot);
       res.json({
         success: true,
         already_unpicked: false,
@@ -469,7 +498,7 @@ export function registerAdsRoutes(app: Express): void {
       });
     } catch (err) {
       log.warn({ err }, "[ads] failed to unpick lead conversion");
-      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to unpick lead conversion" });
+      sendSaveError(res, err, "Failed to unpick lead conversion");
     }
   });
 
@@ -495,11 +524,11 @@ export function registerAdsRoutes(app: Express): void {
       const events = [a, b].sort() as [string, string];
       const entry = note ? { pixel_id, events, note } : { pixel_id, events };
       const next = updateAdsSettings({ meta: { expected_event_pairs: [...current, entry] } }, contentRoot);
-      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      markFileAsModified(ADS_CONFIG_FILENAME, undefined, undefined, contentRoot);
       res.json({ success: true, already_expected: false, expected_event_pairs: next.meta.expected_event_pairs });
     } catch (err) {
       log.warn({ err }, "[ads] failed to add expected event pair");
-      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save expected event pair" });
+      sendSaveError(res, err, "Failed to save expected event pair");
     }
   });
 
@@ -595,7 +624,7 @@ export function registerAdsRoutes(app: Express): void {
         },
         contentRoot,
       );
-      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      markFileAsModified(ADS_CONFIG_FILENAME, undefined, undefined, contentRoot);
       const g = next.google;
       const newAccounts = g.customer_ids.filter((id) => !before.customer_ids.includes(id));
       const datasetChanged = g.bigquery.project !== before.bigquery.project || g.bigquery.dataset !== before.bigquery.dataset;
@@ -606,7 +635,7 @@ export function registerAdsRoutes(app: Express): void {
       res.json({ success: true, sync_requested, ...googleSettingsPayload(res) });
     } catch (err) {
       log.warn({ err }, "[ads] failed to save Google Ads settings");
-      res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save Google Ads settings" });
+      sendSaveError(res, err, "Failed to save Google Ads settings");
     }
   });
 
@@ -758,6 +787,7 @@ export function registerAdsRoutes(app: Express): void {
           refreshing: d.refreshing,
           refresh: d.refresh,
           url_suffix_template: d.url_suffix_template,
+          utm_warnings: d.utm_warnings,
           run: d.run,
           issues: d.issues.filter((i) => wanted.has(i.id)),
           missing_issue_ids: issueIds.filter((id) => !d.issues.some((i) => i.id === id)),
@@ -784,6 +814,7 @@ export function registerAdsRoutes(app: Express): void {
         refreshing: d.refreshing,
         refresh: d.refresh,
         utm_template: d.utm_template,
+        utm_warnings: d.utm_warnings,
         run: d.run,
         issues: trimIssueAds(found, adsLimit, adsOffset),
         missing_issue_ids: issueIds.filter((id) => !found.some((i) => i.id === id) && !filteredOut.includes(id)),
@@ -854,6 +885,7 @@ export function registerAdsRoutes(app: Express): void {
     fetchAds: fetchAdsForFix,
     replace: replaceAdUrlTags,
     requestRefresh: async () => isRefreshActive(await requestAdsRefresh(site, contentRoot, "refresh", { manual: true })),
+    template: metaUtmTemplate(getAdsSettings(contentRoot).utm_convention),
   });
 
   api.post(app, "/api/ads/meta/tracking-fix/preview", { rate: "staffWrite" }, async (req: Request, res: Response) => {

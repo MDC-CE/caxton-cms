@@ -104,6 +104,17 @@ describe("applyAdsSnapshot", () => {
     expect(fs.readdirSync(live()).filter((n) => n.includes(".pull-"))).toEqual([]);
   });
 
+  it("replaces the local change log when production sends one, keeps it when production is older", () => {
+    const change = { at: "2026-09-29T00:00:00.000Z", platform: "meta", level: "campaign", id: "c1", campaign_id: "c1", field: "status", from: "ACTIVE", to: "PAUSED", source: "sync" };
+    writeJson(live("ads-change-log", "meta-2026-08.json"), [change]);
+    applyAdsSnapshot(SITE, snapshot(), ORIGIN, { now: NOW });
+    expect(fs.readdirSync(live("ads-change-log"))).toEqual(["meta-2026-08.json"]);
+
+    applyAdsSnapshot(SITE, snapshot({ change_log: [{ platform: "meta", month: "2026-09", changes: [change] }, { platform: "x", month: "bad", changes: [] }] }), ORIGIN, { now: NOW });
+    expect(fs.readdirSync(live("ads-change-log"))).toEqual(["meta-2026-09.json"]);
+    expect(buildAdsExport(SITE, 90, NOW).change_log).toEqual([{ platform: "meta", month: "2026-09", changes: [change] }]);
+  });
+
   it("round-trips through buildAdsExport", () => {
     applyAdsSnapshot(SITE, snapshot(), ORIGIN, { now: NOW });
     const exported = buildAdsExport(SITE, 90, NOW);

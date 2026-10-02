@@ -28,6 +28,8 @@ import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { apiFetch, apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { formatGoogleCustomerId, normalizeGoogleCustomerId, type GoogleAdsSettings } from "@shared/ads-settings";
+import type { AdsUtmConventionView } from "@/components/ads/ads-types";
+import { AdsUtmConventionCard } from "@/components/ads/AdsUtmConvention";
 import { isRefreshActive, refreshProgressPercent, refreshStatusCopy, type AdsRefreshStatus } from "@shared/ads-refresh-status";
 
 type CustomerSync = {
@@ -47,6 +49,7 @@ type GoogleSettingsResponse = {
   configured: boolean;
   credentials_source: "gcs_json" | "gcs_key_file" | "adc" | "none";
   url_suffix_template: string;
+  utm_convention?: AdsUtmConventionView;
   refreshing: boolean;
   refresh: AdsRefreshStatus;
   sync: {
@@ -423,7 +426,7 @@ export function GoogleAdsTab() {
               <code className="font-mono">{data.credentials_source}</code>). It needs BigQuery Data Viewer on the dataset and Job User on the project.
             </p>
             <p>
-              Non-secret config: <code className="font-mono">settings.yml → ads.google</code>. Cache: <code className="font-mono">{data.policy.cache_dir}</code>.
+              Non-secret config: <code className="font-mono">ads-config.yml → google</code>. Cache: <code className="font-mono">{data.policy.cache_dir}</code>.
             </p>
             <p>
               Matching visits: GA4&apos;s Google Ads link first, then the visit&apos;s gclid joined to <code className="font-mono">ClickStats</code> inside
@@ -544,7 +547,7 @@ export function GoogleAdsTab() {
           />
           <ReadMore testId="button-google-leads-advanced">
             <p>
-              Stored in <code className="font-mono">settings.yml → ads.google.lead_conversion_actions</code> (names or numeric ids). The list comes from{" "}
+              Stored in <code className="font-mono">ads-config.yml → google.lead_conversion_actions</code> (names or numeric ids). The list comes from{" "}
               <code className="font-mono">CampaignConversionStats</code> over the last 30 loaded days.
             </p>
             <p>Google reports conversions per campaign per day; they&apos;re spread over that campaign&apos;s landing pages by clicks.</p>
@@ -577,6 +580,8 @@ export function GoogleAdsTab() {
           <p className="text-xs text-muted-foreground">Alert thresholds are shared with Meta; edit them on the Meta tab.</p>
         </CardContent>
       </Card>
+
+      <AdsUtmConventionCard view={data.utm_convention} platform="google" />
 
       <div
         className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-lg"

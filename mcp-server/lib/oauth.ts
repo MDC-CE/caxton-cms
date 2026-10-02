@@ -559,6 +559,39 @@ export function getTokenClientName(token: string): string | null {
   return name || null;
 }
 
+/**
+ * Disconnect every agent session for a staff user: drop OAuth access tokens issued to
+ * clients bound to that username and evict cached staff-session token → username entries.
+ */
+export function revokeMcpAccessForUser(username: string): {
+  accessTokensRevoked: number;
+  cachedTokensRevoked: number;
+} {
+  const target = username.trim();
+  if (!target) return { accessTokensRevoked: 0, cachedTokensRevoked: 0 };
+
+  let accessTokensRevoked = 0;
+  for (const [token, entry] of accessTokens.entries()) {
+    const client = clients.get(entry.clientId);
+    if (client && (client.staffUsername === target || client.breathecodeUsername === target)) {
+      accessTokens.delete(token);
+      accessTokensRevoked += 1;
+    }
+  }
+
+  let cachedTokensRevoked = 0;
+  for (const [token, entry] of breathecodeTokenUsernames.entries()) {
+    if (entry.username === target) {
+      breathecodeTokenUsernames.delete(token);
+      cachedTokensRevoked += 1;
+    }
+  }
+
+  if (accessTokensRevoked > 0) persistTokens();
+  if (cachedTokensRevoked > 0) persistBreathecodeTokens();
+  return { accessTokensRevoked, cachedTokensRevoked };
+}
+
 // ─── GCS bootstrap (called once at startup) ───────────────────────────────────
 
 export type GcsAuthPersistenceHealth = "ok" | "warn" | "error" | "disabled";

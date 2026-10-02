@@ -121,6 +121,43 @@ export type MetaAdCreativeInfo = {
   instant_form: boolean;
   /** Conversion the ad set optimizes for, as a lead key (`fb_pixel_lead` or a custom conversion id). */
   optimization_event?: string;
+  /** Meta creative id (a new id = the ad's creative was replaced). */
+  creative_id?: string;
+  /** Status staff set on the ad (ACTIVE / PAUSED / ARCHIVED…), unlike `effective_status`. */
+  status?: string;
+};
+
+/** Delivery settings of a Meta campaign (budgets in the account's minor units, as Meta returns them). */
+export type MetaCampaignInfo = {
+  id: string;
+  account_id: string;
+  name: string;
+  status: string | null;
+  effective_status: string | null;
+  objective: string | null;
+  daily_budget: string | null;
+  lifetime_budget: string | null;
+  bid_strategy: string | null;
+  spend_cap: string | null;
+};
+
+/** Delivery settings of a Meta ad set. `targeting` is the raw spec (normalized before hashing). */
+export type MetaAdsetInfo = {
+  id: string;
+  account_id: string;
+  campaign_id: string;
+  name: string;
+  status: string | null;
+  effective_status: string | null;
+  daily_budget: string | null;
+  lifetime_budget: string | null;
+  bid_strategy: string | null;
+  bid_amount: string | null;
+  optimization_goal: string | null;
+  optimization_event?: string;
+  targeting: Record<string, unknown> | null;
+  start_time: string | null;
+  end_time: string | null;
 };
 
 /** Ad set `promoted_object` → lead key (custom conversion id, or `fb_pixel_lead` for the standard Lead event). */
@@ -351,7 +388,80 @@ export function parseCreative(ad: Record<string, unknown>): MetaAdCreativeInfo |
     url_tags: typeof creative.url_tags === "string" && creative.url_tags.trim() ? creative.url_tags.trim() : undefined,
     instant_form: instantForm,
     ...(optimizationEventOf(ad.adset) ? { optimization_event: optimizationEventOf(ad.adset) } : {}),
+    ...(creative.id != null && String(creative.id) ? { creative_id: String(creative.id) } : {}),
+    ...(typeof ad.status === "string" && ad.status ? { status: ad.status } : {}),
   };
+}
+
+function strOrNull(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+export function parseCampaign(raw: Record<string, unknown>, accountId: string): MetaCampaignInfo | null {
+  const id = strOrNull(raw.id);
+  if (!id) return null;
+  return {
+    id,
+    account_id: accountId,
+    name: String(raw.name ?? ""),
+    status: strOrNull(raw.status),
+    effective_status: strOrNull(raw.effective_status),
+    objective: strOrNull(raw.objective),
+    daily_budget: strOrNull(raw.daily_budget),
+    lifetime_budget: strOrNull(raw.lifetime_budget),
+    bid_strategy: strOrNull(raw.bid_strategy),
+    spend_cap: strOrNull(raw.spend_cap),
+  };
+}
+
+export function parseAdset(raw: Record<string, unknown>, accountId: string): MetaAdsetInfo | null {
+  const id = strOrNull(raw.id);
+  if (!id) return null;
+  const event = optimizationEventOf(raw);
+  return {
+    id,
+    account_id: accountId,
+    campaign_id: String(raw.campaign_id ?? ""),
+    name: String(raw.name ?? ""),
+    status: strOrNull(raw.status),
+    effective_status: strOrNull(raw.effective_status),
+    daily_budget: strOrNull(raw.daily_budget),
+    lifetime_budget: strOrNull(raw.lifetime_budget),
+    bid_strategy: strOrNull(raw.bid_strategy),
+    bid_amount: strOrNull(raw.bid_amount),
+    optimization_goal: strOrNull(raw.optimization_goal),
+    ...(event ? { optimization_event: event } : {}),
+    targeting: raw.targeting && typeof raw.targeting === "object" ? (raw.targeting as Record<string, unknown>) : null,
+    start_time: strOrNull(raw.start_time),
+    end_time: strOrNull(raw.end_time),
+  };
+}
+
+export const META_CAMPAIGN_FIELDS = "id,name,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,spend_cap";
+export const META_ADSET_FIELDS =
+  "id,campaign_id,name,status,effective_status,daily_budget,lifetime_budget,bid_strategy,bid_amount,optimization_goal,promoted_object,targeting,start_time,end_time";
+
+async function graphGetAllShrinking(path: string, fields: string, limits: [string, string]): Promise<Record<string, unknown>[]> {
+  try {
+    return await graphGetAll(path, { fields, limit: limits[0] });
+  } catch (err) {
+    if (!isReduceDataError(err)) throw err;
+    return graphGetAll(path, { fields, limit: limits[1] });
+  }
+}
+
+/** Every campaign in the account with its delivery settings (history only — never used for spend). */
+export async function fetchCampaigns(accountId: string): Promise<MetaCampaignInfo[]> {
+  const raw = await graphGetAllShrinking(`act_${accountId}/campaigns`, META_CAMPAIGN_FIELDS, ["200", "50"]);
+  return raw.map((r) => parseCampaign(r, accountId)).filter((c): c is MetaCampaignInfo => !!c);
+}
+
+/** Every ad set in the account with budgets, bidding, targeting and schedule (history only). */
+export async function fetchAdsets(accountId: string): Promise<MetaAdsetInfo[]> {
+  const raw = await graphGetAllShrinking(`act_${accountId}/adsets`, META_ADSET_FIELDS, ["100", "25"]);
+  return raw.map((r) => parseAdset(r, accountId)).filter((c): c is MetaAdsetInfo => !!c);
 }
 
 export async function fetchAccountInfo(accountId: string): Promise<MetaAccountInfo> {
@@ -414,7 +524,7 @@ export async function fetchAdPlatformInsights(
 
 /** Fields `parseCreative` actually reads — keep nested specs narrow so large accounts fit one Graph page. */
 export const META_AD_CREATIVE_FIELDS =
-  "id,campaign_id,adset_id,effective_status,adset{promoted_object},creative{link_url,url_tags,object_story_spec{link_data{link,call_to_action,child_attachments{link,call_to_action}},video_data{call_to_action}},asset_feed_spec{link_urls}}";
+  "id,campaign_id,adset_id,status,effective_status,adset{promoted_object},creative{id,link_url,url_tags,object_story_spec{link_data{link,call_to_action,child_attachments{link,call_to_action}},video_data{call_to_action}},asset_feed_spec{link_urls}}";
 
 function isReduceDataError(err: unknown): boolean {
   return err instanceof MetaApiError && /reduce the amount of data/i.test(err.message);

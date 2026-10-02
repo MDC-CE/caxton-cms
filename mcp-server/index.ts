@@ -40,12 +40,14 @@ import {
   updateClientStaffUser,
   registerStaffSessionToken,
   getCachedBreathecodeUsername,
+  revokeMcpAccessForUser,
   initGcsStore,
   flushGcsWrites,
   getGcsAuthPersistenceHealth,
   TOKEN_EXPIRES_IN,
 } from "./lib/oauth.js";
 import { warnMcpBucketParity } from "./lib/bucket-parity.js";
+import { isInternalRequestAuthorized } from "./lib/internal-auth.js";
 import {
   fetchCallerGrants,
   fetchMcpAccess,
@@ -74,7 +76,8 @@ const PORT = parseInt(process.env.MCP_PORT || "3001", 10);
 // MCP_SERVER_SECRET (formerly MCP_API_KEY) is used exclusively as an internal
 // server-to-server credential for the MCP server's own loopback requests to the
 // main app's /api/auth/check-capability endpoint. It is never accepted as an
-// inbound caller credential — callers must use OAuth or a Breathecode token.
+// inbound caller credential for MCP tools — callers must use OAuth or a Breathecode
+// token. The only inbound use is loopback-only `/internal/*` (not proxied publicly).
 const SERVER_SECRET = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
 const STATIC_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "";
 const STATIC_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
@@ -575,6 +578,28 @@ app.get("/tools", async (_req, res) => {
     console.error("[MCP] /tools introspection error:", err);
     res.status(500).json({ tools: [], error: "Failed to list tools" });
   }
+});
+
+// ─── Internal (main app → MCP, loopback only) ─────────────────────────────────
+
+app.post("/internal/revoke-user", (req, res) => {
+  const authorized = isInternalRequestAuthorized({
+    remoteAddress: req.socket.remoteAddress,
+    authorization: req.headers.authorization,
+    serverSecret: SERVER_SECRET,
+  });
+  if (!authorized) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+  if (!username) {
+    res.status(400).json({ error: "username is required" });
+    return;
+  }
+  const result = revokeMcpAccessForUser(username);
+  console.log(`[MCP] Revoked agent access for ${username}:`, result);
+  res.json({ ok: true, ...result });
 });
 
 // ─── OAuth 2.0 endpoints ──────────────────────────────────────────────────────

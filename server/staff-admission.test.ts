@@ -14,6 +14,8 @@ vi.mock("./user-store", () => ({
   getOrCreateStaffUserId: vi.fn(),
   getUser: vi.fn(),
   renameUser: vi.fn(),
+  restoreUser: vi.fn(),
+  recordDeletedUserSignInAttempt: vi.fn(),
 }));
 
 vi.mock("./staff-session", () => ({
@@ -123,5 +125,52 @@ describe("admitStaff", () => {
     const result = admitStaff(identity());
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("staff_no_role");
+  });
+
+  it("refuses a soft-deleted user and records a Previously Deleted pending entry", () => {
+    vi.mocked(userStore.needsBootstrapAdmin).mockReturnValue(false);
+    vi.mocked(userStore.findUserByIdentity).mockReturnValue({
+      key: "alice",
+      user: {
+        id: "alice",
+        username: "alice",
+        email: "alice@example.com",
+        roles: [],
+        deletedAt: "2026-01-01T00:00:00.000Z",
+      } as any,
+    });
+    vi.mocked(userStore.findUsersByEmails).mockReturnValue([]);
+    vi.mocked(userStore.peekPendingUsersForEmails).mockReturnValue([]);
+    const result = admitStaff(identity());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("staff_previously_deleted");
+    expect(userStore.recordDeletedUserSignInAttempt).toHaveBeenCalledWith("alice", "alice@example.com");
+    expect(userStore.attachIdentity).not.toHaveBeenCalled();
+  });
+
+  it("admits through the active record when a deleted copy also matches", () => {
+    vi.mocked(userStore.needsBootstrapAdmin).mockReturnValue(false);
+    vi.mocked(userStore.findUserByIdentity).mockReturnValue(null);
+    vi.mocked(userStore.findUsersByEmails).mockReturnValue([
+      { key: "old", user: { id: "old", username: "old", email: "alice@example.com", roles: [], deletedAt: "2026-01-01" } as any },
+      { key: "alice", user: { id: "alice", username: "alice", email: "alice@example.com", roles: ["content_viewer"] } as any },
+    ]);
+    vi.mocked(userStore.peekPendingUsersForEmails).mockReturnValue([]);
+    const result = admitStaff(identity());
+    expect(result.ok).toBe(true);
+    expect(userStore.recordDeletedUserSignInAttempt).not.toHaveBeenCalled();
+  });
+
+  it("ignores role-less Previously Deleted pending entries when claiming invites", () => {
+    vi.mocked(userStore.needsBootstrapAdmin).mockReturnValue(false);
+    vi.mocked(userStore.findUserByIdentity).mockReturnValue(null);
+    vi.mocked(userStore.findUsersByEmails).mockReturnValue([]);
+    vi.mocked(userStore.peekPendingUsersForEmails).mockReturnValue([
+      { email: "alice@example.com", createdAt: "2020-01-01", previouslyDeleted: { username: "x", staffId: "x", deletedAt: "2020" } },
+    ]);
+    const result = admitStaff(identity());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("staff_not_pre_registered");
+    expect(userStore.claimPendingUser).not.toHaveBeenCalled();
   });
 });

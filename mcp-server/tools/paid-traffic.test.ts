@@ -6,7 +6,37 @@ vi.mock("../lib/content.js", () => ({ resolveSiteContext: () => ({ ok: true, dom
 vi.mock("../lib/oauth.js", () => ({ getTokenUsername: () => "staff@4geeks.com" }));
 vi.mock("../lib/auth.js", () => ({ denyUnlessMetricsView: async () => null, checkCap: async () => false }));
 
-const { registerPaidTrafficTools, accountSyncWarnings, overviewNextActions, adsRunWarnings, adsIssueNextActions } = await import("./paid-traffic");
+const { registerPaidTrafficTools, accountSyncWarnings, overviewNextActions, adsRunWarnings, adsIssueNextActions, compactCampaignRef } = await import("./paid-traffic");
+
+describe("compactCampaignRef", () => {
+  it("drops zero counts, null rates, empty money and false flags but keeps identity and computed 0 rates", () => {
+    const out = compactCampaignRef({
+      platform: null,
+      campaign_id: null,
+      campaign_name: "Visits without campaign tag",
+      untagged: true,
+      paid_visits: 40,
+      clicks: 0,
+      spend: {},
+      unique_leads: 0,
+      conversion_rate: 0,
+      ctr: null,
+      cost_per_lead: {},
+      low_sample: false,
+      tag_texts: [],
+      visits_by_platform: { meta: 40 },
+    });
+    expect(out).toEqual({
+      platform: null,
+      campaign_id: null,
+      campaign_name: "Visits without campaign tag",
+      untagged: true,
+      paid_visits: 40,
+      conversion_rate: 0,
+      visits_by_platform: { meta: 40 },
+    });
+  });
+});
 
 describe("accountSyncWarnings", () => {
   it("flags unreadable accounts and accounts still waiting on their first load", () => {

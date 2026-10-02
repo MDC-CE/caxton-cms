@@ -1,9 +1,9 @@
-import type { AuthIdentity, AdmissionResult } from "./staff-auth/types";
+import type { AuthIdentity, AdmissionErrorCode, AdmissionResult } from "./staff-auth/types";
 import * as userStore from "./user-store";
 import { rekeyStaffSessions } from "./staff-session";
 import { rekeyUserGitHubToken } from "./github-user-tokens";
 
-const MESSAGES: Record<AdmissionResult extends { ok: false } ? AdmissionResult["code"] : never, string> = {
+const MESSAGES: Record<AdmissionErrorCode, string> = {
   auth_email_unverified:
     "Only GitHub accounts with a verified email can sign in. Add a verified email on GitHub and try again.",
   staff_identity_ambiguous:
@@ -12,6 +12,8 @@ const MESSAGES: Record<AdmissionResult extends { ok: false } ? AdmissionResult["
     "You’re not on the staff list. Ask an admin to pre-register your email.",
   staff_no_role:
     "Your account has no role. Ask an admin to assign one.",
+  staff_previously_deleted:
+    "Your access was removed. Ask an admin to restore it.",
 };
 
 function splitDisplayName(displayName?: string): { firstName?: string; lastName?: string } {
@@ -80,12 +82,18 @@ export function admitStaff(identity: AuthIdentity): AdmissionResult {
     identity.providerUserId,
   );
   const byEmail = userStore.findUsersByEmails(verified);
-  const existingEntries = [
+  const matchedEntries = [
     ...(byIdentity ? [byIdentity] : []),
     ...byEmail,
   ];
+  const activeEntries = matchedEntries.filter((e) => !e.user.deletedAt);
+  const deletedKeys = uniqueKeys(matchedEntries.filter((e) => e.user.deletedAt));
+  // Soft-deleted records only matter when no active record matches this person.
+  const existingEntries = activeEntries;
   const existingKeys = uniqueKeys(existingEntries);
-  const pending = userStore.peekPendingUsersForEmails(verified);
+  const pending = userStore
+    .peekPendingUsersForEmails(verified)
+    .filter((p) => Boolean(p.role));
 
   const existingEmailSet = new Set(
     existingEntries.flatMap((e) => {
@@ -112,6 +120,21 @@ export function admitStaff(identity: AuthIdentity): AdmissionResult {
 
   const ident = identityPayload(identity);
   const profile = profileFromIdentity(identity);
+
+  if (existingKeys.length === 0 && deletedKeys.length > 0) {
+    const key = deletedKeys[0];
+    if (userStore.needsBootstrapAdmin()) {
+      userStore.restoreUser(key, ["user_admin"]);
+      userStore.attachIdentity(key, ident, profile);
+      return finishUser(key);
+    }
+    userStore.recordDeletedUserSignInAttempt(key, profile.email);
+    return {
+      ok: false,
+      code: "staff_previously_deleted",
+      error: MESSAGES.staff_previously_deleted,
+    };
+  }
 
   if (userStore.needsBootstrapAdmin()) {
     if (existingKeys.length === 1) {

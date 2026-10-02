@@ -35,6 +35,8 @@ import { startEventWebhookDueScan } from "./events/event-webhooks";
 import { registerAllJobs } from "./jobs/register";
 import { configureJobQueue } from "./jobs/queue";
 import { ensurePipelineDbForSites } from "./pipeline-db/runner";
+import { warnIfLiveServerMisconfigured } from "./live-server";
+import { markInterruptedOnBoot } from "./data-migrations/ledger";
 import { startJobApplier, stopJobApplier } from "./jobs/applier";
 import { startEngineWatchdog } from "./jobs/engine-watchdog";
 import { scheduleSectionVariantsRefreshForFile } from "./registrySchemaValidationRefresh";
@@ -672,6 +674,8 @@ app.use((req, res, next) => {
       logger.error({ err, worker: "PipelineDb" }, "failed to apply pipeline SQLite migrations");
       process.exit(1);
     }
+    warnIfLiveServerMisconfigured();
+    markInterruptedOnBoot(siteNames);
     if (process.env.NODE_ENV !== "production") {
       const wiped = wipeAllSiteEventStores(siteNames);
       if (wiped > 0) {

@@ -33,6 +33,13 @@ export const ADS_LADDER_CODES = new Set<string>([
   "off_site_destination",
   "instant_form_destination",
   "unmanaged_destination",
+  // UTM issues with Meta ad setups behind them (GA4-only evidence has no ads and stays site-wide).
+  "utm_case_mixed",
+  "utm_bad_chars",
+  "utm_medium_nonstandard",
+  "utm_source_alias",
+  "utm_medium_off_convention",
+  "utm_campaign_pattern",
 ]);
 
 /** Codes that belong to one ad account (`scope.account_id`). */
@@ -202,8 +209,12 @@ function ladderEvidence(input: {
     ...(input.level === "ad" ? { ad_id: input.resourceId } : {}),
   };
   const spend = universeAds.length > 0 ? sumMoney(universeAds) : top.spend_affected;
+  const { in_grace: _inGrace, grace_ends_at: _graceEnds, ...topRest } = top;
+  const graceSources = ranked.length > 0 ? ranked.map((x) => x.f.issue) : [top];
+  const allInGrace = graceSources.every((i) => i.in_grace);
   return {
-    ...top,
+    ...topRest,
+    ...(allInGrace && top.in_grace ? { in_grace: true, grace_ends_at: top.grace_ends_at } : {}),
     id: input.id,
     code: input.code as AdsIssue["code"],
     platform: input.platform,

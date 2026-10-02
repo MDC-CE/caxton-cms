@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ADS_ALERT_THRESHOLDS } from "@shared/ads-settings";
 import {
+  adsConfigIssues,
   adUrlRedirectIssues,
   indexAds,
   leadIssues,
@@ -350,5 +351,23 @@ describe("landingNotLiveIssues", () => {
       site_fixable: true,
     });
     expect(issues[0]!.how_to_fix).toContain("Re-check");
+  });
+});
+
+describe("adsConfigIssues", () => {
+  it("nothing wrong → no issues", () => {
+    expect(adsConfigIssues({ readError: null, rejected: [] })).toEqual([]);
+  });
+
+  it("unreadable file and rejected values each raise one error", () => {
+    const issues = adsConfigIssues({
+      readError: "bad indentation",
+      rejected: [{ field: "mediums.meta", value: "social_paid", reason: "not GA4 paid", default_used: "paid_social" }],
+    });
+    expect(issues.map((i) => [i.id, i.severity])).toEqual([
+      ["ads_config_unreadable", "error"],
+      ["utm_convention_invalid", "error"],
+    ]);
+    expect(issues[1]!.why).toContain("social_paid");
   });
 });

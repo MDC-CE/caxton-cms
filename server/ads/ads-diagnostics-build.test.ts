@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   known: [] as Array<{ key: string; note?: string }>,
   unrecognized: undefined as AdsUnrecognizedCampaigns | undefined,
   offSite: null as AdsPageRow | null,
+  pages: [] as AdsPageRow[],
   rows: null as MetaAdDayRow[] | null,
   creatives: null as Record<string, MetaAdCreativeInfo> | null,
   leadConversions: [] as string[],
@@ -131,7 +132,7 @@ function fakeReport(): AdsReport {
       ...h.totals,
     },
     lead_gap_compare: { days: 0, ga4_leads: 0, submissions: 0 },
-    pages: [],
+    pages: h.pages,
     destinations: [h.offSite ?? OFF_SITE],
     campaigns: [],
     warnings: [],
@@ -217,6 +218,7 @@ beforeEach(() => {
   h.known = [];
   h.unrecognized = undefined;
   h.offSite = OFF_SITE;
+  h.pages = [];
   h.rows = null;
   h.creatives = null;
   h.leadConversions = [];
@@ -229,6 +231,85 @@ beforeEach(() => {
 
 afterAll(() => {
   fs.rmSync(h.cacheDir, { recursive: true, force: true });
+});
+
+describe("buildAdsDiagnostics with ad URL history", () => {
+  const PAGE = {
+    key: "entry:landing/x/en",
+    kind: "entry",
+    title: "X",
+    url: "https://4geeks.com/landing/x",
+    spend: { USD: 100 },
+    paid_visits: 0,
+    clicks: 10,
+  } as unknown as AdsPageRow;
+
+  function writeCatalog() {
+    const file = path.join(h.cacheDir, SITE, "ads-setup", "meta.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const v = (n: number, url: string, first: string | null, last: string) => ({ v: n, landing_urls: [url], url_tags: null, destination: "website", first_seen_at: first, last_seen_at: last });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        platform: "meta",
+        fetched_at: READ_111,
+        accounts: { "111": { id: "111", name: "A", currency: "USD", timezone: "UTC", last_seen_at: READ_111 } },
+        campaigns: {},
+        adsets: {},
+        ads: {
+          a1: {
+            id: "a1",
+            account_id: "111",
+            campaign_id: "c1",
+            adset_id: "s-c1",
+            name: "Ad a1",
+            status: "PAUSED",
+            landing_urls: ["https://4geeks.com/landing/x"],
+            url_tags: null,
+            destination: "website",
+            last_seen_at: READ_111,
+            versions: [
+              v(1, "https://other.example/old", null, "2026-09-10T08:00:00.000Z"),
+              v(2, "https://4geeks.com/landing/x", "2026-09-10T12:00:00.000Z", READ_111),
+            ],
+          },
+        },
+        extras: {},
+      }),
+    );
+  }
+
+  it("skips spend_zero_visits when all the page's spend came from changeover days", async () => {
+    h.ga4Configured = true;
+    h.pages = [{ ...PAGE, url_change_spend: { USD: 100 } }];
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    expect(d.issues.find((i) => i.code === "spend_zero_visits")).toBeUndefined();
+    h.pages = [PAGE];
+    const d2 = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    expect(d2.issues.find((i) => i.code === "spend_zero_visits")).toBeTruthy();
+  });
+
+  it("lists ads that pointed at an older link and adds previous_urls evidence", async () => {
+    writeCatalog();
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
+    const a1 = missing.details!.ads.find((a) => a.ad_id === "a1")!;
+    expect(a1.previous_urls?.map((u) => [u.v, u.url])).toEqual([
+      [2, "https://4geeks.com/landing/x"],
+      [1, "https://other.example/old"],
+    ]);
+  });
+
+  it("credits a page's zero-visit issue to ads that pointed there earlier in the window", async () => {
+    writeCatalog();
+    h.ga4Configured = true;
+    h.creatives = { ...CREATIVES, a1: { ...CREATIVES.a1!, links: ["https://elsewhere.example/now"] } };
+    h.pages = [PAGE];
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    const zero = d.issues.find((i) => i.code === "spend_zero_visits")!;
+    expect(zero.details!.ads.map((a) => a.ad_id)).toContain("a1");
+  });
 });
 
 describe("buildAdsDiagnostics issue details", () => {

@@ -173,7 +173,7 @@ Your job is to stop harm — invented claims, lost query fit, false scope, unjus
 - Always scored opportunity vs harm: **Goal → Evidence → Fit → Brand → dilution**. Authors put goal, evidence, and a kill line in `summary` / `rationale`. Incomplete brief → `add_blocker`; wrong vehicle → close and refile as edits.
 - At most one demand label: `anticipated_demand` (lasting queries after a launch), `existing_demand` (compete for current search), `fast_decay_news` (announcement only — expect reject), `broken_url` (call `get_runtime_issues` first; only if you have it).
 - New-URL ideas need `idea_funnel` `{ stage, products }` before accept.
-- **Accept** (four-eyes): `accepted_entry` `{ contentType, slug, locale }` + `next_step` (min 20). Reserves that page; writes nothing. `accepted_entry_needs_layout` → follow-up must send full `sections`; `accepted_entry_not_creatable` → a human creates the database row first.
+- **Accept** (four-eyes): `accepted_entry` `{ contentType, slug, locale }` + `next_step` (min 20). Reserves that page until its edit is applied; writes nothing. `accepted_entry_taken` → leave the idea open and accept it after the holder's edit ships — do not close it. `accepted_entry_needs_layout` → follow-up must send full `sections`; `accepted_entry_not_creatable` → a human creates the database row first.
 - **Follow-through:** edits with `implements_proposal_id` (one open at a time). Pick up stalled ideas with `list_proposals({ stalled: true })`.
 - **Close** parks (`wont_fix`, `tracked_elsewhere`, `other`) — never use close for "yes".
 

@@ -19,6 +19,7 @@ import type { AdsDiagnosticsOverview, AdsDiagnosticsStatus, AdsIssueRow, AdsPlat
 import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
 import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
 import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
+import { AdsUtmConventionBanner } from "@/components/ads/AdsUtmConvention";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
 import { DiagnosticsAdsPanel, RESOLUTION_LABEL, trackingStatusValue } from "@/components/diagnostics/DiagnosticsAdsPanel";
 import { AdsIssuesTile, AdsRunTile, adsRunPollMs } from "@/components/diagnostics/AdsRunBar";
@@ -406,6 +407,7 @@ export function DiagnosticsGoogleAdsPanel() {
   return (
     <div className="space-y-4" data-testid="diagnostics-google-ads-panel">
       <AdsRefreshNotice refresh={data.refresh} testId="google-ads-refresh-notice" settingsHref="/private/settings/ads/google" />
+      <AdsUtmConventionBanner view={data.utm_convention} />
 
       <div className="flex flex-wrap items-center justify-end gap-2">
         {isFetching && !isRefreshActive(data.refresh) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}

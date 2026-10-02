@@ -25,6 +25,7 @@ import type { AdsDiagnostics, AdsIssueRow } from "@/components/ads/ads-types";
 import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
 import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
 import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
+import { UrlHistoryNotice } from "@/components/ads/UrlHistoryNotice";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
 import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
@@ -48,6 +49,8 @@ import {
 } from "@/components/diagnostics/AdsLeadConversions";
 import { TabCountBadge } from "@/components/DebugBubble/components/PageErrorsModal";
 import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
+import { trackingFixModeFor } from "@shared/ads-tracking-fix";
+import { AdsUtmConventionBanner } from "@/components/ads/AdsUtmConvention";
 
 const SEVERITY_STYLE: Record<AdsIssue["severity"], { Icon: typeof AlertTriangle; className: string; label: string }> = {
   error: { Icon: CircleAlert, className: "text-destructive", label: "Error" },
@@ -502,7 +505,10 @@ function IssueRow({
   const [fixOpen, setFixOpen] = useState(false);
   const { toast } = useToast();
   const { hasCapability } = useDebugAuth();
-  const canFixInMeta = issue.code === "missing_tracking_params" && hasCapability("ads_edit");
+  const fixMode = trackingFixModeFor(issue.code);
+  const canFixInMeta =
+    hasCapability("ads_edit") &&
+    (fixMode === "add" || (fixMode === "replace" && issue.platform === "meta" && (issue.details?.ads?.length ?? 0) > 0));
   const style = SEVERITY_STYLE[issue.severity];
   const hasSpend = Object.keys(issue.spend_affected).length > 0;
   const ga4Seen = issue.details?.ga4_seen ?? [];
@@ -512,7 +518,12 @@ function IssueRow({
       : !hasSpend && ga4Seen.length > 0
         ? ga4Seen.reduce((t, r) => ({ visits: t.visits + r.visits, leads: t.leads + r.leads }), { visits: 0, leads: 0 })
         : null;
-  const showTemplate = issue.code === "missing_tracking_params" || issue.code === "non_paid_medium" || issue.code === "unclear_share_high" || issue.code === "spend_zero_visits";
+  const showTemplate =
+    issue.code === "missing_tracking_params" ||
+    issue.code === "non_paid_medium" ||
+    issue.code === "unclear_share_high" ||
+    issue.code === "spend_zero_visits" ||
+    (fixMode === "replace" && canFixInMeta);
   const unrecognized = issue.code === "unrecognized_campaign";
   const settingsFix = issue.code === "lead_conversions_overlap";
   const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized && !settingsFix;
@@ -778,6 +789,8 @@ export function DiagnosticsAdsPanel() {
   return (
     <div className="space-y-4" data-testid="diagnostics-ads-panel">
       <AdsRefreshNotice refresh={data.refresh} testId="ads-diagnostics-refresh-notice" />
+      <UrlHistoryNotice urlHistory={data.url_history} />
+      <AdsUtmConventionBanner view={data.utm_convention} />
 
       {data.missing_floor_currencies.length > 0 && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs" data-testid="ads-missing-floor">

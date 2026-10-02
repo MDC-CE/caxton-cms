@@ -1,10 +1,11 @@
 /**
- * Pure Ads diagnostics rules (thresholds from settings.yml ads.meta.alert_thresholds).
+ * Pure Ads diagnostics rules (thresholds from ads-config.yml → alert_thresholds).
  * Server gathers inputs; these functions decide whether an issue exists and how severe it is.
  */
 
-import type { AdsAlertThresholds } from "./ads-settings";
-import { isPaidMedium } from "./paid-traffic";
+import { metaTemplateSource, type AdsAlertThresholds, type UtmConvention, type UtmConventionPlatform } from "./ads-settings";
+import { isPaidMedium, type AdPlatform } from "./paid-traffic";
+import { isGa4StandardPaidMedium } from "./utm-standards";
 
 export type AdsIssueSeverity = "error" | "warning" | "info";
 
@@ -40,7 +41,21 @@ export type AdsIssueCode =
   | "google_ga4_not_linked"
   | "google_gclid_join_unavailable"
   | "google_destination_policy"
-  | "google_conversions_not_reporting";
+  | "google_conversions_not_reporting"
+  | "ads_config_unreadable"
+  | "utm_convention_invalid"
+  | UtmIssueCode;
+
+/** UTM convention / GA4 standard violations (universal first, then platform rules). */
+export type UtmIssueCode =
+  | "utm_unfilled_macro"
+  | "utm_case_mixed"
+  | "utm_bad_chars"
+  | "utm_medium_nonstandard"
+  | "utm_source_alias"
+  | "utm_medium_off_convention"
+  | "utm_campaign_pattern"
+  | "utm_missing_ids";
 
 /** Which dashboard owns an issue; `shared` = lead records / consent, listed once on the overview. */
 export type AdsIssuePlatform = "meta" | "google" | "shared";
@@ -66,6 +81,9 @@ export type AdsIssue = {
   action?: AdsIssueAction;
   /** Numbers behind conversion / pixel event checks. */
   evidence?: AdsIssueEvidence;
+  /** UTM issue that only matches values accepted during a convention change (info until `grace_ends_at`). */
+  in_grace?: boolean;
+  grace_ends_at?: string;
 };
 
 /** Settings writes offered on an issue; the UI asks for confirmation first. */
@@ -147,6 +165,8 @@ export type AdsIssueAd = {
   checked_clicks?: number;
   /** Where tagging evidence came from for this issue row. */
   tagging_source?: "setup" | "meta_auto" | "none";
+  /** Last URL versions (newest first, current included) when the ad's link changed; dates are YYYY-MM-DD (UTC). `from: null` = live before URL history started. */
+  previous_urls?: Array<{ v: number; url: string; from: string | null; to: string }>;
 };
 
 /** GA4 paid visits that landed on a destination with no synced ad behind it. */
@@ -198,6 +218,34 @@ export type AdsIssueDetails = {
   ga4_totals?: { visits: number; leads: number };
   /** When the ad setups (links, URL parameters, status) for this issue's account(s) were last read from Meta. */
   setup_last_read_at?: string | null;
+  /** utm_* issues: the wrong values, where they were seen and what GA4 does with them. */
+  utm?: AdsUtmEvidence;
+};
+
+/** One wrong UTM value behind a utm_* issue, merged across ad setups, GA4 visits and lead records. */
+export type AdsUtmValue = {
+  param: string;
+  value: string;
+  /** What the convention / GA4 expects instead (null when there is no single right value). */
+  expected: string | null;
+  in_grace?: boolean;
+  seen_in: Array<"setup" | "ga4" | "leads">;
+  visits: number;
+  leads: number;
+  /** Ads whose setup carries this value. */
+  ads: number;
+};
+
+export type AdsUtmEvidence = {
+  /** Params flagged (Fix via Meta replaces utm_source / utm_medium only). */
+  params: string[];
+  values: AdsUtmValue[];
+  /** Where GA4 files these visits today (e.g. "Paid Other"); null when unchanged. */
+  ga4_channel: string | null;
+  /** The rule broken, in plain English. */
+  rule: string;
+  visits: number;
+  leads: number;
 };
 
 /** Ads with spend in the issue window vs the URL parameters template (Settings card + Diagnostics). */
@@ -433,4 +481,152 @@ export function droppedParams(original: string, final: string): string[] {
   const a = parseTrackingParams(original);
   const b = parseTrackingParams(final);
   return Object.keys(a).filter((k) => (k.startsWith("utm_") || k.endsWith("clid")) && !(k in b));
+}
+
+// ── UTM convention / GA4 standard ───────────────────────────────────────────
+
+/** Old convention values still accepted while a change settles (28 days). */
+export type UtmGrace = {
+  active: boolean;
+  changed_at: string | null;
+  ends_at: string | null;
+  accepted: Partial<Record<UtmConventionPlatform, { sources: string[]; mediums: string[] }>>;
+  campaign_patterns: string[];
+};
+
+export const NO_UTM_GRACE: UtmGrace = { active: false, changed_at: null, ends_at: null, accepted: {}, campaign_patterns: [] };
+
+export type UtmViolation = { code: UtmIssueCode; param: string; value: string; expected: string | null; in_grace?: boolean };
+
+const UTM_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_id", "utm_term", "utm_content"] as const;
+const UTM_MACRO_RE = /\{\{[^}]*\}\}|\{[a-z_]+\}/i;
+const UTM_BAD_CHARS_RE = /[^a-z0-9._+-]/i;
+const UTM_NUMERIC_ID_RE = /^\d{6,25}$/;
+
+export function isUtmMacro(v: string | null | undefined): boolean {
+  return !!v && UTM_MACRO_RE.test(v);
+}
+
+function conventionPlatform(platform: AdPlatform | string | null): UtmConventionPlatform | null {
+  return platform === "meta" || platform === "google" ? platform : null;
+}
+
+function graceAccepts(grace: UtmGrace | null | undefined, p: UtmConventionPlatform, kind: "sources" | "mediums", v: string): boolean {
+  return !!grace?.active && (grace.accepted[p]?.[kind] ?? []).includes(v);
+}
+
+function safeTest(pattern: string, v: string): boolean {
+  try {
+    return new RegExp(pattern).test(v);
+  } catch {
+    return true;
+  }
+}
+
+/** Human list of correct sources ("fb, ig, msg or an"). */
+export function utmExpectedSources(c: UtmConvention, p: UtmConventionPlatform): string {
+  const list = c.sources[p].canonical;
+  return list.length > 1 ? `${list.slice(0, -1).join(", ")} or ${list[list.length - 1]}` : list[0]!;
+}
+
+/**
+ * UTM problems in one set of params. Universal rules apply to any paid traffic; platform rules
+ * only where the convention defines the platform (meta, google). `declared` = an ad setup / URL
+ * suffix, where macros are expected; `observed` = values GA4 or our lead records received.
+ * Meta ids stay on missing_tracking_params; utm_medium_off_convention is skipped for unpaid
+ * mediums (non_paid_medium) and for mediums already flagged as non-standard.
+ */
+export function utmViolations(input: {
+  params: Record<string, string | null | undefined>;
+  platform: AdPlatform | string | null;
+  convention: UtmConvention;
+  grace?: UtmGrace | null;
+  kind: "declared" | "observed";
+}): UtmViolation[] {
+  const { params, convention: c, grace, kind } = input;
+  const out: UtmViolation[] = [];
+  const raw = (k: string) => (params[k] ?? "").toString();
+  const anyUtm = UTM_KEYS.some((k) => raw(k).trim() !== "");
+  if (!anyUtm) return out;
+
+  if (kind === "observed") {
+    for (const k of UTM_KEYS) {
+      const v = raw(k);
+      if (v && isUtmMacro(v)) out.push({ code: "utm_unfilled_macro", param: k, value: v, expected: null });
+    }
+  }
+  for (const k of ["utm_source", "utm_medium"]) {
+    const v = raw(k);
+    if (!v || isUtmMacro(v)) continue;
+    if (c.case === "lowercase" && v !== v.toLowerCase()) out.push({ code: "utm_case_mixed", param: k, value: v, expected: v.toLowerCase() });
+    if (v !== v.trim() || UTM_BAD_CHARS_RE.test(v.trim())) {
+      out.push({ code: "utm_bad_chars", param: k, value: v, expected: v.trim().toLowerCase().replace(/[^a-z0-9._+-]+/g, c.separator) });
+    }
+  }
+
+  const p = conventionPlatform(input.platform);
+  const mediumRaw = raw("utm_medium");
+  const medium = mediumRaw.trim().toLowerCase();
+  const mediumIsMacro = isUtmMacro(mediumRaw);
+  const nonstandard = !!medium && !mediumIsMacro && isPaidMedium(medium) && !isGa4StandardPaidMedium(medium);
+  if (nonstandard) out.push({ code: "utm_medium_nonstandard", param: "utm_medium", value: mediumRaw, expected: p ? c.mediums[p] : null });
+  if (!p) return out;
+
+  const sourceRaw = raw("utm_source");
+  const source = sourceRaw.trim().toLowerCase();
+  if (source) {
+    if (isUtmMacro(sourceRaw)) {
+      if (kind === "declared" && p === "meta") {
+        const want = metaTemplateSource(c);
+        if (sourceRaw.replace(/\s+/g, "") !== want) out.push({ code: "utm_source_alias", param: "utm_source", value: sourceRaw, expected: want });
+      }
+    } else if (!c.sources[p].canonical.includes(source)) {
+      const v: UtmViolation = { code: "utm_source_alias", param: "utm_source", value: sourceRaw, expected: kind === "declared" && p === "meta" ? metaTemplateSource(c) : utmExpectedSources(c, p) };
+      if (graceAccepts(grace, p, "sources", source)) v.in_grace = true;
+      out.push(v);
+    }
+  }
+
+  if (medium && !mediumIsMacro && isPaidMedium(medium) && !nonstandard && medium !== c.mediums[p]) {
+    const v: UtmViolation = { code: "utm_medium_off_convention", param: "utm_medium", value: mediumRaw, expected: c.mediums[p] };
+    if (graceAccepts(grace, p, "mediums", medium)) v.in_grace = true;
+    out.push(v);
+  }
+
+  const campaign = raw("utm_campaign");
+  if (c.campaign_pattern && campaign && !isUtmMacro(campaign) && !safeTest(c.campaign_pattern, campaign)) {
+    const v: UtmViolation = { code: "utm_campaign_pattern", param: "utm_campaign", value: campaign, expected: c.campaign_pattern };
+    if (grace?.active && grace.campaign_patterns.some((old) => safeTest(old, campaign))) v.in_grace = true;
+    out.push(v);
+  }
+
+  if (p === "google" && c.require_ids) {
+    for (const k of ["utm_id", "utm_term"]) {
+      const v = raw(k).trim();
+      const ok = v !== "" && (isUtmMacro(v) ? kind === "declared" : UTM_NUMERIC_ID_RE.test(v));
+      if (!ok) out.push({ code: "utm_missing_ids", param: k, value: v, expected: k === "utm_id" ? "{campaignid}" : "{adgroupid}" });
+    }
+  }
+  return out;
+}
+
+/** Codes whose issue never escalates past info. */
+const UTM_INFO_CODES = new Set<UtmIssueCode>(["utm_campaign_pattern"]);
+
+/**
+ * Severity for one utm_* issue. Grace / exceptions / known external campaigns → info.
+ * With spend behind it: the spend rule (unfilled macros are always errors). Without spend:
+ * skipped below `utm_issue_min_visits`, error at ≥ `utm_issue_error_visits`.
+ */
+export function utmIssueSeverity(
+  code: UtmIssueCode,
+  input: { spend: Record<string, number>; totalSpend: Record<string, number>; visits: number; inGrace: boolean; excepted: boolean },
+  t: AdsAlertThresholds,
+): AdsIssueSeverity | null {
+  const hasSpend = Object.values(input.spend).some((v) => v > 0);
+  if (!hasSpend && input.visits < t.utm_issue_min_visits) return null;
+  if (input.inGrace || input.excepted || UTM_INFO_CODES.has(code)) return "info";
+  if (code === "utm_unfilled_macro") return "error";
+  if (hasSpend) return severityForSpend(input.spend, input.totalSpend, t);
+  return input.visits >= t.utm_issue_error_visits ? "error" : "warning";
 }

@@ -184,13 +184,6 @@ export function googleNetworkOf(adNetworkType: string | null | undefined): Googl
   return "other";
 }
 
-/**
- * Google Ads final URL suffix staff add at account level. Fallback for matching visits when
- * GA4 isn't linked to Google Ads and gclid can't be joined (same id slots as the Meta template).
- */
-export const GOOGLE_URL_SUFFIX_TEMPLATE =
-  "utm_source=google&utm_medium=cpc&utm_campaign={campaignid}&utm_id={campaignid}&utm_term={adgroupid}&utm_content={creative}";
-
 /** Parameters the Google suffix must carry for id matching. */
 export const GOOGLE_SUFFIX_REQUIRED_PARAMS = ["utm_id", "utm_term"] as const;
 

@@ -194,7 +194,7 @@ Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server
 | Key | When | Meaning |
 |---|---|---|
 | `submission_id` | always | Per-submit id (client UUID, server fallback). Not the authored `event_id`. Also on the GTM conversion push. |
-| `is_test` | always (boolean) | Staff session (`X-Debug-Token`) or email matching `settings.yml` → `ads.test_email_patterns`. Still delivered; excluded from Ads reports. |
+| `is_test` | always (boolean) | Staff session (`X-Debug-Token`) or email matching `ads-config.yml` → `test_email_patterns` (legacy `settings.yml` → `ads.test_email_patterns` until migration 004 runs). Still delivered; excluded from Ads reports. |
 | `test_reason` | only when `is_test` | `staff_session` \| `email_pattern` |
 | `is_repeat` | always (boolean) | Same browser + same `conversion_name` within 24h. Still delivered; counted as a submission, not a lead. |
 | `repeat_of_submission_id` | only when `is_repeat` | First submission in the window. |
@@ -210,6 +210,8 @@ Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server
 - Source precedence: HttpOnly `4g_ads` cookie (only after tracking consent) → in-memory session in the request body (same-visit leads before consent).
 - The server ledger (`lead_submissions` in pipeline SQLite) stores **no** name / email / phone; 25-month retention. CRM owns personal data.
 - Non-effects: YAML `fields.*` defaults with the same key win only when enrichment has no value (enrichment keys override raw body keys).
+- UTM checks: the latest `utm_*` per non-test ledger row (with an `ad_platform`) feed the Ads UTM checks as observed evidence (topic `ads` → UTM convention and checks). Values are never rewritten on the lead or in the CRM.
+- Same-site links with `utm_*` in content YAML raise `INTERNAL_LINK_HAS_UTM` (validator `internal-link-utm`, warning): they restart the GA4 session and overwrite the visitor's real source, so paid visits and leads can be credited to the wrong source. Links to other domains (including the org's other sites) are not flagged.
 
 ## Paths
 

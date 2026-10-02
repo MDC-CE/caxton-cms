@@ -141,3 +141,98 @@ export function assertLocaleUrlAvailable(opts: {
 
   return { ok: true, url, localeSlug };
 }
+
+/** Same normalization ContentIndex applies to `meta.redirects` sources. */
+export function normalizeRedirectPath(rawPath: string): string {
+  let normalized = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  normalized = normalized.toLowerCase();
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+/** Normalized `from` paths declared in a document's `meta.redirects` (string or `{ path }` items). */
+export function redirectPathsFromMeta(doc: Record<string, unknown> | null | undefined): string[] {
+  const meta = doc?.meta as Record<string, unknown> | undefined;
+  const redirects = meta?.redirects;
+  if (!Array.isArray(redirects)) return [];
+  const out: string[] = [];
+  for (const item of redirects) {
+    if (typeof item === "string") out.push(normalizeRedirectPath(item));
+    else if (item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string") {
+      out.push(normalizeRedirectPath((item as { path: string }).path));
+    }
+  }
+  return out;
+}
+
+/** Drop `url` from `meta.redirects` in place. Returns true when something was removed. */
+export function removeRedirectPathFromMeta(doc: Record<string, unknown>, url: string): boolean {
+  const meta = doc.meta as Record<string, unknown> | undefined;
+  if (!meta || !Array.isArray(meta.redirects)) return false;
+  const target = normalizeRedirectPath(url);
+  const kept = meta.redirects.filter((item) => {
+    const p =
+      typeof item === "string"
+        ? item
+        : item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+          ? (item as { path: string }).path
+          : null;
+    return p === null || normalizeRedirectPath(p) !== target;
+  });
+  if (kept.length === meta.redirects.length) return false;
+  if (kept.length > 0) meta.redirects = kept;
+  else delete meta.redirects;
+  return true;
+}
+
+/** Plain-English location of a redirect, from its index `source` path. */
+export function describeRedirectSource(source: string): string {
+  const normalized = source.replace(/\\/g, "/");
+  if (normalized.endsWith("custom-redirects.yml")) return "the site redirects file";
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length >= 3) return `page ${parts[parts.length - 3]}/${parts[parts.length - 2]}`;
+  return normalized;
+}
+
+export type RedirectConflictResult =
+  | { ok: true; ownRedirectHit: boolean }
+  | {
+      ok: false;
+      statusCode: number;
+      code: "redirect_conflict";
+      error: string;
+      conflictUrl: string;
+      redirectTo: string;
+      redirectSource: string;
+    };
+
+/**
+ * Reject when `url` is the `from` of a redirect that this entry does not own.
+ * Own = listed in the entry's locale file or `_common.yml` `meta.redirects` (the files a rename can edit).
+ */
+export function assertNoRedirectConflict(opts: {
+  url: string;
+  redirects: Array<{ from: string; to: string | Record<string, string>; source: string }>;
+  ownRedirectPaths: string[];
+}): RedirectConflictResult {
+  const target = normalizeRedirectPath(opts.url);
+  if (opts.ownRedirectPaths.includes(target)) return { ok: true, ownRedirectHit: true };
+  const conflict = opts.redirects.find((r) => r.from === target);
+  if (!conflict) return { ok: true, ownRedirectHit: false };
+  const redirectTo =
+    typeof conflict.to === "string" ? conflict.to : Object.values(conflict.to).join(", ");
+  const where = describeRedirectSource(conflict.source);
+  return {
+    ok: false,
+    statusCode: 409,
+    code: "redirect_conflict",
+    error:
+      `redirect_conflict: "${opts.url}" currently redirects to ${redirectTo} (set in ${where}). ` +
+      "Pick another slug or remove that redirect first.",
+    conflictUrl: opts.url,
+    redirectTo,
+    redirectSource: conflict.source,
+  };
+}

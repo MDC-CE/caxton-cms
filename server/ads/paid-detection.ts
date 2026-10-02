@@ -24,6 +24,7 @@ import {
 } from "@shared/paid-traffic";
 import { normalizeGoogleCustomerId } from "@shared/ads-settings";
 import { getAdsSettings, getLeadConversionEventNames } from "../settings";
+import { adsConfigReadError } from "../ads-config";
 import { isGoogleConfiguredSettings, loadGoogleState } from "./google-ads-days";
 import { child } from "../logger";
 import { addDays, dateRange, shortDateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
@@ -607,7 +608,7 @@ async function queryDay(date: string, contentRoot: string | undefined, first: Pa
   }
 }
 
-export type PaidLandingSyncResult = { ok: boolean; fetched: string[]; error?: string; skipped?: "ga4_not_configured" };
+export type PaidLandingSyncResult = { ok: boolean; fetched: string[]; error?: string; skipped?: "ga4_not_configured" | "ads_config_unreadable" };
 
 export async function syncPaidLandingDays(
   site: string,
@@ -616,6 +617,7 @@ export async function syncPaidLandingDays(
   onStep?: SyncStepCallback,
 ): Promise<PaidLandingSyncResult> {
   if (!isGa4Configured(contentRoot)) return { ok: false, fetched: [], skipped: "ga4_not_configured" };
+  if (adsConfigReadError(contentRoot) != null) return { ok: false, fetched: [], skipped: "ads_config_unreadable" };
   const state = loadPaidLandingState(site);
   const completeCutoff = lastCompleteGa4Date(now);
   const fetched: string[] = [];

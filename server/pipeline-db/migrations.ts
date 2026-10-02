@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 30;
+export const PIPELINE_SCHEMA_VERSION = 32;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -645,6 +645,39 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
           }
         }
       }
+    },
+  },
+  {
+    version: 31,
+    name: "content_proposals_blocked_flagged_at",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "blocked_flagged_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN blocked_flagged_at TEXT");
+      }
+    },
+  },
+  {
+    version: 32,
+    name: "data_migration_runs",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS data_migration_runs (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL,
+          actor TEXT,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          exit_code INTEGER,
+          output TEXT,
+          note TEXT,
+          file_sha TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_migration_runs_file
+          ON data_migration_runs (filename, started_at);
+      `);
     },
   },
 ];

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_ADS_ALERT_THRESHOLDS, DEFAULT_GOOGLE_ADS_SETTINGS } from "@shared/ads-settings";
+import { DEFAULT_ADS_ALERT_THRESHOLDS, DEFAULT_GOOGLE_ADS_SETTINGS, DEFAULT_UTM_CONVENTION, googleUrlSuffixTemplate } from "@shared/ads-settings";
+import { NO_UTM_GRACE } from "@shared/ads-diagnostics-rules";
 import type { AdsReport } from "./ads-report";
 import type { GoogleAdsSetups, GoogleAdsSyncState } from "./google-ads-days";
 
@@ -113,5 +114,32 @@ describe("googleIssues", () => {
       setups: { ...setups, campaigns: { c1: { customer_id: CID, name: "Brand", channel_type: "SEARCH", status: "ENABLED", final_url_suffix: null } } },
     });
     expect(codes(issues)).toContain("google_auto_tagging_off");
+  });
+});
+
+describe("googleIssues UTM convention", () => {
+  const utmSetups = (suffix: string): GoogleAdsSetups => ({
+    ...setups,
+    campaigns: { "111222333": { customer_id: CID, name: "Brand", channel_type: "SEARCH", status: "ENABLED", final_url_suffix: suffix } },
+  });
+  const utm = { convention: DEFAULT_UTM_CONVENTION, grace: NO_UTM_GRACE, observed: [] };
+  const spendReport = report({ campaigns: [{ platform: "google", campaign_id: "111222333", campaign_name: "Brand", spend: { USD: 300 } }] as unknown as AdsReport["campaigns"] });
+
+  it("a suffix from the generated template raises nothing", () => {
+    const issues = googleIssues({ ...base, setups: utmSetups(googleUrlSuffixTemplate()), report: spendReport, state: state(), utm });
+    expect(codes(issues).filter((c) => c.startsWith("utm_"))).toEqual([]);
+  });
+
+  it("flags an off-convention medium in the campaign suffix with google-scoped ids", () => {
+    const suffix = "utm_source=google&utm_medium=paid_search&utm_id={campaignid}&utm_term={adgroupid}";
+    const issues = googleIssues({ ...base, setups: utmSetups(suffix), report: spendReport, state: state(), utm });
+    const i = issues.find((x) => x.code === "utm_medium_off_convention");
+    expect(i).toMatchObject({ id: "utm_medium_off_convention:google:111222333", platform: "google", spend_affected: { USD: 300 } });
+  });
+
+  it("skips UTM checks when utm input is omitted", () => {
+    const suffix = "utm_source=Google&utm_medium=paid_search";
+    const issues = googleIssues({ ...base, setups: utmSetups(suffix), report: spendReport, state: state() });
+    expect(codes(issues).filter((c) => c.startsWith("utm_"))).toEqual([]);
   });
 });

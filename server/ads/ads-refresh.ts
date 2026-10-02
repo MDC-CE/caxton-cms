@@ -13,6 +13,7 @@ import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
+import { ADS_CONFIG_FILENAME, adsConfigReadError } from "../ads-config";
 import { child } from "../logger";
 import { isMetaTokenConfigured } from "./meta-client";
 import {
@@ -22,6 +23,7 @@ import {
   loadMetaState,
   META_STALE_MS,
   planMetaSyncSteps,
+  saveMetaState,
   syncMetaAds,
   type MetaSyncMode,
   type MetaSyncResult,
@@ -45,6 +47,7 @@ import {
 } from "./google-ads-days";
 import { currentWorkerJob, isSidequestWorkerAlive, latestJobRows, type JobRowSummary } from "../jobs/job-rows";
 import { afterAdsSync } from "./ads-rollups";
+import { backupAdsHistory } from "./ads-history-backup";
 import { waitForAdsRunToFinish } from "./diagnostics/run-lock";
 import {
   ADS_REFRESH_QUEUED_STUCK_MS,
@@ -261,6 +264,21 @@ function progressReporter(site: string, run: string, total: number): ((label: st
   };
 }
 
+/** Push `ads-history/` to the content repo (production only) and note the outcome in the Meta state. */
+async function recordHistoryBackup(site: string, contentRoot: string | undefined): Promise<void> {
+  const res = await backupAdsHistory(site, contentRoot);
+  if (res.skipped && res.skipped !== "no_changes") return;
+  const state = loadMetaState(site);
+  if (res.pushed || res.skipped === "no_changes") {
+    if (res.pushed) state.backup_pushed_at = new Date().toISOString();
+    state.backup_error = undefined;
+  } else {
+    state.backup_error = res.error ?? "push failed";
+    log.warn({ site, error: res.error }, "[ads-refresh] history backup push failed (sync still saved)");
+  }
+  saveMetaState(site, state);
+}
+
 export async function runAdsRefresh(opts: { site: string; contentRoot?: string; mode?: MetaSyncMode }): Promise<AdsRefreshResult> {
   if (inFlight.has(opts.site)) return { meta: null, google: null, ga4: null };
   inFlight.add(opts.site);
@@ -270,6 +288,11 @@ export async function runAdsRefresh(opts: { site: string; contentRoot?: string; 
   patchState(opts.site, { started_at: startedAt, progress: undefined });
   let failure: string | null = null;
   try {
+    const configError = adsConfigReadError(opts.contentRoot);
+    if (configError) {
+      failure = `${ADS_CONFIG_FILENAME} can't be read (${configError}). Syncs are paused until the file is fixed.`;
+      return { meta: null, google: null, ga4: null };
+    }
     const metaConnected = isMetaConnected(opts.contentRoot);
     const runGa4 = opts.mode !== "older";
     const runGoogle = opts.mode !== "older" && isGoogleConnected(opts.contentRoot);
@@ -291,6 +314,7 @@ export async function runAdsRefresh(opts: { site: string; contentRoot?: string; 
     } catch (err) {
       log.warn({ err, site: opts.site }, "[ads-refresh] rollups / report windows failed (day files still saved)");
     }
+    if (meta?.ok || google?.ok) await recordHistoryBackup(opts.site, opts.contentRoot);
     if (meta && !meta.ok && !meta.skipped && meta.error) failure = `Meta: ${meta.error}`;
     else if (google && !google.ok && !google.skipped && google.error) failure = `Google Ads: ${google.error}`;
     else if (ga4 && !ga4.ok && !ga4.skipped && ga4.error) failure = `GA4: ${ga4.error}`;

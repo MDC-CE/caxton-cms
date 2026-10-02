@@ -61,6 +61,7 @@ import {
 import { listRequiredEditorFields } from "@shared/validateRequiredFields";
 import { extractParamSlug, validateUrlParamPeerValues } from "../url-param-peers";
 import { ensurePublishedAtOnce } from "../published-at";
+import { isLiveServer } from "../live-server";
 import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-attached-entry";
 import {
   sameAgentIdentity,
@@ -175,6 +176,7 @@ export const MIN_ACCEPT_NEXT_STEP = 20;
 export const MIN_REJECT_NOTE = 80;
 export const ACCEPTED_ENTRY_NOT_CREATABLE = "accepted_entry_not_creatable";
 export const ACCEPTED_ENTRY_NEEDS_LAYOUT = "accepted_entry_needs_layout";
+export const IDEA_PAGE_RELEASED_WAITING_IDEAS = "idea_page_released_waiting_ideas";
 
 export type ProposalStatus = "open" | "partial" | "finished" | "rejected" | "withdrawn";
 export type ProposalKind = "edits" | "notes" | "idea";
@@ -203,7 +205,8 @@ export type ProposalStoredCloseReason =
   | ProposalRejectKind
   | "withdrawn"
   | "legacy_version"
-  | "abandoned_stale";
+  | "abandoned_stale"
+  | "abandoned_blocked";
 
 export const PROPOSAL_CLOSE_REASONS: ProposalCloseReason[] = [
   "wont_fix",
@@ -505,6 +508,8 @@ export type ProposalRecord = {
   /** First time live or the translation source moved under the draft (ISO). Cleared by rebuild / revise. */
   stale_since: string | null;
   stale_flagged_at: string | null;
+  /** Open blockers sat idle BLOCKED_FLAG_DAYS (ISO). Cleared when blockers clear or work resumes. */
+  blocked_flagged_at: string | null;
   /** v1.0 template proposals: attached entries the change reaches (read-only enrichment). */
   affected_entries?: AffectedEntries | null;
   /** Enriched on read — not persisted. */
@@ -596,6 +601,7 @@ export type ProposalSummary = {
   all_or_nothing: boolean;
   stale_since: string | null;
   stale_flagged_at: string | null;
+  blocked_flagged_at: string | null;
   reverts_proposal_id: string | null;
   /** Unique field paths across all entry ops (sorted). */
   field_paths: string[];
@@ -686,6 +692,7 @@ export function toProposalSummary(record: ProposalRecord): ProposalSummary {
     all_or_nothing: record.all_or_nothing,
     stale_since: record.stale_since,
     stale_flagged_at: record.stale_flagged_at,
+    blocked_flagged_at: record.blocked_flagged_at,
     reverts_proposal_id: record.reverts_proposal_id,
     field_paths,
     entries: record.entries.map((e) => ({
@@ -762,6 +769,7 @@ type ProposalRow = {
   reverts_proposal_id?: string | null;
   stale_since?: string | null;
   stale_flagged_at?: string | null;
+  blocked_flagged_at?: string | null;
 };
 
 type EntryDbRow = {
@@ -1125,6 +1133,7 @@ function mapProposal(
     reverts_proposal_id: row.reverts_proposal_id ?? null,
     stale_since: row.stale_since ?? null,
     stale_flagged_at: row.stale_flagged_at ?? null,
+    blocked_flagged_at: row.blocked_flagged_at ?? null,
     entries: row.system_version ? entries.map(withCachedView) : entries,
     blockers,
   };
@@ -1483,6 +1492,8 @@ function emitProposalEvent(
     | "proposal_reverted"
     | "proposal_stale_flagged"
     | "proposal_closed_abandoned_stale"
+    | "proposal_blocked_flagged"
+    | "proposal_closed_abandoned_blocked"
     | "proposal_needs_author"
     | "proposal_migrated_v1"
     | "draft_rebuilt"
@@ -1501,6 +1512,7 @@ function emitProposalEvent(
     type === "proposal_rejected" ||
     type === "proposal_withdrawn" ||
     type === "proposal_closed_abandoned_stale" ||
+    type === "proposal_closed_abandoned_blocked" ||
     type === "proposal_applied_progress" ||
     type === "proposal_deleted"
   ) {
@@ -1843,7 +1855,7 @@ export const OUTCOME_REVIEW_FILTERS = ["good", "bad", "none", "bad_open", "any"]
 export type OutcomeReviewFilter = (typeof OUTCOME_REVIEW_FILTERS)[number];
 
 /** Closures the system made on its own — not a decision anyone can judge, so never "needs a verdict". */
-export const SYSTEM_CLOSE_REASONS = ["abandoned_stale", "legacy_version"] as const;
+export const SYSTEM_CLOSE_REASONS = ["abandoned_stale", "abandoned_blocked", "legacy_version"] as const;
 
 /** SQL predicate: closed by a person or agent (not a system closure). */
 export function reviewableClosedSql(col: (name: string) => string = (name) => name): string {
@@ -1928,10 +1940,8 @@ const LEGACY_ALLOWED_ACTIONS = new Set<ProposalUpdateAction>([
   "deescalate",
 ]);
 
-export function pipelineEnv(): string {
-  const env = process.env.PIPELINE_ENV?.trim();
-  return env || "unknown";
-}
+/** Proposals live only in production; written on draft links so older readers keep parsing. */
+export const DRAFT_LINK_ENV = "production";
 
 /** Draft files the proposal service itself is writing (create / revise) — not co-author edits. */
 const ownDraftWrites = new Map<string, number>();
@@ -2023,7 +2033,7 @@ export function absorbDraftEdit(
 onVariantWrite((filePath, opts) => {
   if (ownDraftWrites.has(path.resolve(filePath))) return;
   const link = readDraftMeta(filePath)?.proposal;
-  if (!link || link.env !== pipelineEnv()) return;
+  if (!link) return;
   const rel = path
     .relative(process.cwd(), path.resolve(filePath))
     .replace(/\\/g, "/");
@@ -2050,7 +2060,7 @@ export function findOpenProposalLinkForDraft(
       ref.variant,
     );
     if (!found) return null;
-    return { id: found.id, env: pipelineEnv(), title: found.title };
+    return { id: found.id, env: DRAFT_LINK_ENV, title: found.title };
   } catch {
     return null;
   }
@@ -2110,6 +2120,26 @@ function countStalledIdeas(db: Database.Database, site: string): number {
   }
 }
 
+/**
+ * An accepted idea holds its page until one implementing edit is applied with none still
+ * open/partial. Rejected or withdrawn edits do not release it (the idea stays stalled).
+ */
+function ideaHoldsEntry(db: Database.Database, site: string, ideaId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN status = 'finished' THEN 1 ELSE 0 END) AS applied,
+         SUM(CASE WHEN status IN ('open','partial') THEN 1 ELSE 0 END) AS active
+       FROM content_proposals
+       WHERE site = ? AND kind = 'edits' AND implements_proposal_id = ?`,
+    )
+    .get(site, ideaId) as { applied: number | null; active: number | null } | undefined;
+  const applied = Number(row?.applied) || 0;
+  const active = Number(row?.active) || 0;
+  return applied === 0 || active > 0;
+}
+
+/** The accepted idea currently holding this page+locale (released ideas are skipped). */
 function findAcceptedIdeaOwningEntry(
   db: Database.Database,
   site: string,
@@ -2123,18 +2153,57 @@ function findAcceptedIdeaOwningEntry(
     .prepare(
       `SELECT id, accepted_entry_json FROM content_proposals
        WHERE site = ? AND kind = 'idea' AND status = 'finished' AND close_reason = 'accepted'
-         AND accepted_entry_json IS NOT NULL`,
+         AND accepted_entry_json IS NOT NULL
+       ORDER BY closed_at DESC`,
     )
     .all(site) as Array<{ id: string; accepted_entry_json: string }>;
   for (const row of rows) {
     if (excludeIdeaId && row.id === excludeIdeaId) continue;
     const entry = parseAcceptedEntry(parseJson(row.accepted_entry_json, null));
     if (!entry) continue;
-    if (acceptedEntryKey(entry) === key) {
-      return loadProposal(db, row.id);
-    }
+    if (acceptedEntryKey(entry) !== key) continue;
+    if (!ideaHoldsEntry(db, site, row.id)) continue;
+    return loadProposal(db, row.id);
   }
   return null;
+}
+
+function waitingIdeasPayload(
+  released: { details: Record<string, unknown> } | null,
+): Record<string, unknown> {
+  if (!released) return {};
+  const waiting = (released.details.waiting_ideas ?? []) as Array<{ id: string }>;
+  return { released_entry: released.details.released_entry, waiting_idea_ids: waiting.map((w) => w.id) };
+}
+
+/** Open ideas whose related_entries name this page (an entry without locale matches any locale). */
+function findIdeasWaitingOnEntry(
+  db: Database.Database,
+  site: string,
+  entry: AcceptedEntry,
+): Array<{ id: string; title: string }> {
+  const rows = db
+    .prepare(
+      `SELECT id, title, related_entries_json FROM content_proposals
+       WHERE site = ? AND kind = 'idea' AND status IN ('open','partial')
+         AND related_entries_json IS NOT NULL
+       ORDER BY created_at`,
+    )
+    .all(site) as Array<{ id: string; title: string; related_entries_json: string }>;
+  const out: Array<{ id: string; title: string }> = [];
+  for (const row of rows) {
+    const refs = parseJson<unknown>(row.related_entries_json, []);
+    if (!Array.isArray(refs)) continue;
+    const hit = refs.some((r) => {
+      if (!r || typeof r !== "object") return false;
+      const o = r as Record<string, unknown>;
+      if (o.contentType !== entry.contentType || o.slug !== entry.slug) return false;
+      const loc = typeof o.locale === "string" ? o.locale.trim() : "";
+      return !loc || loc === entry.locale;
+    });
+    if (hit) out.push({ id: row.id, title: row.title });
+  }
+  return out;
 }
 
 function findOpenImplementsForIdea(
@@ -2688,6 +2757,41 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const selfPath =
       t.cluster.mode === "hub" && facts ? facts.selfPath(ref.contentType, ref.slug, ref.locale) : null;
     return { ok: true, seo: seoBlockFromTarget(t, { selfPath, resolvedPillarPath }), warnings };
+  }
+
+  /**
+   * An implementing edit just finished. If that released the idea's page, list the open
+   * ideas that were waiting on it (never accepted automatically — accept stays four-eyes).
+   */
+  function pageReleasedFollowUp(
+    db: Database.Database,
+    edit: ProposalRecord,
+  ): { code: string; message: string; details: Record<string, unknown> } | null {
+    if (!edit.implements_proposal_id) return null;
+    const idea = loadProposal(db, edit.implements_proposal_id);
+    const entry = idea?.accepted_entry;
+    if (!entry) return null;
+    if (findAcceptedIdeaOwningEntry(db, site, entry.contentType, entry.slug, entry.locale)) return null;
+    const waiting = findIdeasWaitingOnEntry(db, site, entry);
+    if (!waiting.length) return null;
+    const where = acceptedEntryKey(entry);
+    return {
+      code: IDEA_PAGE_RELEASED_WAITING_IDEAS,
+      message:
+        `${where} is free again. ${waiting.length} open idea${waiting.length === 1 ? " was" : "s were"} waiting on it: ` +
+        waiting.map((w) => `"${w.title}" (${w.id})`).join(", ") +
+        ". Review and accept next.",
+      details: {
+        released_entry: entry,
+        waiting_ideas: waiting,
+        next_actions: waiting.map((w) => ({
+          tool: "list_proposals",
+          priority: "recommended",
+          reason: `Review waiting idea "${w.title}", then accept it with accepted_entry ${where}.`,
+          args_hint: { proposal_id: w.id },
+        })),
+      },
+    };
   }
 
   /**
@@ -3416,7 +3520,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
   ) {
     return {
       id: proposalId,
-      env: pipelineEnv(),
+      env: DRAFT_LINK_ENV,
       ...(created
         ? {
             created_by_proposal: true,
@@ -3680,16 +3784,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
             }
             const link = s.readLink(ref);
             if (link && link.id !== opts.proposalId) {
-              const local =
-                link.env === pipelineEnv() ? loadProposal(db, link.id) : null;
-              const open = local
-                ? local.status === "open" || local.status === "partial"
-                : link.env !== pipelineEnv();
+              const local = loadProposal(db, link.id);
+              const open = local ? local.status === "open" || local.status === "partial" : false;
               if (open) {
                 return fail({
                   ok: false,
                   code: "draft_in_proposal",
-                  error: `Draft '${variant}' on ${where} is under review in proposal ${link.id} (${link.env}). Join that proposal instead.`,
+                  error: `Draft '${variant}' on ${where} is under review in proposal ${link.id}. Join that proposal instead.`,
                   duplicate_of: link.id,
                   ...(local ? { existing_proposal: local } : {}),
                 });
@@ -3829,8 +3930,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   /**
    * Reject / withdraw / drop from revise: delete drafts this proposal created, unlink the rest.
-   * `forDelete` (staff bulk delete): only drafts linked to this environment (or unlinked drafts
-   * in production) are touched, empty links are never rewritten, co-authored drafts are kept,
+   * `forDelete` (staff bulk delete): draft files are touched only on the live server (a laptop
+   * holds a test copy), empty links are never rewritten, co-authored drafts are kept,
    * and a failed removal throws so the caller can keep the proposal row.
    */
   async function releaseV1Drafts(
@@ -3850,17 +3951,13 @@ export function createProposalService(deps: ProposalServiceDeps) {
       if (link && link.id !== proposalId) continue;
       const where = `${e.variant} of ${e.contentType}/${e.slug} (${e.locale})`;
       const relPath = forDelete ? path.relative(process.cwd(), store.pathOf(ref)) : undefined;
-      if (forDelete) {
-        const env = pipelineEnv();
-        const owned = link ? link.env === env : env === "production";
-        if (!owned) {
-          out.push({
-            code: "draft_other_env",
-            message: `Left draft ${where} untouched (it belongs to ${link?.env ?? "an unknown"} environment).`,
-            path: relPath,
-          });
-          continue;
-        }
+      if (forDelete && !isLiveServer()) {
+        out.push({
+          code: "draft_test_copy",
+          message: `Left draft ${where} untouched (this is a test copy; drafts are only removed on the live server).`,
+          path: relPath,
+        });
+        continue;
       }
       try {
         const remove = forDelete ? e.created_draft && !forDelete.keepCreated : e.created_draft;
@@ -4212,7 +4309,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
     }, caller.actor);
     if (next === "finished") {
       captureDecisionDebug(proposal, "apply", caller, reviewForApply);
-      emitProposalEvent(site, "proposal_finished", id, caller.username, {}, caller.actor);
+      const released = pageReleasedFollowUp(db, fresh);
+      if (released) warnings.push(released);
+      emitProposalEvent(site, "proposal_finished", id, caller.username, waitingIdeasPayload(released), caller.actor);
     }
     return {
       ok: true as const,
@@ -5814,22 +5913,34 @@ export function createProposalService(deps: ProposalServiceDeps) {
             "Accept requires accepted_entry with contentType, slug, and locale (the page this idea locks for follow-up work).",
         };
       }
-      const taken = findAcceptedIdeaOwningEntry(
-        db,
-        site,
-        acceptedEntry.contentType,
-        acceptedEntry.slug,
-        acceptedEntry.locale,
-        id,
-      );
-      if (taken) {
+      const entryTaken = () => {
+        const holder = findAcceptedIdeaOwningEntry(
+          db,
+          site,
+          acceptedEntry.contentType,
+          acceptedEntry.slug,
+          acceptedEntry.locale,
+          id,
+        );
+        if (!holder) return null;
+        const openEdit = findOpenImplementsForIdea(db, site, holder.id);
         return {
-          ok: false,
+          ok: false as const,
           code: "accepted_entry_taken",
-          error: `Another accepted idea (${taken.id}) already reserved ${acceptedEntryKey(acceptedEntry)}.`,
-          existing_proposal: taken,
+          error:
+            `${acceptedEntryKey(acceptedEntry)} is reserved by accepted idea "${holder.title}" (${holder.id}) until its edit is applied` +
+            (openEdit ? ` (open edit ${openEdit.id})` : "") +
+            ". Leave this idea open and accept it after that. Do not close it.",
+          existing_proposal: holder,
+          details: {
+            holder_id: holder.id,
+            open_edit_id: openEdit?.id ?? null,
+            releases_when: "holder_edit_applied",
+          },
         };
-      }
+      };
+      const taken = entryTaken();
+      if (taken) return taken;
       const acceptEx = resolveExistence({
         contentType: acceptedEntry.contentType,
         slug: acceptedEntry.slug,
@@ -5859,6 +5970,8 @@ export function createProposalService(deps: ProposalServiceDeps) {
         if (!seoGate.ok) return { ...seoGate, proposal };
       }
       const reviewBeforeAccept = await classifyLive(proposal);
+      const takenMeanwhile = entryTaken();
+      if (takenMeanwhile) return takenMeanwhile;
       db.prepare(
         `UPDATE content_proposals
          SET status = 'finished', claim_json = NULL, updated_at = ?,
@@ -7362,7 +7475,9 @@ export function createProposalService(deps: ProposalServiceDeps) {
       }, caller.actor);
       if (next === "finished") {
         captureDecisionDebug(proposal, "apply", caller, reviewForApply);
-        emitProposalEvent(site, "proposal_finished", id, caller.username, {}, caller.actor);
+        const released = pageReleasedFollowUp(db, fresh);
+        emitProposalEvent(site, "proposal_finished", id, caller.username, waitingIdeasPayload(released), caller.actor);
+        if (released) return { ok: true, proposal: fresh, warnings: [released] };
       }
       return { ok: true, proposal: fresh };
     }
@@ -7607,7 +7722,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
 
   /**
    * Daily: flag v1.0 proposals whose drafts fell behind live / their translation source.
-   * 30 days stale without activity → proposal_stale_flagged; 90 → closed abandoned_stale
+   * 10 days stale without activity → proposal_stale_flagged; 30 → closed abandoned_stale
    * (drafts the proposal created are deleted; pre-existing drafts are only unlinked).
    */
   async function staleSweep(opts: { author?: string; now?: number } = {}): Promise<StaleSweepReport> {
@@ -7683,14 +7798,96 @@ export function createProposalService(deps: ProposalServiceDeps) {
   }
 
   /**
-   * Daily link check: a draft whose `_draft.proposal` is not open locally nor in production
-   * gets orphan_since; after 7 days the link is removed (the draft is deleted only when the
-   * proposal created it and nobody edited it). Unreachable production → unverified, no cleanup.
+   * Daily: open|partial proposals (any kind) with open blockers and no real work.
+   * Activity = newest open blocker, author rewrite / author-marked fix, reviewer action.
+   * Claim / release do not count. BLOCKED_FLAG_DAYS idle → proposal_blocked_flagged;
+   * BLOCKED_CLOSE_DAYS → withdrawn abandoned_blocked (no prior flag required).
+   * Escalated rows are skipped; rows with zero open blockers only get their flag cleared.
+   */
+  async function blockedSweep(opts: { author?: string; now?: number } = {}): Promise<BlockedSweepReport> {
+    const report: BlockedSweepReport = { checked: 0, flagged: [], cleared: [], closed: [] };
+    const db = dbFor(site);
+    const now = opts.now ?? Date.now();
+    const author = opts.author ?? "system:proposal-blocked-sweep";
+    const ids = (
+      db
+        .prepare(
+          `SELECT p.id FROM content_proposals p
+           WHERE p.site = ? AND p.status IN ('open', 'partial')
+             AND (p.blocked_flagged_at IS NOT NULL OR EXISTS (
+               SELECT 1 FROM content_proposal_blockers b WHERE b.proposal_id = p.id AND b.status = 'open'
+             ))`,
+        )
+        .all(site) as Array<{ id: string }>
+    ).map((r) => r.id);
+    const clearFlag = db.prepare(`UPDATE content_proposals SET blocked_flagged_at = NULL WHERE id = ?`);
+    for (const id of ids) {
+      const p = loadProposal(db, id);
+      if (!p || (p.status !== "open" && p.status !== "partial")) continue;
+      if (p.escalated) continue;
+      report.checked++;
+      const openBlockers = p.blockers.filter((b) => b.status === "open");
+      if (!openBlockers.length) {
+        if (p.blocked_flagged_at) {
+          clearFlag.run(id);
+          report.cleared.push(id);
+        }
+        continue;
+      }
+      const lastActivity = Math.max(
+        ...openBlockers.map((b) => b.created_at || 0),
+        p.author_content_at ?? 0,
+        p.reviewer_action_at ?? 0,
+      );
+      let flaggedAt = p.blocked_flagged_at;
+      if (flaggedAt && lastActivity > (Date.parse(flaggedAt) || 0)) {
+        clearFlag.run(id);
+        report.cleared.push(id);
+        flaggedAt = null;
+      }
+      const idle = now - lastActivity;
+      if (idle >= BLOCKED_CLOSE_DAYS * DAY_MS) {
+        const note =
+          `Closed automatically: change requests stayed open for ${BLOCKED_CLOSE_DAYS} days without activity.` +
+          (p.status === "partial" ? " Pages already published stay live; only pending pages were dropped." : "");
+        db.prepare(
+          `UPDATE content_proposals
+           SET status = 'withdrawn', claim_json = NULL, updated_at = ?,
+               close_reason = 'abandoned_blocked', close_note = ?, closed_by = ?, closed_at = ?
+           WHERE id = ?`,
+        ).run(now, note, author, now, id);
+        const released = p.system_version ? await releaseV1Drafts(id, p.entries, author) : [];
+        emitProposalEvent(site, "proposal_closed_abandoned_blocked", id, author, {
+          open_blocker_count: openBlockers.length,
+          last_activity_at: new Date(lastActivity).toISOString(),
+          was_partial: p.status === "partial",
+          drafts: released.map((r) => r.code),
+        });
+        report.closed.push(id);
+      } else if (idle >= BLOCKED_FLAG_DAYS * DAY_MS && !flaggedAt) {
+        db.prepare(`UPDATE content_proposals SET blocked_flagged_at = ? WHERE id = ?`).run(
+          new Date(now).toISOString(),
+          id,
+        );
+        emitProposalEvent(site, "proposal_blocked_flagged", id, author, {
+          open_blocker_count: openBlockers.length,
+          last_activity_at: new Date(lastActivity).toISOString(),
+          closes_at: new Date(lastActivity + BLOCKED_CLOSE_DAYS * DAY_MS).toISOString(),
+        });
+        report.flagged.push(id);
+      }
+    }
+    return report;
+  }
+
+  /**
+   * Daily link check (live server only — production owns every proposal): a draft whose
+   * `_draft.proposal` is missing or closed in this database gets orphan_since; after 7 days the
+   * link is removed (the draft is deleted only when the proposal created it and nobody edited it).
    */
   async function verifyDraftLinks(opts: {
     author?: string;
     now?: number;
-    remoteStatus?: (proposalId: string, env: string) => Promise<"open" | "closed" | "unknown">;
   } = {}): Promise<LinkCheckReport> {
     const report: LinkCheckReport = { checked: 0, orphaned: [], cleaned: [], unverified: [], restored: [] };
     if (!store) return report;
@@ -7698,15 +7895,12 @@ export function createProposalService(deps: ProposalServiceDeps) {
     const now = opts.now ?? Date.now();
     const iso = new Date(now).toISOString();
     const author = opts.author ?? "system:draft-link-check";
-    const env = pipelineEnv();
     for (const { ref, link } of store.listLinkedDrafts()) {
       report.checked++;
       const where = `${ref.contentType}/${ref.slug} ${ref.variant}.${ref.locale}`;
       const local = loadProposal(db, link.id);
-      let status: "open" | "closed" | "unknown";
-      if (local) status = local.status === "open" || local.status === "partial" ? "open" : "closed";
-      else if (link.env === env && env !== "unknown") status = "closed";
-      else status = opts.remoteStatus ? await opts.remoteStatus(link.id, link.env) : "unknown";
+      const status: "open" | "closed" =
+        local && (local.status === "open" || local.status === "partial") ? "open" : "closed";
 
       if (status === "open") {
         if (link.orphan_since || link.unverified_since) {
@@ -7714,11 +7908,6 @@ export function createProposalService(deps: ProposalServiceDeps) {
           store.link(ref, clean, author);
           report.restored.push(where);
         }
-        continue;
-      }
-      if (status === "unknown") {
-        if (!link.unverified_since) store.link(ref, { ...link, unverified_since: iso }, author);
-        report.unverified.push(where);
         continue;
       }
       if (!link.orphan_since) {
@@ -7874,6 +8063,7 @@ export function createProposalService(deps: ProposalServiceDeps) {
     missingReferencedIds,
     migrateLegacy,
     staleSweep,
+    blockedSweep,
     verifyDraftLinks,
     list,
     stats,
@@ -7898,8 +8088,10 @@ export type RevertConflict = {
   live: unknown;
 };
 
-export const STALE_FLAG_DAYS = 30;
-export const STALE_CLOSE_DAYS = 90;
+export const STALE_FLAG_DAYS = 10;
+export const STALE_CLOSE_DAYS = 30;
+export const BLOCKED_FLAG_DAYS = 10;
+export const BLOCKED_CLOSE_DAYS = 30;
 export const ORPHAN_CLEANUP_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -7908,6 +8100,13 @@ export type StaleSweepReport = {
   marked: string[];
   cleared: string[];
   flagged: string[];
+  closed: string[];
+};
+
+export type BlockedSweepReport = {
+  checked: number;
+  flagged: string[];
+  cleared: string[];
   closed: string[];
 };
 
@@ -7983,8 +8182,9 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
       outcome_lesson_captured_by, outcome_lesson_note,
       reviewer_action_by, reviewer_action_by_actor_json,
       system_version, co_authors_json, all_or_nothing, reverts_proposal_id,
-      stale_since, stale_flagged_at, idea_seo_target_json, seo_target_override_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      stale_since, stale_flagged_at, idea_seo_target_json, seo_target_override_json,
+      blocked_flagged_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   const insertEntry = db.prepare(
     `INSERT INTO content_proposal_entries (
@@ -8072,6 +8272,7 @@ export function replaceProposalsFromSnapshot(site: string, proposals: ProposalRe
         p.stale_flagged_at ?? null,
         p.idea_seo_target ? JSON.stringify(p.idea_seo_target) : null,
         p.seo_target_override ? JSON.stringify(p.seo_target_override) : null,
+        p.blocked_flagged_at ?? null,
       );
       for (const e of p.entries ?? []) {
         insertEntry.run(

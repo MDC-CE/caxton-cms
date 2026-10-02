@@ -6,7 +6,7 @@
  */
 
 import type { IssueCodeDefinition, ValidatorMetadata } from "../../../scripts/validation/shared/types";
-import type { AdsIssueCode, AdsIssuePlatform } from "@shared/ads-diagnostics-rules";
+import type { AdsIssueCode, AdsIssuePlatform, UtmIssueCode } from "@shared/ads-diagnostics-rules";
 import type { AdsMinData, AdsVerify } from "@shared/ads-issues";
 
 type InstantOrSync = { kind: "instant" } | { kind: "after_sync"; platform: "meta" | "google" | "target" };
@@ -30,6 +30,24 @@ const instant = { kind: "instant" } as const;
 const afterMeta = { kind: "after_sync", platform: "meta" } as const;
 const afterGoogle = { kind: "after_sync", platform: "google" } as const;
 const traffic = (days = 3, lag_days = 2) => ({ kind: "fresh_days", days, lag_days }) as const;
+
+const UTM_CODE_TITLES: Record<UtmIssueCode, string> = {
+  utm_unfilled_macro: "Tracking placeholder reached GA4 unfilled",
+  utm_case_mixed: "Tracking values in mixed case",
+  utm_bad_chars: "Tracking values with spaces or odd characters",
+  utm_medium_nonstandard: "Medium GA4 doesn't count as paid",
+  utm_source_alias: "Source outside the UTM convention",
+  utm_medium_off_convention: "Medium outside the UTM convention",
+  utm_campaign_pattern: "Campaign name doesn't match the pattern",
+  utm_missing_ids: "Tracking ids missing",
+};
+
+/** Every validator owns UTM codes for its platform's traffic; verify depends on where the evidence comes from. */
+function utmCodes(def: Omit<AdsIssueCodeDefinition, "title">): Record<UtmIssueCode, AdsIssueCodeDefinition> {
+  return Object.fromEntries(
+    (Object.keys(UTM_CODE_TITLES) as UtmIssueCode[]).map((code) => [code, { ...def, title: UTM_CODE_TITLES[code] } as AdsIssueCodeDefinition]),
+  ) as Record<UtmIssueCode, AdsIssueCodeDefinition>;
+}
 
 export const ADS_META_VALIDATOR: AdsValidator = {
   name: "ads-meta",
@@ -78,6 +96,7 @@ export const ADS_META_VALIDATOR: AdsValidator = {
     off_site_destination: { title: "Ads send people off-site", verify: instant },
     instant_form_destination: { title: "Meta Instant Forms", verify: instant },
     unmanaged_destination: { title: "Ads land on a page we don't manage", verify: instant },
+    ...utmCodes({ verify: afterMeta }),
   },
 };
 
@@ -96,6 +115,9 @@ export const ADS_SHARED_VALIDATOR: AdsValidator = {
       min_data: { metric: "sessions", value: 20 },
     },
     consent_rate_drop: { title: "Fewer visitors accept tracking", verify: traffic(7, 1), min_data: { metric: "sessions", value: 100 } },
+    ads_config_unreadable: { title: "Ads settings file can't be read", verify: instant },
+    utm_convention_invalid: { title: "UTM convention has non-standard values", verify: instant },
+    ...utmCodes({ verify: traffic(3, 2), min_data: { metric: "sessions", value: 10 } }),
   },
 };
 
@@ -122,6 +144,7 @@ export const ADS_GOOGLE_VALIDATOR: AdsValidator = {
       verify: traffic(5, 2),
       min_data: { metric: "clicks", value: 100 },
     },
+    ...utmCodes({ verify: afterGoogle }),
   },
 };
 

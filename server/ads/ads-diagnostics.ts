@@ -31,7 +31,17 @@ import {
   type AdsUncheckedReason,
   type TrackingParamsCoverage,
 } from "@shared/ads-diagnostics-rules";
-import { adsThresholds, isKnownExternalCampaign, type AdsAlertThresholds, type KnownExternalCampaign } from "@shared/ads-settings";
+import {
+  adsThresholds,
+  DEFAULT_UTM_CONVENTION,
+  isKnownExternalCampaign,
+  type AdsAlertThresholds,
+  type KnownExternalCampaign,
+  type UtmConventionRejection,
+} from "@shared/ads-settings";
+import { ADS_CONFIG_FILENAME, adsConfigReadError } from "../ads-config";
+import { utmGraceState } from "./utm-convention-history";
+import { loadObservedUtmGroups, utmIssues, type DeclaredUtm } from "./utm-issues";
 import {
   buildAdsReport,
   makeDestinationResolver,
@@ -70,6 +80,8 @@ import {
 } from "./observed-tagging";
 import { ledgerLastRecordedAt } from "./lead-ledger";
 import { hasMetaData } from "./ads-refresh";
+import { loadAdsSetup } from "./ads-setup";
+import { adTargetsInWindow, previousUrls } from "./ad-url-history";
 import { consentDropPct, loadConsentWindow } from "../legal/legal-diagnostics";
 import type { AdsUniverse } from "./diagnostics/grouping";
 
@@ -150,7 +162,47 @@ export function leadIssues(input: {
 }
 
 /** Checks that aren't about one ad platform (lead records, consent). Listed once on the overview. */
-export const SHARED_ISSUE_CODES = new Set<AdsIssue["code"]>(["ga4_ledger_gap", "ledger_not_recording", "consent_rate_drop"]);
+export const SHARED_ISSUE_CODES = new Set<AdsIssue["code"]>([
+  "ga4_ledger_gap",
+  "ledger_not_recording",
+  "consent_rate_drop",
+  "ads_config_unreadable",
+  "utm_convention_invalid",
+]);
+
+// ── ads-config.yml / UTM convention ─────────────────────────────────────────
+/** Shared issues about ads-config.yml itself: unreadable file, convention values outside the GA4 standard. */
+export function adsConfigIssues(input: { readError: string | null; rejected: UtmConventionRejection[] }): AdsIssue[] {
+  const out: AdsIssue[] = [];
+  if (input.readError) {
+    out.push({
+      id: "ads_config_unreadable",
+      code: "ads_config_unreadable",
+      severity: "error",
+      title: "Ads settings file can't be read",
+      why: `${ADS_CONFIG_FILENAME} has an error (${input.readError}). Meta, Google and GA4 syncs are paused until the file is fixed, so numbers here stop updating. Checks use the last settings that could be read.`,
+      how_to_fix: `Fix the YAML in ${ADS_CONFIG_FILENAME} (in the site's content folder), or restore the last good version from Cloud Sync. Syncs resume on their own once the file reads.`,
+      spend_affected: {},
+      scope: {},
+      site_fixable: true,
+    });
+  }
+  if (input.rejected.length > 0) {
+    const list = input.rejected.map((r) => `${r.field}: "${r.value}" ${r.reason}; using ${r.default_used}`).join(". ");
+    out.push({
+      id: "utm_convention_invalid",
+      code: "utm_convention_invalid",
+      severity: "error",
+      title: "UTM convention has non-standard values",
+      why: `Some values in ${ADS_CONFIG_FILENAME} → utm_convention are outside GA4's standard and are ignored: ${list}. The templates and checks use the defaults for those fields.`,
+      how_to_fix: `Edit utm_convention in ${ADS_CONFIG_FILENAME} to use standard values, or remove the field to keep the default.`,
+      spend_affected: {},
+      scope: {},
+      site_fixable: true,
+    });
+  }
+  return out;
+}
 
 // ── Tracking params coverage ────────────────────────────────────────────────
 function addSpend(into: MoneyByCurrency, from: MoneyByCurrency): void {
@@ -547,22 +599,32 @@ export async function buildAdsDiagnostics(opts: {
     .sort((a, b) => b.total - a.total || a.ad_id.localeCompare(b.ad_id));
   const resolveDest = makeDestinationResolver(opts.site, opts.contentIndex);
   const bareOf = (a: IndexedAd): string | null => (a.state === "checked" && a.landing_url ? a.landing_url.split("?")[0]! : null);
+  const metaSetup = connected ? loadAdsSetup(opts.site, "meta") : null;
   const adsByDest = new Map<string, IndexedAd[]>();
   for (const a of spendingAds) {
-    let key: string | null = null;
-    if (a.state === "instant_form") key = "dest:instant_form";
+    const setupAd = metaSetup?.ads[a.ad_id];
+    const prevUrls = previousUrls(setupAd);
+    if (prevUrls.length > 0) a.previous_urls = prevUrls;
+    const keys = new Set<string>();
+    if (a.state === "instant_form") keys.add("dest:instant_form");
     else if (bareOf(a)) {
       try {
         const u = new URL(a.landing_url!);
-        key = resolveDest(u.hostname, u.pathname).key;
+        keys.add(resolveDest(u.hostname, u.pathname).key);
       } catch {
-        key = null;
+        /* unparseable link */
       }
     }
-    if (!key) continue;
-    const list = adsByDest.get(key) ?? [];
-    list.push(a);
-    adsByDest.set(key, list);
+    // Every page the ad pointed to during the window (URL history), not only today's link.
+    const tz = setupAd ? metaSetup?.accounts[setupAd.account_id]?.timezone : null;
+    for (const t of adTargetsInWindow(setupAd, report.window.start, report.window.end, tz)) {
+      keys.add(t.kind === "instant_form" ? "dest:instant_form" : resolveDest(t.host, t.path).key);
+    }
+    for (const key of Array.from(keys)) {
+      const list = adsByDest.get(key) ?? [];
+      list.push(a);
+      adsByDest.set(key, list);
+    }
   }
   const adsOnBare = (bare: string | undefined) => spendingAds.filter((a) => bareOf(a) === bare);
   const campaignAds = (campaignId: string) => spendingAds.filter((a) => a.campaign_id === campaignId);
@@ -618,6 +680,8 @@ export async function buildAdsDiagnostics(opts: {
   if (report.ga4.configured && completeDays >= t.zero_visits_complete_days) {
     for (const row of report.pages) {
       if (Object.keys(row.spend).length === 0 || row.paid_visits > 0 || row.clicks === 0) continue;
+      // Only URL-changeover days fed this page: that day's split is approximate, not evidence of a broken page.
+      if (row.url_change_spend && spendTotal(row.url_change_spend) >= spendTotal(row.spend) - 0.01) continue;
       const ads = adsByDest.get(row.key) ?? [];
       issues.push({
         id: `spend_zero_visits:${row.key}`,
@@ -998,7 +1062,50 @@ export async function buildAdsDiagnostics(opts: {
     });
   }
 
-  for (const i of issues) i.platform = SHARED_ISSUE_CODES.has(i.code) ? "shared" : "meta";
+  // ads-config.yml + UTM convention / GA4 standard (declared ad tags, GA4 visits, lead records)
+  issues.push(...adsConfigIssues({ readError: adsConfigReadError(opts.contentRoot), rejected: settings.utm_convention_rejected ?? [] }));
+  const convention = settings.utm_convention ?? DEFAULT_UTM_CONVENTION;
+  const grace = utmGraceState(opts.site, convention, now);
+  const observed = loadObservedUtmGroups(opts.site, report.window.start, report.window.end);
+  const declared: DeclaredUtm[] = spendingAds
+    .filter((a) => a.state === "checked" && creatives[a.ad_id])
+    .map((a) => {
+      const c = creatives[a.ad_id]!;
+      return {
+        campaign_id: a.campaign_id,
+        campaign_name: a.campaign_name,
+        account_id: a.account_id,
+        params: { ...parseTrackingParams(c.links[0]), ...parseTrackingParams(c.url_tags) },
+        spend: a.spend,
+        ad: toIssueAd(a),
+      };
+    });
+  const utmDetails = (ads: AdsIssueAd[]): AdsIssueDetails => ({
+    ads,
+    ads_total: ads.length,
+    ads_offset: 0,
+    setup_last_read_at: setupLastReadAt(metaState.accounts, ads.length > 0 ? Array.from(new Set(ads.map((a) => a.account_id))) : settings.meta.ad_account_ids),
+  });
+  const utmBase = { convention, grace, totalSpend, t, nonPaidCampaigns: new Set(coverage.non_paid_campaigns.map((n) => n.id)) };
+  issues.push(
+    ...utmIssues({
+      ...utmBase,
+      platform: "meta",
+      declared,
+      observed: observed.filter((g) => g.platform === "meta"),
+      known: settings.meta.known_external_campaigns,
+      detailsFor: utmDetails,
+    }),
+    ...utmIssues({
+      ...utmBase,
+      platform: "shared",
+      declared: [],
+      observed: observed.filter((g) => g.platform !== "meta" && g.platform !== "google"),
+      known: [],
+    }),
+  );
+
+  for (const i of issues) i.platform ??= SHARED_ISSUE_CODES.has(i.code) ? "shared" : "meta";
   sortAdsIssues(issues);
   const accountNames: Record<string, string> = {};
   for (const [id, a] of Object.entries(metaState.accounts ?? {})) if (a?.name) accountNames[id] = a.name;

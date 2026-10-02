@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  IconCheck,
   IconCode,
   IconLanguage,
   IconLoader2,
@@ -8,10 +7,7 @@ import {
   IconStar,
   IconTrash,
   IconDeviceFloppy,
-  IconPlayerPlay,
-  IconAlertCircle,
   IconPhoto,
-  IconInfoCircle,
   IconScale,
   IconMessage,
   IconServer,
@@ -31,7 +27,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
@@ -48,6 +43,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { ServerTab } from "@/components/settings/ServerTab";
 import { RobotsTab } from "@/components/settings/RobotsTab";
+import { MigrationsTab } from "@/components/settings/MigrationsTab";
 import { ConsentWindowCard } from "@/components/settings/ConsentWindowCard";
 import {
   consentLabelFromKey,
@@ -77,18 +73,6 @@ interface LocaleSettings {
   default_locale: string;
   supported_locales: LocaleEntry[];
 }
-
-interface Migration {
-  filename: string;
-  name: string;
-  description: string;
-}
-
-interface MigrationRowState {
-  running: boolean;
-  result: { success: boolean; output: string } | null;
-}
-
 
 interface BrandSettings {
   title: string;
@@ -121,10 +105,6 @@ export default function SettingsPage() {
     queryKey: ["/api/settings/locales"],
   });
 
-  const { data: migrations, isLoading: migrationsLoading } = useQuery<Migration[]>({
-    queryKey: ["/api/migrations"],
-  });
-
   const { data: brandData, isLoading: brandLoading } = useQuery<BrandSettings>({
     queryKey: ["/api/admin/brand-settings"],
     enabled: isValidated === true,
@@ -136,7 +116,6 @@ export default function SettingsPage() {
   const [newLabel, setNewLabel] = useState("");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [migrationStates, setMigrationStates] = useState<Record<string, MigrationRowState>>({});
   const [brandImagePickerOpen, setBrandImagePickerOpen] = useState(false);
   const [logoPickerOpen, setLogoPickerOpen] = useState(false);
   const [logoDarkPickerOpen, setLogoDarkPickerOpen] = useState(false);
@@ -522,26 +501,6 @@ export default function SettingsPage() {
     }
   }
 
-  async function runMigration(filename: string) {
-    setMigrationStates((prev) => ({
-      ...prev,
-      [filename]: { running: true, result: null },
-    }));
-    try {
-      const res = await apiRequest("POST", "/api/migrations/run", { filename });
-      const result = await res.json();
-      setMigrationStates((prev) => ({
-        ...prev,
-        [filename]: { running: false, result },
-      }));
-    } catch (err: any) {
-      setMigrationStates((prev) => ({
-        ...prev,
-        [filename]: { running: false, result: { success: false, output: err.message || String(err) } },
-      }));
-    }
-  }
-
   return (
     <SettingsShell
       section="general"
@@ -673,89 +632,7 @@ export default function SettingsPage() {
           </TabsContent>
 
           <TabsContent value="migrations" className="mt-0">
-            <Card>
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconCode className="h-5 w-5 text-muted-foreground" />
-                <CardTitle className="text-base">Migrations</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {migrationsLoading ? (
-                  <div className="flex items-center justify-center py-8">
-                    <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                ) : !migrations || migrations.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-4 text-center">No migration scripts found.</p>
-                ) : (
-                  <div className="space-y-3">
-                    <p className="text-xs text-muted-foreground">
-                      One-time data scripts. Each migration is idempotent — safe to re-run.
-                    </p>
-                    <div className="space-y-2">
-                      {migrations.map((migration) => {
-                        const state = migrationStates[migration.filename];
-                        const running = state?.running ?? false;
-                        const result = state?.result ?? null;
-                        return (
-                          <div key={migration.filename} className="space-y-2" data-testid={`row-migration-${migration.filename}`}>
-                            <div className="flex items-center gap-2 px-3 py-2.5 rounded-md border">
-                              <code className="text-xs font-mono text-muted-foreground flex-1 truncate" data-testid={`text-migration-name-${migration.filename}`}>
-                                {migration.filename}
-                              </code>
-                              {result && (
-                                result.success
-                                  ? <IconCheck className="h-4 w-4 text-green-500 shrink-0" />
-                                  : <IconAlertCircle className="h-4 w-4 text-destructive shrink-0" />
-                              )}
-                              <Popover>
-                                <PopoverTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    title="About this migration"
-                                    data-testid={`button-info-migration-${migration.filename}`}
-                                  >
-                                    <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
-                                  </Button>
-                                </PopoverTrigger>
-                                <PopoverContent className="w-72 text-sm" side="left" align="start">
-                                  <p className="font-medium mb-1">{migration.name}</p>
-                                  <p className="text-muted-foreground text-xs leading-relaxed">{migration.description}</p>
-                                </PopoverContent>
-                              </Popover>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => runMigration(migration.filename)}
-                                disabled={running}
-                                title="Run migration"
-                                data-testid={`button-run-migration-${migration.filename}`}
-                              >
-                                {running
-                                  ? <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                                  : <IconPlayerPlay className="h-4 w-4 text-muted-foreground" />
-                                }
-                              </Button>
-                            </div>
-                            {result && (
-                              <pre
-                                className={`text-xs font-mono rounded-md border px-3 py-2 overflow-auto max-h-48 whitespace-pre-wrap ${
-                                  result.success
-                                    ? "border-green-500/30 bg-green-500/5 text-foreground"
-                                    : "border-destructive/30 bg-destructive/5 text-destructive"
-                                }`}
-                                data-testid={`text-migration-output-${migration.filename}`}
-                              >
-                                {result.output || (result.success ? "Done." : "Failed with no output.")}
-                              </pre>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+            <MigrationsTab />
           </TabsContent>
 
           <TabsContent value="brand" className="mt-0">

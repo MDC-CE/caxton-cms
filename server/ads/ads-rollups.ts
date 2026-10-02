@@ -26,6 +26,8 @@ import { metaProvider } from "./providers/meta";
 import { googleProvider } from "./providers/google";
 import type { AdSpendDayRow, AdsProvider } from "./providers/types";
 import { getAdsRefreshStatus, triggerAdsRefreshIfStale } from "./ads-refresh";
+import { loadAdsSetup } from "./ads-setup";
+import { adChangeoverDays } from "./ad-url-history";
 
 const log = child({ module: "ads/ads-rollups" });
 
@@ -35,6 +37,13 @@ export const ADS_REPORT_WINDOWS_DIR = "ads-report-windows";
 export const ADS_ROLLUP_RETENTION_DAYS = 150;
 export const ADS_ROLLUP_BACKFILL_DAYS = 90;
 export const ADS_REPORT_WINDOW_DAYS = [7, 28, 90] as const;
+/**
+ * Bump when the report's shape or attribution changes: it is part of the saved-window settings hash,
+ * so the 7/28/90 windows and in-memory variants rebuild on the next read.
+ * 2 = per-campaign metrics on page rows.
+ * 3 = Meta spend follows each ad's URL history (page per day, changeover days split).
+ */
+export const ADS_ATTRIBUTION_VERSION = 3;
 const STATE_FILE = "_state.json";
 
 export type RollupPlatform = "meta" | "google";
@@ -70,6 +79,8 @@ export type AdsRollupState = {
   /** Bumped every time any rollup day is rewritten; report windows are stamped with it. */
   generation: number;
   built_at: string | null;
+  /** First time report windows were rebuilt with URL history (past numbers recomputed); drives the staff notice. */
+  url_history_enabled_at?: string;
 };
 
 const PROVIDERS: Record<RollupPlatform, AdsProvider> = { meta: metaProvider, google: googleProvider };
@@ -227,7 +238,7 @@ export function writeRollupsForDates(
   }
   pruneRollups(site, now);
   if (written.length === 0) return { written, generation: state.generation };
-  const next: AdsRollupState = { generation: state.generation + 1, built_at: now.toISOString() };
+  const next: AdsRollupState = { ...state, generation: state.generation + 1, built_at: now.toISOString() };
   saveRollupState(site, next);
   return { written, generation: next.generation };
 }
@@ -261,6 +272,8 @@ export type RollupSum = {
   leads: number;
   /** Days with any spend on the target (paused / no spend → "waiting for spend"). */
   days_with_spend: number;
+  /** Days left out because every matched Meta ad was changing its URL that day (the split is approximate). */
+  url_change_days?: string[];
 };
 
 function rowMatches(r: AdsRollupRow, t: RollupTarget, adSet: Set<string> | null): boolean {
@@ -288,16 +301,31 @@ export function sumRollupsSince(site: string, target: RollupTarget, since: strin
   };
   if (since > end) return out;
   const adSet = target.ad_ids && target.ad_ids.length > 0 ? new Set(target.ad_ids) : null;
+  const changeover = new Map<string, Set<string>>();
+  if (adSet && target.platform === "meta") {
+    const catalog = loadAdsSetup(site, "meta");
+    for (const id of Array.from(adSet)) {
+      const ad = catalog.ads[id];
+      const days = adChangeoverDays(ad, ad ? catalog.accounts[ad.account_id]?.timezone : null);
+      if (days.size > 0) changeover.set(id, days);
+    }
+  }
   for (const d of dateRange(since, end)) {
     const day = loadRollupDay(site, d);
     if (!day || !day.platforms.includes(target.platform)) {
       out.missing_days.push(d);
       continue;
     }
-    out.days_counted += 1;
     let spentToday = 0;
+    let matched = 0;
+    let skipped = 0;
     for (const r of day.rows) {
       if (!rowMatches(r, target, adSet)) continue;
+      if (changeover.get(r.ad_id)?.has(d)) {
+        skipped += 1;
+        continue;
+      }
+      matched += 1;
       out.spend[r.currency] = Math.round(((out.spend[r.currency] ?? 0) + r.spend) * 100) / 100;
       spentToday += r.spend;
       out.clicks += r.clicks;
@@ -305,6 +333,11 @@ export function sumRollupsSince(site: string, target: RollupTarget, since: strin
       out.sessions += r.sessions;
       out.leads += r.leads;
     }
+    if (skipped > 0 && matched === 0) {
+      (out.url_change_days ??= []).push(d);
+      continue;
+    }
+    out.days_counted += 1;
     out.spend_total += spentToday;
     if (spentToday > 0) out.days_with_spend += 1;
   }
@@ -323,8 +356,14 @@ type SavedWindow = { generation: number; settings_hash: string; built_at: string
 const VARIANT_CACHE_MAX = 40;
 const variantCache = new Map<string, { generation: number; settings_hash: string; report: AdsReport }>();
 
+export function reportSettingsHash(settings: unknown, attributionVersion: number = ADS_ATTRIBUTION_VERSION): string {
+  const payload = { attribution: attributionVersion, settings };
+  return crypto.createHash("sha1").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+}
+
 function settingsHash(contentRoot?: string): string {
-  return crypto.createHash("sha1").update(JSON.stringify(getAdsSettings(contentRoot))).digest("hex").slice(0, 12);
+  const { utm_convention: _convention, utm_convention_rejected: _rejected, ...reportSettings } = getAdsSettings(contentRoot);
+  return reportSettingsHash(reportSettings);
 }
 
 function isDefaultWindow(opts: AdsReportOpts): boolean {
@@ -354,8 +393,23 @@ function variantKey(opts: AdsReportOpts): string {
   return JSON.stringify(rest, Object.keys(rest).sort());
 }
 
+/** When past numbers were first recomputed with URL history (stamped on first read / window save). */
+export function urlHistoryEnabledAt(site: string, now: Date = new Date()): string {
+  const state = loadRollupState(site);
+  if (state.url_history_enabled_at) return state.url_history_enabled_at;
+  const at = now.toISOString();
+  try {
+    saveRollupState(site, { ...state, url_history_enabled_at: at });
+  } catch (err) {
+    log.warn({ err, site }, "[ads-rollups] could not stamp url_history_enabled_at");
+  }
+  return at;
+}
+
 function withLiveStatus(report: AdsReport, mod: ReportModule, site: string, gaps: string[]): AdsReport {
   const refresh = getAdsRefreshStatus(site);
+  const urlHistory = report.attribution?.url_history;
+  if (urlHistory) report = { ...report, attribution: { ...report.attribution, url_history: { ...urlHistory, recomputed_at: urlHistoryEnabledAt(site) } } };
   const warnings = [...report.warnings.filter((w) => !mod.isRefreshWarning(w) && w.code !== "rollup_days_missing"), ...mod.refreshWarnings(refresh)];
   if (gaps.length > 0) {
     warnings.push({
@@ -426,6 +480,7 @@ export async function saveDefaultReportWindows(site: string, contentRoot?: strin
   const mod = await import("./ads-report");
   const generation = loadRollupState(site).generation;
   const hash = settingsHash(contentRoot);
+  urlHistoryEnabledAt(site);
   const platforms: Array<AdPlatform | "all"> = ["all"];
   if (metaProvider.hasData(site, contentRoot)) platforms.push("meta");
   if (googleProvider.hasData(site, contentRoot)) platforms.push("google");

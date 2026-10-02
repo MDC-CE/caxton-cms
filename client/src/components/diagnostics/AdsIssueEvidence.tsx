@@ -19,6 +19,7 @@ import { PAID_MEDIUMS } from "@shared/paid-traffic";
 import type { AdsIssueDetailResponse } from "@/components/ads/ads-types";
 import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
+import { formatDay, shortAdUrl } from "@/components/ads/UrlChangedBadge";
 
 const SHOW_ALL_LIMIT = 200;
 const TRACKING_CODES = new Set<AdsIssue["code"]>([
@@ -55,6 +56,38 @@ function StatusBadge({ status }: { status: string | null }) {
     >
       {label}
     </Badge>
+  );
+}
+
+/** The ad's last links, oldest first; the day it switched counts for both pages (approximate). */
+function AdUrlTimeline({ urls, adId }: { urls: NonNullable<AdsIssueAd["previous_urls"]>; adId: string }) {
+  const ordered = [...urls].reverse();
+  return (
+    <div className="mt-1 space-y-0.5 text-[11px] text-muted-foreground" data-testid={`ads-issue-ad-urls-${adId}`}>
+      <p className="font-medium text-foreground/80">Link history</p>
+      <ol className="space-y-0.5">
+        {ordered.map((u, i) => {
+          const isCurrent = i === ordered.length - 1;
+          const next = ordered[i + 1];
+          return (
+            <li key={u.v} className="flex flex-wrap items-baseline gap-x-1.5">
+              <span className="tabular-nums">v{u.v}</span>
+              <span className="truncate font-mono text-foreground/90" title={u.url}>
+                {shortAdUrl(u.url)}
+              </span>
+              <span>
+                {u.from ? formatDay(u.from) : "before history"} – {isCurrent ? "now" : formatDay(u.to)}
+              </span>
+              {next?.from && (
+                <span className="text-amber-500">
+                  · switched {next.from === u.to ? formatDay(next.from) : `${formatDay(u.to)}–${formatDay(next.from)}`}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -95,6 +128,7 @@ function AdRow({ ad, showCampaign }: { ad: AdsIssueAd; showCampaign: boolean }) 
             Meta clicks {formatNum(ad.checked_clicks ?? 0)} · GA4 visits with this ad&apos;s id {formatNum(ad.ga4_tagged_sessions ?? 0)}
           </p>
         )}
+        {ad.previous_urls && ad.previous_urls.length > 1 && <AdUrlTimeline urls={ad.previous_urls} adId={ad.ad_id} />}
       </div>
       <div className="shrink-0 text-right">
         <p className="text-xs font-medium tabular-nums text-foreground">{formatMoney(ad.spend)}</p>

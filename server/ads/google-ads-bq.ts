@@ -99,6 +99,24 @@ function latestFilter(table: { columns: string[] }): string {
   return table.columns.includes("_DATA_DATE") && table.columns.includes("_LATEST_DATE") ? "WHERE _DATA_DATE = _LATEST_DATE" : "";
 }
 
+/** Campaign network toggles (optional transfer columns) → result alias + label in `networks`. */
+const GOOGLE_NETWORK_COLUMNS: Array<[column: string, alias: string, label: string]> = [
+  ["campaign_network_settings_target_google_search", "net_google_search", "google_search"],
+  ["campaign_network_settings_target_search_network", "net_search_partners", "search_partners"],
+  ["campaign_network_settings_target_content_network", "net_display", "display"],
+  ["campaign_network_settings_target_partner_search_network", "net_partner_search", "partner_search"],
+];
+
+/** "google_search,display" from the toggle columns; null when the transfer has none of them. */
+export function googleNetworks(row: Record<string, unknown>): string | null {
+  const seen = GOOGLE_NETWORK_COLUMNS.filter(([, alias]) => row[alias] != null);
+  if (seen.length === 0) return null;
+  return seen
+    .filter(([, alias]) => row[alias] === true || String(row[alias]).toLowerCase() === "true")
+    .map(([, , label]) => label)
+    .join(",");
+}
+
 export type GoogleSqlSet = {
   bounds?: string;
   campaign_stats?: string;
@@ -155,7 +173,10 @@ export function buildCustomerSql(layout: Pick<GoogleTransferLayout, "project" | 
         ANY_VALUE(${col(c, "campaign_name")}) AS name,
         ANY_VALUE(${col(c, "campaign_advertising_channel_type")}) AS channel_type,
         ANY_VALUE(${col(c, "campaign_status")}) AS status,
-        ANY_VALUE(${col(c, "campaign_final_url_suffix")}) AS final_url_suffix
+        ANY_VALUE(${col(c, "campaign_final_url_suffix")}) AS final_url_suffix,
+        ANY_VALUE(${col(c, "campaign_bidding_strategy_type")}) AS bidding_strategy_type,
+        ANY_VALUE(CAST(${col(c, "campaign_budget_amount_micros", "INT64")} AS STRING)) AS budget_amount_micros,
+        ${GOOGLE_NETWORK_COLUMNS.map(([column, alias]) => `ANY_VALUE(${col(c, column, "BOOL")}) AS ${alias}`).join(",\n        ")}
       FROM ${fq(layout, c.name)} ${latestFilter(c)}
       GROUP BY 1`;
   }
@@ -196,7 +217,17 @@ export function buildCustomerSql(layout: Pick<GoogleTransferLayout, "project" | 
 export type RawCampaignStat = { date: string; campaign_id: string; network: string | null; cost_micros: number; clicks: number; impressions: number };
 export type RawLandingStat = { date: string; campaign_id: string; ad_group_id: string | null; url: string | null; cost_micros: number; clicks: number; impressions: number };
 export type RawConversion = { date: string; campaign_id: string; category: string | null; action_name: string | null; action_id: string | null; conversions: number };
-export type GoogleCampaignInfo = { customer_id: string; name: string; channel_type: string | null; status: string | null; final_url_suffix: string | null };
+export type GoogleCampaignInfo = {
+  customer_id: string;
+  name: string;
+  channel_type: string | null;
+  status: string | null;
+  final_url_suffix: string | null;
+  /** Optional transfer columns (null when this transfer version lacks them). */
+  bidding_strategy_type?: string | null;
+  budget_amount_micros?: string | null;
+  networks?: string | null;
+};
 export type GoogleAdGroupInfo = { campaign_id: string; name: string };
 export type GoogleAdInfo = { customer_id: string; ad_group_id: string; campaign_id: string; final_urls: string[]; approval_status: string | null; status: string | null };
 export type GoogleCustomerInfo = { name: string | null; currency: string | null; auto_tagging: boolean | null };
@@ -526,7 +557,16 @@ export async function queryCustomerMeta(client: BigQuery, layout: GoogleTransfer
         .filter((r) => s(r.campaign_id))
         .map((r) => [
           s(r.campaign_id)!,
-          { customer_id: cid, name: s(r.name) ?? s(r.campaign_id)!, channel_type: s(r.channel_type), status: s(r.status), final_url_suffix: s(r.final_url_suffix) },
+          {
+            customer_id: cid,
+            name: s(r.name) ?? s(r.campaign_id)!,
+            channel_type: s(r.channel_type),
+            status: s(r.status),
+            final_url_suffix: s(r.final_url_suffix),
+            bidding_strategy_type: s(r.bidding_strategy_type),
+            budget_amount_micros: s(r.budget_amount_micros),
+            networks: googleNetworks(r),
+          },
         ]),
     ),
     adGroups: Object.fromEntries(

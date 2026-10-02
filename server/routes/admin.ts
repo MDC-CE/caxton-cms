@@ -4175,13 +4175,45 @@ export function registerAdminRoutes(app: Express): void {
   app.get("/api/admin/users", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
-    res.json(userStore.getAllUsers());
+    const { getDuplicatePreview } = await import("../staff-user-deletion");
+    res.json(
+      userStore.getActiveUsers().map((u) => {
+        const duplicate = getDuplicatePreview(u.username);
+        return duplicate ? { ...u, duplicate } : u;
+      }),
+    );
+  });
+
+  api.get(app, "/api/admin/users/deleted", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "users_manage");
+    if (!auth.authorized) return;
+    res.json(userStore.getDeletedUsers());
+  });
+
+  api.post(app, "/api/admin/users/:username/restore", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "users_manage");
+    if (!auth.authorized) return;
+    const { roles } = req.body ?? {};
+    if (!Array.isArray(roles) || roles.length === 0 || roles.some((r) => typeof r !== "string")) {
+      res.status(400).json({ error: "Pick at least one role" });
+      return;
+    }
+    const result = userStore.restoreUser(req.params.username, roles);
+    if (!result.ok) {
+      res.status(result.error === "User not found" ? 404 : 400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true, user: result.user });
   });
 
   app.put("/api/admin/users/:username/roles", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
     const { username } = req.params;
+    if (userStore.getUser(username)?.deletedAt) {
+      res.status(409).json({ error: "This user is deleted. Restore them first." });
+      return;
+    }
     const { roles } = req.body;
     if (!Array.isArray(roles)) {
       res.status(400).json({ error: "roles must be an array of role ids" });
@@ -4236,6 +4268,10 @@ export function registerAdminRoutes(app: Express): void {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
     const { username } = req.params;
+    if (userStore.getUser(username)?.deletedAt) {
+      res.status(409).json({ error: "This user is deleted. Restore them first." });
+      return;
+    }
     const { mcpReadEnabled, mcpWriteEnabled } = req.body ?? {};
     if (mcpReadEnabled !== undefined && typeof mcpReadEnabled !== "boolean") {
       res.status(400).json({ error: "mcpReadEnabled must be a boolean" });
@@ -4260,14 +4296,16 @@ export function registerAdminRoutes(app: Express): void {
   app.delete("/api/admin/users/:username", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
-    const result = userStore.deleteUser(req.params.username);
+    const { deleteStaffUser } = await import("../staff-user-deletion");
+    const result = await deleteStaffUser({
+      username: req.params.username,
+      actorUsername: auth.username,
+    });
     if (!result.ok) {
-      res.status(404).json({ error: result.error });
+      res.status(result.status).json({ error: result.error });
       return;
     }
-    const { revokeAllStaffSessions } = await import("../staff-session");
-    await revokeAllStaffSessions(req.params.username);
-    res.json({ ok: true });
+    res.json(result);
   });
 
   app.get("/api/admin/pending-users", async (req, res) => {
@@ -4286,6 +4324,32 @@ export function registerAdminRoutes(app: Express): void {
     }
     const result = userStore.addPendingUser(email, role);
     if (!result.ok) {
+      if (result.code === "user_exists") {
+        res.status(409).json({
+          code: result.code,
+          error: result.error,
+          username: result.user.username,
+          displayName: userStore.formatStaffDisplayName(result.user),
+        });
+        return;
+      }
+      if (result.code === "user_previously_deleted") {
+        const u = result.user;
+        res.status(409).json({
+          code: result.code,
+          error: result.error,
+          user: {
+            username: u.username,
+            staffId: u.id,
+            email: u.email,
+            firstName: u.firstName,
+            lastName: u.lastName,
+            deletedAt: u.deletedAt,
+            deletedBy: u.deletedBy,
+          },
+        });
+        return;
+      }
       res.status(400).json({ error: result.error });
       return;
     }

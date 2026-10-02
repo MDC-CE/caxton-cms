@@ -78,7 +78,9 @@ import {
   createContentEntry,
   deleteContentEntry,
   renameContentSlug,
+  checkSlugRename,
 } from "../content-editor";
+import { api } from "../rate-limit/api";
 import { findNewDeprecatedVarRefs, getDeprecatedFieldsForType } from "../deprecated-field-guard";
 import { flushAfterContentWrites, collectEntryHtmlPaths, fileMentionsRedirects } from "../content-write-flush";
 import {
@@ -1890,11 +1892,37 @@ export function registerSectionsRoutes(app: Express): void {
         contentRootName: getContentRootName(res),
         ci: getCI(res),
       });
-      if (!result.success) { res.status(result.statusCode).json({ error: result.error }); return; }
+      if (!result.success) {
+        res.status(result.statusCode).json({
+          error: result.error,
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.details ?? {}),
+        });
+        return;
+      }
       res.json(result.data);
     } catch (error) {
       log.error({ err: error }, "[Content] Rename slug error:");
       res.status(500).json({ error: "Failed to rename slug" });
+    }
+  });
+
+  // Read-only dry run of the rename checks, for the slug editor's live availability message.
+  api.post(app, "/api/content/rename-slug/check", { rate: "publicRead" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "content_edit_structure", req.body.contentType || undefined);
+      if (!auth.authorized) return;
+      const { contentType, folderSlug, locale, newSlug } = req.body;
+      const result = await checkSlugRename({ contentType, folderSlug, locale, newSlug, ci: getCI(res) });
+      if (!result.ok) {
+        const { ok: _ok, statusCode, code, error, ...details } = result;
+        res.status(statusCode).json({ available: false, code, reason: error, ...details });
+        return;
+      }
+      res.json({ available: true, newUrl: result.newUrl });
+    } catch (error) {
+      log.error({ err: error }, "[Content] Check slug rename error:");
+      res.status(500).json({ available: false, error: "Failed to check slug" });
     }
   });
 

@@ -13,7 +13,20 @@ type BlockersBadgeProps = {
   testIdSuffix?: string;
   /** List cards say “blocker(s)”; detail header says “needs changes”. */
   labelMode?: "blockers" | "needs_changes";
+  /** ISO time the daily sweep warned this proposal will close for inactivity. */
+  flaggedAt?: string | null;
 };
+
+const BLOCKED_CLOSE_AFTER_FLAG_DAYS = 20;
+
+function closeDateLabel(flaggedAt: string): string | null {
+  const t = Date.parse(flaggedAt);
+  if (Number.isNaN(t)) return null;
+  return new Date(t + BLOCKED_CLOSE_AFTER_FLAG_DAYS * 86_400_000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
 
 export function BlockersBadge({
   count,
@@ -21,6 +34,7 @@ export function BlockersBadge({
   className,
   testIdSuffix = "",
   labelMode = "blockers",
+  flaggedAt = null,
 }: BlockersBadgeProps) {
   const [advanced, setAdvanced] = useState(false);
 
@@ -33,10 +47,12 @@ export function BlockersBadge({
       }
     : undefined;
 
-  const label =
+  const baseLabel =
     labelMode === "needs_changes"
       ? `${count} needs changes`
       : `${count} blocker${count === 1 ? "" : "s"}`;
+  const closesOn = flaggedAt ? closeDateLabel(flaggedAt) : null;
+  const label = closesOn ? `${baseLabel} · closes ${closesOn}` : baseLabel;
 
   return (
     <Popover>
@@ -71,6 +87,11 @@ export function BlockersBadge({
           Approve (and Accept for ideas) stay blocked until each request is marked resolved.
           Reject and withdraw still work.
         </p>
+        <p className="text-muted-foreground leading-5" data-testid={`text-blockers-inactivity${testIdSuffix}`}>
+          {closesOn
+            ? `Nobody has worked on these change requests for 10 days. If nothing changes, this proposal closes automatically around ${closesOn}.`
+            : "If nobody updates this proposal for 30 days while change requests are open, it closes automatically."}
+        </p>
         <button
           type="button"
           className="text-xs text-primary hover:underline"
@@ -90,6 +111,13 @@ export function BlockersBadge({
             <p>
               Only the active claimant resolves a blocker; reviewers can reopen one after it was
               cleared.
+            </p>
+            <p>
+              Inactivity: the daily sweep sets blocked_flagged_at after 10 idle days and withdraws with
+              close_reason abandoned_blocked after 30. Rewriting the draft, adding / resolving /
+              reopening a request, or a reviewer action resets the clock; claiming or releasing does not.
+              Pages already published stay live; drafts the proposal created are deleted. Escalated
+              proposals are skipped.
             </p>
           </div>
         ) : null}

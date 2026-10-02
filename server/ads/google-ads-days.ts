@@ -14,6 +14,7 @@ import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
+import { adsConfigReadError } from "../ads-config";
 import { child } from "../logger";
 import type { GoogleAdsSettings } from "@shared/ads-settings";
 import { addDays, dateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
@@ -42,9 +43,13 @@ import {
   googleCampaignFromCatalog,
   loadAdsSetup,
   mergeGoogleCustomer,
+  noteCampaignNamesFromRows,
   saveAdsSetup,
+  type AdsChangeSink,
   type AdsSetupCatalog,
 } from "./ads-setup";
+import { appendChanges, pruneChangeLog } from "./ads-change-log";
+import { restoreAdsHistoryIfMissing } from "./ads-history-backup";
 
 const log = child({ module: "ads/google-ads-days" });
 
@@ -307,7 +312,7 @@ export function planGoogleSyncSteps(contentRoot?: string): number {
 
 export type GoogleSyncResult = {
   ok: boolean;
-  skipped?: "google_not_connected";
+  skipped?: "google_not_connected" | "ads_config_unreadable";
   error?: string;
   customers: Record<string, { full_days: number; conversion_days: number; error?: string }>;
   /** Days whose cached rows this sync rewrote (spend or conversions) — dirty for rollups. */
@@ -356,6 +361,7 @@ function summarizeActions(cid: string, conversions: RawConversion[], isLead: (c:
 }
 
 export async function syncGoogleAds(opts: { site: string; contentRoot?: string; now?: Date; onStep?: SyncStepCallback }): Promise<GoogleSyncResult> {
+  if (adsConfigReadError(opts.contentRoot) != null) return { ok: false, skipped: "ads_config_unreadable", customers: {} };
   const settings = getAdsSettings(opts.contentRoot).google;
   if (!settings || !isGoogleConfiguredSettings(settings)) return { ok: false, skipped: "google_not_connected", customers: {} };
   if (inFlight.has(opts.site)) return { ok: true, customers: {} };
@@ -366,7 +372,9 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
   const result: GoogleSyncResult = { ok: true, customers: {} };
   const project = settings.bigquery.project!;
   const dataset = settings.bigquery.dataset!;
+  restoreAdsHistoryIfMissing(opts.site, opts.contentRoot, "google", now);
   const setup = loadAdsSetup(opts.site, "google");
+  const changeSink: AdsChangeSink = { changes: [], source: "sync" };
   const dirtyDates = new Set<string>();
   const isLead = makeLeadActionMatcher(settings.lead_conversion_actions);
   try {
@@ -462,7 +470,7 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
         }
         info.sync_error = undefined;
         state.customers[cid] = info;
-        mergeGoogleCustomer(setup, cid, meta, fetchedAt);
+        mergeGoogleCustomer(setup, cid, meta, fetchedAt, changeSink);
         for (const d of [...plan.full, ...plan.conversionsOnly]) dirtyDates.add(d);
         const recentFrom = through ? addDays(through, -(GOOGLE_CONVERSION_REFRESH_DAYS - 1)) : "";
         actions.push(...summarizeActions(cid, convForCatalog.filter((c) => c.date >= recentFrom), isLead));
@@ -476,7 +484,16 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
     }
     setup.fetched_at = new Date().toISOString();
     setup.extras = { ...setup.extras, conversion_actions: actions };
+    if (!setup.extras.names_seeded_at) {
+      for (const d of listGoogleDayDates(opts.site)) {
+        const rows = Object.values(loadGoogleDay(opts.site, d)?.customers ?? {}).flatMap((c) => c.rows);
+        noteCampaignNamesFromRows(setup, rows.map((r) => ({ ...r, account_id: r.customer_id })), setup.fetched_at);
+      }
+      setup.extras.names_seeded_at = setup.fetched_at;
+    }
     saveAdsSetup(opts.site, setup);
+    appendChanges(opts.site, changeSink.changes);
+    pruneChangeLog(opts.site, now);
     result.dates = Array.from(dirtyDates).sort();
     pruneOld(opts.site, now);
 

@@ -21,9 +21,10 @@ export function PlatformTag({ platform, row }: { platform: AdPlatform; row: AdsP
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const label = PLATFORM_LABELS[platform] ?? platform;
   const campaigns = row.campaigns
-    .filter((c) => c.platform === platform)
+    .filter((c) => !c.untagged && c.platform === platform)
     .sort((a, b) => b.paid_visits - a.paid_visits);
-  const visits = campaigns.reduce((s, c) => s + c.paid_visits, 0);
+  const untaggedVisits = row.campaigns.find((c) => c.untagged)?.visits_by_platform?.[platform] ?? 0;
+  const visits = campaigns.reduce((s, c) => s + c.paid_visits, 0) + untaggedVisits;
   const spendSynced = SPEND_SYNCED.has(platform);
   const isOther = platform === "other";
   const clickIds = clickIdsFor(platform);
@@ -48,7 +49,7 @@ export function PlatformTag({ platform, row }: { platform: AdPlatform; row: AdsP
             : `Some paid visits to this page came from ${label} ads. This label shows who sent the traffic. It doesn't mean the page belongs to a ${label} campaign only.`}
         </p>
 
-        {campaigns.length > 0 && (
+        {visits > 0 && (
           <div>
             <p className="mb-1 font-medium text-foreground">
               {formatNum(visits)} paid visit(s) from {label} in this period
@@ -60,9 +61,15 @@ export function PlatformTag({ platform, row }: { platform: AdPlatform; row: AdsP
                   <span className="shrink-0 tabular-nums">{formatNum(c.paid_visits)}</span>
                 </li>
               ))}
+              {untaggedVisits > 0 && (
+                <li className="flex justify-between gap-2">
+                  <span className="truncate italic">Without campaign tag</span>
+                  <span className="shrink-0 tabular-nums">{formatNum(untaggedVisits)}</span>
+                </li>
+              )}
             </ul>
             {campaigns.length > MAX_CAMPAIGNS && (
-              <p className="mt-0.5">+{campaigns.length - MAX_CAMPAIGNS} more campaign(s) in this row's details.</p>
+              <p className="mt-0.5">+{campaigns.length - MAX_CAMPAIGNS} more campaign(s) when you expand the row.</p>
             )}
           </div>
         )}
