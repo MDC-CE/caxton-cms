@@ -14,7 +14,6 @@ import { useVariableDefinitions, useVariableContext } from "@/hooks/useVariables
 import { resolveDeep, patchVariableFieldHighlights } from "@/lib/variable-manager";
 import { findReplaceableTextRange } from "@/lib/cm-variable-highlight";
 import { SectionContextProvider } from "@/contexts/SectionContext";
-import { literalizeThemeColor } from "@/lib/section-background";
 import {
   getCachedSectionComponent,
   hasSectionType,
@@ -213,7 +212,7 @@ export function getSectionWrapperStyles(section: Section): CSSProperties & Recor
   styles['--section-inner-px-desktop'] = innerPaddingX?.desktop ?? DEFAULT_INNER_PADDING_X;
 
   if (background) {
-    styles.background = literalizeThemeColor(background);
+    styles.background = background;
   }
 
   return styles;
