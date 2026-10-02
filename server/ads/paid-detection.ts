@@ -295,11 +295,13 @@ export type PaidLandingSqlOptions = {
 
 function clickStatsSelect(c: PaidLandingClickStats): string {
   const col = (name: string) => (c.columns.includes(name) ? `CAST(${name} AS STRING)` : "CAST(NULL AS STRING)");
-  return `SELECT click_view_gclid AS gclid, '${c.customer_id.replace(/\D/g, "")}' AS customer_id, ${col("campaign_id")} AS campaign_id,
+  const cid = c.customer_id.replace(/\D/g, "");
+  const ownRows = c.columns.includes("customer_id") ? `\n        AND CAST(customer_id AS STRING) = '${cid}'` : "";
+  return `SELECT click_view_gclid AS gclid, '${cid}' AS customer_id, ${col("campaign_id")} AS campaign_id,
         ${col("ad_group_id")} AS ad_group_id, ${col("segments_ad_network_type")} AS network
       FROM \`${c.table.replace(/`/g, "")}\`
       WHERE segments_date BETWEEN DATE_SUB(PARSE_DATE('%Y%m%d', @suffix), INTERVAL 1 DAY) AND PARSE_DATE('%Y%m%d', @suffix)
-        AND click_view_gclid IS NOT NULL`;
+        AND click_view_gclid IS NOT NULL${ownRows}`;
 }
 
 /** Click ids that prove a session started from a Google Ads click (gates the GA4 ↔ Google Ads link fields). */

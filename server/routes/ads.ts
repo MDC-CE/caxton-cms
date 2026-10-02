@@ -11,7 +11,7 @@
  *   POST    /api/settings/ads/meta/test   — probe token + accounts (read-only)
  *   POST    /api/ads/meta/sync            — Sync now / Load older history
  *   GET/PUT /api/settings/ads/google      — Google Ads accounts, BigQuery transfer dataset, lead conversion actions, sync status
- *   GET     /api/settings/ads/google/accounts — customers found in the transfer dataset (picker options)
+ *   GET     /api/settings/ads/google/accounts — accounts found in the transfer dataset (picker options; manager-account sets expanded)
  *   POST    /api/settings/ads/google/test — probe the transfer dataset (read-only)
  *   GET     /api/settings/ads/google/setup — guided transfer setup checklist (read-only; ?project=&dataset=)
  *   POST    /api/ads/sync                 — Sync now for every connected platform (Meta, Google, GA4)
@@ -325,6 +325,7 @@ function googleSettingsPayload(res: Response) {
       customers: state.customers,
       available_customers: state.available_customers ?? [],
       unticked_customers: (state.available_customers ?? []).filter((id) => !ticked.has(id)),
+      manager_customers: state.manager_customers ?? {},
     },
     conversion_actions: setups.conversion_actions,
     policy: {
@@ -646,7 +647,12 @@ export function registerAdsRoutes(app: Express): void {
     const parsed = googleProbeSchema.safeParse({ project: req.query.project ?? saved.project ?? "", dataset: req.query.dataset ?? saved.dataset ?? "" });
     if (!parsed.success) return res.json({ configured: false, accounts: [], error: "Set the BigQuery project and dataset first." });
     const result = await testGoogleTransfer(parsed.data.project, parsed.data.dataset);
-    res.json({ configured: true, accounts: result.customers, ...(result.ok ? {} : { error: result.error, error_kind: result.error_kind }) });
+    res.json({
+      configured: true,
+      accounts: result.customers,
+      managers: result.managers ?? {},
+      ...(result.ok ? {} : { error: result.error, error_kind: result.error_kind }),
+    });
   });
 
   api.get(app, "/api/settings/ads/google/setup", { rate: "staffWrite" }, async (req: Request, res: Response) => {
@@ -690,7 +696,12 @@ export function registerAdsRoutes(app: Express): void {
       : saved.customer_ids;
     const result = await testGoogleTransfer(parsed.data.project, parsed.data.dataset);
     const found = new Set(result.customers.map((c) => c.id));
-    res.json({ ...result, missing_customers: result.ok ? wanted.filter((id) => !found.has(id)) : [] });
+    const managers = result.managers ?? {};
+    res.json({
+      ...result,
+      missing_customers: result.ok ? wanted.filter((id) => !found.has(id) && !managers[id]) : [],
+      ticked_managers: result.ok ? wanted.filter((id) => !!managers[id]) : [],
+    });
   });
 
   api.get(app, "/api/ads/report", { rate: "staffWrite" }, async (req: Request, res: Response) => {

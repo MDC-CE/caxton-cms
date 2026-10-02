@@ -16,15 +16,17 @@ import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
 import { adsConfigReadError } from "../ads-config";
 import { child } from "../logger";
-import type { GoogleAdsSettings } from "@shared/ads-settings";
+import { formatGoogleCustomerId, type GoogleAdsSettings } from "@shared/ads-settings";
 import { addDays, dateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
 import {
+  accountTables,
   allocateLeads,
   buildGoogleDayRows,
   campaignStatsTable,
   clickStatsRef,
   googleBigQueryClient,
   makeLeadActionMatcher,
+  managerTableSets,
   missingTablesFor,
   probeTransferLayout,
   queryCustomerMeta,
@@ -111,8 +113,10 @@ export type GoogleAdsSyncState = {
   /** Newest day loaded across synced customers (min across customers = safe "data through"). */
   data_through?: string | null;
   customers: Record<string, GoogleCustomerSyncInfo>;
-  /** Customers with transfer tables in the dataset (ticked or not). */
+  /** Accounts with rows in the transfer dataset (ticked or not). */
   available_customers?: string[];
+  /** Manager accounts the transfer runs on → the accounts inside them. */
+  manager_customers?: Record<string, string[]>;
   probed_at?: string;
   /** Downloaded from production (dev only). */
   pulled_from_production_at?: string;
@@ -381,7 +385,8 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
     opts.onStep?.("Google Ads: reading the BigQuery transfer");
     const client = googleBigQueryClient(project);
     const layout = await probeTransferLayout(client, project, dataset);
-    state.available_customers = Object.keys(layout.customers).sort();
+    state.available_customers = Object.keys(layout.accounts).sort();
+    state.manager_customers = managerTableSets(layout);
     state.probed_at = new Date().toISOString();
     const actions: GoogleConversionActionInfo[] = (setup.extras.conversion_actions ?? []).filter((a) => !settings.customer_ids.includes(a.customer_id));
 
@@ -389,7 +394,15 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
       const cid = settings.customer_ids[i]!;
       opts.onStep?.(`Google Ads: account ${i + 1} of ${settings.customer_ids.length}`);
       const info: GoogleCustomerSyncInfo = { ...(state.customers[cid] ?? {}) };
-      const tables = layout.customers[cid];
+      const tables = accountTables(layout, cid);
+      const subAccounts = state.manager_customers?.[cid];
+      if (subAccounts) {
+        info.sync_error = `This is a manager account, so it has no spend of its own. Tick the accounts under it instead: ${subAccounts.map(formatGoogleCustomerId).join(", ")}.`;
+        info.missing_tables = undefined;
+        state.customers[cid] = info;
+        result.customers[cid] = { full_days: 0, conversion_days: 0, error: info.sync_error };
+        continue;
+      }
       if (!tables || !campaignStatsTable(tables)) {
         info.sync_error = "The BigQuery transfer has no tables for this account yet. Add it to the transfer in Google Cloud, or wait for the first load.";
         info.missing_tables = tables ? missingTablesFor(tables) : ["CampaignBasicStats"];

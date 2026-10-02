@@ -64,14 +64,29 @@ type GoogleSettingsResponse = {
     customers: Record<string, CustomerSync>;
     available_customers: string[];
     unticked_customers: string[];
+    manager_customers?: Record<string, string[]>;
   };
   conversion_actions: ConversionAction[];
   policy: { refresh_days: number; conversion_refresh_days: number; backfill_days: number; retention_days: number; transfer_lag_days: number; cache_dir: string };
 };
 
-type TransferCustomer = { id: string; name: string | null; currency: string | null; data_through: string | null; missing_tables: string[] };
-type TestResponse = { ok: boolean; error?: string; customers: TransferCustomer[]; missing_customers?: string[] };
-type AccountsResponse = { configured: boolean; accounts: TransferCustomer[]; error?: string };
+type TransferCustomer = {
+  id: string;
+  name: string | null;
+  currency: string | null;
+  data_through: string | null;
+  missing_tables: string[];
+  manager_id?: string | null;
+};
+type TestResponse = {
+  ok: boolean;
+  error?: string;
+  customers: TransferCustomer[];
+  managers?: Record<string, string[]>;
+  missing_customers?: string[];
+  ticked_managers?: string[];
+};
+type AccountsResponse = { configured: boolean; accounts: TransferCustomer[]; managers?: Record<string, string[]>; error?: string };
 
 function fmtWhen(iso: string | null): string {
   if (!iso) return "never";
@@ -145,6 +160,11 @@ export function GoogleAdsTab() {
     setLeadActions(data.google.lead_conversion_actions);
   }, [data, dirty]);
 
+  const managers = useMemo<Record<string, string[]>>(
+    () => (testResult?.ok ? testResult.managers : accountList?.managers) ?? data?.sync.manager_customers ?? {},
+    [accountList, testResult, data],
+  );
+
   const customerOptions = useMemo<SearchableMultiComboboxOption[]>(() => {
     const listed = testResult?.ok ? testResult.customers : (accountList?.accounts ?? []);
     const options: SearchableMultiComboboxOption[] = listed.map((c) => ({
@@ -153,10 +173,20 @@ export function GoogleAdsTab() {
     }));
     const listedIds = new Set(listed.map((c) => c.id));
     for (const id of customerIds) {
-      if (!listedIds.has(id)) options.push({ value: id, label: `${data?.sync.customers[id]?.name || formatGoogleCustomerId(id)} · not in the transfer dataset` });
+      if (listedIds.has(id)) continue;
+      options.push({
+        value: id,
+        label: managers[id]
+          ? `${formatGoogleCustomerId(id)} · manager account, no spend of its own`
+          : `${data?.sync.customers[id]?.name || formatGoogleCustomerId(id)} · not in the transfer dataset`,
+      });
     }
     return options;
-  }, [accountList, testResult, customerIds, data]);
+  }, [accountList, testResult, customerIds, data, managers]);
+
+  const accountName = (id: string) =>
+    (testResult?.ok ? testResult.customers : (accountList?.accounts ?? [])).find((c) => c.id === id)?.name || formatGoogleCustomerId(id);
+  const tickedManagers = customerIds.filter((id) => !!managers[id]);
 
   const actionOptions = useMemo<SearchableMultiComboboxOption[]>(() => {
     const seen = new Set<string>();
@@ -201,12 +231,16 @@ export function GoogleAdsTab() {
       const body = (await res.json()) as TestResponse;
       setTestResult(body);
       const missing = body.missing_customers ?? [];
+      const tickedMgrs = body.ticked_managers ?? [];
+      const problems = missing.length + tickedMgrs.length;
       toast({
-        title: body.ok ? (missing.length > 0 ? "Transfer found, some accounts missing" : "Transfer found") : "Test failed",
+        title: body.ok ? (problems > 0 ? "Transfer found, some ticked accounts can't be read" : "Transfer found") : "Test failed",
         description: body.ok
-          ? `${body.customers.length} account(s) in the dataset.${missing.length > 0 ? ` Not in the transfer: ${missing.map(formatGoogleCustomerId).join(", ")}.` : ""}`
+          ? `${body.customers.length} account(s) in the dataset.${missing.length > 0 ? ` Not in the transfer: ${missing.map(formatGoogleCustomerId).join(", ")}.` : ""}${
+              tickedMgrs.length > 0 ? ` Manager account (tick the accounts under it): ${tickedMgrs.map(formatGoogleCustomerId).join(", ")}.` : ""
+            }`
           : body.error,
-        variant: body.ok && missing.length === 0 ? undefined : "destructive",
+        variant: body.ok && problems === 0 ? undefined : "destructive",
       });
     } catch (err) {
       toast({ title: "Test failed", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
@@ -362,6 +396,20 @@ export function GoogleAdsTab() {
             )}
           </div>
 
+          {tickedManagers.length > 0 && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/40 p-3 text-xs text-foreground" data-testid="google-manager-ticked-banner">
+              <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+              <div className="space-y-1">
+                {tickedManagers.map((id) => (
+                  <p key={id}>
+                    {formatGoogleCustomerId(id)} is the manager account the transfer runs on, so it has no spend of its own. Untick it and tick the
+                    accounts this site reports on: {managers[id]!.map(accountName).join(", ")}.
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
           {data.sync.unticked_customers.length > 0 && (
             <div className="flex items-start gap-2 rounded-md border border-border p-3 text-xs text-muted-foreground" data-testid="google-unticked-banner">
               <IconInfoCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -397,6 +445,12 @@ export function GoogleAdsTab() {
                   {c.missing_tables.length > 0 ? ` · missing ${c.missing_tables.join(", ")}` : ""}
                 </p>
               ))}
+              {(testResult.ticked_managers ?? []).map((id) => (
+                <p key={id} className="text-destructive">
+                  <IconAlertTriangle className="inline h-3.5 w-3.5 mr-1" />
+                  <span className="font-mono">{formatGoogleCustomerId(id)}</span> — manager account. Tick the accounts under it instead.
+                </p>
+              ))}
               {(testResult.missing_customers ?? []).map((id) => (
                 <p key={id} className="text-destructive">
                   <IconAlertTriangle className="inline h-3.5 w-3.5 mr-1" />
@@ -419,6 +473,10 @@ export function GoogleAdsTab() {
               <code className="font-mono">ads_LandingPageStats_&lt;id&gt;</code>, <code className="font-mono">ads_CampaignConversionStats_&lt;id&gt;</code>,{" "}
               <code className="font-mono">ads_Campaign_&lt;id&gt;</code>, <code className="font-mono">ads_Customer_&lt;id&gt;</code>,{" "}
               <code className="font-mono">ads_ClickStats_&lt;id&gt;</code>). Table and column names are detected each sync.
+            </p>
+            <p>
+              A transfer on a manager account names every table after the manager but stores each account&apos;s rows inside them. Accounts are
+              listed from the <code className="font-mono">customer_id</code> column and every query filters by it, so ticked accounts never mix.
             </p>
             <p>
               Credentials: the same service account as GA4 BigQuery (<code className="font-mono">GCS_CREDENTIALS_JSON</code> /{" "}

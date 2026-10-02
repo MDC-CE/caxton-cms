@@ -68,4 +68,57 @@ describe("writeAdsConfigRaw", () => {
     expect(raw.ok && raw.data.utm_convention).toEqual({ mediums: { meta: "cpc" } });
     expect(loadAdsConfig(root, legacy(false)).settings.utm_convention.mediums.meta).toBe("cpc");
   });
+
+  it("keeps comments and blank lines when patching an existing file", () => {
+    fs.writeFileSync(
+      file(),
+      [
+        "meta:",
+        "  enabled: true",
+        "  ad_account_ids:",
+        "    - '11111'",
+        "",
+        "# Diagnostics thresholds",
+        "alert_thresholds:",
+        "",
+        "  # Severity",
+        "  severity_spend_share_pct: 5 # share of spend",
+        "  severity_spend_floor:",
+        "    USD: 50",
+        "",
+        "  # Clicks -> visits",
+        "  clicks_visits_drop_pct: 30",
+        "  ratio_min_clicks: 100",
+        "test_email_patterns: []",
+        "",
+      ].join("\n"),
+    );
+    writeAdsConfigRaw(
+      {
+        meta: { enabled: true, ad_account_ids: ["11111", "22222"] },
+        alert_thresholds: { severity_spend_share_pct: 10, severity_spend_floor: { USD: 50 }, clicks_visits_drop_pct: 30 },
+        test_email_patterns: ["*@example.com"],
+      },
+      root,
+    );
+    const text = fs.readFileSync(file(), "utf-8");
+    expect(text).toContain("\n\n# Diagnostics thresholds\nalert_thresholds:\n\n  # Severity\n");
+    expect(text).toContain("severity_spend_share_pct: 10 # share of spend");
+    expect(text).toContain("\n\n  # Clicks -> visits\n  clicks_visits_drop_pct: 30\n");
+    expect(text).not.toContain("ratio_min_clicks");
+    const raw = readAdsConfigRaw(root);
+    expect(raw.ok && raw.data).toEqual({
+      meta: { enabled: true, ad_account_ids: ["11111", "22222"] },
+      alert_thresholds: { severity_spend_share_pct: 10, severity_spend_floor: { USD: 50 }, clicks_visits_drop_pct: 30 },
+      test_email_patterns: ["*@example.com"],
+    });
+  });
+
+  it("an unchanged save leaves the file byte-for-byte the same", () => {
+    const original = "# top\nmeta:\n  enabled: false\n  ad_account_ids: ['33333']\n\n# hand-edited\nutm_convention:\n  case: any\n";
+    fs.writeFileSync(file(), original);
+    const raw = readAdsConfigRaw(root);
+    writeAdsConfigRaw(raw.ok ? raw.data : {}, root);
+    expect(fs.readFileSync(file(), "utf-8")).toBe(original);
+  });
 });

@@ -9,7 +9,9 @@
 
 import fs from "fs";
 import path from "path";
+import { isDeepStrictEqual } from "util";
 import yaml from "js-yaml";
+import { isMap, isNode, isScalar, parseDocument, type Document, type YAMLMap } from "yaml";
 import { parseAdsSettings, type AdsSettings } from "@shared/ads-settings";
 import { getDefaultContentRoot } from "./site-config";
 import { child } from "./logger";
@@ -117,11 +119,41 @@ export function adsConfigReadError(contentRoot?: string): string | null {
   return error;
 }
 
-/** Writes the raw object (keys staff edit by hand, like utm_convention, must already be in `data`). */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Moves `map` to `data` in place: only changed values are rewritten, so comments, blank lines and key order survive. */
+function patchYamlMap(doc: Document, map: YAMLMap, data: Record<string, unknown>): void {
+  for (const pair of [...map.items]) {
+    const key = isScalar(pair.key) ? pair.key.value : pair.key;
+    if (!(String(key) in data)) map.delete(key);
+  }
+  for (const [key, value] of Object.entries(data)) {
+    const node = map.get(key, true);
+    if (node !== undefined && isDeepStrictEqual(isNode(node) ? node.toJSON() : node, value)) continue;
+    if (isMap(node) && isPlainObject(value)) patchYamlMap(doc, node, value);
+    else if (isScalar(node) && (value === null || typeof value !== "object") && typeof node.value === typeof value) node.value = value;
+    else map.set(key, doc.createNode(value));
+  }
+}
+
+/**
+ * Writes the raw object (keys staff edit by hand, like utm_convention, must already be in `data`).
+ * An existing file is patched in place so hand-written comments and spacing are kept.
+ */
 export function writeAdsConfigRaw(data: Record<string, unknown>, contentRoot?: string): string {
   const file = adsConfigPath(contentRoot);
-  const dumped = yaml.dump(data, { lineWidth: 120, noRefs: true, sortKeys: false });
-  fs.writeFileSync(file, dumped.endsWith("\n") ? dumped : `${dumped}\n`, "utf-8");
+  let out: string | null = null;
+  if (fs.existsSync(file)) {
+    const doc = parseDocument(fs.readFileSync(file, "utf-8"));
+    if (doc.errors.length === 0 && isMap(doc.contents)) {
+      patchYamlMap(doc, doc.contents, data);
+      out = doc.toString({ lineWidth: 120, singleQuote: true, flowCollectionPadding: false });
+    }
+  }
+  out ??= yaml.dump(data, { lineWidth: 120, noRefs: true, sortKeys: false });
+  fs.writeFileSync(file, out.endsWith("\n") ? out : `${out}\n`, "utf-8");
   cache.delete(rootOf(contentRoot));
   return file;
 }

@@ -121,8 +121,21 @@ export function googleIssues(input: GoogleIssueInput): AdsIssue[] {
   const available = new Set(state.available_customers ?? []);
   for (const id of settings.customer_ids) {
     const c = state.customers[id];
+    const subAccounts = state.manager_customers?.[id];
     const missing = (state.available_customers && !available.has(id)) || /no tables/i.test(c?.sync_error ?? "");
-    if (missing) {
+    if (subAccounts) {
+      push({
+        id: `google_transfer_missing_account:${id}`,
+        code: "google_transfer_missing_account",
+        severity: "error",
+        title: `Manager account ticked instead of its accounts: ${formatGoogleCustomerId(id)}`,
+        why: `${formatGoogleCustomerId(id)} is the manager account the transfer runs on. Spend belongs to the accounts under it (${subAccounts.map(formatGoogleCustomerId).join(", ")}), so nothing is counted for the manager itself.`,
+        how_to_fix: "In Settings → Ads → Google Ads, untick the manager account and tick the accounts this site reports on.",
+        spend_affected: {},
+        scope: { account_id: id },
+        site_fixable: false,
+      });
+    } else if (missing) {
       push({
         id: `google_transfer_missing_account:${id}`,
         code: "google_transfer_missing_account",

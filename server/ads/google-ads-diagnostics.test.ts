@@ -75,6 +75,18 @@ describe("googleIssues", () => {
     expect(unticked.how_to_fix).toContain("Tick it");
   });
 
+  it("tells staff to tick the accounts under a ticked manager account", () => {
+    const issues = googleIssues({
+      ...base,
+      report: report(),
+      state: state({ available_customers: ["4759757599", "6067074954"], manager_customers: { [CID]: ["4759757599", "6067074954"] } }),
+    });
+    const issue = issues.find((i) => i.code === "google_transfer_missing_account")!;
+    expect(issue.severity).toBe("error");
+    expect(issue.title).toContain("Manager account");
+    expect(issue.why).toContain("475-975-7599");
+  });
+
   it("flags GA4 not linked and a failed gclid join", () => {
     const issues = googleIssues({
       ...base,

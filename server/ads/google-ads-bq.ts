@@ -1,8 +1,10 @@
 /**
- * Google Ads → BigQuery Data Transfer reader. The transfer writes one set of tables
- * per customer (`ads_<Table>_<customer_id>` views over `p_ads_<Table>_<customer_id>`;
- * older transfers use `p_<Table>_<customer_id>`). Table and column names are probed
- * from INFORMATION_SCHEMA each run, so a missing column reads as NULL instead of failing.
+ * Google Ads → BigQuery Data Transfer reader. The transfer writes one table set per
+ * transfer customer (`ads_<Table>_<id>` views over `p_ads_<Table>_<id>`; older transfers
+ * use `p_<Table>_<id>`). A transfer on a manager account writes every sub-account into the
+ * manager's set, so accounts are discovered from the `customer_id` column and every query
+ * filters by it. Table and column names are probed from INFORMATION_SCHEMA each run, so a
+ * missing column reads as NULL instead of failing.
  *
  * Credentials: the same service account as GA4 BigQuery (GCS_CREDENTIALS_JSON /
  * GCS_KEY_FILENAME / ADC). The SA needs BigQuery Data Viewer + Job User on the dataset.
@@ -28,14 +30,34 @@ export const GOOGLE_LOGICAL_TABLES = [
 ] as const;
 export type GoogleLogicalTable = (typeof GOOGLE_LOGICAL_TABLES)[number];
 
-/** Per customer: logical table → physical table name + its columns. */
+/** Per table set: logical table → physical table name + its columns. */
 export type GoogleCustomerTables = Partial<Record<GoogleLogicalTable, { name: string; columns: string[]; partitioned_name?: string }>>;
 
 export type GoogleTransferLayout = {
   project: string;
   dataset: string;
-  customers: Record<string, GoogleCustomerTables>;
+  /** Table set id (the `_<id>` suffix) → its tables. */
+  table_sets: Record<string, GoogleCustomerTables>;
+  /** Account id → table set holding its rows (the account itself, or its manager). */
+  accounts: Record<string, string>;
 };
+
+/** Tables holding one account's rows. */
+export function accountTables(layout: GoogleTransferLayout, cid: string): GoogleCustomerTables | undefined {
+  const set = layout.accounts[cid];
+  return set ? layout.table_sets[set] : undefined;
+}
+
+/** Table sets that aren't accounts themselves (manager accounts) → the accounts inside them. */
+export function managerTableSets(layout: GoogleTransferLayout): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [cid, set] of Object.entries(layout.accounts)) {
+    if (cid === set || layout.accounts[set] === set) continue;
+    (out[set] ??= []).push(cid);
+  }
+  for (const ids of Object.values(out)) ids.sort();
+  return out;
+}
 
 const TABLE_RE = new RegExp(`^(p_)?(ads_)?(${GOOGLE_LOGICAL_TABLES.join("|")})_(\\d{10})$`);
 
@@ -47,21 +69,29 @@ function tableRank(name: string): number {
   return 3;
 }
 
-/** Pure: INFORMATION_SCHEMA.COLUMNS rows → layout. */
-export function parseTransferLayout(project: string, dataset: string, rows: Array<{ table_name: string; column_name: string }>): GoogleTransferLayout {
+/**
+ * Pure: INFORMATION_SCHEMA.COLUMNS rows → layout. `setAccounts` = accounts found inside each
+ * table set; a set with none listed is assumed to hold only its own account.
+ */
+export function parseTransferLayout(
+  project: string,
+  dataset: string,
+  rows: Array<{ table_name: string; column_name: string }>,
+  setAccounts: Record<string, string[]> = {},
+): GoogleTransferLayout {
   const byTable = new Map<string, string[]>();
   for (const r of rows) {
     const cols = byTable.get(r.table_name) ?? [];
     cols.push(String(r.column_name));
     byTable.set(r.table_name, cols);
   }
-  const customers: GoogleTransferLayout["customers"] = {};
+  const tableSets: GoogleTransferLayout["table_sets"] = {};
   for (const [name, columns] of Array.from(byTable.entries())) {
     const m = TABLE_RE.exec(name);
     if (!m) continue;
     const logical = m[3] as GoogleLogicalTable;
     const cid = m[4]!;
-    const tables = (customers[cid] ??= {});
+    const tables = (tableSets[cid] ??= {});
     const prev = tables[logical];
     const partitioned = name.startsWith("p_") ? name : prev?.partitioned_name;
     if (!prev || tableRank(name) < tableRank(prev.name)) {
@@ -70,14 +100,20 @@ export function parseTransferLayout(project: string, dataset: string, rows: Arra
       prev.partitioned_name = partitioned;
     }
   }
-  return { project, dataset, customers };
+  const accounts: Record<string, string> = {};
+  const setIds = Object.keys(tableSets).sort();
+  for (const set of setIds) {
+    const found = setAccounts[set]?.length ? setAccounts[set]! : [set];
+    for (const cid of found) if (!accounts[cid] || cid === set) accounts[cid] = set;
+  }
+  return { project, dataset, table_sets: tableSets, accounts };
 }
 
 export function campaignStatsTable(t: GoogleCustomerTables) {
   return t.CampaignBasicStats ?? t.CampaignStats;
 }
 
-const CLICK_JOIN_COLUMNS = ["click_view_gclid", "campaign_id", "ad_group_id", "segments_ad_network_type", "segments_date"];
+const CLICK_JOIN_COLUMNS = ["click_view_gclid", "customer_id", "campaign_id", "ad_group_id", "segments_ad_network_type", "segments_date"];
 
 /** ClickStats reference for the GA4 gclid join; null when the table or its gclid/date columns are missing. */
 export function clickStatsRef(project: string, dataset: string, t: GoogleCustomerTables): { table: string; columns: string[] } | null {
@@ -95,8 +131,14 @@ function col(table: { columns: string[] }, name: string, type = "STRING"): strin
   return table.columns.includes(name) ? name : `CAST(NULL AS ${type})`;
 }
 
+/** Rows of the @cid account only; manager-account table sets mix every sub-account. */
+function accountCond(table: { columns: string[] }): string {
+  return table.columns.includes("customer_id") ? "CAST(customer_id AS STRING) = @cid" : "TRUE";
+}
+
 function latestFilter(table: { columns: string[] }): string {
-  return table.columns.includes("_DATA_DATE") && table.columns.includes("_LATEST_DATE") ? "WHERE _DATA_DATE = _LATEST_DATE" : "";
+  const latest = table.columns.includes("_DATA_DATE") && table.columns.includes("_LATEST_DATE") ? " AND _DATA_DATE = _LATEST_DATE" : "";
+  return `WHERE ${accountCond(table)}${latest}`;
 }
 
 /** Campaign network toggles (optional transfer columns) → result alias + label in `networks`. */
@@ -128,20 +170,20 @@ export type GoogleSqlSet = {
   customer?: string;
 };
 
-/** Pure: SQL for one customer. Date params: @since / @until (YYYY-MM-DD strings). */
+/** Pure: SQL for one account. Params: @cid (account id); stats also @since / @until (YYYY-MM-DD strings). */
 export function buildCustomerSql(layout: Pick<GoogleTransferLayout, "project" | "dataset">, t: GoogleCustomerTables): GoogleSqlSet {
   const out: GoogleSqlSet = {};
   const cs = campaignStatsTable(t);
   if (cs) {
     out.bounds = `SELECT CAST(MIN(segments_date) AS STRING) AS min_date, CAST(MAX(segments_date) AS STRING) AS max_date
-      FROM ${fq(layout, cs.name)} WHERE segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 400 DAY)`;
+      FROM ${fq(layout, cs.name)} WHERE segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 400 DAY) AND ${accountCond(cs)}`;
     out.campaign_stats = `SELECT CAST(segments_date AS STRING) AS date, CAST(campaign_id AS STRING) AS campaign_id,
         ${col(cs, "segments_ad_network_type")} AS network,
         SUM(${col(cs, "metrics_cost_micros", "INT64")}) AS cost_micros,
         SUM(${col(cs, "metrics_clicks", "INT64")}) AS clicks,
         SUM(${col(cs, "metrics_impressions", "INT64")}) AS impressions
       FROM ${fq(layout, cs.name)}
-      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until)
+      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until) AND ${accountCond(cs)}
       GROUP BY 1, 2, 3`;
   }
   const lp = t.LandingPageStats;
@@ -153,7 +195,7 @@ export function buildCustomerSql(layout: Pick<GoogleTransferLayout, "project" | 
         SUM(${col(lp, "metrics_clicks", "INT64")}) AS clicks,
         SUM(${col(lp, "metrics_impressions", "INT64")}) AS impressions
       FROM ${fq(layout, lp.name)}
-      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until)
+      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until) AND ${accountCond(lp)}
       GROUP BY 1, 2, 3, 4`;
   }
   const cv = t.CampaignConversionStats;
@@ -164,7 +206,7 @@ export function buildCustomerSql(layout: Pick<GoogleTransferLayout, "project" | 
         REGEXP_EXTRACT(${col(cv, "segments_conversion_action")}, r'(\\d+)$') AS action_id,
         SUM(${col(cv, "metrics_conversions", "FLOAT64")}) AS conversions
       FROM ${fq(layout, cv.name)}
-      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until)
+      WHERE segments_date BETWEEN DATE(@since) AND DATE(@until) AND ${accountCond(cv)}
       GROUP BY 1, 2, 3, 4, 5`;
   }
   const c = t.Campaign;
@@ -488,6 +530,23 @@ async function run(client: BigQuery, query: string, params?: Record<string, unkn
   }
 }
 
+/** Pure: SQL listing the accounts inside one table set (Customer rows, plus accounts with recent stats); null when no table has `customer_id`. */
+export function buildSetAccountsSql(layout: Pick<GoogleTransferLayout, "project" | "dataset">, t: GoogleCustomerTables): string | null {
+  const parts: string[] = [];
+  const cu = t.Customer;
+  if (cu?.columns.includes("customer_id")) {
+    const notManager = cu.columns.includes("customer_manager") ? " WHERE NOT IFNULL(customer_manager, FALSE)" : "";
+    parts.push(`SELECT DISTINCT CAST(customer_id AS STRING) AS id FROM ${fq(layout, cu.name)}${notManager}`);
+  }
+  const cs = campaignStatsTable(t);
+  if (cs?.columns.includes("customer_id")) {
+    parts.push(
+      `SELECT DISTINCT CAST(customer_id AS STRING) AS id FROM ${fq(layout, cs.name)} WHERE segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 400 DAY)`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" UNION DISTINCT ") : null;
+}
+
 export async function probeTransferLayout(client: BigQuery, project: string, dataset: string): Promise<GoogleTransferLayout> {
   const rows = await run(
     client,
@@ -495,16 +554,23 @@ export async function probeTransferLayout(client: BigQuery, project: string, dat
      WHERE REGEXP_CONTAINS(table_name, @re)`,
     { re: TABLE_RE.source },
   );
-  return parseTransferLayout(
-    project,
-    dataset,
-    rows.map((r) => ({ table_name: String(r.table_name), column_name: String(r.column_name) })),
+  const columns = rows.map((r) => ({ table_name: String(r.table_name), column_name: String(r.column_name) }));
+  const sets = parseTransferLayout(project, dataset, columns).table_sets;
+  const setAccounts: Record<string, string[]> = {};
+  await Promise.all(
+    Object.entries(sets).map(async ([set, t]) => {
+      const sql = buildSetAccountsSql({ project, dataset }, t);
+      if (!sql) return;
+      const found = await run(client, sql).catch(() => []);
+      setAccounts[set] = found.map((r) => s(r.id)).filter((id): id is string => !!id && /^\d{10}$/.test(id));
+    }),
   );
+  return parseTransferLayout(project, dataset, columns, setAccounts);
 }
 
 /** Partition id (YYYYMMDD) → last modified ISO, for the campaign stats + conversion tables. */
 export async function queryPartitionLoads(client: BigQuery, layout: GoogleTransferLayout, cid: string, sinceDate: string): Promise<Map<string, string>> {
-  const t = layout.customers[cid] ?? {};
+  const t = accountTables(layout, cid) ?? {};
   const names = [campaignStatsTable(t)?.partitioned_name, t.CampaignConversionStats?.partitioned_name].filter((x): x is string => !!x);
   const out = new Map<string, string>();
   if (names.length === 0) return out;
@@ -539,13 +605,14 @@ export type CustomerPull = {
 };
 
 export async function queryCustomerMeta(client: BigQuery, layout: GoogleTransferLayout, cid: string): Promise<CustomerPull> {
-  const sql = buildCustomerSql(layout, layout.customers[cid] ?? {});
+  const sql = buildCustomerSql(layout, accountTables(layout, cid) ?? {});
+  const p = { cid };
   const [bounds, customer, campaigns, adGroups, ads] = await Promise.all([
-    sql.bounds ? run(client, sql.bounds) : Promise.resolve([]),
-    sql.customer ? run(client, sql.customer) : Promise.resolve([]),
-    sql.campaigns ? run(client, sql.campaigns) : Promise.resolve([]),
-    sql.ad_groups ? run(client, sql.ad_groups) : Promise.resolve([]),
-    sql.ads ? run(client, sql.ads) : Promise.resolve([]),
+    sql.bounds ? run(client, sql.bounds, p) : Promise.resolve([]),
+    sql.customer ? run(client, sql.customer, p) : Promise.resolve([]),
+    sql.campaigns ? run(client, sql.campaigns, p) : Promise.resolve([]),
+    sql.ad_groups ? run(client, sql.ad_groups, p) : Promise.resolve([]),
+    sql.ads ? run(client, sql.ads, p) : Promise.resolve([]),
   ]);
   const cu = customer[0] ?? {};
   const autoTagging = cu.auto_tagging == null ? null : cu.auto_tagging === true || String(cu.auto_tagging).toLowerCase() === "true";
@@ -597,11 +664,11 @@ export async function queryCustomerStats(
   range: { since: string; until: string },
   convRange: { since: string; until: string } | null,
 ): Promise<{ campaignStats: RawCampaignStat[]; landingStats: RawLandingStat[]; conversions: RawConversion[] }> {
-  const sql = buildCustomerSql(layout, layout.customers[cid] ?? {});
+  const sql = buildCustomerSql(layout, accountTables(layout, cid) ?? {});
   const [cs, lp, cv] = await Promise.all([
-    sql.campaign_stats ? run(client, sql.campaign_stats, range) : Promise.resolve([]),
-    sql.landing_stats ? run(client, sql.landing_stats, range) : Promise.resolve([]),
-    sql.conversions && convRange ? run(client, sql.conversions, convRange) : Promise.resolve([]),
+    sql.campaign_stats ? run(client, sql.campaign_stats, { ...range, cid }) : Promise.resolve([]),
+    sql.landing_stats ? run(client, sql.landing_stats, { ...range, cid }) : Promise.resolve([]),
+    sql.conversions && convRange ? run(client, sql.conversions, { ...convRange, cid }) : Promise.resolve([]),
   ]);
   return {
     campaignStats: cs.map((r) => ({
@@ -636,7 +703,7 @@ export type TransferTestResult = {
   ok: boolean;
   error?: string;
   error_kind?: GoogleTransferError["kind"];
-  /** Customer ids that have transfer tables in the dataset. */
+  /** Accounts with rows in the dataset (in their own table set or their manager's). */
   customers: Array<{
     id: string;
     name: string | null;
@@ -645,7 +712,11 @@ export type TransferTestResult = {
     data_since: string | null;
     data_through: string | null;
     missing_tables: GoogleLogicalTable[];
+    /** Manager account whose table set holds this account's rows; null when it has its own. */
+    manager_id: string | null;
   }>;
+  /** Manager accounts the transfer runs on → accounts inside them. Ticking a manager reads nothing. */
+  managers?: Record<string, string[]>;
 };
 
 const REQUIRED_TABLES: GoogleLogicalTable[] = ["Campaign", "CampaignConversionStats", "LandingPageStats", "Customer"];
@@ -661,7 +732,7 @@ export async function countLoadedDays(project: string, dataset: string, since: s
   try {
     const client = googleBigQueryClient(project);
     const layout = await probeTransferLayout(client, project, dataset);
-    const tables = Object.values(layout.customers)
+    const tables = Object.values(layout.table_sets)
       .map((t) => campaignStatsTable(t)?.name)
       .filter((x): x is string => !!x);
     if (tables.length === 0) return 0;
@@ -673,30 +744,33 @@ export async function countLoadedDays(project: string, dataset: string, since: s
   }
 }
 
-/** Read-only: list customers in the dataset with their newest loaded day. */
+/** Read-only: list accounts in the dataset with their newest loaded day. */
 export async function testGoogleTransfer(project: string, dataset: string): Promise<TransferTestResult> {
   try {
     const client = googleBigQueryClient(project);
     const layout = await probeTransferLayout(client, project, dataset);
-    const ids = Object.keys(layout.customers).sort();
-    const customers: TransferTestResult["customers"] = [];
-    for (const id of ids) {
-      const t = layout.customers[id]!;
-      const sql = buildCustomerSql(layout, t);
-      const [bounds, cu] = await Promise.all([
-        sql.bounds ? run(client, sql.bounds).catch(() => []) : Promise.resolve([]),
-        sql.customer ? run(client, sql.customer).catch(() => []) : Promise.resolve([]),
-      ]);
-      customers.push({
-        id,
-        name: s(cu[0]?.name),
-        currency: s(cu[0]?.currency),
-        data_since: s(bounds[0]?.min_date),
-        data_through: s(bounds[0]?.max_date),
-        missing_tables: missingTablesFor(t),
-      });
-    }
-    return { ok: true, customers };
+    const ids = Object.keys(layout.accounts).sort();
+    const customers = await Promise.all(
+      ids.map(async (id): Promise<TransferTestResult["customers"][number]> => {
+        const set = layout.accounts[id]!;
+        const t = layout.table_sets[set]!;
+        const sql = buildCustomerSql(layout, t);
+        const [bounds, cu] = await Promise.all([
+          sql.bounds ? run(client, sql.bounds, { cid: id }).catch(() => []) : Promise.resolve([]),
+          sql.customer ? run(client, sql.customer, { cid: id }).catch(() => []) : Promise.resolve([]),
+        ]);
+        return {
+          id,
+          name: s(cu[0]?.name),
+          currency: s(cu[0]?.currency),
+          data_since: s(bounds[0]?.min_date),
+          data_through: s(bounds[0]?.max_date),
+          missing_tables: missingTablesFor(t),
+          manager_id: set === id ? null : set,
+        };
+      }),
+    );
+    return { ok: true, customers, managers: managerTableSets(layout) };
   } catch (err) {
     const e = err instanceof GoogleTransferError ? err : classifyBqError(err);
     return { ok: false, error: e.message, error_kind: e.kind, customers: [] };
