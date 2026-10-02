@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import App from "./App";
 import { preloadSectionsFromInitialData } from "./components/sectionRegistry";
 import { preloadPublicPageChunks } from "./lib/preloadPublicPageChunk";
+import { setThemePaint, type ThemePaint } from "@shared/theme-palette";
 
 interface SingleQuery {
   queryKey: unknown[];
@@ -97,6 +98,8 @@ export async function render(
   url: string,
   initialDataPayload: InitialDataPayload | null,
 ): Promise<string> {
+  const themePaint = (initialDataPayload as { themePaint?: ThemePaint } | null)?.themePaint ?? null;
+  setThemePaint(themePaint);
   const restoreLocation = installSsrLocation(url);
   const ssrQueryClient = new QueryClient({
     defaultOptions: {

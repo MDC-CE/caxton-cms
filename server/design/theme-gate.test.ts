@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { evaluatePageThemeColors } from "./theme-gate";
-import { classifyThemeValue, resolveSectionBackgroundCss, buildThemeBackgroundCss } from "@shared/theme-palette";
+import { classifyThemeValue, resolveSectionBackgroundCss, buildThemeBackgroundCss, sectionBackgroundPaint, setThemePaint } from "@shared/theme-palette";
 import { findOffThemeInlineStyles } from "@shared/rich-text-inline-styles";
 import type { SiteThemeConfig } from "../theme-config";
 
@@ -27,11 +27,35 @@ describe("classifyThemeValue", () => {
 });
 
 describe("resolveSectionBackgroundCss", () => {
+  afterEach(() => setThemePaint(null));
+
   it("resolves IDs through theme vars with legacy fallback", () => {
     expect(resolveSectionBackgroundCss("muted")).toBe("var(--theme-bg-muted, hsl(var(--muted)))");
     expect(resolveSectionBackgroundCss("light-blue-5")).toBe("var(--theme-bg-light-blue-5)");
     expect(resolveSectionBackgroundCss("#fff")).toBe("#fff");
     expect(resolveSectionBackgroundCss("bg-muted/30")).toBe("bg-muted/30");
+  });
+
+  it("paints a theme id as a solid background-color from colors.light", () => {
+    setThemePaint({
+      light: { "--muted": "0 0% 98%", "--secondary": "0 0% 96%" },
+      backgrounds: [
+        { id: "muted", cssVar: "--muted" },
+        { id: "secondary", cssVar: "--secondary" },
+        { id: "light-blue-5", value: "hsl(210 100% 50% / 0.05)" },
+        { id: "light-blue-5-gradient", value: "linear-gradient(to bottom, hsl(var(--secondary)), transparent)" },
+      ],
+    });
+    expect(sectionBackgroundPaint("secondary")).toEqual({ backgroundColor: "hsl(0 0% 96%)" });
+    expect(sectionBackgroundPaint("light-blue-5")).toEqual({
+      backgroundColor: "hsl(210 100% 50% / 0.05)",
+    });
+    expect(sectionBackgroundPaint("light-blue-5-gradient")).toEqual({
+      backgroundImage: "linear-gradient(to bottom, hsl(0 0% 96%), transparent)",
+    });
+    expect(sectionBackgroundPaint("not-a-theme-id")).toEqual({
+      background: "var(--theme-bg-not-a-theme-id)",
+    });
   });
 
   it("emits vars for every background entry", () => {
