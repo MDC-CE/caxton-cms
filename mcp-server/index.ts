@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerSeoClusterTools } from "./tools/seo-clusters.js";
 import { registerComponentTools } from "./tools/components.js";
+import { registerDesignTools } from "./tools/design.js";
 import { registerUserTools } from "./tools/user.js";
 import { registerExplainTools } from "./tools/explain.js";
 import { registerProductTools } from "./tools/product.js";
@@ -409,6 +410,7 @@ async function createMcpServer(
   registerPageTools(mcp, mcpAuthor, mcpToken, grants);
   registerSeoClusterTools(mcp, mcpToken, grants);
   registerComponentTools(mcp, mcpToken, grants);
+  registerDesignTools(mcp, mcpToken, grants);
   registerUserTools(mcp, mcpToken, grants, {
     activeRoleId: opts?.activeRoleId,
     roleDescription: opts?.roleDescription,

@@ -5,6 +5,7 @@ import type { ListPressMentionsSection } from "@shared/schema";
 import { UniversalImage } from "@/components/UniversalImage";
 import { Badge } from "@/components/ui/badge";
 import { coerceToHtml, coerceToText } from "@/lib/variable-manager";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 /** Approx. 5 lines of card excerpt. */
 const CLAMPED_WORD_LIMIT = 30;
@@ -70,19 +71,11 @@ export default function ListPressMentionsCards({ data }: ListPressMentionsCardsP
   const clampExcerpts = data.clamp_excerpts === true;
   const readMoreLabel = data.read_more_label || "Read more";
   const columns = data.columns || 3;
-  const background = data.background;
   const columnCount = useResponsiveColumns(columns);
 
   if (items.length === 0) return null;
 
-  const bgStyle: React.CSSProperties = {};
-  if (background) {
-    if (background.startsWith("linear-gradient") || background.startsWith("radial-gradient")) {
-      bgStyle.backgroundImage = background;
-    } else {
-      bgStyle.backgroundColor = background;
-    }
-  }
+  const bgStyle: React.CSSProperties = sectionBackgroundStyle(data.background);
 
   const indexedItems = items.map((item, index) => ({ item, index }));
   const columnGroups = splitIntoColumns(indexedItems, columnCount);

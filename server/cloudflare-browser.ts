@@ -400,3 +400,114 @@ export async function captureScreenshotToWebp(
 
   throw lastError ?? new Error("Cloudflare screenshot failed after retries");
 }
+
+// ─── Full-page render review (screenshot + rendered HTML) ──────────────────
+
+export type ReviewViewport = "desktop" | "mobile";
+
+export const REVIEW_VIEWPORTS: Record<ReviewViewport, { width: number; height: number; isMobile: boolean }> = {
+  desktop: { width: 1440, height: 900, isMobile: false },
+  mobile: { width: 390, height: 844, isMobile: true },
+};
+
+/** Tallest full-page capture kept (px); longer pages are cropped at the bottom. */
+export const REVIEW_MAX_PAGE_HEIGHT = 16_000;
+
+const PAGE_READY_SELECTOR = "[data-screenshot-root][data-capture-ready='1']";
+
+/**
+ * POST to a Browser Rendering REST endpoint with the shared pacing slot and
+ * 429 cooldown (same account budget as entry-preview screenshots).
+ */
+async function postBrowserRendering(endpointPath: string, body: Record<string, unknown>, contentRoot?: string): Promise<Response> {
+  const configErr = cloudflareBrowserConfigError(contentRoot);
+  if (configErr) throw new Error(configErr);
+  const accountId = resolveCloudflareAccountId().value;
+  const token = resolveCloudflareApiToken().value;
+  const endpoint =
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}` +
+    `/browser-rendering/${endpointPath}?cacheTTL=0`;
+  const maxRetries = Math.max(1, getCloudflareScreenshotMaxRetries(contentRoot));
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    await acquireScreenshotSlot(contentRoot);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 429) {
+      const detail = await res.text().catch(() => "");
+      extendRateLimitCooldown(parseRetryAfterMs(res) ?? backoffDelayMs(attempt));
+      lastError = new Error(`Cloudflare ${endpointPath} rate limited (429)${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+      continue;
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Cloudflare ${endpointPath} failed (${res.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+    }
+    return res;
+  }
+  throw lastError ?? new Error(`Cloudflare ${endpointPath} failed after retries`);
+}
+
+function reviewGotoBody(url: string, viewport: ReviewViewport, timeoutMs: number): Record<string, unknown> {
+  const vp = REVIEW_VIEWPORTS[viewport];
+  return {
+    url,
+    viewport: { width: vp.width, height: vp.height, deviceScaleFactor: 1, isMobile: vp.isMobile, hasTouch: vp.isMobile },
+    gotoOptions: { waitUntil: "networkidle0", timeout: timeoutMs },
+    waitForSelector: { selector: PAGE_READY_SELECTOR, timeout: timeoutMs },
+  };
+}
+
+/** Full-page screenshot of a signed /private/page-preview URL → WebP (height capped). */
+export async function captureFullPageWebp(opts: {
+  url: string;
+  viewport: ReviewViewport;
+  contentRoot?: string;
+  timeoutMs?: number;
+}): Promise<{ webp: Buffer; width: number; height: number; cropped: boolean }> {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const res = await postBrowserRendering(
+    "screenshot",
+    {
+      ...reviewGotoBody(opts.url, opts.viewport, timeoutMs),
+      screenshotOptions: { type: "png", fullPage: true, omitBackground: false },
+    },
+    opts.contentRoot,
+  );
+  const png = Buffer.from(await res.arrayBuffer());
+  if (png.length < 100) throw new Error("Cloudflare screenshot returned empty or tiny PNG");
+  const meta = await sharp(png, { limitInputPixels: false }).metadata();
+  const width = meta.width ?? REVIEW_VIEWPORTS[opts.viewport].width;
+  const fullHeight = meta.height ?? 0;
+  const height = Math.min(fullHeight, REVIEW_MAX_PAGE_HEIGHT);
+  const webp = await sharp(png, { limitInputPixels: false })
+    .extract({ left: 0, top: 0, width, height })
+    .webp({ quality: 80 })
+    .toBuffer();
+  return { webp, width, height, cropped: fullHeight > height };
+}
+
+/** Rendered HTML of the page after it is capture-ready (to read in-page measurement JSON). */
+export async function fetchRenderedHtml(opts: {
+  url: string;
+  viewport: ReviewViewport;
+  contentRoot?: string;
+  timeoutMs?: number;
+}): Promise<string> {
+  const res = await postBrowserRendering(
+    "content",
+    reviewGotoBody(opts.url, opts.viewport, opts.timeoutMs ?? 60_000),
+    opts.contentRoot,
+  );
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text) as { success?: boolean; result?: unknown };
+    if (typeof json.result === "string") return json.result;
+  } catch {
+    /* raw HTML */
+  }
+  return text;
+}

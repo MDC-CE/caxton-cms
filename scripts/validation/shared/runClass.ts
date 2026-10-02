@@ -96,6 +96,8 @@ export const ENTRY_LOCAL_VALIDATOR_NAMES = [
   "section-variants",
   "text-limits",
   "backgrounds",
+  "rich-text-styles",
+  "design-layout",
   "faqs",
   "schema",
   "forms",

@@ -10,6 +10,7 @@ import type {
 } from "@shared/schema";
 import { Card } from "@/components/ui/card";
 import { useInternalNav } from "@/hooks/useInternalNav";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 interface PartnershipCarouselProps {
   data: PartnershipCarouselSection;
@@ -449,7 +450,7 @@ export default function PartnershipCarouselSplitCard({
   return (
     <section
       className="w-full"
-      style={data.background ? { background: data.background } : undefined}
+      style={sectionBackgroundStyle(data.background)}
       data-testid="section-partnership-carousel"
       onMouseEnter={handlePause}
       onMouseLeave={handleResume}

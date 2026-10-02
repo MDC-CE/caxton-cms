@@ -13,8 +13,8 @@ behaviors:
   listing:
     source: dynamic_entries
     notes: >-
-      Optional. Without dynamic_entries, authored items[] render as today. With database/content_type,
-      resolve fills items (item_template + hardcoded_entries).
+      Optional. Without dynamic_entries, authored items[] render as today. With database/content_type, resolve fills
+      items (item_template + hardcoded_entries).
 image_sizes:
   default.items[].logo: "(min-width: 768px) 220px, 80px"
 props:
@@ -64,8 +64,7 @@ props:
       year:
         type: string
         required: false
-    description: >-
-      Logo row. Author statically, or leave for resolveDynamicEntries when using dynamic_entries.
+    description: Logo row. Author statically, or leave for resolveDynamicEntries when using dynamic_entries.
   dynamic_entries:
     type: object
     required: false
@@ -120,3 +119,22 @@ variants:
   default:
     description: Continuously scrolling horizontal logo band
     best_for: Award / technology / partner logos under hero or credibility strip
+    content_shape:
+      items:
+        items:
+          min: 6
+          max: 14
+          typical: 8
+      text:
+        title:
+          min: 27
+          max: 89
+          typical: 66
+      image: required
+      icon: unused
+      sample_pages: 90
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Pages with fewer than 6 awards, when a static grid layout is preferred, or when no title text (27-89 chars) is
+      available to accompany the logos.
+    metadata_status: draft

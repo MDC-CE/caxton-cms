@@ -30,6 +30,8 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import { loadSiteTheme } from "../theme-config";
+import { scanThemeBackgroundUsage, replaceSectionBackgroundEverywhere } from "../design/theme-usage";
 import { evaluateVariableWrite, type VariableWriteAction } from "../variable-write-rules";
 import { api } from "../rate-limit/api";
 import { handleVariableCatalogRequest } from "../variable-catalog-route";
@@ -415,6 +417,51 @@ export function registerSettingsRoutes(app: Express): void {
     } catch (error) {
       log.error({ err: error }, "Error saving theme palettes:");
       res.status(500).json({ error: "Failed to save theme palettes" });
+    }
+  });
+
+  api.get(app, "/api/theme/background-usage", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "theme_edit");
+      if (!auth.authorized) return;
+      const contentRoot = getContentRoot(res);
+      const theme = loadSiteTheme(contentRoot);
+      if (!theme) {
+        res.status(404).json({ error: "Theme configuration not found" });
+        return;
+      }
+      res.json(scanThemeBackgroundUsage(contentRoot, theme.backgrounds ?? []));
+    } catch (error) {
+      log.error({ err: error }, "Error scanning theme background usage:");
+      res.status(500).json({ error: "Failed to scan background usage" });
+    }
+  });
+
+  api.post(app, "/api/theme/backgrounds/replace", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "theme_edit");
+      if (!auth.authorized) return;
+      const parsed = z.object({ from: z.string().min(1), to: z.string().min(1) }).safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "from and to are required" });
+        return;
+      }
+      const contentRoot = getContentRoot(res);
+      const theme = loadSiteTheme(contentRoot);
+      const backgrounds = theme?.backgrounds ?? [];
+      if (!backgrounds.some((b) => b.id === parsed.data.to)) {
+        res.status(400).json({ error: `"${parsed.data.to}" is not a background in the theme` });
+        return;
+      }
+      const result = replaceSectionBackgroundEverywhere(contentRoot, parsed.data.from, parsed.data.to, backgrounds);
+      for (const file of result.files) {
+        markFileAsModified(file, auth.author || undefined, undefined, contentRoot);
+      }
+      if (result.files.length > 0) invalidateContentCaches();
+      res.json({ ok: true, replaced: result.replaced, files: result.files });
+    } catch (error) {
+      log.error({ err: error }, "Error replacing section backgrounds:");
+      res.status(500).json({ error: "Failed to replace backgrounds" });
     }
   });
 

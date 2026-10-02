@@ -9,6 +9,7 @@ import type {
   PartnershipCarouselSection,
   PartnershipSlide,
 } from "@shared/schema";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 import { Card } from "@/components/ui/card";
 
 interface PartnershipCarouselProps {
@@ -211,7 +212,7 @@ export default function PartnershipCarouselDefault({ data }: PartnershipCarousel
   return (
     <section
       className="w-full"
-      style={data.background ? { background: data.background } : undefined}
+      style={sectionBackgroundStyle(data.background)}
       data-testid="section-partnership-carousel"
       onMouseEnter={handlePause}
       onMouseLeave={handleResume}

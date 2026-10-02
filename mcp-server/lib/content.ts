@@ -11,6 +11,12 @@ import {
   type ComponentBehaviors,
 } from "../../shared/component-behaviors.js";
 import { typeUsesSharedTemplate } from "../../shared/sharedLayoutPaths.js";
+import {
+  resolveLayoutTraits,
+  type ComponentLayoutBlock,
+  type ResolvedLayoutTraits,
+  type VariantContentShape,
+} from "../../shared/component-layout-traits.js";
 import { entryItemLayer, entryItemLocales, entrySourceStatus, listTypePages } from "../../server/entry-layer.js";
 import { entrySourceRoot } from "./entry-source.js";
 
@@ -829,6 +835,9 @@ export interface ComponentVariantSummary {
   name: string;
   description?: string;
   best_for?: string;
+  avoid_when?: string;
+  content_shape?: VariantContentShape;
+  metadata_status?: "draft" | "approved";
 }
 
 export interface ComponentSchemaSlim {
@@ -837,6 +846,34 @@ export interface ComponentSchemaSlim {
   when_to_use: string | null;
   variants: ComponentVariantSummary[];
   behaviors?: ComponentBehaviors;
+  layout?: ComponentLayoutBlock;
+}
+
+function variantSummaryFromDef(name: string, def: Record<string, unknown> | null): ComponentVariantSummary {
+  const entry: ComponentVariantSummary = { name };
+  if (!def) return entry;
+  if (typeof def.description === "string") entry.description = def.description;
+  if (typeof def.best_for === "string") entry.best_for = def.best_for;
+  if (typeof def.avoid_when === "string") entry.avoid_when = def.avoid_when;
+  if (def.content_shape && typeof def.content_shape === "object" && !Array.isArray(def.content_shape)) {
+    entry.content_shape = def.content_shape as VariantContentShape;
+  }
+  if (def.metadata_status === "draft" || def.metadata_status === "approved") {
+    entry.metadata_status = def.metadata_status;
+  }
+  return entry;
+}
+
+function layoutBlockFrom(parsed: Record<string, unknown>): ComponentLayoutBlock | undefined {
+  const raw = parsed.layout;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: ComponentLayoutBlock = {};
+  if (r.flow === "in" || r.flow === "out") out.flow = r.flow;
+  if (typeof r.self_padded === "boolean") out.self_padded = r.self_padded;
+  else if (Array.isArray(r.self_padded)) out.self_padded = r.self_padded.filter((v): v is string => typeof v === "string");
+  if (r.edge === "top_of_page") out.edge = "top_of_page";
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function getComponentSchema(componentType: string, contentPath?: string): ComponentSchemaSlim | null {
@@ -867,11 +904,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
   const variants: ComponentVariantSummary[] = [];
   if (parsed.variants && typeof parsed.variants === "object" && !Array.isArray(parsed.variants)) {
     for (const [variantName, variantDef] of Object.entries(parsed.variants as Record<string, unknown>)) {
-      const def = variantDef as Record<string, unknown> | null;
-      const entry: ComponentVariantSummary = { name: variantName };
-      if (def && typeof def.description === "string") entry.description = def.description;
-      if (def && typeof def.best_for === "string") entry.best_for = def.best_for;
-      variants.push(entry);
+      variants.push(variantSummaryFromDef(variantName, variantDef as Record<string, unknown> | null));
     }
   } else if (Array.isArray(parsed.variants)) {
     for (const v of parsed.variants) {
@@ -880,10 +913,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
       } else if (v && typeof v === "object") {
         const def = v as Record<string, unknown>;
         if (typeof def.name !== "string") continue;
-        const entry: ComponentVariantSummary = { name: def.name };
-        if (typeof def.description === "string") entry.description = def.description;
-        if (typeof def.best_for === "string") entry.best_for = def.best_for;
-        variants.push(entry);
+        variants.push(variantSummaryFromDef(def.name, def));
       }
     }
   }
@@ -894,6 +924,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
 
   const behaviors = resolveComponentBehaviors(parsed as Record<string, unknown>);
   const hasBehaviors = Object.keys(behaviors).length > 0;
+  const layout = layoutBlockFrom(parsed as Record<string, unknown>);
 
   return {
     name,
@@ -901,6 +932,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
     when_to_use,
     variants,
     ...(hasBehaviors ? { behaviors } : {}),
+    ...(layout ? { layout } : {}),
   };
 }
 
@@ -909,6 +941,8 @@ export interface ComponentVariantDetail {
   variant: string;
   variant_props: Record<string, unknown> | null;
   example: string | null;
+  metadata?: ComponentVariantSummary;
+  layout?: ResolvedLayoutTraits;
 }
 
 export function getComponentVariant(
@@ -1009,5 +1043,12 @@ export function getComponentVariant(
     }
   }
 
-  return { componentType, variant, variant_props, example };
+  let metadata: ComponentVariantSummary | undefined;
+  if (variantsDef && typeof variantsDef === "object" && !Array.isArray(variantsDef)) {
+    const def = (variantsDef as Record<string, unknown>)[variant];
+    metadata = variantSummaryFromDef(variant, (def && typeof def === "object" ? def : null) as Record<string, unknown> | null);
+  }
+  const layout = resolveLayoutTraits(layoutBlockFrom(parsed as Record<string, unknown>), variant);
+
+  return { componentType, variant, variant_props, example, ...(metadata ? { metadata } : {}), layout };
 }

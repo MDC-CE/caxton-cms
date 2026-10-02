@@ -73,6 +73,10 @@ import {
 } from "../lib/deprecated-field-mcp.js";
 import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
 import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
+import { THEME_COLORS_CODE } from "../../shared/theme-palette.js";
+import { RENDER_REVIEW_REQUIRED_CODE, renderReviewRequiredResult } from "../lib/render-review-mcp.js";
+import { createEntryDiscoveryPath, designLoopNextActions } from "../lib/design-guidance.js";
+import { themeColorsRequiredResult } from "../lib/theme-colors-mcp.js";
 import {
   DEPRECATED_FIELD_CODE,
   deprecatedSystemHint,
@@ -5597,7 +5601,8 @@ export function registerPageTools(
     "Confirm with the user before calling — this makes the page live. " +
     "Page-level fields in the draft (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
     "Rejections: proposal_required (swarm roles), draft_in_proposal (draft under an open proposal — apply that proposal instead), translation_source_changed, " +
-    "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees). " +
+    "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees), " +
+    "render_review_required (entry-owned page layout never reviewed or restructured since — run review_page_render on the draft first). " +
     "On success, next_actions requires run_entry_diagnostics (hard + one slug → job_id; poll get_diagnostics_job).",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
@@ -5692,6 +5697,25 @@ export function registerPageTools(
               publish: true,
             });
           }
+          if (serverCode === THEME_COLORS_CODE) {
+            return themeColorsRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === RENDER_REVIEW_REQUIRED_CODE) {
+            return renderReviewRequiredResult(errMsg, data, {
+              retryTool: "publish_draft",
+              contentType,
+              slug,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variantSlug,
+              site,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -5767,7 +5791,8 @@ export function registerPageTools(
     "Page-level fields (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
     "If live changed after the draft was created, non-overlapping edits are rebuilt on top of live (warning draft_rebuilt); overlaps fail with draft_base_stale (details.conflicting_fields) — " +
     "retry with confirm_overwrite_newer_live only after the user agrees to discard those live changes. draft_base_unknown = draft has no recorded base (same confirm). " +
-    "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure. " +
+    "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure, " +
+    "render_review_required (entry-owned layout changed vs live with no matching review_page_render). " +
     "dry_run: true runs every check and returns published_diff without writing. " +
     "For attached shared-layout entries, pass the entry slug (not \"single\") to promote entry drafts from translate_entry " +
     "({variantSlug}.{locale}.yml under the entry folder). Pass slug \"single\" only to promote a type-root template variant. " +
@@ -5925,6 +5950,25 @@ export function registerPageTools(
               locale,
               variant: variantSlug,
               publish: true,
+            });
+          }
+          if (serverCode === THEME_COLORS_CODE) {
+            return themeColorsRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === RENDER_REVIEW_REQUIRED_CODE) {
+            return renderReviewRequiredResult(errMsg, data, {
+              retryTool: "promote_variant",
+              contentType,
+              slug,
+              locale,
+              variantSlug,
+              site,
             });
           }
           return fail(errMsg, {
@@ -6457,6 +6501,7 @@ const next_actions: NextAction[] = entryDeleted
     "Shared-layout / single_template drafts carry fields only: " +
     "put body/fields on the locale (title, description, content, … per field_mapping); sections must be [] — shell comes from template.{locale}.yml. " +
     "Call explain_site topic shared-layout and/or get_content_type_info before creating shared-layout entries. " +
+    "Section-built (entry-owned) pages such as landings: call get_page_recipe first to pick sections, then review_page_render on the draft before publish_draft (explain_site topic design). " +
     MULTI_SITE_TOOL_BLURB + "\n\n" +
     "locales map: locale → { meta?, sections?, …field_mapping keys }. Exactly one locale key.\n" +
     "URL pattern params (from url_pattern, e.g. :category) must be on the locale object — never _common.yml. " +
@@ -6829,6 +6874,24 @@ const next_actions: NextAction[] = entryDeleted
         ([, v]) => v.fields && typeof (v.fields as Record<string, unknown>).seo === "object",
       );
 
+      {
+        const { evaluatePageThemeColors, summarizeThemeViolations, themeViolationDetails } = await import(
+          "../../server/design/theme-gate.js"
+        );
+        const { loadSiteTheme } = await import("../../server/theme-config.js");
+        const theme = loadSiteTheme(contentPath);
+        for (const [loc, localeContent] of Object.entries(normalizedLocales)) {
+          const violations = evaluatePageThemeColors({ sections: localeContent.sections }, { theme });
+          if (violations.length > 0) {
+            return themeColorsRequiredResult(
+              `[${loc}] Use theme IDs for colors: ${summarizeThemeViolations(violations)}. Nothing was written.`,
+              { details: themeViolationDetails(violations, theme) },
+              { slug, locale: loc, contentType },
+            );
+          }
+        }
+      }
+
       fs.mkdirSync(pageDir, { recursive: true });
 
       const commonData: Record<string, unknown> = { slug, ...commonRecord };
@@ -6937,6 +7000,22 @@ const ghWarning = githubCommitWarning(commitResult);
           });
         }
       }
+      const funnelRaw = (commonRecord as Record<string, unknown>).funnel;
+      const createStage =
+        funnelRaw && typeof funnelRaw === "object" && typeof (funnelRaw as Record<string, unknown>).stage === "string"
+          ? ((funnelRaw as Record<string, unknown>).stage as string)
+          : undefined;
+      const designTarget = {
+        contentType,
+        slug,
+        locale: primaryLocale,
+        variant: draftVariant,
+        ...(site ? { site } : {}),
+        ...(createStage ? { stage: createStage } : {}),
+      };
+      if (!sharedLayoutCreate) {
+        next_actions.splice(next_actions.length - 1, 0, ...designLoopNextActions(designTarget));
+      }
       if (!refreshResult.ok) {
         warnings.push({
           code: "index_refresh_failed",
@@ -6994,6 +7073,7 @@ const ghWarning = githubCommitWarning(commitResult);
             ? { commitSha: commitResult.commitSha, commitShas: [commitResult.commitSha] }
             : {}),
           ...(refreshResult.knownUrlCount !== undefined ? { known_url_count: refreshResult.knownUrlCount } : {}),
+          ...(!sharedLayoutCreate ? { layout_owner: "entry", discovery_path: createEntryDiscoveryPath(designTarget) } : {}),
         },
         { warnings, next_actions, ...(side_effects.length > 0 ? { side_effects } : {}) },
       );
@@ -7003,7 +7083,8 @@ const ghWarning = githubCommitWarning(commitResult);
   // add_section
   mcp.tool(
     "add_section",
-    "Add a new section to a page. Inserts at the given index (or appends if omitted). Section must include a 'type' field matching a component type. contentType is optional — omit it and the server will auto-detect it from the slug.\n\n" +
+    "Add a new section to a page. Inserts at the given index (or appends if omitted). Section must include a 'type' field matching a component type. contentType is optional — omit it and the server will auto-detect it from the slug. " +
+    "Building a new layout: call get_page_recipe first to pick type/variant/background/spacing; background must be a theme ID.\n\n" +
     "IMPORTANT — article / split pages: 2+ article sections on a page ALWAYS continue one piece (no share choice). " +
     "Put the lead article first. show_toc on the first article only controls the shared TOC; later show_toc / meta are non-effects for chrome. " +
     "Reading time (on-page and OG) combines all article bodies and shows on the first only; mobile/top TOC only on the first; desktop side TOC may still appear on later parts. " +
@@ -7270,6 +7351,14 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       });
       warnings.push(...modalHints.warnings);
       next_actions = [...next_actions, ...modalHints.next_actions];
+      if (pathInfo.layer !== "type_template") {
+        next_actions.push(
+          ...designLoopNextActions(
+            { contentType: resolved.contentType, slug, locale, ...(variant ? { variant } : {}), ...(site ? { site } : {}) },
+            { includeRecipe: existingSections.length < 3 },
+          ),
+        );
+      }
 
       return ok(
         {
@@ -7677,7 +7766,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     "Optionally also replaces the meta block in the same call. " +
     "The caller supplies the complete new sections array; the server replaces the existing array atomically. " +
     "Accepts the same variant and confirm_live_edit versioning guards as update_fields. " +
-    "contentType is optional — omit it and the server will auto-detect from slug.\n\n" +
+    "contentType is optional — omit it and the server will auto-detect from slug. " +
+    "Designing a new layout: get_page_recipe first; afterwards review_page_render (agents need a fresh review to publish a restructured page).\n\n" +
     "What the caller must supply: a complete sections array (every section, in order). " +
     "What the server handles: path-sanitisation, conflict detection, atomic write via edit-sections API, " +
     "cache refresh, and Git mark-modified.\n\n" +
@@ -7886,6 +7976,14 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       });
       warnings.push(...modalHints.warnings);
       next_actions = [...next_actions, ...modalHints.next_actions];
+      if (pathInfo.layer !== "type_template") {
+        next_actions.push(
+          ...designLoopNextActions(
+            { contentType: resolved.contentType, slug, locale, ...(variant ? { variant } : {}), ...(site ? { site } : {}) },
+            { includeRecipe: false },
+          ),
+        );
+      }
 
       const stampEffect: McpSideEffect = {
         kind: "locale_yaml",

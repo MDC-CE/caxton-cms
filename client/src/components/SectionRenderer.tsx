@@ -22,6 +22,7 @@ import {
 } from "@/components/sectionRegistry";
 import { SectionRenderErrorBoundary } from "@/components/editing/SectionRenderErrorBoundary";
 import { isSchemaOrgSection } from "@shared/schema-org-sections";
+import { resolveSectionBackgroundCss } from "@shared/theme-palette";
 
 // Spacing presets in pixels (top, bottom)
 const SPACING_PRESETS: Record<string, { top: string; bottom: string }> = {
@@ -159,31 +160,6 @@ function parseResponsiveInnerPaddingXFromMaxWidth(value: ResponsiveSpacing | und
   };
 }
 
-// Semantic background tokens mapped to CSS variables
-const BACKGROUND_TOKENS: Record<string, string> = {
-  background: "hsl(var(--background))",
-  muted: "hsl(var(--muted))",
-  card: "hsl(var(--card))",
-  accent: "hsl(var(--accent))",
-  primary: "hsl(var(--primary))",
-  secondary: "hsl(var(--secondary))",
-  sidebar: "hsl(var(--sidebar-background))",
-  destructive: "hsl(var(--destructive))",
-};
-
-// Parse background value - supports semantic tokens or custom CSS
-function parseBackground(value: string | undefined): string | undefined {
-  if (!value || value === "inherit" || value === "none") return undefined;
-
-  // Check if it's a semantic token
-  if (BACKGROUND_TOKENS[value]) {
-    return BACKGROUND_TOKENS[value];
-  }
-
-  // Return as-is for custom values (gradients, colors, etc.)
-  return value;
-}
-
 // Get section wrapper styles - full-bleed background + spacing + CSS vars
 // Uses CSS custom properties + media query for responsive behavior
 // paddingY/marginY/paddingX/marginX: Applied to wrapper
@@ -199,7 +175,7 @@ export function getSectionWrapperStyles(section: Section): CSSProperties & Recor
   const marginX = parseResponsiveSpacingX(layoutSection.marginX);
   const maxWidth = parseResponsiveMaxWidth(layoutSection.maxWidth);
   const innerPaddingX = parseResponsiveInnerPaddingXFromMaxWidth(layoutSection.maxWidth);
-  const background = parseBackground(layoutSection.background);
+  const background = resolveSectionBackgroundCss(layoutSection.background);
 
   const styles: CSSProperties & Record<string, string> = {
     paddingTop: 'var(--section-pt)',
@@ -1616,6 +1592,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
               key={index}
               id={sectionId}
               data-section-type={sectionType}
+              data-section-index={index}
               className={`section-wrapper${sectionType !== "modal" ? " scroll-mt-20" : ""}${hasTopCover ? " relative" : ""}${visibilityClasses ? " " + visibilityClasses : ""}`.trim()}
               style={sectionWrapperStyles}
             >

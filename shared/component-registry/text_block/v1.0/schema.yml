@@ -31,3 +31,15 @@ props:
     type: string
     required: true
     description: "Constrains readable line length: 'narrow', 'default' (default), or 'wide'"
+variants:
+  default:
+    content_shape:
+      image: unused
+      icon: unused
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    best_for: >-
+      Standalone editorial text sections with an optional eyebrow, heading, and rich-text body on pages focused purely
+      on prose content.
+    avoid_when: Any page section needing images, icons, columns, cards, or interactive elements beyond basic formatted text.
+    metadata_status: draft

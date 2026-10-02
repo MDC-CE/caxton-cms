@@ -2,6 +2,7 @@ import type { ListSinglePressMentionSection } from "@shared/schema";
 import { UniversalImage } from "@/components/UniversalImage";
 import { Button } from "@/components/ui/button";
 import { ExternalLink } from "lucide-react";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 interface ListSinglePressMentionProps {
   data: ListSinglePressMentionSection;
@@ -17,21 +18,9 @@ export function ListSinglePressMention({ data }: ListSinglePressMentionProps) {
   const organization = item?.organization ?? data.organization;
   const linkText = item?.link_text ?? data.link_text ?? "Read Article";
   const linkUrl = item?.link_url ?? data.link_url;
-  const background = data.background;
-
   if (!title && !image) return null;
 
-  const bgStyle: React.CSSProperties = {};
-  if (background) {
-    if (
-      background.startsWith("linear-gradient") ||
-      background.startsWith("radial-gradient")
-    ) {
-      bgStyle.backgroundImage = background;
-    } else {
-      bgStyle.backgroundColor = background;
-    }
-  }
+  const bgStyle: React.CSSProperties = sectionBackgroundStyle(data.background);
 
   return (
     <section

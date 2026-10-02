@@ -9,6 +9,8 @@ when_to_use: |
   - showcase: 3-column layout with images on sides (best for landing pages)
   - productShowcase: Text on left with video on right (best for product/service introductions)
   - simpleTwoColumn: Image on left or right (media_at_right), text with CTAs (best for promotions, announcements)
+layout:
+  edge: top_of_page
 behaviors:
   ecommerce:
     role: funnel
@@ -42,22 +44,33 @@ image_sizes:
 text_limits:
   productShowcase:
     - label: Welcome text
-      fields: [welcome_text]
+      fields:
+        - welcome_text
       max_length: 40
     - label: H1
-      fields: [brand_mark.prefix, brand_mark.highlight, brand_mark.suffix]
+      fields:
+        - brand_mark.prefix
+        - brand_mark.highlight
+        - brand_mark.suffix
       max_length: 70
     - label: H2
-      fields: [title]
+      fields:
+        - title
       max_length: 60
     - label: H1 + H2
-      fields: [brand_mark.prefix, brand_mark.highlight, brand_mark.suffix, title]
+      fields:
+        - brand_mark.prefix
+        - brand_mark.highlight
+        - brand_mark.suffix
+        - title
       max_length: 90
     - label: Subtitle
-      fields: [subtitle]
+      fields:
+        - subtitle
       max_length: 80
     - label: Description
-      fields: [description]
+      fields:
+        - description
       max_length: 180
     - label: Bullets
       list: bullets
@@ -65,23 +78,158 @@ text_limits:
       max_items: 4
       item_max_length: 120
 variants:
-  ApplyFormProductShowcase: {}
+  ApplyFormProductShowcase:
+    content_shape:
+      text:
+        title:
+          min: 72
+          max: 72
+          typical: 72
+        description:
+          min: 170
+          max: 170
+          typical: 170
+      image: required
+      icon: unused
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    best_for: >-
+      Landing pages introducing a product or service with a 72-character title, 170-character description, and a
+      prominent video on the right.
+    avoid_when: Program pages, simple promotions, or any page without a video and exact 72/170 character text requirements.
+    metadata_status: draft
   blogHero:
     description: Left-aligned blog post hero with updated date, reading time, title, subtitle, and author avatars
     best_for: Blog shared templates and article detail pages
+    content_shape:
+      items:
+        authors:
+          min: 1
+          max: 1
+          typical: 1
+        items:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 30
+          max: 87
+          typical: 30
+        subtitle:
+          min: 39
+          max: 133
+          typical: 39
+      image: optional
+      icon: unused
+      sample_pages: 4
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Landing pages, product pages, promotions, or any non-blog content that lacks authors, reading time, or updated
+      date.
+    metadata_status: draft
   course:
     description: Two column layout with content on left (title, bullet points, tutors) and media + signup card on right
     best_for: Course landing pages, self-paced program pages
+    content_shape:
+      items:
+        bullet_points:
+          min: 3
+          max: 5
+          typical: 4
+        tutors:
+          min: 1
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 13
+          max: 88
+          typical: 48
+        subtitle:
+          min: 49
+          max: 361
+          typical: 251
+        description:
+          min: 69
+          max: 502
+          typical: 148
+      image: optional
+      icon: unused
+      sample_pages: 24
+      measured_at: "2026-10-02"
+    avoid_when: Landing pages, simple promotions, or pages without bullet points, tutors, or a course signup form.
+    metadata_status: draft
   credibility:
     description: >-
       Two column hero with large rich-text title on the left and a vertical stack of credibility pills on the right,
       plus an optional muted watermark marquee at the bottom
     best_for: Homepage hero sections, trust-building landing pages, program overview pages
+    content_shape:
+      items:
+        cta_buttons:
+          min: 2
+          max: 2
+          typical: 2
+        pills:
+          min: 3
+          max: 3
+          typical: 3
+        marquee_items:
+          min: 4
+          max: 4
+          typical: 4
+      text:
+        title:
+          min: 45
+          max: 54
+          typical: 45
+        description:
+          min: 159
+          max: 191
+          typical: 159
+      image: required
+      icon: required
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Landing pages, product showcases, or promotions that require large hero images, video, or simple CTAs without
+      credibility elements.
+    metadata_status: draft
   exercise:
     description: >-
       Two-column layout with badge, title, description, and "This exercise includes" card on the left; an enrollment
       form card on the right; and a stats bar that overlaps the bottom of the hero.
     best_for: Interactive exercise landing pages
+    content_shape:
+      items:
+        features:
+          min: 3
+          max: 4
+          typical: 4
+        stats:
+          min: 3
+          max: 4
+          typical: 4
+        technologies:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 17
+          max: 50
+          typical: 18
+        description:
+          min: 23
+          max: 138
+          typical: 24
+      image: unused
+      icon: required
+      sample_pages: 2
+      measured_at: "2026-10-02"
+    avoid_when: Pages without an enrollment form, or content that is not an interactive exercise or course.
+    metadata_status: draft
   orbit:
     description: >-
       Two-column hero with eyebrow, large title and CTAs on the left, and an animated multi-ring orbit diagram on the
@@ -90,30 +238,201 @@ variants:
     best_for: >-
       Homepage hero sections, AI/tech product pages, program overview pages where the concept of convergence or
       interconnection is key
+    content_shape:
+      items:
+        cta_buttons:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        eyebrow:
+          min: 22
+          max: 29
+          typical: 22
+        title:
+          min: 21
+          max: 33
+          typical: 21
+      image: unused
+      icon: required
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Pages with video, photography, or simple promotions; avoid when you have fewer than 6 orbiting items or need a
+      strong hero image.
+    metadata_status: draft
   productShowcase:
     description: >-
-      Two column layout with brand mark, text on left and video on right. The large H1 is brand_mark prefix +
-      highlight + suffix; title renders as the H2 below it. Keep copy short: see text_limits (visible characters,
-      HTML stripped) — draft saves warn, publishing blocks agents.
+      Two column layout with brand mark, text on left and video on right. The large H1 is brand_mark prefix + highlight
+      + suffix; title renders as the H2 below it. Keep copy short: see text_limits (visible characters, HTML stripped) —
+      draft saves warn, publishing blocks agents.
     best_for: Product/service introductions, feature pages
+    content_shape:
+      items:
+        bullets:
+          min: 2
+          max: 4
+          typical: 3
+          limit:
+            max: 4
+        programs:
+          min: 1
+          max: 1
+          typical: 1
+      text:
+        title:
+          min: 0
+          max: 60
+          typical: 17
+          limit:
+            max: 60
+        description:
+          min: 0
+          max: 180
+          typical: 154
+          limit:
+            max: 180
+        subtitle:
+          min: 20
+          max: 58
+          typical: 38
+          limit:
+            max: 80
+        welcome_text:
+          limit:
+            max: 40
+      image: required
+      icon: unused
+      sample_pages: 56
+      measured_at: "2026-10-02"
+    avoid_when: Landing pages needing 3-column showcase layout, announcement-style promotions, or pages without video content.
+    metadata_status: draft
   singleColumn:
     description: Centered single column with badge, title, subtitle, CTAs, trust bar, and optional image or video
     best_for: Program pages, course pages
+    content_shape:
+      items:
+        cta_buttons:
+          min: 1
+          max: 3
+          typical: 2
+        award_badges:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 10
+          max: 95
+          typical: 43
+        subtitle:
+          min: 25
+          max: 379
+          typical: 173
+      image: optional
+      icon: optional
+      sample_pages: 67
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Landing pages, promotional announcements, or product introductions that need side-by-side media or multi-column
+      layouts.
+    metadata_status: draft
   showcase:
     description: 3-column layout with images on left/right, centered content with trust bar
     best_for: Landing pages, marketing pages
+    content_shape:
+      items:
+        left_images:
+          min: 2
+          max: 2
+          typical: 2
+        right_images:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 48
+          max: 48
+          typical: 48
+        subtitle:
+          min: 189
+          max: 189
+          typical: 189
+      image: required
+      icon: unused
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    avoid_when: Product pages, promotions, or any page without 4 side images and dual-column image layout.
+    metadata_status: draft
   simpleTwoColumn:
     description: Two column layout with image on left (or right) and title, subtitle, CTA buttons
     best_for: Guarantee pages, feature announcements, promotional sections
-  simpleStacked: {}
+    content_shape:
+      items:
+        cta_buttons:
+          min: 1
+          max: 2
+          typical: 1
+        proportions_percentage:
+          min: 2
+          max: 2
+          typical: 2
+      text:
+        title:
+          min: 24
+          max: 78
+          typical: 44
+        subtitle:
+          min: 96
+          max: 337
+          typical: 176
+      image: optional
+      icon: optional
+      sample_pages: 13
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Program pages, product videos, or landing pages needing centered layout, trust bars, badges, or multi-column
+      showcase.
+    metadata_status: draft
+  simpleStacked:
+    best_for: >-
+      Pages with a single focused message and one prominent image below the text, such as announcements or simple
+      promotions with 1 CTA.
+    avoid_when: >-
+      Landing pages, product introductions, or content needing multiple images, videos, side-by-side layout, or more
+      than 2 CTAs.
+    metadata_status: draft
   twoColumn:
     description: Two-column hero with image or media on one side and text/CTAs on the other (legacy variant)
     best_for: General landing pages, legacy pages using the older two-column hero layout
+    avoid_when: >-
+      Landing pages needing 3-column showcase layout or program pages that require centered single-column hero with
+      trust bar.
+    metadata_status: draft
   workshop:
     description: >-
       Event/workshop detail hero: back link, badge, rich title, date/duration, description, host, seats summary,
       countdown on the left; LeadForm card on the right. Seat counts come from entry props (live_request on the CT).
     best_for: Workshop / event detail pages
+    content_shape:
+      text:
+        title:
+          min: 17
+          max: 17
+          typical: 17
+        description:
+          min: 23
+          max: 23
+          typical: 23
+      image: unused
+      icon: unused
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    avoid_when: >-
+      Landing pages, product promotions, or simple announcement pages that lack event dates, hosts, live seat data, or
+      registration forms.
+    metadata_status: draft
 variant_props:
   ApplyFormProductShowcase:
     brand_mark:

@@ -12,7 +12,7 @@ import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import { fqEventsWildcard, getBigQueryClient, getBigQueryConfigStatus, getBigQuerySettings } from "../ecommerce/bigquery-client";
-import { bqNormalizedPagePathSql, bqSessionLastClickChannelSql } from "../analytics/reports";
+import { bqNormalizedPagePathSql } from "../analytics/reports";
 import {
   adIdFromTag,
   googleNetworkOf,
@@ -35,6 +35,8 @@ export const PAID_LANDING_RETENTION_DAYS = 395;
 /** GA4 daily export is treated as final this many days after the date. */
 export const GA4_COMPLETE_LAG_DAYS = 2;
 const MAX_DAYS_PER_RUN = 30;
+/** Re-reads after a schema bump run in one sync (one cheap query per cached day). */
+const MAX_UPGRADE_DAYS_PER_RUN = PAID_LANDING_RETENTION_DAYS;
 const MAX_BYTES_BILLED = "5000000000";
 
 export type PaidLandingCandidateRow = {
@@ -73,8 +75,15 @@ export type OrganicBaselineRow = {
 
 export type CookielessRow = { host: string; path: string; page_views: number };
 
-/** 2 = candidates carry Google Ads ids (GA4 link / gclid join). Older days are re-read once Google is connected. */
-export const PAID_LANDING_SCHEMA_VERSION = 2;
+/** Sessions GA4 credits to ads (carried-over last click / Google Ads link) with no ad evidence on this visit. */
+export type AttributedOnlyRow = { host: string; sessions: number };
+
+/**
+ * 2 = candidates carry Google Ads ids (GA4 link / gclid join).
+ * 3 = paid only from per-visit evidence (landing URL / collected_traffic_source); adds attributed_only.
+ * Days below the current version are re-read on the next sync.
+ */
+export const PAID_LANDING_SCHEMA_VERSION = 3;
 
 export type PaidLandingDayFile = {
   date: string;
@@ -84,6 +93,11 @@ export type PaidLandingDayFile = {
   candidates: PaidLandingCandidateRow[];
   organic: OrganicBaselineRow[];
   cookieless: CookielessRow[];
+  /** Google Ads ids were requested (GA4 link / gclid join). Days without them are re-read once Google is connected. */
+  google_ids?: boolean;
+  attributed_only?: AttributedOnlyRow[];
+  /** False when the export lacked session_traffic_source_last_click, so attributed_only could not be counted. */
+  attributed_measured?: boolean;
 };
 
 export type PaidLandingState = {
@@ -183,22 +197,46 @@ export function lastCompleteGa4Date(now = new Date()): string {
   return addDays(utcDate(now), -GA4_COMPLETE_LAG_DAYS);
 }
 
-/**
- * Days to (re)query, newest first: missing in the backfill window, days cached before they were
- * complete, then (with `upgradeSchema`) days cached before Google ids were read.
- */
-export function paidLandingDatesToFetch(site: string, now = new Date(), upgradeSchema = false): string[] {
+/** A cached day is stale when it predates the current schema, or lacks Google ids now that Google is connected. */
+function needsUpgrade(f: PaidLandingDayFile, google: boolean): boolean {
+  if ((f.schema_version ?? 1) < PAID_LANDING_SCHEMA_VERSION) return true;
+  return google && f.google_ids === false;
+}
+
+export type PaidLandingFetchPlan = {
+  /** Missing or not-yet-final days in the backfill window, newest first. */
+  missing: string[];
+  /** Every other cached complete day (whole retention) that needs a re-read, newest first. */
+  upgrade: string[];
+};
+
+/** Days to (re)query: missing / incomplete in the backfill window, then stale cached days anywhere in retention. */
+export function paidLandingDatesToFetch(site: string, now = new Date(), google = false): PaidLandingFetchPlan {
   const until = addDays(utcDate(now), -1);
   const since = addDays(until, -(PAID_LANDING_BACKFILL_DAYS - 1));
   const completeCutoff = lastCompleteGa4Date(now);
-  const out: string[] = [];
-  const upgrade: string[] = [];
+  const floor = addDays(utcDate(now), -PAID_LANDING_RETENTION_DAYS);
+  const missing: string[] = [];
+  const queued = new Set<string>();
   for (const d of dateRange(since, until).reverse()) {
     const f = loadPaidLandingDay(site, d);
-    if (!f || (!f.complete && d <= completeCutoff) || d > completeCutoff) out.push(d);
-    else if (upgradeSchema && (f.schema_version ?? 1) < PAID_LANDING_SCHEMA_VERSION) upgrade.push(d);
+    if (!f || (!f.complete && d <= completeCutoff) || d > completeCutoff) {
+      missing.push(d);
+      queued.add(d);
+    }
   }
-  return [...out, ...upgrade];
+  const upgrade: string[] = [];
+  for (const d of listPaidLandingDates(site).reverse()) {
+    if (queued.has(d) || d < floor || d > until) continue;
+    const f = loadPaidLandingDay(site, d);
+    if (f && needsUpgrade(f, google)) upgrade.push(d);
+  }
+  return { missing, upgrade };
+}
+
+/** One run: up to 30 missing days, then every stale cached day so a rule change finishes in a single sync. */
+function runDates(plan: PaidLandingFetchPlan): string[] {
+  return [...plan.missing.slice(0, MAX_DAYS_PER_RUN), ...plan.upgrade.slice(0, MAX_UPGRADE_DAYS_PER_RUN)];
 }
 
 function googleWanted(contentRoot?: string): boolean {
@@ -208,7 +246,12 @@ function googleWanted(contentRoot?: string): boolean {
 /** GA4 days `syncPaidLandingDays` will query on a run starting now; 0 when GA4 isn't configured. */
 export function planPaidLandingSteps(site: string, contentRoot?: string, now = new Date()): number {
   if (!isGa4Configured(contentRoot)) return 0;
-  return Math.min(paidLandingDatesToFetch(site, now, googleWanted(contentRoot)).length, MAX_DAYS_PER_RUN);
+  return runDates(paidLandingDatesToFetch(site, now, googleWanted(contentRoot))).length;
+}
+
+/** Cached days in [since, until] still at an older schema (normally 0; >0 after a failed re-read run). */
+export function countOldRuleDays(days: PaidLandingDayFile[]): number {
+  return days.filter((d) => (d.schema_version ?? 1) < PAID_LANDING_SCHEMA_VERSION).length;
 }
 
 /** ClickStats tables for ticked accounts, as recorded by the last Google sync. */
@@ -258,13 +301,52 @@ function clickStatsSelect(c: PaidLandingClickStats): string {
         AND click_view_gclid IS NOT NULL`;
 }
 
+/** Click ids that prove a session started from a Google Ads click (gates the GA4 ↔ Google Ads link fields). */
+export const GOOGLE_CLICK_IDS = ["gclid", "gbraid", "wbraid", "dclid"] as const;
+
+const ATTRIBUTED_TOP_HOSTS = 10;
+export const ATTRIBUTED_OTHER_HOST = "(other)";
+
+export type AttributedOnlyVisits = { total: number; by_host: AttributedOnlyRow[] };
+
+/**
+ * Window total of sessions GA4 credits to ads without per-visit evidence. Null when a day was read
+ * without GA4's last-click field (can't measure, not zero). Days on an older schema contribute nothing.
+ */
+export function summarizeAttributedOnly(days: PaidLandingDayFile[]): AttributedOnlyVisits | null {
+  const byHost = new Map<string, number>();
+  for (const d of days) {
+    if ((d.schema_version ?? 1) < PAID_LANDING_SCHEMA_VERSION) continue;
+    if (d.attributed_measured === false) return null;
+    for (const r of d.attributed_only ?? []) byHost.set(r.host, (byHost.get(r.host) ?? 0) + r.sessions);
+  }
+  const sorted = Array.from(byHost.entries())
+    .map(([host, sessions]) => ({ host, sessions }))
+    .sort((a, b) => b.sessions - a.sessions);
+  const top = sorted.slice(0, ATTRIBUTED_TOP_HOSTS);
+  const rest = sorted.slice(ATTRIBUTED_TOP_HOSTS).reduce((s, r) => s + r.sessions, 0);
+  if (rest > 0) top.push({ host: ATTRIBUTED_OTHER_HOST, sessions: rest });
+  return { total: sorted.reduce((s, r) => s + r.sessions, 0), by_host: top };
+}
+
+/**
+ * Paid evidence is per visit only: click ids / UTMs on the landing URL, else GA4's event-scoped
+ * `collected_traffic_source`. GA4's carried-over `session_traffic_source_last_click` (and the
+ * first-user `traffic_source`) never make a session paid; with `includeSessionLastClick` they only
+ * feed the per-host "attributed" count (GA4 credits ads, we don't) and, behind a Google click id,
+ * the Google Ads campaign ids.
+ */
 export function buildPaidLandingSql(eventsTable: string, opts: boolean | PaidLandingSqlOptions): string {
   const o: PaidLandingSqlOptions = typeof opts === "boolean" ? { includeSessionLastClick: opts } : opts;
-  const channel = bqSessionLastClickChannelSql({ includeSessionLastClick: o.includeSessionLastClick });
-  const link = o.includeSessionLastClick && !!o.googleLink;
+  const lastClick = o.includeSessionLastClick;
+  const link = lastClick && !!o.googleLink;
   const clickStats = o.clickStats ?? [];
   const gadsField = (f: string) =>
     link ? `CAST(session_traffic_source_last_click.google_ads_campaign.${f} AS STRING)` : "CAST(NULL AS STRING)";
+  const lastClickMedium = lastClick
+    ? `COALESCE(NULLIF(session_traffic_source_last_click.manual_campaign.medium, ''),
+            NULLIF(session_traffic_source_last_click.cross_channel_campaign.medium, ''))`
+    : "CAST(NULL AS STRING)";
   const clickIdAlternation = [...CLICK_ID_PARAMS, "utm_id"].join("|");
   const param = (key: string) =>
     `REGEXP_EXTRACT(landing.page_location, r'[?&]${key}=([^&#]+)')`;
@@ -300,19 +382,23 @@ export function buildPaidLandingSql(eventsTable: string, opts: boolean | PaidLan
         (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_time_msec,
         (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'experiment_id') AS experiment_id,
         (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'variant') AS variant,
-        ${channel.source} AS source,
-        ${channel.medium} AS medium,
-        ${channel.campaign} AS campaign,
+        NULLIF(collected_traffic_source.manual_source, '') AS ct_source,
+        NULLIF(collected_traffic_source.manual_medium, '') AS ct_medium,
+        NULLIF(collected_traffic_source.manual_campaign_name, '') AS ct_campaign,
+        ${lastClickMedium} AS lc_medium,
         ${gadsField("customer_id")} AS gads_cid,
         ${gadsField("campaign_id")} AS gads_campaign,
-        ${gadsField("ad_group_id")} AS gads_ad_group
+        ${gadsField("ad_group_id")} AS gads_ad_group,
+        ${gadsField("campaign_name")} AS gads_campaign_name
       FROM ${eventsTable}
       WHERE _TABLE_SUFFIX = @suffix
     ),
     sessions AS (
       SELECT
-        ARRAY_AGG(IF(event_name = 'page_view', STRUCT(page_location, page_path, source, medium, campaign, gads_cid, gads_campaign, gads_ad_group), NULL)
+        ARRAY_AGG(IF(event_name = 'page_view', STRUCT(page_location, page_path, lc_medium, gads_cid, gads_campaign, gads_ad_group, gads_campaign_name), NULL)
           IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS landing,
+        ARRAY_AGG(IF(ct_source IS NOT NULL OR ct_medium IS NOT NULL, STRUCT(ct_source, ct_medium, ct_campaign), NULL)
+          IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS collected,
         ARRAY_AGG(IF(event_name = 'experiment_exposure', STRUCT(experiment_id, variant), NULL)
           IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)] AS exposure,
         MAX(IF(session_engaged = '1', 1, 0)) AS engaged,
@@ -322,25 +408,33 @@ export function buildPaidLandingSql(eventsTable: string, opts: boolean | PaidLan
       WHERE user_pseudo_id IS NOT NULL AND sid IS NOT NULL
       GROUP BY user_pseudo_id, sid
     ),
-    landed AS (
+    tagged AS (
       SELECT
         *,
         REGEXP_EXTRACT(landing.page_location, r'^https?://([^/?#:]+)') AS host,
         REGEXP_EXTRACT(landing.page_location, r'[?&]gclid=([^&#]+)') AS gclid,
-        (REGEXP_CONTAINS(COALESCE(landing.page_location, ''), r'[?&](${clickIdAlternation})=')
-          OR LOWER(landing.medium) IN UNNEST(@paid_mediums)
-          OR landing.gads_campaign IS NOT NULL) AS is_candidate
+        REGEXP_CONTAINS(COALESCE(landing.page_location, ''), r'[?&](${GOOGLE_CLICK_IDS.join("|")})=') AS google_click,
+        REGEXP_CONTAINS(COALESCE(landing.page_location, ''), r'[?&](${clickIdAlternation})=') AS has_click_id,
+        COALESCE(${param("utm_source")}, collected.ct_source) AS v_source,
+        COALESCE(${param("utm_medium")}, collected.ct_medium) AS v_medium,
+        COALESCE(${param("utm_campaign")}, collected.ct_campaign) AS v_campaign
       FROM sessions
       WHERE landing IS NOT NULL
+    ),
+    landed AS (
+      SELECT
+        *,
+        (has_click_id OR LOWER(v_medium) IN UNNEST(@paid_mediums)) AS is_candidate
+      FROM tagged
     ),
     ${joined}
     SELECT
       'candidate' AS kind,
       host,
       landing.page_path AS path,
-      landing.source AS source,
-      landing.medium AS medium,
-      landing.campaign AS campaign,
+      COALESCE(v_source, '(direct)') AS source,
+      COALESCE(v_medium, '(none)') AS medium,
+      COALESCE(v_campaign, IF(google_click, landing.gads_campaign_name, NULL), '(not set)') AS campaign,
       ${firstClickId} AS click_id_type,
       ${param("utm_id")} AS utm_id,
       ${param("utm_term")} AS utm_term,
@@ -353,11 +447,11 @@ export function buildPaidLandingSql(eventsTable: string, opts: boolean | PaidLan
       SUM(leads) AS lead_events,
       COUNTIF(leads > 0) AS sessions_with_lead,
       0 AS page_views,
-      COALESCE(landing.gads_cid, k_cid) AS gads_customer_id,
-      COALESCE(landing.gads_campaign, k_campaign) AS gads_campaign_id,
-      COALESCE(landing.gads_ad_group, k_ad_group) AS gads_ad_group_id,
+      COALESCE(IF(google_click, landing.gads_cid, NULL), k_cid) AS gads_customer_id,
+      COALESCE(IF(google_click, landing.gads_campaign, NULL), k_campaign) AS gads_campaign_id,
+      COALESCE(IF(google_click, landing.gads_ad_group, NULL), k_ad_group) AS gads_ad_group_id,
       k_network AS gads_network,
-      CASE WHEN landing.gads_campaign IS NOT NULL THEN 'ga4_link' WHEN k_campaign IS NOT NULL THEN 'gclid' END AS gads_match
+      CASE WHEN google_click AND landing.gads_campaign IS NOT NULL THEN 'ga4_link' WHEN k_campaign IS NOT NULL THEN 'gclid' END AS gads_match
     FROM matched
     WHERE is_candidate
     GROUP BY host, path, source, medium, campaign, click_id_type, utm_id, utm_term, utm_content, experiment_id, variant,
@@ -369,7 +463,18 @@ export function buildPaidLandingSql(eventsTable: string, opts: boolean | PaidLan
     FROM landed
     WHERE NOT is_candidate
     GROUP BY host, landing.page_path
-    UNION ALL
+    UNION ALL${
+      lastClick
+        ? `
+    SELECT
+      'attributed', host, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      COUNT(*), 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL
+    FROM landed
+    WHERE NOT is_candidate AND (LOWER(landing.lc_medium) IN UNNEST(@paid_mediums) OR landing.gads_campaign IS NOT NULL)
+    GROUP BY host
+    UNION ALL`
+        : ""
+    }
     SELECT
       'cookieless', REGEXP_EXTRACT(page_location, r'^https?://([^/?#:]+)'), page_path,
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, COUNT(*), NULL, NULL, NULL, NULL, NULL
@@ -397,14 +502,23 @@ function str(v: unknown): string | null {
   }
 }
 
-export function parsePaidLandingRows(raw: Record<string, unknown>[]): Pick<PaidLandingDayFile, "candidates" | "organic" | "cookieless"> {
+export function parsePaidLandingRows(
+  raw: Record<string, unknown>[],
+): Pick<PaidLandingDayFile, "candidates" | "organic" | "cookieless"> & { attributed_only: AttributedOnlyRow[] } {
   const candidates: PaidLandingCandidateRow[] = [];
   const organic: OrganicBaselineRow[] = [];
   const cookieless: CookielessRow[] = [];
+  const attributed_only: AttributedOnlyRow[] = [];
   for (const r of raw) {
     const host = (str(r.host) ?? "").toLowerCase().replace(/^www\./, "");
     const p = normalizeLandingPath(str(r.path) ?? "/");
-    if (r.kind === "cookieless") {
+    if (r.kind === "attributed") {
+      const sessions = num(r.sessions);
+      if (sessions <= 0) continue;
+      const same = attributed_only.find((a) => a.host === host);
+      if (same) same.sessions += sessions;
+      else attributed_only.push({ host, sessions });
+    } else if (r.kind === "cookieless") {
       cookieless.push({ host, path: p, page_views: num(r.page_views) });
     } else if (r.kind === "organic") {
       organic.push({
@@ -448,10 +562,11 @@ export function parsePaidLandingRows(raw: Record<string, unknown>[]): Pick<PaidL
       });
     }
   }
-  return { candidates, organic, cookieless };
+  attributed_only.sort((a, b) => b.sessions - a.sessions);
+  return { candidates, organic, cookieless, attributed_only };
 }
 
-type DayQueryResult = Pick<PaidLandingDayFile, "candidates" | "organic" | "cookieless"> & {
+type DayQueryResult = Pick<PaidLandingDayFile, "candidates" | "organic" | "cookieless" | "attributed_only"> & {
   attempt: PaidLandingAttempt;
   /** Set when the ClickStats join was requested but dropped. */
   join_error: string | null;
@@ -512,7 +627,9 @@ export async function syncPaidLandingDays(
   };
   const requestedJoin = attempt.clickStats.length > 0;
   try {
-    const dates = paidLandingDatesToFetch(site, now, google).slice(0, MAX_DAYS_PER_RUN);
+    const plan = paidLandingDatesToFetch(site, now, google);
+    const dates = runDates(plan);
+    const startedAt = Date.now();
     for (let i = 0; i < dates.length; i++) {
       const date = dates[i];
       onStep?.(`GA4: day ${i + 1} of ${dates.length} (${shortDateRange(date, date)})`);
@@ -525,11 +642,17 @@ export async function syncPaidLandingDays(
         date,
         fetched_at: new Date().toISOString(),
         complete: date <= completeCutoff,
-        schema_version: google ? PAID_LANDING_SCHEMA_VERSION : 1,
+        schema_version: PAID_LANDING_SCHEMA_VERSION,
+        google_ids: google,
+        attributed_measured: used.includeSessionLastClick,
         ...rows,
       } satisfies PaidLandingDayFile);
       if (hasData && (!state.last_export_date || date > state.last_export_date)) state.last_export_date = date;
       fetched.push(date);
+    }
+    const upgraded = Math.min(plan.upgrade.length, MAX_UPGRADE_DAYS_PER_RUN);
+    if (upgraded > 0) {
+      log.info({ site, upgraded_days: upgraded, ms: Date.now() - startedAt }, "[paid-detection] re-read cached GA4 days at the current schema");
     }
     const floor = addDays(utcDate(now), -PAID_LANDING_RETENTION_DAYS);
     for (const d of listPaidLandingDates(site)) {

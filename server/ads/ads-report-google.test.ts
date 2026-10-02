@@ -167,7 +167,9 @@ const fixture: {
   googleState: GoogleAdsSyncState;
   ledgerRows: LedgerRow[];
   metaEnabled: boolean;
+  paidDays: PaidLandingDayFile[];
 } = {
+  paidDays: [paidDay],
   googleState: { consecutive_failures: 0, last_success_at: NOW.toISOString(), customers: { [CID]: { name: "Main", currency: "USD", data_through: "2026-09-17" } } },
   ledgerRows: [
     // Legacy row (no stored landing platform): falls back to the latest tags.
@@ -244,10 +246,11 @@ vi.mock("./google-ads-days", async (orig) => ({
   loadGoogleSetups: () => setups,
   loadGoogleState: () => fixture.googleState,
 }));
-vi.mock("./paid-detection", () => ({
+vi.mock("./paid-detection", async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
   isGa4Configured: () => true,
   loadPaidLandingState: () => ({ last_success_at: NOW.toISOString(), last_export_date: DAY }),
-  loadPaidLandingDays: () => [paidDay],
+  loadPaidLandingDays: () => fixture.paidDays,
   lastCompleteGa4Date: () => "2026-09-18",
 }));
 vi.mock("./lead-ledger", () => ({
@@ -265,6 +268,7 @@ vi.mock("./ads-refresh", () => ({
 }));
 
 const { buildAdsReport, AdsPlatformRequiredError } = await import("./ads-report");
+const { PAID_LANDING_SCHEMA_VERSION } = await import("./paid-detection");
 const build = (over: Record<string, unknown> = {}) =>
   buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex, ...over });
 
@@ -349,5 +353,52 @@ describe("buildAdsReport with Google Ads", () => {
     } finally {
       fixture.googleState = prev;
     }
+  });
+});
+
+describe("buildAdsReport per-visit paid evidence", () => {
+  const withDays = <T,>(days: PaidLandingDayFile[], fn: () => T): T => {
+    const prev = fixture.paidDays;
+    fixture.paidDays = days;
+    try {
+      return fn();
+    } finally {
+      fixture.paidDays = prev;
+    }
+  };
+
+  it("doesn't make a visit paid from a Google Ads campaign id without a Google click id", () => {
+    const linkedOnly = googleVisit({ source: "(direct)", medium: "(none)", campaign: "(not set)", click_id_type: null, sessions: 7 });
+    const r = withDays([{ ...paidDay, candidates: [linkedOnly] }], () => build({ platform: "google" }));
+    expect(r.totals.paid_visits).toBe(0);
+    const tagged = withDays([{ ...paidDay, candidates: [googleVisit({ sessions: 7 })] }], () => build({ platform: "google" }));
+    expect(tagged.totals.paid_visits).toBe(7);
+  });
+
+  it("sums attributed-only visits by host and counts days at the older rule", () => {
+    const current = { schema_version: PAID_LANDING_SCHEMA_VERSION, attributed_measured: true };
+    const r = withDays(
+      [
+        { ...paidDay, ...current, attributed_only: [{ host: "learn.example.com", sessions: 30 }, { host: HOST, sessions: 4 }] },
+        { ...paidDay, ...current, date: "2026-09-14", attributed_only: [{ host: HOST, sessions: 6 }] },
+        { ...paidDay, date: "2026-09-13", schema_version: 2 },
+      ],
+      () => build(),
+    );
+    expect(r.totals.attributed_only_visits).toEqual({
+      total: 40,
+      by_host: [
+        { host: "learn.example.com", sessions: 30 },
+        { host: HOST, sessions: 10 },
+      ],
+    });
+    expect(r.ga4.old_rule_days).toBe(1);
+    expect(r.ga4.attributed_only_unavailable_reason).toBeNull();
+  });
+
+  it("reports can't-measure (null + reason) when GA4 lacks the last-click field", () => {
+    const r = withDays([{ ...paidDay, schema_version: PAID_LANDING_SCHEMA_VERSION, attributed_measured: false }], () => build());
+    expect(r.totals.attributed_only_visits).toBeNull();
+    expect(r.ga4.attributed_only_unavailable_reason).toMatch(/session_traffic_source_last_click/);
   });
 });

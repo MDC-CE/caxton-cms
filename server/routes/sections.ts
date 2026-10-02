@@ -117,6 +117,13 @@ import { validateFieldSource, validateFieldMapping, extractByDotPath } from "../
 import { validateSectionOperations } from "../section-save-validation";
 import { evaluateEditTextLimits } from "../text-limits-edit";
 import {
+  evaluateEditThemeColors,
+  summarizeThemeViolations,
+  themeViolationDetails,
+  THEME_COLORS_CODE,
+  type ThemeViolation,
+} from "../design/theme-gate";
+import {
   TEXT_LIMITS_EXCEEDED_CODE,
   summarizeTextLimitViolations,
   type TextLimitViolation,
@@ -1240,6 +1247,34 @@ export function registerSectionsRoutes(app: Express): void {
         }
       }
 
+      // Theme colors: agents may only write palette IDs (section backgrounds)
+      // and theme-backed inline styles in rich text. Rejected for any agent
+      // write (draft or live) that adds/changes an off-theme value; staff get
+      // warnings. Values already on the page never block.
+      let themeColorWarnings: ThemeViolation[] = [];
+      if (!isTypeLayoutTarget(resolvedLayoutTarget)) {
+        const themeCheck = evaluateEditThemeColors({
+          ci: getCI(res),
+          contentType,
+          slug,
+          locale: normalizeLocale(locale),
+          variant: effectiveVariant,
+          operations: finalOperations,
+          contentRoot: getContentRoot(res),
+        });
+        if (themeCheck.violations.length > 0) {
+          if (isMcpRequest) {
+            res.status(422).json({
+              error: `Use theme IDs for colors: ${summarizeThemeViolations(themeCheck.violations)}. Section backgrounds take a palette ID (allowed_background_ids); rich text must not hardcode color/font-size/letter-spacing.`,
+              code: THEME_COLORS_CODE,
+              details: themeViolationDetails(themeCheck.violations, themeCheck.theme),
+            });
+            return;
+          }
+          themeColorWarnings = themeCheck.violations;
+        }
+      }
+
       const touchedSectionIndexes = new Set<number>();
       for (const op of finalOperations as Array<{ action: string; index?: number; path?: string }>) {
         if (op.action === "update_section" && typeof op.index === "number") {
@@ -1422,12 +1457,16 @@ export function registerSectionsRoutes(app: Express): void {
           shared_template_html_cache?: string;
           deprecated_template_refs?: unknown;
           text_limit_warnings?: TextLimitViolation[];
+          theme_color_warnings?: ThemeViolation[];
         } = {
           success: true,
           updatedSections: result.updatedSections,
         };
         if (textLimitWarnings.length > 0) {
           response.text_limit_warnings = textLimitWarnings;
+        }
+        if (themeColorWarnings.length > 0) {
+          response.theme_color_warnings = themeColorWarnings;
         }
         if (boundUpdates.length > 0) {
           response.boundUpdates = boundUpdates;

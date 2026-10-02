@@ -12,6 +12,8 @@ import { schemaValidator } from "./schema";
 import { sitemapValidator } from "./sitemap";
 import { componentsValidator } from "./components";
 import { backgroundsValidator } from "./backgrounds";
+import { richTextStylesValidator } from "./rich-text-styles";
+import { designLayoutValidator } from "./design-layout";
 import { faqsValidator } from "./faqs";
 import { seoDepthValidator } from "./seo-depth";
 import { seoDuplicatesValidator } from "./seo-duplicates";
@@ -66,6 +68,8 @@ export const validators: Validator[] = [
   sectionVariantsValidator,
   textLimitsValidator,
   backgroundsValidator,
+  richTextStylesValidator,
+  designLayoutValidator,
   faqsValidator,
   seoDepthValidator,
   seoDuplicatesValidator,
@@ -154,6 +158,8 @@ export {
   sitemapValidator,
   componentsValidator,
   backgroundsValidator,
+  richTextStylesValidator,
+  designLayoutValidator,
   faqsValidator,
   seoDepthValidator,
   seoDuplicatesValidator,

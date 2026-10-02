@@ -371,13 +371,26 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "get_component_usage",
     tool: "get_component_usage",
-    about: "Where a component appears, scoped to the primary contentType.",
+    about: "Where a component appears, scoped to the primary contentType (+ suggest_next and weighted variant_pairings).",
     buildArgs: (ctx) =>
       withSite(ctx, {
         componentType: ctx.componentName!,
         contentType: ctx.contentType,
       }),
     skipIf: needComponent,
+  },
+  {
+    id: "get_page_recipe_landing",
+    tool: "get_page_recipe",
+    about: "Page recipe for a new landing (decision stage): weighted skeleton slots, variant pairings and learned rules. Called at the start of every page design.",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "landing", stage: "decision", locale: ctx.locale }),
+    phase: "both",
+  },
+  {
+    id: "get_page_recipe_fields_blog",
+    tool: "get_page_recipe",
+    about: "Fields-mode recipe for a new blog post attached to the shared template (template sections + bound entry fields).",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "blog", locale: ctx.locale }),
   },
 
   {

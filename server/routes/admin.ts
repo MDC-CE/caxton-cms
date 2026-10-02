@@ -3651,10 +3651,136 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       const result = getComponentUsageData(componentType, { intent, contentType });
-      res.json(result);
+      const { buildVariantPairings, weighLayouts } = await import("../design/page-recipe");
+      const insights = readInsightsFile();
+      const layouts = insights
+        ? weighLayouts(insights.pages, { ...(intent ? { intent } : {}), ...(contentType ? { contentType } : {}) })
+        : [];
+      const variantPairings = buildVariantPairings(layouts, 500).filter(
+        (p) => p.from.startsWith(`${componentType}:`) || p.to.startsWith(`${componentType}:`),
+      );
+      res.json({
+        ...result,
+        suggest_next: suggestNextComponent(componentType, intent, "frequency")
+          .slice(0, 5)
+          .map((p) => ({ type: p.to, frequency: p.frequency, pmi: p.pmi })),
+        variant_pairings: {
+          after: variantPairings.filter((p) => p.from.startsWith(`${componentType}:`)).slice(0, 8),
+          before: variantPairings.filter((p) => p.to.startsWith(`${componentType}:`)).slice(0, 8),
+        },
+      });
     } catch (err) {
       log.error({ err: err }, "[ComponentInsights] Component usage failed:");
       res.status(500).json({ error: "Failed to get component usage", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Layout approval ("Approve layout as design reference") — staff only, never agents.
+  app.get("/api/private/component-insights/layout-approval", async (req, res) => {
+    const contentType = typeof req.query.contentType === "string" ? req.query.contentType : "";
+    const slug = typeof req.query.slug === "string" ? req.query.slug : "";
+    if (!contentType || !slug) return res.status(400).json({ error: "contentType and slug are required" });
+    const auth = await requireCapability(req, res, "content_view", contentType);
+    if (!auth.authorized) return;
+    try {
+      const { getEntryLayoutApproval } = await import("../design/layout-approval-service");
+      const result = getEntryLayoutApproval(contentType, slug);
+      if (!result) return res.status(404).json({ error: "No live layout for this entry" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to read layout approval", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/private/component-insights/recipe", async (req, res) => {
+    const auth = await requireCapability(req, res, "content_view");
+    if (!auth.authorized) return;
+    const str = (k: string) => (typeof req.query[k] === "string" && (req.query[k] as string).trim() ? (req.query[k] as string).trim() : undefined);
+    try {
+      const { getPageRecipe } = await import("../design/recipe-service");
+      const contentType = str("contentType");
+      const intent = str("intent");
+      const stage = str("stage");
+      const locale = str("locale");
+      const slug = str("slug");
+      res.json(
+        getPageRecipe({
+          ...(contentType ? { contentType } : {}),
+          ...(intent ? { intent } : {}),
+          ...(stage ? { stage } : {}),
+          ...(locale ? { locale } : {}),
+          ...(slug ? { slug } : {}),
+        }),
+      );
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build recipe", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/private/component-insights/rules", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { currentLearnedRules } = await import("../design/recipe-service");
+      const { RULE_MIN_APPROVED_PAGES, RULE_MIN_AGREEMENT } = await import("../design/page-recipe");
+      res.json({
+        rules: currentLearnedRules(),
+        thresholds: { approved_pages: RULE_MIN_APPROVED_PAGES, agreement: RULE_MIN_AGREEMENT },
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to read rules", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/api/private/component-insights/rules/:id/pin", async (req, res) => {
+    if (typeof req.headers["x-mcp-author"] === "string") {
+      return res.status(403).json({ error: "Rule pins are a staff decision; agents cannot pin or disable rules." });
+    }
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    const status = req.body?.status;
+    if (status !== "pinned" && status !== "disabled" && status !== null) {
+      return res.status(400).json({ error: "status must be 'pinned', 'disabled', or null (follow the data)" });
+    }
+    try {
+      const { RULE_DEFS, writeDesignRulePin } = await import("../design/page-recipe");
+      if (!RULE_DEFS.some((d) => d.id === req.params.id)) return res.status(404).json({ error: "Unknown rule" });
+      const root = getDefaultContentRoot();
+      const rootAbs = path.isAbsolute(root) ? root : path.join(process.cwd(), root);
+      const author = auth.author || "staff";
+      const file = writeDesignRulePin(
+        rootAbs,
+        req.params.id,
+        status ? { status, by: author, ...(typeof req.body?.note === "string" ? { note: req.body.note.slice(0, 300) } : {}) } : null,
+      );
+      markFileAsModified(file, author, undefined, root);
+      const { currentLearnedRules } = await import("../design/recipe-service");
+      res.json({ rules: currentLearnedRules(), file: path.relative(process.cwd(), file) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save pin", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/api/private/component-insights/layout-approval", async (req, res) => {
+    if (typeof req.headers["x-mcp-author"] === "string") {
+      return res.status(403).json({ error: "Layout approvals are a staff decision; agents cannot approve layouts." });
+    }
+    const contentType = typeof req.body?.contentType === "string" ? req.body.contentType : "";
+    const slug = typeof req.body?.slug === "string" ? req.body.slug : "";
+    const status = req.body?.status;
+    if (!contentType || !slug) return res.status(400).json({ error: "contentType and slug are required" });
+    if (status !== "approved" && status !== "rejected" && status !== null) {
+      return res.status(400).json({ error: "status must be 'approved', 'rejected', or null (clear)" });
+    }
+    const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+    if (!auth.authorized) return;
+    try {
+      const { setEntryLayoutApproval } = await import("../design/layout-approval-service");
+      const out = setEntryLayoutApproval({ contentType, slug, status, by: auth.author || "staff" });
+      if (!out.ok) return res.status(out.status).json({ error: out.error });
+      res.json(out.result);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save layout approval", details: err instanceof Error ? err.message : String(err) });
     }
   });
 

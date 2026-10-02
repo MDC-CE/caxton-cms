@@ -6,6 +6,7 @@ import type { ListPressMentionsSection } from "@shared/schema";
 import { UniversalImage } from "@/components/UniversalImage";
 import { DotsIndicator } from "@/components/DotsIndicator";
 import { coerceToHtml, coerceToText } from "@/lib/variable-manager";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 type PressMentionItem = NonNullable<ListPressMentionsSection["items"]>[number];
 
@@ -149,14 +150,7 @@ export default function ListPressMentionsFeaturedShowcase({ data }: ListPressMen
     resetTouchState();
   };
 
-  const bgStyle: React.CSSProperties = {};
-  if (data.background) {
-    if (data.background.startsWith("linear-gradient") || data.background.startsWith("radial-gradient")) {
-      bgStyle.backgroundImage = data.background;
-    } else {
-      bgStyle.backgroundColor = data.background;
-    }
-  }
+  const bgStyle: React.CSSProperties = sectionBackgroundStyle(data.background);
 
   return (
     <section

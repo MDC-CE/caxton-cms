@@ -19,20 +19,29 @@ vi.mock("../analytics/reports", () => ({
 }));
 vi.mock("../settings", () => ({ getLeadConversionEventNames: () => [], getAdsSettings: () => ({ meta: { enabled: true, ad_account_ids: [] } }) }));
 
-const { planPaidLandingSteps, lastCompleteGa4Date, PAID_LANDING_BACKFILL_DAYS } = await import("./paid-detection");
+const { planPaidLandingSteps, lastCompleteGa4Date, PAID_LANDING_BACKFILL_DAYS, PAID_LANDING_SCHEMA_VERSION } = await import("./paid-detection");
 const { addDays, utcDate } = await import("./meta-ads-days");
 
 const SITE = "site_test";
 const NOW = new Date("2026-09-29T12:00:00.000Z");
 
-function seedCompleteDay(date: string) {
+function seedCompleteDay(date: string, schemaVersion = PAID_LANDING_SCHEMA_VERSION) {
   const dir = path.join(h.cacheDir, SITE, "paid-landing-days");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, `${date}.json`),
-    JSON.stringify({ date, fetched_at: "", complete: true, candidates: [], organic: [], cookieless: [] }),
+    JSON.stringify({ date, fetched_at: "", complete: true, candidates: [], organic: [], cookieless: [], schema_version: schemaVersion }),
     "utf-8",
   );
+}
+
+function seedWindow(schemaVersion?: number) {
+  const until = addDays(utcDate(NOW), -1);
+  const cutoff = lastCompleteGa4Date(NOW);
+  for (let i = 0; i < PAID_LANDING_BACKFILL_DAYS; i++) {
+    const d = addDays(until, -i);
+    if (d <= cutoff) seedCompleteDay(d, schemaVersion);
+  }
 }
 
 beforeEach(() => {
@@ -50,13 +59,15 @@ describe("planPaidLandingSteps", () => {
   });
 
   it("only counts days still missing or not yet final", () => {
-    const until = addDays(utcDate(NOW), -1);
-    const cutoff = lastCompleteGa4Date(NOW);
-    for (let i = 0; i < PAID_LANDING_BACKFILL_DAYS; i++) {
-      const d = addDays(until, -i);
-      if (d <= cutoff) seedCompleteDay(d);
-    }
+    seedWindow();
     expect(planPaidLandingSteps(SITE, undefined, NOW)).toBe(1);
+  });
+
+  it("re-reads every older-schema day in one run, past the 30-day cap", () => {
+    seedWindow(2);
+    seedCompleteDay(addDays(utcDate(NOW), -200), 2);
+    const cached = PAID_LANDING_BACKFILL_DAYS - 1;
+    expect(planPaidLandingSteps(SITE, undefined, NOW)).toBe(1 + cached + 1);
   });
 
   it("is 0 when GA4 isn't configured", () => {

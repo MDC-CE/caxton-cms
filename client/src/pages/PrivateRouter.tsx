@@ -9,6 +9,7 @@ const ComponentGallery = lazy(() => import("@/pages/ComponentGallery"));
 const ComponentPreview = lazy(() => import("@/pages/ComponentPreview"));
 const ComponentSectionDemoPage = lazy(() => import("@/pages/ComponentSectionDemoPage"));
 const EntryPreviewFrame = lazy(() => import("@/pages/EntryPreviewFrame"));
+const PagePreviewPage = lazy(() => import("@/pages/PagePreviewPage"));
 const MediaGallery = lazy(() => import("@/pages/MediaGallery"));
 const MenuEditor = lazy(() => import("@/pages/MenuEditor"));
 const MoleculesShowcase = lazy(() => import("@/pages/MoleculesShowcase"));
@@ -136,6 +137,7 @@ export default function PrivateRouter() {
           <Route path="/private/component-showcase/:componentType/preview" component={ComponentPreview} />
           <Route path="/private/demo/:hash" component={ComponentSectionDemoPage} />
           <Route path="/private/entry-preview-frame/:contentType/:slug" component={EntryPreviewFrame} />
+          <Route path="/private/page-preview" component={PagePreviewPage} />
           <Route path="/private/blog" component={BlogManageRedirect} />
           <Route path="/private/type/:contentType" component={ContentTypeManagePage} />
           <Route path="/private/databases" component={PrivateDatabases} />

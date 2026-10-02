@@ -30,6 +30,31 @@ function internalHeaders(mcpToken?: string): Record<string, string> {
   return headers;
 }
 
+const VARIANT_FIELD_SOURCES = {
+  best_for: "staff-approved text when metadata_status=approved; AI draft when metadata_status=draft",
+  avoid_when: "same as best_for",
+  content_shape: "measured from live pages (item counts, headline lengths, media), clamped by Zod/text_limits",
+  live: "usage from component insights at read time (not stored in schema.yml)",
+  layout: "component facts: flow out = overlay/structured data; self_padded = paints its own vertical padding; edge top_of_page = designed as first section",
+};
+
+async function fetchVariantLiveStats(
+  componentType: string,
+  domain: string,
+  mcpToken?: string,
+): Promise<Record<string, { uses: number; pages: number }> | null> {
+  try {
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/private/component-insights/summary/${encodeURIComponent(componentType)}?__site=${encodeURIComponent(domain)}`;
+    const res = await fetch(url, { headers: internalHeaders(mcpToken), signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { variants?: Array<{ variant: string; count: number; pageCount: number }> };
+    if (!Array.isArray(json.variants)) return null;
+    return Object.fromEntries(json.variants.map((v) => [v.variant, { uses: v.count, pages: v.pageCount }]));
+  } catch {
+    return null;
+  }
+}
+
 function inheritForMcpFolder(contentFolder: string): string | undefined {
   const want = contentFolder.replace(/\\/g, "/").replace(/\/+$/, "");
   for (const c of getMcpSiteConfigs()) {
@@ -81,7 +106,7 @@ export function registerComponentTools(
   // get_component_schema
   mcp.tool(
     "get_component_schema",
-    "Get the top-level schema info for a component: name, description, when_to_use, and the list of variants (each with name, description, best_for). Resolves from shared or the selected site's registry. Use this to understand which variant fits your use case. Call get_component_variant next. Shared Zod/yml live in the app repo (shared/component-registry); site packages are content-synced. Requires content_view.",
+    "Get the top-level schema info for a component: name, description, when_to_use, layout traits, and the list of variants (each with name, description, best_for, avoid_when, measured content_shape, live usage). field_sources says which fields are staff-approved vs measured. Resolves from shared or the selected site's registry. Use this to pick the variant whose content_shape matches your content; for a new page start from get_page_recipe. Call get_component_variant next. Shared Zod/yml live in the app repo (shared/component-registry); site packages are content-synced. Requires content_view.",
     {
       componentType: z.string().describe("Component type name, e.g. 'faq', 'hero', 'two_column'"),
       site: z.string().optional().describe(SITE_PARAM_DESC),
@@ -105,7 +130,25 @@ export function registerComponentTools(
       if (!schema) {
         return { content: [{ type: "text", text: `Component '${componentType}' not found in registry.` }], isError: true };
       }
-      return { content: [{ type: "text", text: JSON.stringify({ componentType, ...schema }, null, 2) }] };
+      const live = await fetchVariantLiveStats(componentType, siteResult.domain, mcpToken);
+      const variants = schema.variants.map((v) => (live?.[v.name] ? { ...v, live: live[v.name] } : v));
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                componentType,
+                ...schema,
+                variants,
+                field_sources: VARIANT_FIELD_SOURCES,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
     }
   );
 
@@ -145,7 +188,7 @@ export function registerComponentTools(
   // get_component_usage
   mcp.tool(
     "get_component_usage",
-    "Investigate how a specific section component is used across the site — which pages include it, what position it appears at, and which components typically come before/after it. Scope the query by 'intent' or 'contentType' to keep the response focused and token-efficient. If neither is provided, the tool returns an error listing the available intents and content types so you can pick one. Requires content_view.",
+    "Investigate how a specific section component is used across the site — which pages include it, what position it appears at, which components typically come before/after it, variant usage, suggest_next (most common next components), and variant_pairings (type:variant neighbors weighted by approval + performance; shared templates count once). Scope the query by 'intent' or 'contentType' to keep the response focused and token-efficient. If neither is provided, the tool returns an error listing the available intents and content types so you can pick one. For a whole new page, start with get_page_recipe instead. Requires content_view.",
     {
       componentType: z.string().describe("Component type name, e.g. 'hero', 'faq', 'two_column'"),
       intent: z.string().optional().describe("Filter to pages with this intent slug (e.g. 'bootcamp'). Either intent or contentType is required."),

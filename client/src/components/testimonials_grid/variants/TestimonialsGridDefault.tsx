@@ -8,6 +8,7 @@ import {
   testimonialText,
   type TestimonialBankRow,
 } from "@shared/testimonials-listing";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 interface GridItem {
   name: string;
@@ -134,18 +135,9 @@ export function TestimonialsGrid({ data }: TestimonialsGridProps) {
   const defaultCommentColor = data.default_comment_color;
   const defaultStarColor = data.default_star_color;
   const defaultLinkedinColor = data.default_linkedin_color;
-  const background = data.background;
-
   if (items.length === 0) return null;
 
-  const bgStyle: React.CSSProperties = {};
-  if (background) {
-    if (background.startsWith("linear-gradient") || background.startsWith("radial-gradient")) {
-      bgStyle.backgroundImage = background;
-    } else {
-      bgStyle.backgroundColor = background;
-    }
-  }
+  const bgStyle: React.CSSProperties = sectionBackgroundStyle(data.background);
 
   return (
     <section

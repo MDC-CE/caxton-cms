@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { UniversalImage } from "@/components/UniversalImage";
 import { Button } from "@/components/ui/button";
 import type { ProfilesCarouselSection, ProfileCard } from "@shared/schema";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 interface ProfilesCarouselProps {
   data: ProfilesCarouselSection;
@@ -163,7 +164,7 @@ export default function ProfilesCarousel({ data }: ProfilesCarouselProps) {
   return (
     <section
       className="w-full"
-      style={data.background ? { background: data.background } : undefined}
+      style={sectionBackgroundStyle(data.background)}
       data-testid="section-profiles-carousel"
     >
       <div className="max-w-7xl mx-auto px-4 md:px-8 py-12 md:py-16">

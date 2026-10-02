@@ -92,7 +92,7 @@ export interface ValidatorMetadata {
   description: string;
   apiExposed: boolean;
   estimatedDuration: "fast" | "medium" | "slow";
-  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings" | "ads";
+  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings" | "ads" | "design";
   /** Execution / clear-scope class. Defaults via runClass.ts map when omitted. */
   runClass?: ValidatorRunClass;
   /** Optional catalog of codes this validator may emit. */

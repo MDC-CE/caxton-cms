@@ -71,6 +71,75 @@ export function verifyEntryPreviewCaptureToken(
   return { ok: true };
 }
 
+// ─── Full-page preview (render review) ─────────────────────────────────────
+
+export type PagePreviewSource =
+  | { source: "entry"; contentType: string; slug: string; locale: string; variant?: string }
+  | { source: "demo"; hash: string };
+
+export type PagePreviewViewport = "desktop" | "mobile";
+
+function pagePreviewPayload(p: PagePreviewSource, viewport: PagePreviewViewport, exp: number): string {
+  const key =
+    p.source === "entry"
+      ? `entry|${p.contentType}|${p.slug}|${p.locale}|${p.variant ?? ""}`
+      : `demo|${p.hash}`;
+  return `page|${key}|${viewport}|${exp}`;
+}
+
+export function signPagePreviewToken(p: PagePreviewSource, viewport: PagePreviewViewport, exp: number): string {
+  return signPayload(pagePreviewPayload(p, viewport, exp));
+}
+
+export function verifyPagePreviewToken(
+  p: PagePreviewSource,
+  viewport: PagePreviewViewport,
+  exp: number,
+  token: string,
+): { ok: true } | { ok: false; error: string } {
+  if (!captureSecret()) return { ok: false, error: "Capture signing secret not configured" };
+  if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) {
+    return { ok: false, error: "Capture token expired" };
+  }
+  const a = Buffer.from(signPagePreviewToken(p, viewport, exp), "utf8");
+  const b = Buffer.from(token, "utf8");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, error: "Invalid capture token" };
+  }
+  return { ok: true };
+}
+
+/** Query string for /private/page-preview (no host). */
+export function pagePreviewQuery(p: PagePreviewSource, extra?: Record<string, string>): URLSearchParams {
+  const qs = new URLSearchParams(
+    p.source === "entry"
+      ? { source: "entry", content_type: p.contentType, slug: p.slug, locale: p.locale, ...(p.variant ? { variant: p.variant } : {}) }
+      : { source: "demo", hash: p.hash },
+  );
+  for (const [k, v] of Object.entries(extra ?? {})) qs.set(k, v);
+  return qs;
+}
+
+/** Absolute signed URL Cloudflare opens to capture + measure a full page. */
+export function buildSignedPagePreviewUrl(
+  p: PagePreviewSource,
+  viewport: PagePreviewViewport,
+  opts?: { ttlSec?: number; theme?: "dark" | "light" },
+): string {
+  const base = getPublicSiteUrl();
+  if (!base) throw new Error("SITE_URL is required to build capture frame URLs");
+  const exp = Math.floor(Date.now() / 1000) + (opts?.ttlSec ?? DEFAULT_TTL_SEC);
+  const qs = pagePreviewQuery(p, {
+    viewport,
+    capture: "1",
+    capture_token: signPagePreviewToken(p, viewport, exp),
+    exp: String(exp),
+    _: String(Date.now()),
+    ...(opts?.theme ? { theme: opts.theme } : {}),
+  });
+  return `${base}/private/page-preview?${qs}`;
+}
+
 /**
  * Absolute URL to the SPA frame with capture=1 and HMAC token.
  */

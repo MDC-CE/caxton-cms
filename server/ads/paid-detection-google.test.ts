@@ -12,8 +12,16 @@ vi.mock("../settings", () => ({
   getLeadConversionEventNames: () => ["generate_lead"],
 }));
 
-const { buildPaidLandingSql, nextPaidLandingAttempt, parsePaidLandingRows, paidLandingDatesToFetch, PAID_LANDING_SCHEMA_VERSION, PAID_LANDING_DAYS_DIR } =
-  await import("./paid-detection");
+const {
+  ATTRIBUTED_OTHER_HOST,
+  buildPaidLandingSql,
+  nextPaidLandingAttempt,
+  parsePaidLandingRows,
+  paidLandingDatesToFetch,
+  summarizeAttributedOnly,
+  PAID_LANDING_SCHEMA_VERSION,
+  PAID_LANDING_DAYS_DIR,
+} = await import("./paid-detection");
 
 afterAll(() => fs.rmSync(h.cacheDir, { recursive: true, force: true }));
 
@@ -35,6 +43,56 @@ describe("buildPaidLandingSql Google fields", () => {
     expect(sql).not.toContain("google_ads_campaign");
     expect(sql).not.toContain("ClickStats");
     expect(sql).toContain("matched AS");
+  });
+});
+
+describe("buildPaidLandingSql per-visit evidence", () => {
+  const full = buildPaidLandingSql("`g.a.events_*`", { includeSessionLastClick: true, googleLink: true, clickStats: CLICKS });
+  const candidateGate = full.split("\n").find((l) => l.includes("AS is_candidate")) ?? "";
+
+  it("gates candidates on landing click ids / per-visit medium only", () => {
+    expect(candidateGate).toContain("LOWER(v_medium) IN UNNEST(@paid_mediums)");
+    expect(candidateGate).not.toContain("gads_campaign");
+    expect(candidateGate).not.toContain("lc_medium");
+    expect(full).not.toContain("gads_campaign IS NOT NULL) AS is_candidate");
+  });
+
+  it("reads source / medium from the landing URL, then collected_traffic_source, never last click or first user", () => {
+    expect(full).toContain("collected_traffic_source.manual_medium");
+    expect(full).toContain("r'[?&]utm_medium=([^&#]+)'");
+    expect(full).not.toMatch(/session_traffic_source_last_click\.manual_campaign\.source/);
+    expect(full).not.toMatch(/\btraffic_source\.(source|medium|name)\b/);
+  });
+
+  it("uses the Google Ads link only behind a Google click id", () => {
+    expect(full).toContain("IF(google_click, landing.gads_campaign, NULL)");
+    expect(full).toContain("WHEN google_click AND landing.gads_campaign IS NOT NULL THEN 'ga4_link'");
+    expect(full).toMatch(/\(gclid\|gbraid\|wbraid\|dclid\)=/);
+  });
+
+  it("counts attributed-only sessions per host only when the last-click field is read", () => {
+    expect(full).toContain("'attributed', host");
+    expect(full).toMatch(/WHERE NOT is_candidate AND \(LOWER\(landing\.lc_medium\) IN UNNEST\(@paid_mediums\) OR landing\.gads_campaign IS NOT NULL\)/);
+    const noLastClick = buildPaidLandingSql("`g.a.events_*`", { includeSessionLastClick: false });
+    expect(noLastClick).not.toContain("'attributed'");
+    expect(noLastClick).not.toContain("session_traffic_source_last_click");
+  });
+});
+
+describe("parsePaidLandingRows attributed", () => {
+  it("merges www / bare hosts and sorts by sessions", () => {
+    const { attributed_only, candidates, organic } = parsePaidLandingRows([
+      { kind: "attributed", host: "learn.4geeks.com", path: null, sessions: 40 },
+      { kind: "attributed", host: "www.4geeks.com", path: null, sessions: 5 },
+      { kind: "attributed", host: "4geeks.com", path: null, sessions: 7 },
+      { kind: "attributed", host: "x.com", path: null, sessions: 0 },
+    ]);
+    expect(attributed_only).toEqual([
+      { host: "learn.4geeks.com", sessions: 40 },
+      { host: "4geeks.com", sessions: 12 },
+    ]);
+    expect(candidates).toEqual([]);
+    expect(organic).toEqual([]);
   });
 });
 
@@ -86,22 +144,52 @@ describe("parsePaidLandingRows Google ids", () => {
 });
 
 describe("paidLandingDatesToFetch schema upgrade", () => {
-  it("re-reads complete days cached before Google ids, after missing days", () => {
-    const now = new Date("2026-09-20T12:00:00.000Z");
-    const dir = path.join(h.cacheDir, "site_x", PAID_LANDING_DAYS_DIR);
+  const now = new Date("2026-09-20T12:00:00.000Z");
+  const write = (site: string, date: string, extra: Record<string, unknown> = {}) => {
+    const dir = path.join(h.cacheDir, site, PAID_LANDING_DAYS_DIR);
     fs.mkdirSync(dir, { recursive: true });
-    const write = (date: string, schema?: number) =>
-      fs.writeFileSync(
-        path.join(dir, `${date}.json`),
-        JSON.stringify({ date, fetched_at: now.toISOString(), complete: true, candidates: [], organic: [], cookieless: [], ...(schema ? { schema_version: schema } : {}) }),
-      );
-    write("2026-09-10");
-    write("2026-09-11", PAID_LANDING_SCHEMA_VERSION);
-    const plain = paidLandingDatesToFetch("site_x", now);
-    const upgraded = paidLandingDatesToFetch("site_x", now, true);
-    expect(plain).not.toContain("2026-09-10");
-    expect(upgraded).toContain("2026-09-10");
-    expect(upgraded).not.toContain("2026-09-11");
-    expect(upgraded[upgraded.length - 1]).toBe("2026-09-10");
+    fs.writeFileSync(
+      path.join(dir, `${date}.json`),
+      JSON.stringify({ date, fetched_at: now.toISOString(), complete: true, candidates: [], organic: [], cookieless: [], ...extra }),
+    );
+  };
+
+  it("re-reads every older-schema day, Google on or off, without the 30-day cap", () => {
+    write("site_x", "2026-09-10");
+    write("site_x", "2026-09-09", { schema_version: 2 });
+    write("site_x", "2026-09-11", { schema_version: PAID_LANDING_SCHEMA_VERSION, google_ids: true });
+    // Older than the 90-day backfill window, still within retention.
+    write("site_x", "2026-03-01", { schema_version: 2 });
+    for (const google of [false, true]) {
+      const { missing, upgrade } = paidLandingDatesToFetch("site_x", now, google);
+      expect(upgrade).toEqual(["2026-09-10", "2026-09-09", "2026-03-01"]);
+      expect(missing).not.toContain("2026-09-10");
+      expect(missing.length).toBeGreaterThan(30);
+    }
+  });
+
+  it("re-reads current-schema days without Google ids only once Google is connected", () => {
+    write("site_y", "2026-09-12", { schema_version: PAID_LANDING_SCHEMA_VERSION, google_ids: false });
+    expect(paidLandingDatesToFetch("site_y", now, false).upgrade).toEqual([]);
+    expect(paidLandingDatesToFetch("site_y", now, true).upgrade).toEqual(["2026-09-12"]);
+  });
+});
+
+describe("summarizeAttributedOnly", () => {
+  const day = (extra: Record<string, unknown>) =>
+    ({ date: "2026-09-01", fetched_at: "", complete: true, candidates: [], organic: [], cookieless: [], schema_version: PAID_LANDING_SCHEMA_VERSION, ...extra }) as never;
+
+  it("sums hosts across days, keeps the top 10 and folds the rest into (other)", () => {
+    const hosts = Array.from({ length: 12 }, (_, i) => ({ host: `h${i}.com`, sessions: 12 - i }));
+    const out = summarizeAttributedOnly([day({ attributed_only: hosts }), day({ attributed_only: [{ host: "h0.com", sessions: 3 }] })]);
+    expect(out!.total).toBe(81);
+    expect(out!.by_host).toHaveLength(11);
+    expect(out!.by_host[0]).toEqual({ host: "h0.com", sessions: 15 });
+    expect(out!.by_host[10]).toEqual({ host: ATTRIBUTED_OTHER_HOST, sessions: 3 });
+  });
+
+  it("is null when a day couldn't measure it; older-schema days contribute nothing", () => {
+    expect(summarizeAttributedOnly([day({ attributed_measured: false })])).toBeNull();
+    expect(summarizeAttributedOnly([day({ schema_version: 2, attributed_only: [{ host: "a.com", sessions: 9 }] })])).toEqual({ total: 0, by_host: [] });
   });
 });

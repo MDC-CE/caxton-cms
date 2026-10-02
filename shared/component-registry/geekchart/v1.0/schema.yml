@@ -71,8 +71,24 @@ props:
   duration:
     type: number
     required: false
-    description: "How long the build animation takes, in seconds (e.g. 6). Left empty, the chart plays at its designed pace."
+    description: How long the build animation takes, in seconds (e.g. 6). Left empty, the chart plays at its designed pace.
   wide:
     type: boolean
     required: false
-    description: "Hero placement: render the chart at its natural width and let it span wider than the article column. Use for a chart replacing the hero image; leave off for in-flow charts."
+    description: >-
+      Hero placement: render the chart at its natural width and let it span wider than the article column. Use for a
+      chart replacing the hero image; leave off for in-flow charts.
+variants:
+  default:
+    content_shape:
+      image: unused
+      icon: unused
+      sample_pages: 1
+      measured_at: "2026-10-02"
+    best_for: >-
+      Use on blog posts to display a standalone, animated mermaid diagram (flowchart, sequence, decision tree or org
+      chart) with optional caption as its own full-width section.
+    avoid_when: >-
+      Avoid for pages needing static images, icon grids, photo galleries, or any content that is not a clean editorial
+      mermaid diagram under 15 nodes.
+    metadata_status: draft

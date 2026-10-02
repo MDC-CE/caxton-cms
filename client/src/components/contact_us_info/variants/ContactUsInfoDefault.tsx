@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import type { ContactUsInfoSection, ContactLocation } from "@shared/schema";
 import { Mail, MapPin, Phone } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 const LeadForm = lazy(() => import("@/components/lead_form/variants/LeadFormDefault"));
 
@@ -80,7 +81,7 @@ function LocationCard({ location }: { location: ContactLocation }) {
 export default function ContactUsInfo({ data }: ContactUsInfoProps) {
   return (
     <section
-      style={data.background ? { background: data.background } : undefined}
+      style={sectionBackgroundStyle(data.background)}
       data-testid="section-contact-us-info"
     >
       <div className="max-w-6xl mx-auto px-4">

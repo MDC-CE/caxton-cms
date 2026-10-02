@@ -1626,6 +1626,26 @@ export interface ComponentSequence {
 export interface InsightSection {
   type: string;
   variant: string;
+  /** Theme background ID (or legacy CSS) as written in YAML. */
+  background?: string;
+  /** Spacing tokens as written (`paddingY` / `marginY`; responsive values as "mobile|desktop"). */
+  spacing?: { paddingY?: string; marginY?: string };
+  /** Component layout traits resolved for this variant. */
+  traits?: { flow: "in" | "out"; self_padded: boolean; edge?: "top_of_page" };
+}
+
+export type InsightApprovalState = "approved" | "implicit" | "rejected" | "stale" | "none";
+
+export interface InsightPagePerformance {
+  /** Clamped lift used in the weight (0.5–1.5). */
+  factor: number;
+  lift: number;
+  outcome: number;
+  expected: number;
+  sessions: number;
+  outcome_metric: string;
+  window_days: number;
+  generated_at: string;
 }
 
 export interface InsightPageRecord {
@@ -1635,9 +1655,27 @@ export interface InsightPageRecord {
   slug?: string;
   slugs?: string[];
   intent: string;
+  /** Manual `insights_weight` (default 1). */
   weight: number;
+  /** Pages that render this layout (attached entries for a template). Reach only — not a learning multiplier. */
   instanceCount: number;
   sections: InsightSection[];
+  /** Structural fingerprint (type, variant, background per section). */
+  fingerprint?: string;
+  /** Locale whose sections were scanned, and all live locales. */
+  locale?: string;
+  locales?: string[];
+  funnelStage?: string;
+  approval?: {
+    state: InsightApprovalState;
+    factor: number;
+    by?: string;
+    at?: string;
+    stable_since?: string;
+  };
+  performance?: InsightPagePerformance;
+  /** manual × approval × performance (relevance and locale apply at query time). */
+  baseWeight?: number;
 }
 
 export interface VariantUsageStat {

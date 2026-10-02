@@ -56,8 +56,8 @@ props:
     type: boolean
     required: false
     description: >
-      Whether to show the auto-generated table of contents (based on h2/h3 headings; markdown `#` is treated as h2). On pages with 2+ articles,
-      only the first article's show_toc controls the shared TOC; later values are non-effects.
+      Whether to show the auto-generated table of contents (based on h2/h3 headings; markdown `#` is treated as h2). On
+      pages with 2+ articles, only the first article's show_toc controls the shared TOC; later values are non-effects.
   toc_position:
     type: string
     required: false
@@ -119,4 +119,21 @@ props:
     required: false
     description: Stable section id (also used as heading-id prefix on split pages)
 variants:
-  default: {}
+  default:
+    content_shape:
+      items:
+        items:
+          min: 3
+          max: 3
+          typical: 3
+      image: unused
+      icon: unused
+      sample_pages: 31
+      measured_at: "2026-10-02"
+    best_for: >-
+      Long-form Markdown pages with 3+ headings such as blog posts, documentation, how-tos, or policies that benefit
+      from an optional table of contents and inline Mermaid diagrams.
+    avoid_when: >-
+      Short content, landing pages, or pages needing multiple distinct articles, image-heavy layouts, or separate
+      interactive charts outside the article body.
+    metadata_status: draft

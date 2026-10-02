@@ -8,10 +8,19 @@ Call this topic before answering “what are ads doing for us?” or “why do M
 |---|---|---|
 | Meta Marketing API | spend, clicks, landing page views, Meta-reported leads (pixel + instant forms), ad creative link | `.cache/{site}/meta-ads-days/{date}.json` (refresh last 10 days, keep 13 months, 90-day backfill; see Account sync) |
 | Google Ads → BigQuery Data Transfer | spend, clicks, impressions, Google-reported leads (`google_leads`), campaign / ad group / ad setups, network split | `.cache/{site}/google-ads-days/{date}.json`, `google-ads-network-days/`, `google-ads-setups.json`, `google-ads-state.json` (see Google Ads) |
-| GA4 BigQuery export | paid visits per landing page, engagement, bounce, experiment variant; Google campaign / ad group / network per visit | `.cache/{site}/paid-landing-days/{date}.json` (complete days only, ~2-day lag) |
+| GA4 BigQuery export | paid visits per landing page, engagement, bounce, experiment variant; Google campaign / ad group / network per visit; per-domain count of sessions GA4 credits to ads that we don't count | `.cache/{site}/paid-landing-days/{date}.json` (complete days only, ~2-day lag; `schema_version` 3) |
 | Lead ledger | site leads (unique vs repeat, test flag), first / last paid landing with platform + campaign / ad set / ad ids | pipeline SQLite `lead_submissions` (no PII, 25-month retention) |
 
 Meta-reported leads, Google-reported leads and site leads are **separate columns** — never add them. Spend is **per currency**, never converted (`mixed_currency` warning when accounts differ).
+
+## What counts as a paid visit (GA4)
+
+- **Per-visit evidence only.** A session (landing = first `page_view`) is a paid candidate when its landing URL has an ad click id (`gclid`, `gbraid`, `wbraid`, `dclid`, `fbclid`, `msclkid`, `ttclid`, `li_fat_id`, `twclid`, `sclid`, `epik`) or `utm_id`, or a paid `utm_medium` (URL first, else GA4 event-scoped `collected_traffic_source`). Then `classifyTraffic` decides paid / unclear (`fbclid` alone) / organic. No domain filter: an ad pointing at another domain still shows under destinations.
+- **Ignored for paid detection:** `session_traffic_source_last_click` (GA4 carries the last non-direct source across sessions for weeks) and the first-user `traffic_source`. A returning visitor who once clicked an ad is **not** a paid visit on later direct / bookmark / newsletter visits.
+- **GA4 ↔ Google Ads link** (`google_ads_campaign`) only supplies campaign / ad group ids for sessions with a Google click id on the landing URL; it never makes a session paid on its own.
+- **`totals.attributed_only_visits`** `{ total, by_host[] }` (top 10 hosts + `(other)`): sessions GA4's last-click (or the Ads link without a click id) credits to ads, with no per-visit evidence. Whole window, all platforms, ignores `account` / `currency` / `content_type` / id filters. `null` + `ga4.attributed_only_unavailable_reason` when the export lacks `session_traffic_source_last_click` (can't measure, not zero). These sessions are in the organic baseline.
+- **`ga4.old_rule_days`**: window days still cached at an older schema. After the schema bump, the next sync re-reads **every** cached day (whole retention) in one run; >0 only after a failed run, and the next sync finishes it.
+- Non-effects: spend, Meta- / Google-reported leads and site leads (ledger, already URL-based) are unchanged. Paid visits drop vs the old rule; cost per visit rises; clicks → visits moves toward 100%.
 
 ## Account sync
 
@@ -27,7 +36,7 @@ Meta-reported leads, Google-reported leads and site leads are **separate columns
 - **Sync** (same `ads_sync` job as Meta + GA4; `meta_ads_sync` is an alias): re-reads the last **10 days** of spend / clicks and **30 days** of conversions every run, plus any day the transfer reloaded. Per-account state → report `google.accounts[] { id, name, currency, history_loaded, data_through, auto_tagging, sync_error? }`.
 - **Lag:** the transfer lands each day late. The newest 1–2 days missing are normal (`google_data_through` warning: "missing, not zero"); older → `google_transfer_stale` warning + issue. `refresh: true` can't make the transfer run sooner.
 - **Visit matching** (paid Google visits → campaign), in order; the report counts each in `google.visit_match { ga4_link, gclid, tags, none }`:
-  1. GA4 ↔ Google Ads link (`session_traffic_source_last_click.google_ads_campaign` in the export) — best.
+  1. GA4 ↔ Google Ads link (`session_traffic_source_last_click.google_ads_campaign` in the export) — best; used only when the landing URL has a Google click id (`gclid` / `gbraid` / `wbraid` / `dclid`).
   2. `gclid` joined to the transfer's `ClickStats` **inside BigQuery** (needs the same BigQuery location as GA4); click ids are never stored by us.
   3. URL suffix tags (`utm_id` / `utm_term` / `utm_content` = campaign / ad group / ad ids; template in Settings → Ads → Google).
   Unmatched visits stay paid Google traffic, just without campaign ids. **Performance Max** reports campaign level only (no ad group / ad).

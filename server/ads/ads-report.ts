@@ -57,9 +57,13 @@ import {
 } from "./meta-ads-days";
 import type { MetaAdCreativeInfo, MetaAdDayRow } from "./meta-client";
 import {
+  countOldRuleDays,
+  GOOGLE_CLICK_IDS,
   lastCompleteGa4Date,
   loadPaidLandingDays,
   loadPaidLandingState,
+  summarizeAttributedOnly,
+  type AttributedOnlyVisits,
   type PaidLandingCandidateRow,
 } from "./paid-detection";
 import { isDubiousUtmContent, metaAutoTaggedAdIds } from "./observed-tagging";
@@ -354,7 +358,16 @@ export type AdsReport = {
     }>;
   };
   google: AdsGoogleBlock;
-  ga4: { configured: boolean; last_synced_at: string | null; last_export_date: string | null; last_error: string | null };
+  ga4: {
+    configured: boolean;
+    last_synced_at: string | null;
+    last_export_date: string | null;
+    last_error: string | null;
+    /** GA4 days in the window still read with the older paid-visit rule (normally 0; the next sync re-reads them). */
+    old_rule_days: number;
+    /** Set when `totals.attributed_only_visits` is null: why it can't be measured. */
+    attributed_only_unavailable_reason: string | null;
+  };
   /** Derived from `refresh` (queued or running); kept for older clients. */
   refreshing: boolean;
   refresh: AdsRefreshStatus;
@@ -396,6 +409,11 @@ export type AdsReport = {
     submissions: number;
     repeat_submissions: number;
     test_submissions: number;
+    /**
+     * Sessions GA4 credits to ads (carried-over last click / Google Ads link) that had no ad evidence on the
+     * landing URL, so they are not paid visits. Whole window, all platforms, ignores other filters. Null = can't measure.
+     */
+    attributed_only_visits: AttributedOnlyVisits | null;
   };
   /** Days in the window whose Meta day rows include the click/view lead split. */
   meta_split_days: { covered: number; total: number };
@@ -562,6 +580,10 @@ const LEVEL_LABEL: Record<keyof DerivedIds, string> = { ad: "ad", adset: "ad set
 function addMoney(target: MoneyByCurrency, currency: string, amount: number): void {
   if (!currency || !amount) return;
   target[currency] = Math.round(((target[currency] ?? 0) + amount) * 100) / 100;
+}
+
+function spendSum(m: MoneyByCurrency): number {
+  return Object.values(m).reduce((s, v) => s + v, 0);
 }
 
 function divMoney(money: MoneyByCurrency, denom: number): MoneyByCurrency {
@@ -886,6 +908,10 @@ function makeUnrecognizedTracker(site: string, accountIds: string[], end: string
  * `known` (every synced row) decides paid vs organic; `matched` uses `connected`
  * (rows after account/currency filters) so both sides of clicks → visits narrow together.
  */
+function isGoogleClickId(id: string | null): boolean {
+  return !!id && (GOOGLE_CLICK_IDS as readonly string[]).includes(id);
+}
+
 function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, connected: ByPlatform<KnownAdIds>) {
   const cls = classifyTraffic({
     utm_source: c.source === "(direct)" ? null : c.source,
@@ -893,8 +919,9 @@ function classifyCandidate(c: PaidLandingCandidateRow, known: KnownMetaIds, conn
     click_ids: c.click_id_type ? { [c.click_id_type]: "1" } : undefined,
     matches_known_meta_id: matchesMetaIds(c, known),
   });
-  // GA4's Google Ads link marks the session as a Google Ads click even when source/medium were overwritten.
-  if (cls.status !== "paid" && c.gads_campaign_id) {
+  // GA4's Google Ads link marks the session as a Google Ads click even when source/medium were overwritten,
+  // but only with a Google click id on this visit (the link alone is carried over from earlier clicks).
+  if (cls.status !== "paid" && c.gads_campaign_id && isGoogleClickId(c.click_id_type)) {
     return { status: "paid" as const, platform: "google" as const, click_id_type: cls.click_id_type, matched: matchesGoogleIds(c, connected.google) };
   }
   const matched =
@@ -998,6 +1025,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     submissions: 0,
     repeat_submissions: 0,
     test_submissions: 0,
+    attributed_only_visits: { total: 0, by_host: [] },
   };
 
   type PlacementAgg = { spend: MoneyByCurrency; clicks: number; meta_leads: number; paid_visits: number; unique_leads: number };
@@ -1081,6 +1109,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
   const ga4Configured = hasGa4Data(opts.site, opts.contentRoot);
   const ga4State = loadPaidLandingState(opts.site);
   const paidDays = ga4Configured ? loadPaidLandingDays(opts.site, start, end) : [];
+  totals.attributed_only_visits = summarizeAttributedOnly(paidDays);
   const adLandingVotes = new Map<string, Map<string, number>>();
   const ga4Dates = new Set(paidDays.map((d) => d.date));
   /** Filtered-out Meta visits whose finest filtered id is unknown (no tag, no parent), by row key. */
@@ -1491,7 +1520,9 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
           }
         : null;
     row.platforms = Array.from(a.platforms);
-    row.campaigns = Array.from(a.campaigns.values()).sort((x, y) => y.paid_visits - x.paid_visits).slice(0, 10);
+    row.campaigns = Array.from(a.campaigns.values())
+      .sort((x, y) => y.paid_visits - x.paid_visits || spendSum(y.spend) - spendSum(x.spend))
+      .slice(0, 10);
     if (opts.includeGa4Ads) {
       row.ga4_ads = Array.from(a.ga4Ads?.values() ?? [])
         .sort((x, y) => y.visits - x.visits)
@@ -1510,7 +1541,6 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
     if (!hasActivity) continue;
     (row.kind === "entry" ? pages : destinations).push(row);
   }
-  const spendSum = (m: MoneyByCurrency) => Object.values(m).reduce((s, v) => s + v, 0);
   pages.sort((x, y) => spendSum(y.spend) - spendSum(x.spend) || y.paid_visits - x.paid_visits);
   destinations.sort((x, y) => spendSum(y.spend) - spendSum(x.spend) || y.paid_visits - x.paid_visits);
 
@@ -1825,6 +1855,11 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       last_synced_at: ga4State.last_success_at ?? null,
       last_export_date: ga4State.last_export_date ?? null,
       last_error: ga4State.last_error ?? null,
+      old_rule_days: countOldRuleDays(paidDays),
+      attributed_only_unavailable_reason:
+        totals.attributed_only_visits === null
+          ? "GA4's export doesn't include session_traffic_source_last_click, so visits GA4 credits to ads can't be counted."
+          : null,
     },
     refreshing,
     refresh,

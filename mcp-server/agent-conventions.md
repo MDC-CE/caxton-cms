@@ -200,6 +200,17 @@ Your job is to stop harm — invented claims, lost query fit, false scope, unjus
 
 Every full `sections` array is shape-checked against the component registry (`invalid_sections` + `property_path`) — read `get_component_schema` first. Images, links, and product scope are still on you. Publishing an empty `entry` page fails with `empty_page`. Database-backed types cannot be created by proposal (a human creates the row). Recipes (new section-built page, change every entry's layout): `explain_site` `topic: "proposals"` `subtopic: "overview"`.
 
+### 7h. Designing a page
+
+Building or restructuring an entry-owned layout (landing, downloadable, detached entry):
+
+1. `get_page_recipe` (`contentType`, `stage`, `locale`) → pick slot options; `get_component_variant` per pick (match `content_shape` to your content).
+2. Optional `create_page_demo` to compare options; then write the draft.
+3. `review_page_render` (`source: "entry"`) → `get_render_review` with `include_images: true`; fix findings, re-review after structural edits.
+4. Publish. Agents publishing a new/restructured page without a fresh review get `render_review_required` (warn-only when render review is unavailable).
+
+Backgrounds are theme IDs only; no inline colors/font sizes in rich text (`theme_colors_required`). Template entries: `get_page_recipe` with `slug` returns `mode: "fields"` — fill fields, do not add sections. Details: `explain_site` `topic: "design"`.
+
 ## 8. Diagnostics and issues
 
 - `open_issues[]` from `run_entry_diagnostics` / `get_diagnostics_job` is the open work queue, not a full validation dump. Claim from a fresh one-slug run (`slugs: [slug]`, `freshness: "hard"` → poll `get_diagnostics_job`), never from a stale bulk page.

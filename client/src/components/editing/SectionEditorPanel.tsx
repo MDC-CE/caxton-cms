@@ -3750,6 +3750,7 @@ export function SectionEditorPanel({
               value={currentBackground}
               onChange={(value) => updateProperty("background", value)}
               type="background"
+              saveAs="id"
               testIdPrefix="props-background"
             />
             {/* Render top-level (non-array) color-picker field editors */}

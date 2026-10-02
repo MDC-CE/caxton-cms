@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { AlertTriangle, BadgeCheck, CheckCircle2, ChevronDown, CircleAlert, Copy, Info, Loader2, Megaphone, Scale, Settings, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import {
@@ -30,7 +30,15 @@ import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButto
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
 import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
-import { AdsRunBar, adsRunPollMs } from "@/components/diagnostics/AdsRunBar";
+import {
+  AdsRunStatus,
+  RunAdvancedCollapsible,
+  RunChecksButton,
+  RunNotes,
+  RUN_CHECKS_INTRO,
+  adsIssuesValue,
+  adsRunPollMs,
+} from "@/components/diagnostics/AdsRunBar";
 import { AdsIssueStateBadges, AdsIssueVerifyPanel } from "@/components/diagnostics/AdsIssueActions";
 import {
   IssueConversionEvidence,
@@ -132,19 +140,22 @@ function spendRightNow(spend: Record<string, number>, trackedShare: number | nul
 }
 
 const ISSUES_READINGS: KpiReading[] = [
+  { reading: "—", meaning: "No check has run yet. It doesn't mean healthy — press Run checks." },
   { reading: "0", meaning: "Nothing to fix. Ads and tracking look healthy." },
   { reading: "Warnings", meaning: "Mostly measurement gaps: ads still run, but some numbers here are incomplete or can't be tied to an ad." },
   { reading: "Errors", meaning: "Fix first: Meta can't sync, or enough spend goes through a broken setup (for example ads sending people to a broken page)." },
   { reading: "$ affected", meaning: "Spend that ran through ads with an open issue. Not all of it is wasted — for tracking gaps it just can't be traced." },
 ];
 
-function issuesRightNow(k: AdsDiagnostics["kpis"], affected: string | null, windowDays: number): string {
+function issuesRightNow(k: AdsDiagnostics["kpis"], affected: string | null, windowDays: number, run: AdsDiagnostics["run"]): string {
+  if (run.active.some((j) => j.kind === "run")) return "A check is running. The count updates when it finishes.";
+  if (run.never_run) return "No checks have run yet, so nothing is counted. Press Run checks on this card to look for problems.";
   const spendNote = affected ? ` ${affected} ran through ads with a problem.` : "";
   if (k.open_errors > 0) {
-    return `${k.open_errors} error${k.open_errors === 1 ? "" : "s"} and ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Start with the errors in the list below.`;
+    return `${k.open_errors} error${k.open_errors === 1 ? "" : "s"} and ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Start with the errors — open the issues badge on the Ads tracking card.`;
   }
   if (k.open_warnings > 0) {
-    return `No errors, ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Open the list below — each issue says what to fix.`;
+    return `No errors, ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Open the issues badge on the Ads tracking card — each issue says what to fix.`;
   }
   return `No open issues in the last ${windowDays} days.`;
 }
@@ -187,7 +198,7 @@ function leadsRightNow(k: AdsDiagnostics["kpis"], collectingSince: string | null
 const UNCLEAR_READINGS: KpiReading[] = [
   { reading: "What it counts", meaning: "Visits from Meta that carry only Meta's click id and no campaign tags. We can't tell if they came from a paid ad or an organic post or shared link." },
   { reading: "Low", meaning: "Normal. Organic posts and shared links always add a few." },
-  { reading: "High or rising", meaning: "Usually ads without the tracking template. You get a warning in the list below when it gets too high." },
+  { reading: "High or rising", meaning: "Usually ads without the tracking template. You get a tracking issue warning when it gets too high." },
   { reading: "—", meaning: "No Meta visits in this window yet." },
 ];
 
@@ -208,6 +219,7 @@ function KpiReadGuide({
   activeReading,
   template,
   footer,
+  advanced,
   testId,
 }: {
   title: string;
@@ -219,6 +231,8 @@ function KpiReadGuide({
   /** Shows a copy button for the tracking template in the "Right now" box. */
   template?: string;
   footer?: ReactNode;
+  /** Opt-in block at the bottom (e.g. a "Read more (advanced)" collapsible). */
+  advanced?: ReactNode;
   testId: string;
 }) {
   const { toast } = useToast();
@@ -289,6 +303,7 @@ function KpiReadGuide({
           )}
         </div>
         {footer && <p>{footer}</p>}
+        {advanced}
       </DialogContent>
     </Dialog>
   );
@@ -318,7 +333,7 @@ function Kpi({
   hint?: ReactNode;
   /** Opens from an ⓘ button next to the label. */
   info?: ReactNode;
-  tone?: "error" | "warning";
+  tone?: "error" | "warning" | "ok";
   aside?: ReactNode;
   /** Bottom-right of the card, under `aside`. */
   corner?: ReactNode;
@@ -334,7 +349,7 @@ function Kpi({
             <p
               className={cn(
                 "truncate text-2xl font-bold tabular-nums",
-                tone === "error" ? "text-destructive" : tone === "warning" ? "text-amber-500" : "text-foreground",
+                tone === "error" ? "text-destructive" : tone === "warning" ? "text-amber-500" : tone === "ok" ? "text-chart-3" : "text-foreground",
               )}
             >
               {value}
@@ -579,7 +594,111 @@ function IssueRow({
   );
 }
 
-const ISSUES_OPEN_KEY = "diagnostics-ads-issues-open";
+function TrackingIssuesBadge({
+  data,
+  issues,
+  infos,
+  openCount,
+  affectedSpend,
+  onReload,
+}: {
+  data: AdsDiagnostics;
+  issues: AdsIssueRow[];
+  infos: AdsIssueRow[];
+  openCount: number;
+  affectedSpend: Record<string, number> | null;
+  onReload: () => void;
+}) {
+  const [list, setList] = useState<"issues" | "resolved">("issues");
+  const neverRun = data.run.never_run;
+  const hasErrors = data.kpis.open_errors > 0;
+  const tone = neverRun ? "muted" : hasErrors ? "error" : openCount > 0 ? "warning" : "ok";
+  const Icon = tone === "ok" ? CheckCircle2 : tone === "muted" ? Info : AlertTriangle;
+  const label = neverRun ? "Not checked" : openCount === 0 ? "All good" : `${openCount} issue${openCount === 1 ? "" : "s"}`;
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            tone === "error" && "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20",
+            tone === "warning" && "border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-400",
+            tone === "ok" && "border-green-600/40 bg-green-600/10 text-green-700 hover:bg-green-600/20 dark:text-green-400",
+            tone === "muted" && "border-border bg-muted/40 text-muted-foreground hover:text-foreground",
+          )}
+          aria-label={`Tracking issues: ${label}`}
+          data-testid="badge-ads-issues"
+          data-tone={tone}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          {label}
+        </button>
+      </DialogTrigger>
+      <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-3 sm:max-w-3xl" data-testid="dialog-ads-issues">
+        <DialogHeader className="space-y-1.5">
+          <DialogTitle className="text-base" data-testid="text-ads-issues-title">
+            Tracking issues
+            <span
+              className={cn("ml-1 tabular-nums", hasErrors ? "text-destructive" : openCount > 0 ? "text-amber-500" : "text-muted-foreground")}
+              data-testid="text-ads-issues-count"
+            >
+              ({openCount})
+            </span>
+            {affectedSpend && (
+              <span className="font-normal text-muted-foreground">
+                {" "}affecting <span className="font-semibold tabular-nums text-foreground">{formatMoney(affectedSpend)}</span> in spend
+              </span>
+            )}
+          </DialogTitle>
+          <DialogDescription className="text-sm">
+            Problems found by the last check over the last {data.issue_window_days} days. Changing the window doesn&apos;t hide or resolve them;
+            issues you marked as fixed stay listed as pending until they&apos;re confirmed.
+          </DialogDescription>
+        </DialogHeader>
+        <ToggleButtonBar value={list} onValueChange={(v) => setList(v as "issues" | "resolved")} listTestId="ads-issue-list" listClassName="flex w-fit">
+          <ToggleButtonBarTrigger value="issues">Issues ({openCount})</ToggleButtonBarTrigger>
+          <ToggleButtonBarTrigger value="resolved">Resolved ({data.resolved.length})</ToggleButtonBarTrigger>
+        </ToggleButtonBar>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border">
+          {list === "issues" ? (
+            issues.length === 0 && infos.length === 0 ? (
+              <p className="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground" data-testid="ads-no-issues">
+                <CheckCircle2 className="h-4 w-4 text-chart-3" />{" "}
+                {neverRun ? "No checks have run yet. Press Run checks on the Open issues card to look for problems." : "No tracking issues found in the last check."}
+              </p>
+            ) : (
+              [...issues, ...infos].map((i) => (
+                <IssueRow
+                  key={i.id}
+                  issue={i}
+                  template={data.utm_template}
+                  issueWindowDays={data.issue_window_days}
+                  refresh={data.refresh}
+                  onReload={onReload}
+                />
+              ))
+            )
+          ) : data.resolved.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-muted-foreground">Nothing resolved yet.</p>
+          ) : (
+            data.resolved.map((r) => (
+              <div key={`${r.id}-${r.resolved_at}`} className="flex items-center justify-between border-b border-border px-3 py-2 text-sm last:border-b-0">
+                <span className="flex items-center gap-2 text-foreground">
+                  <CheckCircle2 className="h-4 w-4 text-chart-3" /> {r.title}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {RESOLUTION_LABEL[r.resolution]} · {formatWhen(r.resolved_at)}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export const RESOLUTION_LABEL: Record<AdsDiagnostics["resolved"][number]["resolution"], string> = {
   verified_gone: "Confirmed fixed",
@@ -588,14 +707,15 @@ export const RESOLUTION_LABEL: Record<AdsDiagnostics["resolved"][number]["resolu
   rule_retired: "Check retired",
 };
 
+export function trackingStatusValue(status: AdsDiagnostics["status"], neverRun: boolean): string {
+  if (status === "not_connected") return "Not connected";
+  if (neverRun) return "Not checked yet";
+  if (status === "ok") return "Healthy";
+  return status === "errors" ? "Has errors" : "Has warnings";
+}
+
 export function DiagnosticsAdsPanel() {
   const [days, setDays] = useState<7 | 28 | 90>(28);
-  const [list, setList] = useState<"issues" | "resolved">("issues");
-  const [issuesOpen, setIssuesOpen] = useState(() => localStorage.getItem(ISSUES_OPEN_KEY) !== "0");
-  const toggleIssuesOpen = (open: boolean) => {
-    setIssuesOpen(open);
-    localStorage.setItem(ISSUES_OPEN_KEY, open ? "1" : "0");
-  };
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["/api/diagnostics/ads", "meta", days],
@@ -641,19 +761,10 @@ export function DiagnosticsAdsPanel() {
       : Object.keys(k.tracked_spend).length > 0
         ? `${formatMoney(k.tracked_spend)} lands on our pages`
         : undefined;
-  const statusStyle =
-    data.status === "errors"
-      ? "border-destructive/40 bg-destructive/10"
-      : data.status === "warnings"
-        ? "border-amber-500/40 bg-amber-500/10"
-        : data.status === "ok"
-          ? "border-chart-3/40 bg-chart-3/10"
-          : "border-border bg-muted/40";
   const issues = data.issues.filter((i) => i.severity !== "info");
   const openIssues = issues.filter((i) => i.verify.state === "open");
   const consentDrop = data.issues.find((i) => i.code === "consent_rate_drop" && i.verify.state === "open");
   const infos = data.issues.filter((i) => i.severity === "info" && i.code !== "consent_rate_drop");
-  const issueWindow = `last ${data.issue_window_days} days`;
   const affectedSpend: Record<string, number> = {};
   for (const i of [...openIssues, ...infos]) {
     for (const [cur, v] of Object.entries(i.spend_affected)) affectedSpend[cur] = (affectedSpend[cur] ?? 0) + v;
@@ -666,38 +777,7 @@ export function DiagnosticsAdsPanel() {
 
   return (
     <div className="space-y-4" data-testid="diagnostics-ads-panel">
-      <div className={cn("flex flex-wrap items-center justify-between gap-3 rounded-md border px-4 py-3", statusStyle)} data-testid="ads-status-bar">
-        <div className="flex items-center gap-2 text-sm">
-          <Megaphone className="h-4 w-4" />
-          {data.status === "not_connected" ? (
-            <span>
-              Meta is not connected.{" "}
-              <Link href="/private/settings/ads/meta" className="underline underline-offset-2">
-                Connect it in Settings → Ads
-              </Link>
-              .
-            </span>
-          ) : (
-            <span>
-              {data.status === "ok" ? "Ads tracking looks healthy." : `${k.open_errors} error(s), ${k.open_warnings} warning(s).`} Checked over the{" "}
-              {issueWindow}. Meta synced {formatWhen(data.meta.last_synced_at)}
-              {isRefreshActive(data.refresh) ? " · refreshing…" : ""}
-              {data.collecting_since ? ` · site leads since ${data.collecting_since.slice(0, 10)}` : ""}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button asChild size="sm" variant="ghost">
-            <Link href="/private/settings/ads/meta" data-testid="link-ads-settings">
-              <Settings className="h-4 w-4" />
-            </Link>
-          </Button>
-        </div>
-      </div>
-
       <AdsRefreshNotice refresh={data.refresh} testId="ads-diagnostics-refresh-notice" />
-
-      {data.status !== "not_connected" && <AdsRunBar run={data.run} onChanged={() => void refetch()} testIdPrefix="ads-meta" />}
 
       {data.missing_floor_currencies.length > 0 && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs" data-testid="ads-missing-floor">
@@ -741,9 +821,46 @@ export function DiagnosticsAdsPanel() {
           <ToggleButtonBarTrigger value="28">28 days</ToggleButtonBarTrigger>
           <ToggleButtonBarTrigger value="90">90 days</ToggleButtonBarTrigger>
         </ToggleButtonBar>
+        <Button asChild size="sm" variant="ghost">
+          <Link href="/private/settings/ads/meta" data-testid="link-ads-settings">
+            <Settings className="h-4 w-4" />
+          </Link>
+        </Button>
       </div>
 
       <div className="grid w-full grid-cols-2 gap-3 lg:grid-cols-3" data-testid="ads-kpis">
+        <Kpi
+          label="Ads tracking"
+          value={trackingStatusValue(data.status, data.run.never_run)}
+          tone={data.status === "not_connected" || data.run.never_run ? undefined : data.status === "ok" ? "ok" : data.status === "errors" ? "error" : "warning"}
+          hint={
+            data.status === "not_connected" ? (
+              <Link href="/private/settings/ads/meta" className="underline underline-offset-2 hover:text-foreground">
+                Connect it in Settings → Ads
+              </Link>
+            ) : (
+              `Meta synced ${formatWhen(data.meta.last_synced_at)}${isRefreshActive(data.refresh) ? " · refreshing…" : ""}`
+            )
+          }
+          aside={
+            data.status !== "not_connected" ? (
+              <TrackingIssuesBadge
+                data={data}
+                issues={issues}
+                infos={infos}
+                openCount={openIssues.length}
+                affectedSpend={hasAffectedSpend ? affectedSpend : null}
+                onReload={() => void refetch()}
+              />
+            ) : undefined
+          }
+          footer={
+            data.status !== "not_connected" && data.collecting_since ? (
+              <p className="mt-1 text-[11px] leading-snug text-muted-foreground">Site leads since {data.collecting_since.slice(0, 10)}</p>
+            ) : undefined
+          }
+          testId="status"
+        />
         <Kpi
           label="Spend"
           value={formatMoney(k.spend)}
@@ -761,34 +878,44 @@ export function DiagnosticsAdsPanel() {
         />
         <Kpi
           label="Open issues"
-          value={String(k.open_errors + k.open_warnings)}
-          tone={k.open_errors > 0 ? "error" : k.open_warnings > 0 ? "warning" : undefined}
-          hint={issueWindow}
+          value={adsIssuesValue(data.run, k.open_errors + k.open_warnings)}
+          tone={data.run.never_run ? undefined : k.open_errors > 0 ? "error" : k.open_warnings > 0 ? "warning" : undefined}
+          hint={<AdsRunStatus run={data.run} windowDays={data.issue_window_days} testIdPrefix="ads-meta" />}
           aside={
             <KpiReadGuide
               title="Open issues"
-              intro={`Problems found in your ads or tracking over the last ${data.issue_window_days} days. Changing the window above doesn't hide or resolve them.`}
+              intro={`Problems found in your ads or tracking over the last ${data.issue_window_days} days. Changing the window above doesn't hide or resolve them. ${RUN_CHECKS_INTRO}`}
               readings={ISSUES_READINGS}
-              rightNow={issuesRightNow(k, hasAffectedSpend ? formatMoney(affectedSpend) : null, data.issue_window_days)}
+              rightNow={issuesRightNow(k, hasAffectedSpend ? formatMoney(affectedSpend) : null, data.issue_window_days, data.run)}
               footer={
                 <>
                   An issue becomes an error when enough spend is involved.{" "}
                   <AdsSettingsLink>Change that limit in Settings → Ads</AdsSettingsLink>.
                 </>
               }
+              advanced={<RunAdvancedCollapsible testIdPrefix="ads-meta" />}
               testId="issues"
             />
           }
           corner={
-            <div className="flex flex-col items-end gap-0.5">
+            <div className="flex flex-col items-end gap-1">
               {hasAffectedSpend && (
                 <span data-testid="kpi-issues-affected-spend">
                   <span className="font-semibold tabular-nums text-amber-500">{formatMoney(affectedSpend)}</span> affected
                 </span>
               )}
-              <IssueCountChips errors={k.open_errors} warnings={k.open_warnings} />
+              {!data.run.never_run && <IssueCountChips errors={k.open_errors} warnings={k.open_warnings} />}
+              {data.status !== "not_connected" && (
+                <RunChecksButton
+                  run={data.run}
+                  onChanged={() => void refetch()}
+                  testIdPrefix="ads-meta"
+                  variant={data.run.never_run ? "button" : "link"}
+                />
+              )}
             </div>
           }
+          footer={<RunNotes run={data.run} testIdPrefix="ads-meta" className="mt-2" />}
           testId="issues"
         />
         <Kpi
@@ -824,7 +951,7 @@ export function DiagnosticsAdsPanel() {
               template={k.untagged_clicks > 0 ? data.utm_template : undefined}
               footer={
                 <>
-                  You get a warning in the list below when it drops sharply or falls too low.{" "}
+                  You get a tracking issue warning when it drops sharply or falls too low.{" "}
                   <AdsSettingsLink>Change the limits in Settings → Ads</AdsSettingsLink>.
                 </>
               }
@@ -852,94 +979,6 @@ export function DiagnosticsAdsPanel() {
       </div>
 
       {data.status !== "not_connected" && data.meta_platforms && <AdsMetaPlatformsCard data={data.meta_platforms} days={data.window_days} />}
-
-      {(issues.length > 0 || infos.length > 0 || data.resolved.length > 0 || data.run.never_run) && data.status !== "not_connected" && (
-        <Collapsible open={issuesOpen} onOpenChange={toggleIssuesOpen} asChild>
-        <Card data-testid="card-ads-issues">
-          <CardHeader className={cn(issuesOpen ? "pb-3" : "py-4")}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <CollapsibleTrigger asChild>
-                <button
-                  type="button"
-                  className="group flex min-w-0 items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label={issuesOpen ? "Collapse tracking issues" : "Expand tracking issues"}
-                  data-testid="button-ads-issues-collapse"
-                >
-                  <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90" />
-                  <CardTitle className="text-base" data-testid="text-ads-issues-title">
-                    Tracking issues
-                    <span
-                      className={cn(
-                        "ml-1 tabular-nums",
-                        k.open_errors > 0 ? "text-destructive" : openIssues.length > 0 ? "text-amber-500" : "text-muted-foreground",
-                      )}
-                      data-testid="text-ads-issues-count"
-                    >
-                      ({openIssues.length})
-                    </span>
-                    {hasAffectedSpend && (
-                      <span className="font-normal text-muted-foreground">
-                        {" "}affecting <span className="font-semibold tabular-nums text-foreground">{formatMoney(affectedSpend)}</span> in spend
-                      </span>
-                    )}
-                  </CardTitle>
-                </button>
-              </CollapsibleTrigger>
-              {issuesOpen && (
-                <ToggleButtonBar value={list} onValueChange={(v) => setList(v as "issues" | "resolved")} listTestId="ads-issue-list" listClassName="flex">
-                  <ToggleButtonBarTrigger value="issues">Issues ({openIssues.length})</ToggleButtonBarTrigger>
-                  <ToggleButtonBarTrigger value="resolved">Resolved ({data.resolved.length})</ToggleButtonBarTrigger>
-                </ToggleButtonBar>
-              )}
-            </div>
-            {issuesOpen && (
-              <p className="text-sm text-muted-foreground">
-                Problems found by the last check over the {issueWindow}. Changing the window above doesn&apos;t hide or resolve them; issues you marked as
-                fixed stay listed as pending until they&apos;re confirmed.
-              </p>
-            )}
-          </CardHeader>
-          <CollapsibleContent>
-          <CardContent className="p-0">
-            {list === "issues" ? (
-              issues.length === 0 && infos.length === 0 ? (
-                <p className="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground" data-testid="ads-no-issues">
-                  <CheckCircle2 className="h-4 w-4 text-chart-3" />{" "}
-                  {data.run.never_run ? "No checks have run yet. Press Run checks above to look for problems." : "No tracking issues found in the last check."}
-                </p>
-              ) : (
-                <div>
-                  {[...issues, ...infos].map((i) => (
-                    <IssueRow
-                      key={i.id}
-                      issue={i}
-                      template={data.utm_template}
-                      issueWindowDays={data.issue_window_days}
-                      refresh={data.refresh}
-                      onReload={() => void refetch()}
-                    />
-                  ))}
-                </div>
-              )
-            ) : data.resolved.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-muted-foreground">Nothing resolved yet.</p>
-            ) : (
-              data.resolved.map((r) => (
-                <div key={`${r.id}-${r.resolved_at}`} className="flex items-center justify-between border-b border-border px-3 py-2 text-sm last:border-b-0">
-                  <span className="flex items-center gap-2 text-foreground">
-                    <CheckCircle2 className="h-4 w-4 text-chart-3" /> {r.title}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {RESOLUTION_LABEL[r.resolution]} · {formatWhen(r.resolved_at)}
-                  </span>
-                </div>
-              ))
-            )}
-          </CardContent>
-          </CollapsibleContent>
-        </Card>
-        </Collapsible>
-      )}
 
       <PaidPagesCard days={days} issues={data.issues.filter((i) => i.verify.state === "open")} />
     </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, Blocks, ChevronDown, ChevronUp, FileInput, LayoutGrid, Link, Moon, Palette, Plus, Save, Search, Sun, Trash2, Undo2 } from "lucide-react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, apiRequestWithAuth, queryClient } from "@/lib/queryClient";
@@ -30,6 +30,14 @@ import { useToast } from "@/hooks/use-toast";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { filterSitemapEntries, sitemapPathname } from "@/lib/sitemapSearch";
+import {
+  AddToThemeDialog,
+  OffThemeBackgroundsPanel,
+  ReplaceBackgroundDialog,
+  THEME_BACKGROUND_USAGE_KEY,
+  useThemeBackgroundUsage,
+  type BackgroundOption,
+} from "@/components/theme/ThemeBackgroundUsage";
 
 interface PreviewExample {
   component: string;
@@ -414,6 +422,7 @@ interface PaletteEntryRowProps {
   onDelete: (index: number) => void;
   onMoveUp: (index: number) => void;
   onMoveDown: (index: number) => void;
+  usageCount?: number;
 }
 
 function resolveSwatchColor(entry: PaletteEntry, previewMode: "light" | "dark"): string {
@@ -433,6 +442,7 @@ function PaletteEntryRow({
   onDelete,
   onMoveUp,
   onMoveDown,
+  usageCount,
 }: PaletteEntryRowProps) {
   const mode: "cssVar" | "value" = entry.cssVar ? "cssVar" : "value";
   const isUnknownVar = mode === "cssVar" && entry.cssVar && !knownCssVars.has(entry.cssVar);
@@ -462,6 +472,15 @@ function PaletteEntryRow({
           placeholder="Label"
           data-testid={`input-palette-label-${index}`}
         />
+        {usageCount !== undefined && (
+          <span
+            className="text-[10px] text-muted-foreground shrink-0 tabular-nums"
+            title={`Used by ${usageCount} page section${usageCount === 1 ? "" : "s"}`}
+            data-testid={`usage-count-${entry.id}`}
+          >
+            {usageCount}×
+          </span>
+        )}
         <div className="flex items-center gap-0.5 shrink-0">
           <button
             type="button"
@@ -596,9 +615,14 @@ interface PaletteAccordionProps {
   knownCssVars: Set<string>;
   previewMode: "light" | "dark";
   onChange: (palette: "backgrounds" | "text" | "accents", entries: PaletteEntry[]) => void;
+  /** Sections using each entry ID (backgrounds only). */
+  usage?: Record<string, { count: number }>;
+  /** Called instead of deleting when the entry is still used by sections. */
+  onDeleteUsed?: (index: number) => void;
+  intro?: ReactNode;
 }
 
-function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, onChange }: PaletteAccordionProps) {
+function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, onChange, usage, onDeleteUsed, intro }: PaletteAccordionProps) {
   const handleEntryChange = (index: number, updated: PaletteEntry) => {
     const next = [...entries];
     next[index] = updated;
@@ -606,6 +630,11 @@ function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, 
   };
 
   const handleDelete = (index: number) => {
+    const used = usage?.[entries[index]?.id]?.count ?? 0;
+    if (used > 0 && onDeleteUsed) {
+      onDeleteUsed(index);
+      return;
+    }
     const next = entries.filter((_, i) => i !== index);
     onChange(palette, next);
   };
@@ -642,6 +671,7 @@ function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, 
         </span>
       </AccordionTrigger>
       <AccordionContent className="pb-2">
+        {intro}
         <div className="space-y-0">
           {entries.map((entry, i) => (
             <div key={`${entry.id}-${i}`}>
@@ -655,6 +685,7 @@ function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, 
                 onDelete={handleDelete}
                 onMoveUp={handleMoveUp}
                 onMoveDown={handleMoveDown}
+                usageCount={usage ? usage[entry.id]?.count ?? 0 : undefined}
               />
               {i < entries.length - 1 && <Separator />}
             </div>
@@ -1484,6 +1515,78 @@ export default function ThemeEditor() {
     else if (palette === "accents") setAccents(entries);
   };
 
+  const { data: bgUsage, isLoading: bgUsageLoading } = useThemeBackgroundUsage();
+  const [replaceDialog, setReplaceDialog] = useState<
+    { from: string; fromLabel: string; count: number; deleteIndex?: number } | null
+  >(null);
+  const [addDialog, setAddDialog] = useState<{ value: string; count: number } | null>(null);
+  const [bgActionBusy, setBgActionBusy] = useState(false);
+
+  const savedBackgrounds = themeData?.backgrounds ?? [];
+  const backgroundOptions: BackgroundOption[] = savedBackgrounds.map((b) => ({
+    id: b.id,
+    label: b.label || b.id,
+    swatch: resolveSwatchColor(b, previewMode),
+  }));
+
+  const replaceBackgroundEverywhere = async (from: string, to: string) => {
+    const res = await apiRequestWithAuth("POST", "/api/theme/backgrounds/replace", { from, to });
+    return (await res.json()) as { replaced: number; files: string[] };
+  };
+
+  const handleConfirmReplace = async (toId: string) => {
+    if (!replaceDialog) return;
+    setBgActionBusy(true);
+    try {
+      const result = await replaceBackgroundEverywhere(replaceDialog.from, toId);
+      if (replaceDialog.deleteIndex !== undefined) {
+        const removedId = backgrounds[replaceDialog.deleteIndex]?.id;
+        const nextSaved = savedBackgrounds.filter((b) => b.id !== removedId);
+        await apiRequestWithAuth("PUT", "/api/theme/palettes", {
+          backgrounds: nextSaved,
+          text: themeData?.text ?? [],
+          accents: themeData?.accents ?? [],
+        });
+        setBackgrounds((prev) => prev.filter((b) => b.id !== removedId));
+      }
+      toast({
+        title: replaceDialog.deleteIndex !== undefined ? "Color removed from theme" : "Color replaced",
+        description: `${result.replaced} section${result.replaced === 1 ? "" : "s"} in ${result.files.length} file${result.files.length === 1 ? "" : "s"} now use "${toId}". Changes are queued for Cloud Sync.`,
+      });
+      setReplaceDialog(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/theme"] });
+      queryClient.invalidateQueries({ queryKey: THEME_BACKGROUND_USAGE_KEY });
+    } catch (err: unknown) {
+      toast({ title: "Replace failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
+    } finally {
+      setBgActionBusy(false);
+    }
+  };
+
+  const handleConfirmAdd = async (entry: { id: string; label: string; value: string }) => {
+    setBgActionBusy(true);
+    try {
+      await apiRequestWithAuth("PUT", "/api/theme/palettes", {
+        backgrounds: [...savedBackgrounds, entry],
+        text: themeData?.text ?? [],
+        accents: themeData?.accents ?? [],
+      });
+      const result = await replaceBackgroundEverywhere(entry.value, entry.id);
+      setBackgrounds((prev) => [...prev, entry]);
+      toast({
+        title: "Added to theme",
+        description: `"${entry.label}" is now a theme background; ${result.replaced} section${result.replaced === 1 ? "" : "s"} switched to it.`,
+      });
+      setAddDialog(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/theme"] });
+      queryClient.invalidateQueries({ queryKey: THEME_BACKGROUND_USAGE_KEY });
+    } catch (err: unknown) {
+      toast({ title: "Add failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
+    } finally {
+      setBgActionBusy(false);
+    }
+  };
+
   const atomMolecules = (moleculesData?.molecules || []).filter((m) => m.tags.includes("theme-preview"));
 
   return (
@@ -1662,6 +1765,23 @@ export default function ThemeEditor() {
                       knownCssVars={knownCssVars}
                       previewMode={previewMode}
                       onChange={handlePaletteChange}
+                      usage={bgUsage?.by_id}
+                      onDeleteUsed={(index) => {
+                        const entry = backgrounds[index];
+                        if (!entry) return;
+                        setReplaceDialog({
+                          from: entry.id,
+                          fromLabel: entry.label || entry.id,
+                          count: bgUsage?.by_id[entry.id]?.count ?? 0,
+                          deleteIndex: index,
+                        });
+                      }}
+                      intro={
+                        <p className="text-xs text-muted-foreground pb-2">
+                          Page sections can only use these colors. The number shows how many sections use each one;
+                          removing a used color asks what to switch those sections to.
+                        </p>
+                      }
                     />
                     <PaletteAccordion
                       palette="text"
@@ -1680,6 +1800,13 @@ export default function ThemeEditor() {
                       onChange={handlePaletteChange}
                     />
                   </Accordion>
+                  <Separator />
+                  <OffThemeBackgroundsPanel
+                    usage={bgUsage}
+                    loading={bgUsageLoading}
+                    onAdd={(value, count) => setAddDialog({ value, count })}
+                    onReplace={(value, count) => setReplaceDialog({ from: value, fromLabel: value, count })}
+                  />
                 </div>
               )}
             </ScrollArea>
@@ -2189,6 +2316,37 @@ export default function ThemeEditor() {
         await savePreviewExamples(updated);
       }}
     />
+
+    {replaceDialog && (
+      <ReplaceBackgroundDialog
+        open
+        title={replaceDialog.deleteIndex !== undefined ? "Remove a color that's in use" : "Replace this color everywhere"}
+        description={
+          replaceDialog.deleteIndex !== undefined
+            ? "Sections still use this color. Pick the theme color they should switch to; then it's removed from the theme."
+            : "Every section using this color switches to the theme color you pick. Other pages and colors don't change."
+        }
+        fromLabel={replaceDialog.fromLabel}
+        count={replaceDialog.count}
+        options={backgroundOptions}
+        excludeId={replaceDialog.deleteIndex !== undefined ? replaceDialog.from : undefined}
+        confirmLabel={replaceDialog.deleteIndex !== undefined ? "Switch and remove" : "Replace everywhere"}
+        busy={bgActionBusy}
+        onConfirm={handleConfirmReplace}
+        onClose={() => setReplaceDialog(null)}
+      />
+    )}
+    {addDialog && (
+      <AddToThemeDialog
+        open
+        value={addDialog.value}
+        count={addDialog.count}
+        existingIds={savedBackgrounds.map((b) => b.id)}
+        busy={bgActionBusy}
+        onConfirm={handleConfirmAdd}
+        onClose={() => setAddDialog(null)}
+      />
+    )}
     </>
   );
 }
