@@ -89,13 +89,11 @@ export function AdsTrackingFixDialog({
   open,
   onOpenChange,
   issue,
-  snapshotId,
   onApplied,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   issue: AdsIssue;
-  snapshotId: string | undefined;
   onApplied: () => void;
 }) {
   const { toast } = useToast();
@@ -103,11 +101,11 @@ export function AdsTrackingFixDialog({
   const [result, setResult] = useState<TrackingFixApplyResponse | null>(null);
 
   const preview = useQuery({
-    queryKey: ["/api/ads/meta/tracking-fix/preview", issue.id, snapshotId],
+    queryKey: ["/api/ads/meta/tracking-fix/preview", issue.id],
     enabled: open,
     staleTime: 0,
     gcTime: 0,
-    queryFn: () => postJson<TrackingFixPreview>("/api/ads/meta/tracking-fix/preview", { issue_id: issue.id, snapshot_id: snapshotId }),
+    queryFn: () => postJson<TrackingFixPreview>("/api/ads/meta/tracking-fix/preview", { issue_id: issue.id }),
   });
 
   const fixable = useMemo(() => (preview.data?.ads ?? []).filter((a) => a.status === "fixable"), [preview.data]);
@@ -126,7 +124,6 @@ export function AdsTrackingFixDialog({
     mutationFn: () =>
       postJson<TrackingFixApplyResponse>("/api/ads/meta/tracking-fix/apply", {
         issue_id: issue.id,
-        snapshot_id: snapshotId,
         ad_ids: Array.from(selected),
       }),
     onSuccess: (r) => {
@@ -255,7 +252,7 @@ export function AdsTrackingFixDialog({
                   without a reusable post are skipped.
                 </p>
                 <p>
-                  After a successful run we re-read ad setups from Meta so this issue can clear. Uses the server's{" "}
+                  After a successful run we re-read ad setups from Meta; the issue only clears when a Re-check or Run checks confirms it. Uses the server's{" "}
                   <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (needs <code className="font-mono">ads_management</code>); each change is
                   logged with your account.
                 </p>
@@ -277,8 +274,8 @@ export function AdsTrackingFixDialog({
             {result.fixed.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 {result.refresh_requested
-                  ? "Re-reading ad setups from Meta now; the issue updates when that finishes."
-                  : "Resync ads to see the issue update."}
+                  ? "Re-reading ad setups from Meta now. Once that finishes, press Re-check on this issue to confirm the fix."
+                  : "Press Re-check on this issue to confirm the fix."}
               </p>
             )}
           </div>

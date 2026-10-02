@@ -7,10 +7,9 @@
  */
 
 import { getAdsSettings } from "../settings";
-import { child } from "../logger";
+import type { ContentIndex } from "../content-index";
 import {
   ADS_ISSUE_WINDOW_DAYS,
-  resolveAdsDiagnosticsWindows,
   severityForSpend,
   sortAdsIssues,
   type AdsIssue,
@@ -23,60 +22,25 @@ import {
   type AdsAlertThresholds,
   type GoogleAdsSettings,
 } from "@shared/ads-settings";
-import { GOOGLE_URL_SUFFIX_TEMPLATE, googleSuffixHasIds } from "@shared/paid-traffic";
-import { buildAdsReport, getAdsReport, type AdsGoogleBlock, type AdsGoogleNetworks, type AdsReport, type MoneyByCurrency } from "./ads-report";
+import { googleSuffixHasIds } from "@shared/paid-traffic";
+import { buildAdsReport, type AdsReport, type MoneyByCurrency } from "./ads-report";
 import { GOOGLE_BACKFILL_DAYS, loadGoogleSetups, loadGoogleState, type GoogleAdsSetups, type GoogleAdsSyncState } from "./google-ads-days";
 import { addDays, utcDate } from "./meta-ads-days";
 import { lastCompleteGa4Date, loadPaidLandingState, type PaidLandingState } from "./paid-detection";
-import { GOOGLE_ISSUE_STATE_FILE, loadIssueState, rollIssueState, saveIssueState, type IssueState } from "./ads-diagnostics";
-
-const log = child({ module: "ads/google-ads-diagnostics" });
 
 /** Transfer more than this many days behind "expected through" is an error, not a warning. */
 export const GOOGLE_STALE_ERROR_DAYS = 3;
 /** Google spend without a reported landing page above this share of Google spend is a warning. */
 export const GOOGLE_UNKNOWN_DESTINATION_WARN_PCT = 20;
 
-export type GoogleAdsDiagnostics = {
+export type GoogleChecks = {
   generated_at: string;
-  platform: "google";
-  window_days: number;
-  issue_window_days: number;
-  status: "not_connected" | "ok" | "warnings" | "errors";
-  google: AdsGoogleBlock;
-  ga4: AdsReport["ga4"];
-  refreshing: boolean;
-  refresh: AdsReport["refresh"];
-  collecting_since: string | null;
-  kpis: {
-    spend: MoneyByCurrency;
-    tracked_spend: MoneyByCurrency;
-    /** Spend on Google lead forms, calls, video views and app installs (left out of cost per lead). */
-    no_site_spend: MoneyByCurrency;
-    open_errors: number;
-    open_warnings: number;
-    google_leads: number;
-    site_leads: number;
-    paid_visits: number;
-    clicks: number;
-    /** Matched paid Google visits / Google clicks to site pages on GA4-exported days, in percent. */
-    clicks_to_visits_pct: number | null;
-    /** Share of paid Google visits tied to a campaign (GA4 link, gclid join or suffix tags), in percent. */
-    matched_visits_pct: number | null;
-  };
-  networks: AdsGoogleNetworks | null;
-  matching: {
-    ga4_link_available: boolean | null;
-    gclid_join_tables: number;
-    gclid_join_error: string | null;
-  };
+  window: { start: string; end: string; days: number };
+  connected: boolean;
   issues: AdsIssue[];
-  resolved: IssueState["resolved"];
-  url_suffix_template: string;
-  warnings: AdsReport["warnings"];
 };
 
-const NO_SITE_KINDS = new Set(["google_lead_form", "calls", "video_views", "app"]);
+export const NO_SITE_KINDS = new Set(["google_lead_form", "calls", "video_views", "app"]);
 const NO_SITE_COPY: Record<string, { label: string; why: string }> = {
   google_lead_form: { label: "Google lead forms", why: "people fill a form inside Google, so no site visit happens" },
   calls: { label: "Calls", why: "people call from the ad without visiting the site" },
@@ -354,92 +318,34 @@ export function googleIssues(input: GoogleIssueInput): AdsIssue[] {
 export async function buildGoogleAdsDiagnostics(opts: {
   site: string;
   contentRoot?: string;
-  days?: number;
-  /** false = roll-up only (no Issues | Resolved bookkeeping). */
-  persist?: boolean;
+  /** Explicit window (post-fix verification); default = the fixed issue window ending yesterday. */
+  window?: { since: string; until: string };
+  contentIndex?: ContentIndex;
   now?: Date;
-}): Promise<GoogleAdsDiagnostics> {
+}): Promise<GoogleChecks> {
   const now = opts.now ?? new Date();
-  const { kpiDays, issueDays } = resolveAdsDiagnosticsWindows(opts.days);
   const settings = getAdsSettings(opts.contentRoot);
   const google = settings.google ?? DEFAULT_GOOGLE_ADS_SETTINGS;
   const t = adsThresholds(settings);
-  const report = await getAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: issueDays, platform: "google", includeMetaPlatforms: false, now });
-  const kpiReport =
-    kpiDays === issueDays
-      ? report
-      : buildAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "google", includeMetaPlatforms: false, noRefresh: true, now });
-  const state = loadGoogleState(opts.site);
-  const paidState = loadPaidLandingState(opts.site);
-  const connected = report.google.connected;
-  const issues = connected ? googleIssues({ report, state, setups: loadGoogleSetups(opts.site), settings: google, paidState, t, now }) : [];
-
-  const issueState = loadIssueState(opts.site, GOOGLE_ISSUE_STATE_FILE);
-  const nowIso = now.toISOString();
-  if (opts.persist !== false) {
-    rollIssueState(issueState, issues, nowIso);
-    try {
-      saveIssueState(opts.site, issueState, GOOGLE_ISSUE_STATE_FILE);
-    } catch (err) {
-      log.warn({ err }, "[google-ads-diagnostics] failed to persist issue state");
-    }
-  }
-  for (const i of issues) {
-    const firstSeen = issueState.open[i.id]?.first_seen;
-    if (firstSeen) i.first_seen = firstSeen;
-  }
-  sortAdsIssues(issues);
-
-  const k = kpiReport.totals;
-  const noSite: MoneyByCurrency = {};
-  for (const d of kpiReport.destinations) if (NO_SITE_KINDS.has(d.kind)) addMoney(noSite, d.spend);
-  const vm = kpiReport.google.visit_match;
-  const googleVisits = vm.ga4_link + vm.gclid + vm.tags + vm.none;
-  const ratio = k.ratio_clicks > 0 && kpiReport.ga4.configured ? k.matched_visits / k.ratio_clicks : null;
-  const openErrors = issues.filter((i) => i.severity === "error").length;
-  const openWarnings = issues.filter((i) => i.severity === "warning").length;
-  return {
-    generated_at: nowIso,
+  const report = buildAdsReport({
+    site: opts.site,
+    contentRoot: opts.contentRoot,
+    ...(opts.window ? { since: opts.window.since, until: opts.window.until } : { days: ADS_ISSUE_WINDOW_DAYS }),
     platform: "google",
-    window_days: kpiDays,
-    issue_window_days: issueDays,
-    status: !connected ? "not_connected" : openErrors > 0 ? "errors" : openWarnings > 0 ? "warnings" : "ok",
-    google: kpiReport.google,
-    ga4: kpiReport.ga4,
-    refreshing: kpiReport.refreshing,
-    refresh: kpiReport.refresh,
-    collecting_since: kpiReport.collecting_since,
-    kpis: {
-      spend: k.spend,
-      tracked_spend: k.tracked_spend,
-      no_site_spend: noSite,
-      open_errors: openErrors,
-      open_warnings: openWarnings,
-      google_leads: k.google_leads,
-      site_leads: k.unique_leads,
-      paid_visits: k.paid_visits,
-      clicks: k.clicks,
-      clicks_to_visits_pct: ratio != null ? Math.round(ratio * 1000) / 10 : null,
-      matched_visits_pct: googleVisits > 0 ? Math.round(((googleVisits - vm.none) / googleVisits) * 1000) / 10 : null,
-    },
-    networks: kpiReport.google_networks ?? null,
-    matching: {
-      ga4_link_available: paidState.google_link_available ?? null,
-      gclid_join_tables: paidState.gclid_join_tables ?? 0,
-      gclid_join_error: paidState.gclid_join_error ?? null,
-    },
+    includeMetaPlatforms: false,
+    noRefresh: true,
+    contentIndex: opts.contentIndex,
+    now,
+  });
+  const connected = report.google.connected;
+  const issues = connected
+    ? googleIssues({ report, state: loadGoogleState(opts.site), setups: loadGoogleSetups(opts.site), settings: google, paidState: loadPaidLandingState(opts.site), t, now })
+    : [];
+  sortAdsIssues(issues);
+  return {
+    generated_at: now.toISOString(),
+    window: { start: report.window.start, end: report.window.end, days: report.window.days },
+    connected,
     issues,
-    resolved: issueState.resolved,
-    url_suffix_template: GOOGLE_URL_SUFFIX_TEMPLATE,
-    warnings: kpiReport.warnings,
   };
-}
-
-/** Light roll-up for the overview and the Global tab. */
-export async function googleAdsDiagnosticsSummary(
-  site: string,
-  contentRoot?: string,
-): Promise<{ status: GoogleAdsDiagnostics["status"]; open_errors: number; open_warnings: number }> {
-  const d = await buildGoogleAdsDiagnostics({ site, contentRoot, days: ADS_ISSUE_WINDOW_DAYS, persist: false });
-  return { status: d.status, open_errors: d.kpis.open_errors, open_warnings: d.kpis.open_warnings };
 }

@@ -366,31 +366,25 @@ function Ga4SeenList({
 /** Campaign / account / open-since line plus affected ads, unchecked reasons and GA4 evidence. */
 export function AdsIssueEvidence({
   issue,
-  snapshotId,
   issueWindowDays,
   refresh,
-  onSnapshotExpired,
   onResyncStarted,
 }: {
   issue: AdsIssue;
-  snapshotId: string | undefined;
   issueWindowDays: number;
   refresh: AdsRefreshStatus | undefined;
-  onSnapshotExpired: () => void;
   onResyncStarted: () => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const details = issue.details;
   const all = useQuery({
-    queryKey: ["/api/diagnostics/ads", "issue", snapshotId, issue.id],
-    enabled: showAll && !!snapshotId,
+    queryKey: ["/api/diagnostics/ads", "issue", issue.id],
+    enabled: showAll,
     queryFn: async () => {
-      const qs = new URLSearchParams({ snapshot_id: snapshotId!, "issue_ids[]": issue.id, ads_limit: String(SHOW_ALL_LIMIT) });
+      const qs = new URLSearchParams({ "issue_ids[]": issue.id, ads_limit: String(SHOW_ALL_LIMIT) });
       const res = await apiFetch(`/api/diagnostics/ads?${qs.toString()}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load ads");
-      const body = (await res.json()) as AdsIssueDetailResponse;
-      if (body.snapshot_expired) onSnapshotExpired();
-      return body;
+      return (await res.json()) as AdsIssueDetailResponse;
     },
     staleTime: 5 * 60 * 1000,
   });
@@ -399,7 +393,7 @@ export function AdsIssueEvidence({
   const fullIssue = showAll ? all.data?.issues.find((i) => i.id === issue.id) : undefined;
   const ads = fullIssue?.details?.ads ?? details?.ads ?? [];
   const total = details?.ads_total ?? 0;
-  const campaignScoped = !!scope.campaign_id && issue.code !== "landing_http_error" && issue.code !== "redirect_drops_params" && issue.code !== "ad_url_redirects";
+  const campaignScoped = !!scope.campaign_id && issue.code !== "landing_not_live" && issue.code !== "ad_url_redirects";
   const hasMeta = Boolean((campaignScoped && scope.campaign_name) || scope.account_id || issue.first_seen);
   const showSetupLine = !!details && (total > 0 || (details.unchecked?.length ?? 0) > 0);
 
@@ -444,7 +438,7 @@ export function AdsIssueEvidence({
           </ul>
           {fullIssue && ads.length < total && (
             <p className="text-[11px] text-muted-foreground">
-              Showing the top {ads.length} of {total} by spend. Use Meta Ads Manager for the rest.
+              Showing the top {ads.length} of {total} by spend (the last check keeps the top 50). Use Meta Ads Manager for the rest.
             </p>
           )}
           {!fullIssue && ads.length < total && (
@@ -452,7 +446,7 @@ export function AdsIssueEvidence({
               size="sm"
               variant="ghost"
               className="h-7 px-2 text-xs"
-              disabled={all.isFetching || !snapshotId}
+              disabled={all.isFetching}
               onClick={() => setShowAll(true)}
               data-testid={`button-ads-issue-show-all-${issue.id}`}
             >

@@ -161,7 +161,11 @@ export function classifyError(status: number, code?: number): MetaApiError["kind
   return "other";
 }
 
-async function graphGet(pathOrUrl: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
+async function graphGet(
+  pathOrUrl: string,
+  params: Record<string, string> = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<Record<string, unknown>> {
   const token = getMetaAccessToken();
   if (!token) throw new MetaApiError("META_ADS_ACCESS_TOKEN is not set", 0, undefined, "auth");
   const url = pathOrUrl.startsWith("http") ? new URL(pathOrUrl) : new URL(`${GRAPH_BASE}/${pathOrUrl.replace(/^\//, "")}`);
@@ -169,7 +173,7 @@ async function graphGet(pathOrUrl: string, params: Record<string, string> = {}):
   if (!url.searchParams.has("access_token")) url.searchParams.set("access_token", token);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: controller.signal });
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -426,6 +430,36 @@ export async function fetchAdCreatives(accountId: string): Promise<MetaAdCreativ
     raw = await run("25");
   }
   return raw.map(parseCreative).filter((c): c is MetaAdCreativeInfo => !!c);
+}
+
+const META_IDS_BATCH = 50;
+
+/**
+ * Setups for specific ads (instant Re-check). Ads Meta no longer returns, or returns as
+ * DELETED / ARCHIVED, are listed in `missing`. Throws on network / auth failure.
+ */
+export async function fetchAdCreativesByIds(
+  adIds: string[],
+  timeoutMs: number,
+): Promise<{ found: MetaAdCreativeInfo[]; missing: string[] }> {
+  const found: MetaAdCreativeInfo[] = [];
+  const missing: string[] = [];
+  for (let i = 0; i < adIds.length; i += META_IDS_BATCH) {
+    const batch = adIds.slice(i, i + META_IDS_BATCH);
+    const body = await graphGet("", { ids: batch.join(","), fields: `${META_AD_CREATIVE_FIELDS},account_id` }, timeoutMs);
+    for (const id of batch) {
+      const raw = body[id] as Record<string, unknown> | undefined;
+      const status = typeof raw?.effective_status === "string" ? raw.effective_status : "";
+      const parsed = raw ? parseCreative(raw) : null;
+      if (!parsed || status === "DELETED" || status === "ARCHIVED") {
+        missing.push(id);
+        continue;
+      }
+      const accountId = raw?.account_id != null ? String(raw.account_id).replace(/^act_/, "") : undefined;
+      found.push(accountId ? { ...parsed, account_id: accountId } : parsed);
+    }
+  }
+  return { found, missing };
 }
 
 export function parseCustomConversion(raw: Record<string, unknown>): MetaCustomConversion | null {

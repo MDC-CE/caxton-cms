@@ -203,12 +203,9 @@ vi.mock("../legal/legal-diagnostics", () => ({
 }));
 
 const { buildAdsDiagnostics } = await import("./ads-diagnostics");
+const { metaKpis } = await import("./diagnostics/kpis");
 
-function seedIssueState(open: Record<string, { first_seen: string; title: string; severity: string }>) {
-  const file = path.join(h.cacheDir, SITE, "ads-issues.json");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ open, resolved: [], resolver_version: 2 }), "utf-8");
-}
+const kpisOf = () => metaKpis(fakeReport(), { open_errors: 0, open_warnings: 0 }, null, h.leadConversions, null);
 
 beforeEach(() => {
   fs.rmSync(path.join(h.cacheDir, SITE), { recursive: true, force: true });
@@ -236,7 +233,7 @@ afterAll(() => {
 
 describe("buildAdsDiagnostics issue details", () => {
   it("lists a campaign's missing and unchecked ads with account, status and setup read time", async () => {
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
     expect(missing.scope).toMatchObject({ campaign_id: "c1", account_id: "111" });
     expect(missing.details!.ads.map((a) => [a.ad_id, a.effective_status, a.unchecked_reason ?? null])).toEqual([
@@ -249,7 +246,7 @@ describe("buildAdsDiagnostics issue details", () => {
   });
 
   it("raises tracking_params_unchecked (info) per campaign with the reason", async () => {
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const failed = d.issues.find((i) => i.id === "tracking_params_unchecked:c2")!;
     expect(failed).toMatchObject({ severity: "info", scope: { account_id: "222" }, spend_affected: { USD: 30 } });
     expect(failed.details!.unchecked).toEqual([{ reason: "setup_fetch_failed", ads: 1, spend: { USD: 30 } }]);
@@ -260,7 +257,7 @@ describe("buildAdsDiagnostics issue details", () => {
   });
 
   it("shows GA4-seen campaigns on destinations with no synced ad", async () => {
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const off = d.issues.find((i) => i.id === "off_site_destination:dest:learn.4geeks.com|/choose-program")!;
     expect(off.details!.ads_total).toBe(0);
     expect(off.details!.ga4_seen).toEqual(OFF_SITE.ga4_ads);
@@ -268,26 +265,11 @@ describe("buildAdsDiagnostics issue details", () => {
   });
 
   it("sorts severity first, then spend", async () => {
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const ranks = d.issues.map((i) => ({ error: 0, warning: 1, info: 2 })[i.severity]);
     expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
     const infos = d.issues.filter((i) => i.severity === "info" && Object.keys(i.spend_affected).length > 0);
     expect(infos.map((i) => i.id).slice(0, 2)).toEqual(["tracking_params_unchecked:c2", "tracking_params_unchecked:c3"]);
-  });
-
-  it("carries first_seen from the issue history", async () => {
-    seedIssueState({ "missing_tracking_params:c1": { first_seen: "2026-09-10T00:00:00.000Z", title: "t", severity: "warning" } });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.issues.find((i) => i.id === "missing_tracking_params:c1")!.first_seen).toBe("2026-09-10T00:00:00.000Z");
-    expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")!.first_seen).toBeUndefined();
-  });
-
-  it("skips the separate KPI report on issue-only builds", async () => {
-    await buildAdsDiagnostics({ site: SITE, probe: false, days: 90, now: NOW });
-    expect(h.reportBuilds).toBe(2);
-    h.reportBuilds = 0;
-    await buildAdsDiagnostics({ site: SITE, probe: false, days: 90, issuesOnly: true, now: NOW });
-    expect(h.reportBuilds).toBe(1);
   });
 });
 
@@ -331,7 +313,7 @@ describe("buildAdsDiagnostics unrecognized campaigns", () => {
 
   it("raises an error, a warning, and nothing below the minimum", async () => {
     h.unrecognized = data();
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const big = d.issues.find((i) => i.id === `unrecognized_campaign:${EXTERNAL_ID}`)!;
     expect(big).toMatchObject({
       code: "unrecognized_campaign",
@@ -351,7 +333,7 @@ describe("buildAdsDiagnostics unrecognized campaigns", () => {
   it("downgrades known external campaigns to info", async () => {
     h.unrecognized = data();
     h.known = [{ key: EXTERNAL_ID, note: "Agency" }, { key: "spring PROMO" }];
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const big = d.issues.find((i) => i.id === `unrecognized_campaign:${EXTERNAL_ID}`)!;
     expect(big).toMatchObject({ severity: "info", title: "Known external campaign: AI Fluency ES" });
     expect(big.how_to_fix).toContain("Nothing to fix");
@@ -361,18 +343,18 @@ describe("buildAdsDiagnostics unrecognized campaigns", () => {
   it("skips the check when Meta isn't connected or sync keeps failing", async () => {
     h.unrecognized = data();
     h.connected = false;
-    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    let d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.some((i) => i.code === "unrecognized_campaign")).toBe(false);
 
     h.connected = true;
     h.syncFailures = 3;
-    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.some((i) => i.code === "meta_sync_failing")).toBe(true);
     expect(d.issues.some((i) => i.code === "unrecognized_campaign")).toBe(false);
   });
 
   it("explains GA4-only off-site rows and points at the flagged campaign", async () => {
-    const plain = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const plain = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const plainOff = plain.issues.find((i) => i.code === "off_site_destination")!;
     expect(plainOff.why).toContain("None of your ads link here. GA4 counted 12 visits here as paid");
     expect(plainOff.why).not.toContain("flagged separately");
@@ -387,7 +369,7 @@ describe("buildAdsDiagnostics unrecognized campaigns", () => {
       ga4_ads: [{ ...unrecognizedCampaign(EXTERNAL_ID, 4, "AI Fluency ES").ga4_seen[0]! }],
       ga4_untagged_visits: 0,
     } as unknown as AdsPageRow;
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const off = d.issues.find((i) => i.code === "off_site_destination")!;
     expect(off.why).toContain("Most come from campaign AI Fluency ES (flagged separately).");
   });
@@ -397,33 +379,32 @@ describe("buildAdsDiagnostics clicks → visits", () => {
   it("uses matched visits over tagged clicks and passes the exclusions through", async () => {
     h.ga4Configured = true;
     h.totals = { paid_visits: 900, matched_visits: 150, ratio_clicks: 200, untagged_clicks: 35, unmatched_meta_visits: 750 };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: 75, clicks_to_visits_mismatch: false, untagged_clicks: 35, unmatched_meta_visits: 750 });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    expect(kpisOf()).toMatchObject({ clicks_to_visits_pct: 75, clicks_to_visits_mismatch: false, untagged_clicks: 35, unmatched_meta_visits: 750 });
     expect(d.issues.find((i) => i.code === "clicks_visits_low")).toBeUndefined();
   });
 
   it("flags a mismatch above 110% and raises no clicks_visits_low", async () => {
     h.ga4Configured = true;
     h.totals = { matched_visits: 900, ratio_clicks: 200 };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: 450, clicks_to_visits_mismatch: true });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
+    expect(kpisOf()).toMatchObject({ clicks_to_visits_pct: 450, clicks_to_visits_mismatch: true });
     expect(d.issues.find((i) => i.code === "clicks_visits_low")).toBeUndefined();
   });
 
   it("still warns when few tagged clicks become matched visits", async () => {
     h.ga4Configured = true;
     h.totals = { paid_visits: 400, matched_visits: 40, ratio_clicks: 200 };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const cv = d.issues.find((i) => i.code === "clicks_visits_low")!;
     expect(cv.title).toBe("Few ad clicks become visits");
     expect(cv.why).toContain("Only 20% of Meta clicks from tagged ads");
-    expect(d.kpis.clicks_to_visits_mismatch).toBe(false);
+    expect(kpisOf().clicks_to_visits_mismatch).toBe(false);
   });
 
   it("shows no ratio without GA4", async () => {
     h.totals = { matched_visits: 40, ratio_clicks: 200 };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.kpis).toMatchObject({ clicks_to_visits_pct: null, clicks_to_visits_mismatch: false });
+    expect(kpisOf()).toMatchObject({ clicks_to_visits_pct: null, clicks_to_visits_mismatch: false });
   });
 });
 
@@ -447,8 +428,7 @@ describe("buildAdsDiagnostics lead conversions", () => {
       meta_incomplete_days: 3,
       snapshot_lacks_conversions: false,
     };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.kpis).toMatchObject({
+    expect(kpisOf()).toMatchObject({
       meta_conversions: [{ key: RMI, name: "request_more_info", count: 4 }],
       site_conversions: [{ name: "apply", count: 2 }],
       meta_lead_conversions_picked: [RMI],
@@ -460,19 +440,18 @@ describe("buildAdsDiagnostics lead conversions", () => {
 
   it("falls back to settings when an older cached report has no lead_conversions block", async () => {
     h.leadConversions = [RMI];
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
-    expect(d.kpis).toMatchObject({ meta_conversions: [], site_conversions: [], meta_lead_conversions_picked: [RMI], snapshot_lacks_conversions: false });
+    expect(kpisOf()).toMatchObject({ meta_conversions: [], site_conversions: [], meta_lead_conversions_picked: [RMI], snapshot_lacks_conversions: false });
   });
 
   it("raises lead_conversions_overlap while both are picked, and not after unpicking one", async () => {
     h.rows = overlapRows;
     h.leadConversions = ["fb_pixel_lead", RMI];
-    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    let d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const overlap = d.issues.find((i) => i.code === "lead_conversions_overlap")!;
     expect(overlap).toMatchObject({ platform: "meta", severity: "warning", action: { kind: "unpick_lead_conversion" } });
 
     h.leadConversions = [RMI];
-    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.some((i) => i.code === "lead_conversions_overlap")).toBe(false);
   });
 
@@ -490,18 +469,18 @@ describe("buildAdsDiagnostics lead conversions", () => {
         ],
       },
     };
-    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    let d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.filter((i) => i.code === "pixel_events_lockstep").map((i) => i.id)).toEqual(["pixel_events_lockstep:414:Lead|request_more_info"]);
 
     h.expectedPairs = [{ pixel_id: "414", events: ["Lead", "request_more_info"] }];
-    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.some((i) => i.code === "pixel_events_lockstep")).toBe(false);
   });
 
   it("raises lead_conversion_stopped for a picked conversion Meta no longer lists", async () => {
     h.leadConversions = [RMI];
     h.customConversions = { "111": { conversions: [] }, "222": { conversions: [] } };
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "lead_conversion_stopped")).toMatchObject({
       id: `lead_conversion_stopped:${RMI}`,
       evidence: { reason: "missing" },
@@ -511,10 +490,10 @@ describe("buildAdsDiagnostics lead conversions", () => {
   it("names the picked conversions when Meta reports no leads", async () => {
     h.totals = { unique_leads: 4, meta_leads: 0 };
     h.leadConversions = [RMI];
-    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    let d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "pixel_not_reporting_leads")!.why).toContain("picked in Settings → Ads → Meta (request_more_info)");
     h.leadConversions = [];
-    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "pixel_not_reporting_leads")!.why).toContain("the standard Lead event (no conversions are picked");
   });
 });
@@ -550,7 +529,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     h.rows = [{ ...row("a1", 50, "c1"), date: "2026-09-22", link_clicks: 100 }];
     // 25 sessions / 100 clicks = 25% ≥ 10%, sessions ≥ 3
     h.ga4Days = completeGa4Days({ a1: 25 });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
     expect(d.issues.find((i) => i.code === "tracking_params_unverified")).toBeUndefined();
   });
@@ -570,7 +549,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     };
     h.rows = [{ ...row("a1", 80, "c1"), date: "2026-09-22", link_clicks: 300 }];
     h.ga4Days = completeGa4Days({ a1: 3 });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
     expect(missing.severity).toBe("warning");
     expect(missing.details!.ads[0]).toMatchObject({
@@ -596,7 +575,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     };
     h.rows = [{ ...row("a1", 40, "c1"), date: "2026-09-22", link_clicks: 5 }];
     h.ga4Days = completeGa4Days({ a1: 0 });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
     const unverified = d.issues.find((i) => i.id === "tracking_params_unverified:c1")!;
     expect(unverified).toMatchObject({ severity: "info", platform: "meta" });
@@ -617,7 +596,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     };
     h.rows = [{ ...row("a1", 40, "c1"), date: "2026-09-22", link_clicks: 100 }];
     h.ga4Days = completeGa4Days({ a1: 0 }, ["2026-09-25", "2026-09-26", "2026-09-27"]);
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
     expect(d.issues.find((i) => i.id === "tracking_params_unverified:c1")).toBeTruthy();
   });
@@ -627,7 +606,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     h.creatives = {};
     h.rows = [{ ...row("a3", 30, "c2", "222"), date: "2026-09-22", link_clicks: 100 }];
     h.ga4Days = completeGa4Days({ a3: 40 });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")).toBeUndefined();
   });
 
@@ -636,7 +615,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     h.creatives = {};
     h.rows = [{ ...row("a3", 30, "c2", "222"), date: "2026-09-22", link_clicks: 100 }];
     h.ga4Days = completeGa4Days({ a3: 0 });
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.id === "tracking_params_unchecked:c2")).toMatchObject({ severity: "info" });
   });
 
@@ -654,11 +633,11 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
     h.creatives = { a1: dubious };
     h.rows = [{ ...row("a1", 50, "c1"), date: "2026-09-22", link_clicks: 100 }];
     h.ga4Days = completeGa4Days({ a1: 30 });
-    let d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    let d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.code === "missing_tracking_params")).toBeUndefined();
 
     h.ga4Days = completeGa4Days({ a1: 0 });
-    d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     const missing = d.issues.find((i) => i.id === "missing_tracking_params:c1")!;
     expect(missing.why).toMatch(/wrong or incomplete/i);
     expect(missing.details!.ads[0]!.dubious_utm_content).toBe(true);
@@ -678,7 +657,7 @@ describe("buildAdsDiagnostics GA4-verified tracking", () => {
       },
     };
     h.rows = [row("a1", 50, "c1")];
-    const d = await buildAdsDiagnostics({ site: SITE, probe: false, now: NOW });
+    const d = await buildAdsDiagnostics({ site: SITE, now: NOW });
     expect(d.issues.find((i) => i.id === "missing_tracking_params:c1")!.details!.ads[0]!.dubious_utm_content).toBe(true);
   });
 });

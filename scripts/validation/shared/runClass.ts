@@ -12,7 +12,8 @@ export type ValidationScope =
   | "database"
   | "sitemap"
   | "forms"
-  | "bindings";
+  | "bindings"
+  | "ads";
 
 /** Default runClass when a validator omits metadata (conservative: entry-local). */
 const RUN_CLASS_BY_NAME: Record<string, ValidatorRunClass> = {

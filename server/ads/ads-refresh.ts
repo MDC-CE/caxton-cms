@@ -44,6 +44,8 @@ import {
   type GoogleSyncResult,
 } from "./google-ads-days";
 import { currentWorkerJob, isSidequestWorkerAlive, latestJobRows, type JobRowSummary } from "../jobs/job-rows";
+import { afterAdsSync } from "./ads-rollups";
+import { waitForAdsRunToFinish } from "./diagnostics/run-lock";
 import {
   ADS_REFRESH_QUEUED_STUCK_MS,
   adsRefreshBackoffMs,
@@ -262,6 +264,8 @@ function progressReporter(site: string, run: string, total: number): ((label: st
 export async function runAdsRefresh(opts: { site: string; contentRoot?: string; mode?: MetaSyncMode }): Promise<AdsRefreshResult> {
   if (inFlight.has(opts.site)) return { meta: null, google: null, ga4: null };
   inFlight.add(opts.site);
+  // Sync and an Ads diagnostics Run never write at the same time: wait for the Run to finish.
+  await waitForAdsRunToFinish(opts.site);
   const startedAt = new Date().toISOString();
   patchState(opts.site, { started_at: startedAt, progress: undefined });
   let failure: string | null = null;
@@ -280,6 +284,13 @@ export async function runAdsRefresh(opts: { site: string; contentRoot?: string; 
       : null;
     const google = runGoogle ? await syncGoogleAds({ site: opts.site, contentRoot: opts.contentRoot, onStep }) : null;
     const ga4 = runGa4 ? await syncPaidLandingDays(opts.site, opts.contentRoot, undefined, onStep) : null;
+    const dirty = [...(meta?.ok ? meta.dates : []), ...(google?.dates ?? []), ...(ga4?.fetched ?? [])];
+    try {
+      onStep?.("Saving daily numbers");
+      await afterAdsSync(opts.site, dirty, { contentRoot: opts.contentRoot });
+    } catch (err) {
+      log.warn({ err, site: opts.site }, "[ads-refresh] rollups / report windows failed (day files still saved)");
+    }
     if (meta && !meta.ok && !meta.skipped && meta.error) failure = `Meta: ${meta.error}`;
     else if (google && !google.ok && !google.skipped && google.error) failure = `Google Ads: ${google.error}`;
     else if (ga4 && !ga4.ok && !ga4.skipped && ga4.error) failure = `GA4: ${ga4.error}`;

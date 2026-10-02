@@ -1,16 +1,16 @@
 /**
  * Ads diagnostics overview (`/private/diagnostics/ads`): one honest status across platforms.
  * Status = worst of the connected platforms plus shared checks (lead records, consent).
- * Deep dives live on the per-platform pages; this only shows cards, top issues and shared issues.
+ * Read-only: issues from the last Run / Re-checks, numbers from the saved report windows.
  */
 
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
-import { ADS_ISSUE_WINDOW_DAYS, resolveAdsDiagnosticsWindows } from "@shared/ads-diagnostics-rules";
-import { buildAdsDiagnostics, summarizeMetaDiagnostics, type AdsDiagnostics } from "./ads-diagnostics";
-import { buildGoogleAdsDiagnostics } from "./google-ads-diagnostics";
-import { buildAdsReport, type MoneyByCurrency } from "./ads-report";
+import type { AdsIssueRow, AdsRunInfo } from "@shared/ads-issues";
+import { hasMetaData } from "./ads-refresh";
+import { assembleAdsReportFromRollups } from "./ads-rollups";
+import type { MoneyByCurrency } from "./ads-report";
+import { adsIssueCounts, snapKpiDays } from "./diagnostics/read";
 
-export type AdsDiagnosticsStatus = AdsDiagnostics["status"];
+export type AdsDiagnosticsStatus = "not_connected" | "ok" | "warnings" | "errors";
 
 export type AdsPlatformCard = {
   connected: boolean;
@@ -24,7 +24,7 @@ export type AdsPlatformCard = {
   last_synced_at: string | null;
   /** Google only: newest day the BigQuery transfer loaded. */
   data_through?: string | null;
-  top_issues: Array<Pick<AdsIssue, "id" | "code" | "title" | "severity">>;
+  top_issues: Array<Pick<AdsIssueRow, "id" | "code" | "title" | "severity">>;
 };
 
 export type AdsDiagnosticsOverview = {
@@ -36,8 +36,9 @@ export type AdsDiagnosticsOverview = {
   open_warnings: number;
   platforms: { meta: AdsPlatformCard; google: AdsPlatformCard };
   /** Lead records / consent checks, listed once here (also shown on the Meta page). */
-  shared_issues: AdsIssue[];
+  shared_issues: AdsIssueRow[];
   totals: { spend: MoneyByCurrency; site_leads: number; paid_visits: number };
+  run: AdsRunInfo;
 };
 
 const RANK: Record<AdsDiagnosticsStatus, number> = { not_connected: 0, ok: 1, warnings: 2, errors: 3 };
@@ -46,73 +47,78 @@ export function worstStatus(statuses: AdsDiagnosticsStatus[]): AdsDiagnosticsSta
   return statuses.reduce<AdsDiagnosticsStatus>((w, s) => (RANK[s] > RANK[w] ? s : w), "not_connected");
 }
 
-function top(issues: AdsIssue[]): AdsPlatformCard["top_issues"] {
-  return issues
-    .filter((i) => i.severity !== "info")
+function counts(rows: AdsIssueRow[]): { open_errors: number; open_warnings: number } {
+  const open = rows.filter((r) => r.verify.state === "open");
+  return { open_errors: open.filter((r) => r.severity === "error").length, open_warnings: open.filter((r) => r.severity === "warning").length };
+}
+
+function statusOf(connected: boolean, c: { open_errors: number; open_warnings: number }): AdsDiagnosticsStatus {
+  return !connected ? "not_connected" : c.open_errors > 0 ? "errors" : c.open_warnings > 0 ? "warnings" : "ok";
+}
+
+function top(rows: AdsIssueRow[]): AdsPlatformCard["top_issues"] {
+  return rows
+    .filter((i) => i.severity !== "info" && i.verify.state === "open")
     .slice(0, 3)
     .map(({ id, code, title, severity }) => ({ id, code, title, severity }));
 }
 
-export async function buildAdsDiagnosticsOverview(opts: { site: string; contentRoot?: string; days?: number; now?: Date }): Promise<AdsDiagnosticsOverview> {
+export async function buildAdsDiagnosticsOverview(opts: { site: string; contentRoot?: string; days?: unknown; now?: Date }): Promise<AdsDiagnosticsOverview> {
   const now = opts.now ?? new Date();
-  const { kpiDays } = resolveAdsDiagnosticsWindows(opts.days);
-  const [meta, google] = await Promise.all([
-    buildAdsDiagnostics({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, probe: false, now }),
-    buildGoogleAdsDiagnostics({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, persist: false, now }),
+  const kpiDays = snapKpiDays(opts.days);
+  const [meta, google, all] = await Promise.all([
+    assembleAdsReportFromRollups({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "meta", includeMetaPlatforms: false }),
+    assembleAdsReportFromRollups({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "google", includeMetaPlatforms: false, noRefresh: true }),
+    assembleAdsReportFromRollups({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "all", includeMetaPlatforms: false, noRefresh: true }),
   ]);
-  const metaSummary = summarizeMetaDiagnostics(opts.site, meta);
-  const shared = meta.issues.filter((i) => i.platform === "shared");
-  const metaOnly = meta.issues.filter((i) => i.platform !== "shared");
-  const sharedErrors = shared.filter((i) => i.severity === "error").length;
-  const sharedWarnings = shared.filter((i) => i.severity === "warning").length;
-  const metaConnected = meta.status !== "not_connected";
+  const { rows, run } = adsIssueCounts(opts.site);
+  const metaRows = rows.filter((r) => r.platform === "meta");
+  const googleRows = rows.filter((r) => r.platform === "google");
+  const shared = rows.filter((r) => r.platform === "shared");
+  const metaConnected = hasMetaData(opts.site, opts.contentRoot);
+  const metaCounts = counts(metaRows);
+  const googleCounts = counts(googleRows);
+  const sharedCounts = counts(shared);
   const metaCard: AdsPlatformCard = {
     connected: metaConnected,
-    status: metaConnected
-      ? metaSummary.open_errors - sharedErrors > 0
-        ? "errors"
-        : metaSummary.open_warnings - sharedWarnings > 0
-          ? "warnings"
-          : "ok"
-      : "not_connected",
-    open_errors: Math.max(0, metaSummary.open_errors - sharedErrors),
-    open_warnings: Math.max(0, metaSummary.open_warnings - sharedWarnings),
-    spend: meta.kpis.spend,
-    platform_leads: meta.kpis.meta_leads,
-    site_leads: meta.kpis.site_leads,
+    status: statusOf(metaConnected, metaCounts),
+    ...metaCounts,
+    spend: meta.totals.spend,
+    platform_leads: meta.totals.meta_leads,
+    site_leads: meta.totals.unique_leads,
     last_synced_at: meta.meta.last_synced_at,
-    top_issues: top(metaOnly),
+    top_issues: top(metaRows),
   };
   const googleCard: AdsPlatformCard = {
-    connected: google.status !== "not_connected",
-    status: google.status,
-    open_errors: google.kpis.open_errors,
-    open_warnings: google.kpis.open_warnings,
-    spend: google.kpis.spend,
-    platform_leads: google.kpis.google_leads,
-    site_leads: google.kpis.site_leads,
+    connected: google.google.connected,
+    status: statusOf(google.google.connected, googleCounts),
+    ...googleCounts,
+    spend: google.totals.spend,
+    platform_leads: google.totals.google_leads,
+    site_leads: google.totals.unique_leads,
     last_synced_at: google.google.last_synced_at,
     data_through: google.google.data_through,
-    top_issues: top(google.issues),
+    top_issues: top(googleRows),
   };
-  const anyConnected = metaCard.connected || googleCard.connected;
-  const sharedStatus: AdsDiagnosticsStatus = !anyConnected ? "not_connected" : sharedErrors > 0 ? "errors" : sharedWarnings > 0 ? "warnings" : "ok";
-  const all = buildAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "all", includeMetaPlatforms: false, noRefresh: true, now });
+  const sharedStatus = statusOf(metaCard.connected || googleCard.connected, sharedCounts);
   return {
     generated_at: now.toISOString(),
     platform: "overview",
     window_days: kpiDays,
     status: worstStatus([metaCard.status, googleCard.status, sharedStatus]),
-    open_errors: metaCard.open_errors + googleCard.open_errors + sharedErrors,
-    open_warnings: metaCard.open_warnings + googleCard.open_warnings + sharedWarnings,
+    open_errors: metaCounts.open_errors + googleCounts.open_errors + sharedCounts.open_errors,
+    open_warnings: metaCounts.open_warnings + googleCounts.open_warnings + sharedCounts.open_warnings,
     platforms: { meta: metaCard, google: googleCard },
     shared_issues: shared,
     totals: { spend: all.totals.spend, site_leads: all.totals.unique_leads, paid_visits: all.totals.paid_visits },
+    run,
   };
 }
 
-/** Global tab roll-up: worst status and open counts across Meta, Google and shared checks. */
-export async function adsOverviewSummary(site: string, contentRoot?: string): Promise<{ status: AdsDiagnosticsStatus; open_errors: number; open_warnings: number }> {
-  const o = await buildAdsDiagnosticsOverview({ site, contentRoot, days: ADS_ISSUE_WINDOW_DAYS });
-  return { status: o.status, open_errors: o.open_errors, open_warnings: o.open_warnings };
+/** Global tab roll-up: cache-only counts across Meta, Google and shared checks (no report read). */
+export function adsOverviewSummary(site: string, contentRoot?: string): { status: AdsDiagnosticsStatus; open_errors: number; open_warnings: number; never_run: boolean } {
+  const { rows, run } = adsIssueCounts(site);
+  const c = counts(rows);
+  const connected = hasMetaData(site, contentRoot) || rows.some((r) => r.platform === "google");
+  return { status: statusOf(connected || !run.never_run, c), ...c, never_run: run.never_run };
 }

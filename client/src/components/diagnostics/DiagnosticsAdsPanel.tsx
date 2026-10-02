@@ -21,7 +21,7 @@ import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { apiFetch, apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
-import type { AdsDiagnostics } from "@/components/ads/ads-types";
+import type { AdsDiagnostics, AdsIssueRow } from "@/components/ads/ads-types";
 import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
 import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
 import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
@@ -30,6 +30,8 @@ import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButto
 import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
 import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
 import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
+import { AdsRunBar, adsRunPollMs } from "@/components/diagnostics/AdsRunBar";
+import { AdsIssueStateBadges, AdsIssueVerifyPanel } from "@/components/diagnostics/AdsIssueActions";
 import {
   IssueConversionEvidence,
   IssueSettingsAction,
@@ -395,7 +397,7 @@ function IssueCountChips({ errors, warnings }: { errors: number; warnings: numbe
 }
 
 /** Adds an unrecognized campaign to Settings → Ads → Known external campaigns (ads_settings only). */
-function MarkCampaignKnown({ issue, onDone }: { issue: AdsIssue; onDone: () => void }) {
+function MarkCampaignKnown({ issue, onDone }: { issue: AdsIssueRow; onDone: () => void }) {
   const { hasCapability } = useDebugAuth();
   const canEdit = hasCapability("ads_settings");
   const { toast } = useToast();
@@ -403,7 +405,7 @@ function MarkCampaignKnown({ issue, onDone }: { issue: AdsIssue; onDone: () => v
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
-  const key = issue.id.slice("unrecognized_campaign:".length);
+  const key = issue.check_key.slice("unrecognized_campaign:".length);
 
   async function save() {
     setSaving(true);
@@ -471,14 +473,12 @@ function MarkCampaignKnown({ issue, onDone }: { issue: AdsIssue; onDone: () => v
 function IssueRow({
   issue,
   template,
-  snapshotId,
   issueWindowDays,
   refresh,
   onReload,
 }: {
-  issue: AdsIssue;
+  issue: AdsIssueRow;
   template: string;
-  snapshotId: string | undefined;
   issueWindowDays: number;
   refresh: AdsRefreshStatus | undefined;
   onReload: () => void;
@@ -522,8 +522,9 @@ function IssueRow({
               {ga4Totals ? `${formatNum(ga4Totals.leads)} leads · GA4` : "spend affected"}
             </span>
           </div>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 space-y-0.5">
             <p className="text-sm text-foreground">{issue.title}</p>
+            <AdsIssueStateBadges issue={issue} />
           </div>
           <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
         </button>
@@ -537,14 +538,8 @@ function IssueRow({
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">How to fix</p>
           <p className="text-foreground/90">{issue.how_to_fix}</p>
         </div>
-        <AdsIssueEvidence
-          issue={issue}
-          snapshotId={snapshotId}
-          issueWindowDays={issueWindowDays}
-          refresh={refresh}
-          onSnapshotExpired={onReload}
-          onResyncStarted={onReload}
-        />
+        <AdsIssueVerifyPanel issue={issue} onChanged={onReload} />
+        <AdsIssueEvidence issue={issue} issueWindowDays={issueWindowDays} refresh={refresh} onResyncStarted={onReload} />
         {showTemplate && (
           <div className="flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">{template}</code>
@@ -568,7 +563,7 @@ function IssueRow({
           </div>
         )}
         {canFixInMeta && (
-          <AdsTrackingFixDialog open={fixOpen} onOpenChange={setFixOpen} issue={issue} snapshotId={snapshotId} onApplied={onReload} />
+          <AdsTrackingFixDialog open={fixOpen} onOpenChange={setFixOpen} issue={issue} onApplied={onReload} />
         )}
         {issue.scope.url && (
           <a href={issue.scope.url} target="_blank" rel="noreferrer" className="text-xs underline underline-offset-2 text-muted-foreground hover:text-foreground">
@@ -585,6 +580,13 @@ function IssueRow({
 }
 
 const ISSUES_OPEN_KEY = "diagnostics-ads-issues-open";
+
+export const RESOLUTION_LABEL: Record<AdsDiagnostics["resolved"][number]["resolution"], string> = {
+  verified_gone: "Confirmed fixed",
+  soft_complete: "Marked fixed",
+  resource_gone: "Ad removed",
+  rule_retired: "Check retired",
+};
 
 export function DiagnosticsAdsPanel() {
   const [days, setDays] = useState<7 | 28 | 90>(28);
@@ -604,8 +606,9 @@ export function DiagnosticsAdsPanel() {
     },
     placeholderData: (prev) => prev,
     refetchInterval: (q) => {
-      const state = (q.state.data as AdsDiagnostics | undefined)?.refresh?.state;
-      return state === "running" ? 3000 : state === "queued" ? 8000 : false;
+      const d = q.state.data as AdsDiagnostics | undefined;
+      const state = d?.refresh?.state;
+      return state === "running" ? 3000 : adsRunPollMs(d?.run) || (state === "queued" ? 8000 : false);
     },
   });
 
@@ -647,11 +650,12 @@ export function DiagnosticsAdsPanel() {
           ? "border-chart-3/40 bg-chart-3/10"
           : "border-border bg-muted/40";
   const issues = data.issues.filter((i) => i.severity !== "info");
-  const consentDrop = data.issues.find((i) => i.code === "consent_rate_drop");
+  const openIssues = issues.filter((i) => i.verify.state === "open");
+  const consentDrop = data.issues.find((i) => i.code === "consent_rate_drop" && i.verify.state === "open");
   const infos = data.issues.filter((i) => i.severity === "info" && i.code !== "consent_rate_drop");
   const issueWindow = `last ${data.issue_window_days} days`;
   const affectedSpend: Record<string, number> = {};
-  for (const i of [...issues, ...infos]) {
+  for (const i of [...openIssues, ...infos]) {
     for (const [cur, v] of Object.entries(i.spend_affected)) affectedSpend[cur] = (affectedSpend[cur] ?? 0) + v;
   }
   for (const cur of Object.keys(affectedSpend)) {
@@ -692,6 +696,8 @@ export function DiagnosticsAdsPanel() {
       </div>
 
       <AdsRefreshNotice refresh={data.refresh} testId="ads-diagnostics-refresh-notice" />
+
+      {data.status !== "not_connected" && <AdsRunBar run={data.run} onChanged={() => void refetch()} testIdPrefix="ads-meta" />}
 
       {data.missing_floor_currencies.length > 0 && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs" data-testid="ads-missing-floor">
@@ -847,7 +853,7 @@ export function DiagnosticsAdsPanel() {
 
       {data.status !== "not_connected" && data.meta_platforms && <AdsMetaPlatformsCard data={data.meta_platforms} days={data.window_days} />}
 
-      {(issues.length > 0 || infos.length > 0 || data.resolved.length > 0) && (
+      {(issues.length > 0 || infos.length > 0 || data.resolved.length > 0 || data.run.never_run) && data.status !== "not_connected" && (
         <Collapsible open={issuesOpen} onOpenChange={toggleIssuesOpen} asChild>
         <Card data-testid="card-ads-issues">
           <CardHeader className={cn(issuesOpen ? "pb-3" : "py-4")}>
@@ -865,11 +871,11 @@ export function DiagnosticsAdsPanel() {
                     <span
                       className={cn(
                         "ml-1 tabular-nums",
-                        k.open_errors > 0 ? "text-destructive" : issues.length > 0 ? "text-amber-500" : "text-muted-foreground",
+                        k.open_errors > 0 ? "text-destructive" : openIssues.length > 0 ? "text-amber-500" : "text-muted-foreground",
                       )}
                       data-testid="text-ads-issues-count"
                     >
-                      ({issues.length})
+                      ({openIssues.length})
                     </span>
                     {hasAffectedSpend && (
                       <span className="font-normal text-muted-foreground">
@@ -881,14 +887,15 @@ export function DiagnosticsAdsPanel() {
               </CollapsibleTrigger>
               {issuesOpen && (
                 <ToggleButtonBar value={list} onValueChange={(v) => setList(v as "issues" | "resolved")} listTestId="ads-issue-list" listClassName="flex">
-                  <ToggleButtonBarTrigger value="issues">Issues ({issues.length})</ToggleButtonBarTrigger>
+                  <ToggleButtonBarTrigger value="issues">Issues ({openIssues.length})</ToggleButtonBarTrigger>
                   <ToggleButtonBarTrigger value="resolved">Resolved ({data.resolved.length})</ToggleButtonBarTrigger>
                 </ToggleButtonBar>
               )}
             </div>
             {issuesOpen && (
               <p className="text-sm text-muted-foreground">
-                Problems are always checked over the {issueWindow}, so changing the window above does not hide or resolve them.
+                Problems found by the last check over the {issueWindow}. Changing the window above doesn&apos;t hide or resolve them; issues you marked as
+                fixed stay listed as pending until they&apos;re confirmed.
               </p>
             )}
           </CardHeader>
@@ -897,7 +904,8 @@ export function DiagnosticsAdsPanel() {
             {list === "issues" ? (
               issues.length === 0 && infos.length === 0 ? (
                 <p className="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground" data-testid="ads-no-issues">
-                  <CheckCircle2 className="h-4 w-4 text-chart-3" /> No tracking issues found. Issues clear on the next sync once fixed.
+                  <CheckCircle2 className="h-4 w-4 text-chart-3" />{" "}
+                  {data.run.never_run ? "No checks have run yet. Press Run checks above to look for problems." : "No tracking issues found in the last check."}
                 </p>
               ) : (
                 <div>
@@ -906,7 +914,6 @@ export function DiagnosticsAdsPanel() {
                       key={i.id}
                       issue={i}
                       template={data.utm_template}
-                      snapshotId={data.snapshot_id}
                       issueWindowDays={data.issue_window_days}
                       refresh={data.refresh}
                       onReload={() => void refetch()}
@@ -922,7 +929,9 @@ export function DiagnosticsAdsPanel() {
                   <span className="flex items-center gap-2 text-foreground">
                     <CheckCircle2 className="h-4 w-4 text-chart-3" /> {r.title}
                   </span>
-                  <span className="text-xs text-muted-foreground">{formatWhen(r.resolved_at)}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {RESOLUTION_LABEL[r.resolution]} · {formatWhen(r.resolved_at)}
+                  </span>
                 </div>
               ))
             )}
@@ -932,7 +941,7 @@ export function DiagnosticsAdsPanel() {
         </Collapsible>
       )}
 
-      <PaidPagesCard days={days} issues={data.issues} />
+      <PaidPagesCard days={days} issues={data.issues.filter((i) => i.verify.state === "open")} />
     </div>
   );
 }
@@ -943,7 +952,7 @@ export function AdsGlobalRollupCard() {
     queryFn: async () => {
       const res = await apiFetch("/api/diagnostics/ads?summary=1");
       if (!res.ok) return null;
-      return res.json() as Promise<{ status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number }>;
+      return res.json() as Promise<{ status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number; never_run?: boolean }>;
     },
     staleTime: 5 * 60 * 1000,
   });

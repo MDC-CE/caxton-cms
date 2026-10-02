@@ -95,21 +95,87 @@ export function accountSyncWarnings(accounts: unknown[] | undefined): Warning[] 
   return out;
 }
 
-function snapshotWarnings(data: Record<string, unknown>): Warning[] {
+type AdsRunInfo = {
+  never_run?: boolean;
+  last_run?: { finished_at?: string | null; skipped?: Array<{ platform: string; reason: string }> } | null;
+  active?: Array<{ job_id: string; kind: string; lane: string; status: string }>;
+  last_failed?: { kind: string; error: string } | null;
+  busy?: { code: string; message: string } | null;
+};
+type IssueVerify = { action?: string; state?: string; label?: string; verify?: { kind?: string } };
+type ActionIssue = DiagIssue & { verify?: IssueVerify; affected_ads?: string[]; affected_ads_total?: number };
+
+/** Standing facts for every diagnostics read (dense; staff copy lives in the UI). */
+const ADS_DIAGNOSTICS_MODEL: Warning = {
+  code: "ads_diagnostics_model",
+  message:
+    "Issues come from the last Run / Re-check, not this read: numbers are as of issues[].measured_at over issues[].window (28 days). " +
+    "Sync updates KPIs only; it never opens or closes issues. Runs skip pending (marked-fixed) issues and never override a Mark / Undo / Re-check made after the Run started. " +
+    "Issues on a platform the last Run skipped carry not_checked (not fixed, not re-evaluated).",
+};
+
+/** Run state → warnings (never-run, running, failed, skipped platforms). */
+export function adsRunWarnings(run: AdsRunInfo | undefined): Warning[] {
+  if (!run) return [];
   const out: Warning[] = [];
-  if (data.snapshot_expired) {
-    out.push({
-      code: "snapshot_expired",
-      message: "snapshot_id expired or unknown (30 min TTL); these results are a fresh build with a new snapshot_id — issue ids and ad lists may differ.",
-    });
+  if (run.never_run) {
+    out.push({ code: "ads_never_run", message: "No Run has finished on this site yet, so issues are empty. Start one with update_ads_issue action run (background, ~1–3 min)." });
   }
-  if (data.newer_data_available) {
-    out.push({
-      code: "newer_data_available",
-      message: "A Meta sync or GA4 export finished after this snapshot; omit snapshot_id to rebuild with the newer data.",
-    });
+  const running = (run.active ?? []).filter((j) => j.status === "running" || j.status === "queued");
+  if (running.some((j) => j.kind === "run")) {
+    out.push({ code: "ads_run_in_progress", message: "A Run is in progress; issues update when it finishes. Re-call get_paid_traffic in ~1 minute. New Runs and big Re-checks return 409 ads_run_busy meanwhile." });
+  } else if (running.length > 0) {
+    out.push({ code: "ads_recheck_in_progress", message: `${running.length} Re-check(s) queued or running; affected issues show recheck_queued.` });
+  }
+  if (run.last_failed) {
+    out.push({ code: "ads_last_job_failed", message: `Last ${run.last_failed.kind} failed: ${run.last_failed.error} Issues were left as they were.` });
+  }
+  for (const s of run.last_run?.skipped ?? []) {
+    out.push({ code: "ads_platform_not_checked", message: `${s.platform} was not checked in the last Run (${s.reason}). Its issues stay as last checked — not fixed, not re-evaluated.` });
+  }
+  if (run.busy?.code === "ads_sync_active") {
+    out.push({ code: "ads_sync_active", message: run.busy.message });
   }
   return out;
+}
+
+const MAX_ISSUE_ACTIONS = 5;
+
+/** Per-issue next step: Re-check (instant / ready), Mark as fixed (needs report), nothing while waiting. */
+export function adsIssueNextActions(issues: ActionIssue[], run: AdsRunInfo | undefined): NextAction[] {
+  if (run?.never_run) {
+    return [{ tool: "update_ads_issue", priority: "recommended", reason: "No Run yet: start a full Run to find issues", args_hint: { action: "run" } }];
+  }
+  const out: NextAction[] = [];
+  for (const i of issues) {
+    if (!i.id || out.length >= MAX_ISSUE_ACTIONS) break;
+    const action = i.verify?.action;
+    if (action === "recheck" || action === "recheck_ready") {
+      out.push({
+        tool: "update_ads_issue",
+        priority: action === "recheck_ready" ? "recommended" : "optional",
+        reason: action === "recheck_ready" ? `${i.id}: ready to confirm the fix` : `${i.id}: after fixing it in the ad platform or site, Re-check confirms right away`,
+        args_hint: { action: "recheck", issue_id: i.id },
+      });
+    } else if (action === "mark_fixed") {
+      out.push({
+        tool: "update_ads_issue",
+        priority: "optional",
+        reason: `${i.id}: needs new data to confirm (${i.verify?.verify?.kind}); after fixing, mark as fixed with a report — it stays pending until verified`,
+        args_hint: { action: "mark_fixed", issue_id: i.id, report: "What you changed, where (account / campaign / ad ids)" },
+      });
+    }
+  }
+  return out;
+}
+
+const LIST_AFFECTED_ADS = 20;
+
+/** List mode: cap affected_ads (ids) per issue; issue_ids returns the full list. */
+function slimAffectedAds<T extends ActionIssue>(issues: T[]): T[] {
+  return issues.map((i) =>
+    Array.isArray(i.affected_ads) && i.affected_ads.length > LIST_AFFECTED_ADS ? { ...i, affected_ads: i.affected_ads.slice(0, LIST_AFFECTED_ADS) } : i,
+  );
 }
 
 function truncatedAds(issues: DiagIssue[]): Array<{ id: string; shown: number; total: number; next_offset: number }> {
@@ -266,19 +332,23 @@ const NON_EFFECTS = [
 
 const DIAG_PLATFORMS = new Set(["meta", "google"]);
 
+const DIAG_READ_NON_EFFECT = "diagnostics is a read: it never runs checks, probes landing pages or opens / closes issues (use update_ads_issue run / recheck / mark_fixed / undo).";
+
 export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, grants?: CatalogGrant[]): void {
   mcp.tool(
     "get_paid_traffic",
     "Paid traffic by landing page: ad spend (Meta Marketing API + Google Ads BigQuery transfer), paid visits (GA4 BigQuery export), and site leads (lead ledger), " +
       "plus ad tracking health. Requires metrics_view. Exclusive mode per call: " +
       "summary (totals + lead_conversions: which Meta conversions / site forms sit behind the lead counts + top pages) | campaigns | entries (managed pages, paginated) | destinations (spend that did not land on a managed page, incl. Google lead forms / calls / video views / app — excluded from cost per lead) | diagnostics. " +
-      "diagnostics without platform → cross-platform overview (platforms.meta / platforms.google cards with top_issues, shared lead-tracking issues, totals; next_actions per platform with open issues). diagnostics with platform meta | google → that platform's full issue list (Meta: snapshot_id, evidence, landing probes; unrecognized_campaign = paid Meta visits from a campaign not in any connected account. Google: transfer health, matching, networks). " +
+      "diagnostics without platform → cross-platform overview (platforms.meta / platforms.google cards with top_issues, shared lead-tracking issues, totals; next_actions per platform with open issues). diagnostics with platform meta | google → that platform's full issue list (Meta: evidence; landing_not_live = ad URL resolves to no live page (in-process, no HTTP probe); unrecognized_campaign = paid Meta visits from a campaign not in any connected account. Google: transfer health, matching, networks). " +
+      "diagnostics is a cache read: issues come from the last Run / Re-check (run { never_run, last_run { checked, skipped }, active, last_failed, busy }); change them with update_ads_issue (run | recheck | mark_fixed | undo). " +
+      "Each issue: stable id (ads:{platform}:{code}:{level}:{resource}), level + resource_id, affected_ads (ad ids; list mode caps 20, affected_ads_total = all), measured_at + window, verify { verify { kind instant | after_sync | fresh_days }, state open | pending, action recheck | mark_fixed | recheck_ready | wait, verify_after, waits_for_sync, ready_to_verify, progress (min_data x of y), label }, last_check (partly_fixed / couldnt_check notes), recheck_queued, not_checked. " +
       "Google data lags 1–2 days (google_data_through warning; google_transfer_stale when older). google_leads (Submit lead form conversions + staff-picked actions) are never summed with Meta or site leads. " +
       "Consent surfaces only as warnings (consent_estimates, consent_rate_drop); the consent breakdown is staff-only (Diagnostics → Legal). " +
-      "days 1–90 ending yesterday (default 28). diagnostics: KPIs follow days; issues and open_errors/open_warnings always cover the last 28 days (issue_window_days). Credit: one lead → one landing page (model last_paid default | first_paid), 30-day lookback, no split; the form page never gets credit. " +
+      "days 1–90 ending yesterday (default 28). diagnostics: KPIs read the saved 7 / 28 / 90 day windows (other values snap up); issues and open_errors/open_warnings (open only; pending excluded) always cover the last 28 days (issue_window_days). Credit: one lead → one landing page (model last_paid default | first_paid), 30-day lookback, no split; the form page never gets credit. " +
       "Money is per currency (never converted). Soft status not_configured when neither Meta nor GA4 export is set up. " +
       "diagnostics issues sort severity → spend affected; each carries scope (campaign/account ids), first_seen and details { ads (top 3 by spend unless issue_ids), ads_total, ads_offset, unchecked reasons, ga4_seen for destinations with no synced ad, setup_last_read_at }. " +
-      "Every diagnostics call returns snapshot_id (30 min): pass it with issue_ids (≤10) for up to ads_limit ads per issue (default 50, max 200; page with ads_offset) from the same build. " +
+      "Pass issue_ids (≤10) for up to ads_limit ads with evidence per issue (default 50; evidence keeps the top 50 by spend; page with ads_offset) and the full affected_ads list. " +
       "Refresh status (refresh.state): meta_refresh_in_progress → re-call in ~1 minute; meta_refresh_failed / jobs_worker_down → numbers are the last cached sync, do not re-call in a loop (staff retry via Sync now). refresh.progress { done, total, label } only while running (uneven steps; not a time estimate). " +
       "refresh: true (any mode, needs ads_settings) queues a Meta + Google + GA4 read first; without the grant → refresh_not_allowed warning and the cached read proceeds. " +
       "Filters: campaign_ids / adset_ids / ad_ids (≤20 each; OR within a level, AND across levels; Google ad groups go in adset_ids) narrow spend, GA4 visits (matched by link tags; parents filled from synced ads) and leads (by last-clicked ad); untagged visits are left out (untagged_visits_excluded = floor). " +
@@ -289,7 +359,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
       MULTI_SITE_TOOL_BLURB,
     {
       mode: z.enum(["summary", "campaigns", "entries", "destinations", "diagnostics"]).describe("Exclusive mode for this call"),
-      days: z.number().int().min(1).max(90).optional().describe("Lookback days ending yesterday (default 28). diagnostics: sets the KPI window only; issues stay on the last 28 days."),
+      days: z.number().int().min(1).max(90).optional().describe("Lookback days ending yesterday (default 28). diagnostics: KPI window only (snaps to 7 / 28 / 90); issues stay on the last 28 days."),
       platform: z
         .enum(["all", "meta", "google", "microsoft", "tiktok", "linkedin", "x", "snapchat", "pinterest", "other"])
         .optional()
@@ -326,10 +396,6 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
         .describe("entries/destinations sort (default spend). Low-sample rows sort last for rates."),
       limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe(`Page size (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`),
       offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)"),
-      snapshot_id: z
-        .string()
-        .optional()
-        .describe("diagnostics: snapshot_id from an earlier diagnostics call (30 min TTL) so issue_ids read the same build"),
       issue_ids: z
         .array(z.string())
         .max(MAX_ISSUE_IDS)
@@ -369,7 +435,6 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
       sort,
       limit,
       offset,
-      snapshot_id,
       issue_ids,
       ads_limit,
       ads_offset,
@@ -411,7 +476,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
                 {
                   kind: "meta_sync_enqueued",
                   summary: `Queued a Meta read if Meta is connected (last 10 days of ad data + ad setups; job state ${state}). Reads from Meta only.`,
-                  paths: [".cache/{site}/meta-ads-days/", ".cache/{site}/meta-ads-creatives.json", ".cache/{site}/meta-ads-state.json"],
+                  paths: [".cache/{site}/meta-ads-days/", ".cache/{site}/ads-setup/meta.json", ".cache/{site}/meta-ads-state.json"],
                 },
                 {
                   kind: "google_sync_enqueued",
@@ -419,7 +484,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
                   paths: [
                     ".cache/{site}/google-ads-days/",
                     ".cache/{site}/google-ads-network-days/",
-                    ".cache/{site}/google-ads-setups.json",
+                    ".cache/{site}/ads-setup/google.json",
                     ".cache/{site}/google-ads-state.json",
                   ],
                 },
@@ -435,13 +500,13 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
             });
           }
           const hasIdFilters = [campaign_ids, adset_ids, ad_ids].some((l) => (l?.length ?? 0) > 0);
-          const detailArgs = !!snapshot_id || (issue_ids?.length ?? 0) > 0 || hasIdFilters;
+          const detailArgs = (issue_ids?.length ?? 0) > 0 || hasIdFilters;
           let diagPlatform: "overview" | "meta" | "google" = platform === "meta" || platform === "google" ? platform : "overview";
           if (diagPlatform === "overview" && detailArgs) {
             diagPlatform = "meta";
             refreshWarningsOut.push({
               code: "diagnostics_platform_defaulted",
-              message: "snapshot_id / issue_ids / id filters need a platform; used meta. Pass platform: google for Google issue ids (google_* codes).",
+              message: "issue_ids / id filters need a platform; used meta. Pass platform: google for Google issue ids (ads:google:…).",
             });
           }
 
@@ -451,7 +516,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
             const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/diagnostics/ads?${params}`, { headers: internalHeaders(mcpToken) });
             const data = (await res.json()) as Record<string, unknown> & { platforms?: Partial<Record<"meta" | "google", PlatformCard>> };
             if (!res.ok) return fail((data.error as string) || `Server error: ${res.status}`);
-            const warnings: Warning[] = [...refreshWarningsOut];
+            const warnings: Warning[] = [...refreshWarningsOut, ADS_DIAGNOSTICS_MODEL, ...adsRunWarnings(data.run as AdsRunInfo | undefined)];
             if (since || until) {
               warnings.push({ code: "range_ignored_in_diagnostics", message: "since / until are ignored in diagnostics; use a report mode for a custom range." });
             }
@@ -468,9 +533,13 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
                 message: `Ads diagnostics overview (${data.window_days}d): ${String(data.status)}`,
                 ...data,
                 shared_issues: shared.filter((i) => i.code !== "consent_rate_drop"),
-                non_effects: [...NON_EFFECTS, "Overview writes nothing (no landing probes, no Issues/Resolved update); per-platform calls do."],
+                non_effects: [...NON_EFFECTS, DIAG_READ_NON_EFFECT],
               },
-              { warnings, side_effects: refreshEffects, next_actions: overviewNextActions(data.platforms) },
+              {
+                warnings,
+                side_effects: refreshEffects,
+                next_actions: (data.run as AdsRunInfo | undefined)?.never_run ? adsIssueNextActions([], data.run as AdsRunInfo) : overviewNextActions(data.platforms),
+              },
             );
           }
 
@@ -481,8 +550,11 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
             const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/diagnostics/ads?${params}`, { headers: internalHeaders(mcpToken) });
             const data = (await res.json()) as Record<string, unknown>;
             if (!res.ok) return fail((data.error as string) || `Server error: ${res.status}`);
+            const run = data.run as AdsRunInfo | undefined;
             const warnings: Warning[] = [
               ...refreshWarningsOut,
+              ADS_DIAGNOSTICS_MODEL,
+              ...adsRunWarnings(run),
               ...((Array.isArray(data.warnings) ? data.warnings : []) as Warning[]).filter(
                 (w) => REFRESH_WARNING_CODES.has(w.code) || GOOGLE_STATUS_WARNING_CODES.has(w.code),
               ),
@@ -490,17 +562,18 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
             if (since || until) {
               warnings.push({ code: "range_ignored_in_diagnostics", message: "since / until are ignored in diagnostics; use a report mode for a custom range." });
             }
-            if (hasIdFilters || snapshot_id || ads_limit != null || ads_offset != null) {
+            if (hasIdFilters || ads_limit != null || ads_offset != null) {
               warnings.push({
                 code: "google_diagnostics_args_ignored",
-                message: "Google diagnostics ignores id filters, snapshot_id and ads_limit / ads_offset (no per-ad evidence lists yet). Use report modes with platform google to narrow by ids.",
+                message: "Google diagnostics ignores id filters and ads_limit / ads_offset (no per-ad evidence lists yet). Use report modes with platform google to narrow by ids.",
               });
             }
             for (const id of (Array.isArray(data.missing_issue_ids) ? data.missing_issue_ids : []) as string[]) {
               warnings.push({ code: "issue_not_found", message: `Issue ${id} is not open in Google diagnostics (resolved, or wrong id / platform).` });
             }
-            const issues = (Array.isArray(data.issues) ? data.issues : []) as DiagIssue[];
+            const issues = (Array.isArray(data.issues) ? data.issues : []) as ActionIssue[];
             const detail = (issue_ids?.length ?? 0) > 0;
+            const googlePage = detail ? issues : slimAffectedAds(issues.slice(off, off + lim));
             return ok(
               {
                 message: detail
@@ -508,28 +581,20 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
                   : `Google Ads diagnostics (KPIs ${data.window_days}d, issues ${data.issue_window_days}d): ${String(data.status)}`,
                 ...(data.status === "not_connected" ? { status_detail: "Google Ads not connected — see Settings → Ads → Google" } : {}),
                 ...data,
-                issues: detail ? issues : issues.slice(off, off + lim),
+                issues: googlePage,
                 issues_total: issues.length,
-                non_effects: NON_EFFECTS,
+                non_effects: [...NON_EFFECTS, DIAG_READ_NON_EFFECT],
               },
               {
                 warnings,
-                side_effects: [
-                  ...refreshEffects,
-                  {
-                    kind: "issue_state_recorded",
-                    summary: "Records Google Issues/Resolved state (first_seen / resolved_at). No landing probes; nothing sent to Google.",
-                    paths: [".cache/{site}/ads-issues-google.json"],
-                  },
-                ],
-                next_actions: refreshNextActions(data.refresh as RefreshStatus | undefined, "diagnostics", "google"),
+                side_effects: refreshEffects,
+                next_actions: [...refreshNextActions(data.refresh as RefreshStatus | undefined, "diagnostics", "google"), ...adsIssueNextActions(googlePage, run)],
               },
             );
           }
 
           const params = new URLSearchParams({ platform: "meta", days: String(days ?? 28) });
           if (domain) params.set("__site", domain);
-          if (snapshot_id) params.set("snapshot_id", snapshot_id);
           for (const id of issue_ids ?? []) params.append("issue_ids[]", id);
           if (ads_limit != null) params.set("ads_limit", String(ads_limit));
           if (ads_offset != null) params.set("ads_offset", String(ads_offset));
@@ -551,27 +616,18 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
             });
           }
           const refresh = data.refresh as RefreshStatus | undefined;
-          const fromSnapshot = !!snapshot_id && data.snapshot_id === snapshot_id && !data.snapshot_expired;
-          const probeEffects: McpSideEffect[] = fromSnapshot
-            ? []
-            : [
-                {
-                  kind: "landing_probe",
-                  summary: "Probes up to 10 top ad landing URLs (redirects followed manually; results cached 6h) and records Issues/Resolved state.",
-                  paths: [".cache/{site}/ads-issues.json", ".cache/{site}/ads-diagnostics-snapshots/"],
-                },
-              ];
+          const run = data.run as AdsRunInfo | undefined;
+          refreshWarningsOut.push(ADS_DIAGNOSTICS_MODEL, ...adsRunWarnings(run));
 
           if (issue_ids && issue_ids.length > 0) {
-            const detailIssues = (Array.isArray(data.issues) ? data.issues : []) as DiagIssue[];
+            const detailIssues = (Array.isArray(data.issues) ? data.issues : []) as ActionIssue[];
             const missing = (Array.isArray(data.missing_issue_ids) ? data.missing_issue_ids : []) as string[];
             const filteredOut = (Array.isArray(data.filtered_out_issue_ids) ? data.filtered_out_issue_ids : []) as string[];
             const warnings: Warning[] = [
               ...refreshWarningsOut,
-              ...snapshotWarnings(data),
               ...missing.map((id) => ({
                 code: "issue_not_found",
-                message: `Issue ${id} is not open in this build (resolved, or wrong id). Re-list with mode diagnostics.`,
+                message: `Issue ${id} is not open (resolved, or wrong id). Re-list with mode diagnostics.`,
               })),
               ...filteredOut.map((id) => ({
                 code: "issue_filtered_out",
@@ -579,7 +635,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               })),
               ...truncatedAds(detailIssues).map((t) => ({
                 code: "ads_truncated",
-                message: `${t.id}: showing ${t.shown} of ${t.total} ads; re-call with snapshot_id, issue_ids [${t.id}] and ads_offset ${t.next_offset}.`,
+                message: `${t.id}: showing ${t.shown} of ${t.total} ads with evidence; re-call with issue_ids [${t.id}] and ads_offset ${t.next_offset}. Evidence keeps the top 50 ads by spend; affected_ads lists every ad id.`,
               })),
               ...uncheckedWarnings(detailIssues),
             ];
@@ -587,18 +643,17 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               {
                 message: `Ads diagnostics detail for ${detailIssues.length} issue(s) (issues ${data.issue_window_days}d)`,
                 ...data,
-                non_effects: NON_EFFECTS,
+                non_effects: [...NON_EFFECTS, DIAG_READ_NON_EFFECT],
               },
-              { warnings, side_effects: [...refreshEffects, ...probeEffects], next_actions: refreshNextActions(refresh, "diagnostics") },
+              { warnings, side_effects: refreshEffects, next_actions: [...refreshNextActions(refresh, "diagnostics"), ...adsIssueNextActions(detailIssues, run)] },
             );
           }
 
           const warnings: Warning[] = [
             ...refreshWarningsOut,
-            ...snapshotWarnings(data),
             ...((Array.isArray(data.warnings) ? data.warnings : []) as Warning[]).filter((w) => REFRESH_WARNING_CODES.has(w.code)),
           ];
-          const allIssues = (Array.isArray(data.issues) ? data.issues : []) as DiagIssue[];
+          const allIssues = (Array.isArray(data.issues) ? data.issues : []) as ActionIssue[];
           const consentDrop = allIssues.find((i) => i.code === "consent_rate_drop");
           if (consentDrop) {
             warnings.push({
@@ -608,12 +663,12 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
           }
           const issues = allIssues.filter((i) => i.code !== "consent_rate_drop");
           warnings.push(...uncheckedWarnings(issues));
-          const page = issues.slice(off, off + lim);
+          const page = slimAffectedAds(issues.slice(off, off + lim));
           const truncated = truncatedAds(page);
           if (truncated.length > 0) {
             warnings.push({
               code: "ads_truncated",
-              message: `${truncated.length} issue(s) on this page list only their top ads by spend; pass snapshot_id + issue_ids (≤${MAX_ISSUE_IDS}) for up to 50 each (ads_limit ≤${MAX_ADS_LIMIT}).`,
+              message: `${truncated.length} issue(s) on this page list only their top ads by spend; pass issue_ids (≤${MAX_ISSUE_IDS}) for up to 50 each with evidence. affected_ads is capped at ${LIST_AFFECTED_ADS} ids here (affected_ads_total = all).`,
             });
           }
           const { consent: _consent, kpis: rawKpis, ...rest } = data as Record<string, unknown> & { kpis?: Record<string, unknown> };
@@ -626,12 +681,12 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               kpis,
               issues: page,
               issues_total: issues.length,
-              non_effects: NON_EFFECTS,
+              non_effects: [...NON_EFFECTS, DIAG_READ_NON_EFFECT],
             },
             {
               warnings,
-              side_effects: [...refreshEffects, ...probeEffects],
-              next_actions: refreshNextActions(refresh, "diagnostics"),
+              side_effects: refreshEffects,
+              next_actions: [...refreshNextActions(refresh, "diagnostics"), ...adsIssueNextActions(page, run)],
             },
           );
         }

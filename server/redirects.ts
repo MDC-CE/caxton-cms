@@ -188,10 +188,33 @@ function resolveRedirectTarget(entry: RedirectEntry, req: Request, captureGroups
   return target;
 }
 
-function getQueryString(req: Request): string {
-  const url = req.originalUrl;
-  const qIndex = url.indexOf('?');
-  return qIndex >= 0 ? url.slice(qIndex) : '';
+/**
+ * Append the inbound query string to a redirect target. When the target already has a query,
+ * the two are merged (inbound wins on the same key) so the result never has a second `?`.
+ */
+export function mergeQueryIntoTarget(target: string, originalUrl: string): string {
+  const qIndex = originalUrl.indexOf("?");
+  if (qIndex < 0) return target;
+  const inbound = originalUrl.slice(qIndex + 1).split("#")[0] ?? "";
+  if (!inbound) return target;
+  const hashIndex = target.indexOf("#");
+  const hash = hashIndex >= 0 ? target.slice(hashIndex) : "";
+  const base = hashIndex >= 0 ? target.slice(0, hashIndex) : target;
+  const tq = base.indexOf("?");
+  if (tq < 0) return `${base}?${inbound}${hash}`;
+  const merged = new URLSearchParams(base.slice(tq + 1));
+  const incoming = new URLSearchParams(inbound);
+  for (const key of Array.from(new Set(incoming.keys()))) {
+    const [first, ...rest] = incoming.getAll(key);
+    merged.set(key, first ?? "");
+    for (const v of rest) merged.append(key, v);
+  }
+  const qs = merged.toString();
+  return `${base.slice(0, tq)}${qs ? `?${qs}` : ""}${hash}`;
+}
+
+function withInboundQuery(target: string, req: Request): string {
+  return mergeQueryIntoTarget(target, req.originalUrl);
 }
 
 function sendRedirect(
@@ -238,7 +261,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
   if (homeAliasTarget) {
     sendRedirect(req, res, {
       from: req.path,
-      to: homeAliasTarget + getQueryString(req),
+      to: withInboundQuery(homeAliasTarget, req),
       status: 301,
       matchType: "exact",
       source: "locale-home-alias",
@@ -255,7 +278,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
   const entry = map.get(normalizedPath);
   if (entry) {
     const status = entry.status || 301;
-    const target = resolveRedirectTarget(entry, req) + getQueryString(req);
+    const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
     sendRedirect(req, res, {
       from: req.path,
       to: target,
@@ -272,7 +295,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
     if (match) {
       const captureGroups = match.slice(1);
       const status = regexEntry.status || 301;
-      const target = resolveRedirectTarget(regexEntry, req, captureGroups) + getQueryString(req);
+      const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
       sendRedirect(req, res, {
         from: req.path,
         to: target,
@@ -318,7 +341,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     const entry = activeFallbackNonCustomMap.get(normalizedPath);
     if (entry) {
       const status = entry.status || 301;
-      const target = resolveRedirectTarget(entry, req) + getQueryString(req);
+      const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
       sendRedirect(req, res, {
         from: req.path,
         to: target,
@@ -338,7 +361,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
       if (match) {
         const captureGroups = match.slice(1);
         const status = regexEntry.status || 301;
-        const target = resolveRedirectTarget(regexEntry, req, captureGroups) + getQueryString(req);
+        const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
         sendRedirect(req, res, {
           from: req.path,
           to: target,
@@ -369,7 +392,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
   try {
     const soft = findCanonicalSoftMatch(cleanUrlNoSlash, activeCi);
     if (soft) {
-      const target = soft.canonicalUrl + getQueryString(req);
+      const target = withInboundQuery(soft.canonicalUrl, req);
       sendRedirect(req, res, {
         from: cleanUrl,
         to: target,
@@ -395,7 +418,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     const entry = activeFallbackMap.get(normalizedPath);
     if (entry) {
       const status = entry.status || 301;
-      const target = resolveRedirectTarget(entry, req) + getQueryString(req);
+      const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
       sendRedirect(req, res, {
         from: req.path,
         to: target,
@@ -415,7 +438,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
       if (match) {
         const captureGroups = match.slice(1);
         const status = regexEntry.status || 301;
-        const target = resolveRedirectTarget(regexEntry, req, captureGroups) + getQueryString(req);
+        const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
         sendRedirect(req, res, {
           from: req.path,
           to: target,

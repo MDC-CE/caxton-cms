@@ -15,12 +15,14 @@ import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import { formatGoogleCustomerId } from "@shared/ads-settings";
 import { GOOGLE_NETWORK_LABELS } from "@shared/paid-traffic";
 import { isRefreshActive } from "@shared/ads-refresh-status";
-import type { AdsDiagnosticsOverview, AdsDiagnosticsStatus, AdsPlatformCard, GoogleAdsDiagnostics } from "@/components/ads/ads-types";
+import type { AdsDiagnosticsOverview, AdsDiagnosticsStatus, AdsIssueRow, AdsPlatformCard, AdsResolvedRow, GoogleAdsDiagnostics } from "@/components/ads/ads-types";
 import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
 import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
 import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
 import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
-import { DiagnosticsAdsPanel } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { DiagnosticsAdsPanel, RESOLUTION_LABEL } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { AdsRunBar, adsRunPollMs } from "@/components/diagnostics/AdsRunBar";
+import { AdsIssueStateBadges, AdsIssueVerifyPanel } from "@/components/diagnostics/AdsIssueActions";
 
 type AdsView = "overview" | "meta" | "google";
 
@@ -93,7 +95,7 @@ function WindowPicker({ days, onChange }: { days: 7 | 28 | 90; onChange: (d: 7 |
   );
 }
 
-function IssueRow({ issue }: { issue: AdsIssue }) {
+function IssueRow({ issue, onChanged }: { issue: AdsIssueRow; onChanged: () => void }) {
   const s = SEVERITY_STYLE[issue.severity];
   const spend = Object.keys(issue.spend_affected).length > 0 ? formatMoney(issue.spend_affected) : null;
   return (
@@ -101,7 +103,10 @@ function IssueRow({ issue }: { issue: AdsIssue }) {
       <CollapsibleTrigger className="group flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left">
         <span className="flex min-w-0 items-start gap-2">
           <s.Icon className={cn("mt-0.5 h-4 w-4 shrink-0", s.className)} />
-          <span className="text-sm text-foreground">{issue.title}</span>
+          <span className="min-w-0 space-y-0.5">
+            <span className="block text-sm text-foreground">{issue.title}</span>
+            <AdsIssueStateBadges issue={issue} />
+          </span>
         </span>
         <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
           {spend && <span className="tabular-nums">{spend}</span>}
@@ -115,6 +120,7 @@ function IssueRow({ issue }: { issue: AdsIssue }) {
           {issue.how_to_fix}
         </p>
         {issue.first_seen && <p className="text-xs text-muted-foreground">Open since {formatWhen(issue.first_seen)}</p>}
+        <AdsIssueVerifyPanel issue={issue} onChanged={onChanged} />
       </CollapsibleContent>
     </Collapsible>
   );
@@ -127,32 +133,38 @@ function IssuesCard({
   emptyText,
   windowDays,
   testId,
+  onChanged,
 }: {
   title: string;
-  issues: AdsIssue[];
-  resolved?: GoogleAdsDiagnostics["resolved"];
+  issues: AdsIssueRow[];
+  resolved?: AdsResolvedRow[];
   emptyText: string;
   windowDays: number;
   testId: string;
+  onChanged: () => void;
 }) {
   const [list, setList] = useState<"issues" | "resolved">("issues");
   const open = issues.filter((i) => i.severity !== "info");
+  const openCount = open.filter((i) => i.verify.state === "open").length;
   const infos = issues.filter((i) => i.severity === "info");
   return (
     <Card data-testid={testId}>
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle className="text-base">
-            {title} <span className="tabular-nums text-muted-foreground">({open.length})</span>
+            {title} <span className="tabular-nums text-muted-foreground">({openCount})</span>
           </CardTitle>
           {resolved && (
             <ToggleButtonBar value={list} onValueChange={(v) => setList(v as "issues" | "resolved")} listTestId={`${testId}-list`} listClassName="flex">
-              <ToggleButtonBarTrigger value="issues">Issues ({open.length})</ToggleButtonBarTrigger>
+              <ToggleButtonBarTrigger value="issues">Issues ({openCount})</ToggleButtonBarTrigger>
               <ToggleButtonBarTrigger value="resolved">Resolved ({resolved.length})</ToggleButtonBarTrigger>
             </ToggleButtonBar>
           )}
         </div>
-        <p className="text-sm text-muted-foreground">Checked over the last {windowDays} days; changing the window above doesn&apos;t hide or resolve them.</p>
+        <p className="text-sm text-muted-foreground">
+          Found by the last check over the last {windowDays} days; changing the window above doesn&apos;t hide or resolve them. Issues you marked as fixed
+          stay listed as pending until they&apos;re confirmed.
+        </p>
       </CardHeader>
       <CardContent className="p-0">
         {list === "resolved" && resolved ? (
@@ -164,7 +176,9 @@ function IssuesCard({
                 <span className="flex items-center gap-2 text-foreground">
                   <CheckCircle2 className="h-4 w-4 text-chart-3" /> {r.title}
                 </span>
-                <span className="text-xs text-muted-foreground">{formatWhen(r.resolved_at)}</span>
+                <span className="text-xs text-muted-foreground">
+                  {RESOLUTION_LABEL[r.resolution]} · {formatWhen(r.resolved_at)}
+                </span>
               </div>
             ))
           )
@@ -173,7 +187,7 @@ function IssuesCard({
             <CheckCircle2 className="h-4 w-4 text-chart-3" /> {emptyText}
           </p>
         ) : (
-          [...open, ...infos].map((i) => <IssueRow key={i.id} issue={i} />)
+          [...open, ...infos].map((i) => <IssueRow key={i.id} issue={i} onChanged={onChanged} />)
         )}
       </CardContent>
     </Card>
@@ -248,7 +262,7 @@ function PlatformSummaryCard({ name, Icon, card, view, settingsHref }: { name: s
 
 export function DiagnosticsAdsOverview() {
   const [days, setDays] = useState<7 | 28 | 90>(28);
-  const { data, isLoading, isFetching, error } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["/api/diagnostics/ads", "overview", days],
     queryFn: async () => {
       const res = await apiFetch(`/api/diagnostics/ads?platform=overview&days=${days}`);
@@ -256,6 +270,7 @@ export function DiagnosticsAdsOverview() {
       return res.json() as Promise<AdsDiagnosticsOverview>;
     },
     placeholderData: (prev) => prev,
+    refetchInterval: (q) => adsRunPollMs((q.state.data as AdsDiagnosticsOverview | undefined)?.run) || false,
   });
   if (isLoading) {
     return (
@@ -286,6 +301,7 @@ export function DiagnosticsAdsOverview() {
       <p className="text-sm text-muted-foreground">
         One status for all ad platforms; open a platform for the evidence behind each issue. Leads each platform reports are never added together.
       </p>
+      {!noneConnected && <AdsRunBar run={data.run} onChanged={() => void refetch()} testIdPrefix="ads-overview" />}
       <div className="flex justify-end">
         {isFetching && <Loader2 className="mr-2 h-4 w-4 animate-spin text-muted-foreground" />}
         <WindowPicker days={days} onChange={setDays} />
@@ -305,6 +321,7 @@ export function DiagnosticsAdsOverview() {
         emptyText="Lead records and consent look fine."
         windowDays={data.window_days}
         testId="card-ads-shared-issues"
+        onChanged={() => void refetch()}
       />
     </div>
   );
@@ -323,8 +340,9 @@ export function DiagnosticsGoogleAdsPanel() {
     },
     placeholderData: (prev) => prev,
     refetchInterval: (q) => {
-      const state = (q.state.data as GoogleAdsDiagnostics | undefined)?.refresh?.state;
-      return state === "running" ? 3000 : state === "queued" ? 8000 : false;
+      const d = q.state.data as GoogleAdsDiagnostics | undefined;
+      const state = d?.refresh?.state;
+      return state === "running" ? 3000 : adsRunPollMs(d?.run) || (state === "queued" ? 8000 : false);
     },
   });
   if (isLoading) {
@@ -368,6 +386,8 @@ export function DiagnosticsGoogleAdsPanel() {
       </div>
 
       <AdsRefreshNotice refresh={data.refresh} testId="google-ads-refresh-notice" settingsHref="/private/settings/ads/google" />
+
+      {data.status !== "not_connected" && <AdsRunBar run={data.run} onChanged={() => void refetch()} testIdPrefix="google-ads" />}
 
       <div className="flex flex-wrap items-center justify-end gap-2">
         {isFetching && !isRefreshActive(data.refresh) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
@@ -479,9 +499,10 @@ export function DiagnosticsGoogleAdsPanel() {
         title="Google Ads issues"
         issues={data.issues}
         resolved={data.resolved}
-        emptyText="No Google Ads issues found. Issues clear on the next sync once fixed."
+        emptyText={data.run.never_run ? "No checks have run yet. Press Run checks above to look for problems." : "No Google Ads issues found in the last check."}
         windowDays={data.issue_window_days}
         testId="card-google-ads-issues"
+        onChanged={() => void refetch()}
       />
 
       {data.status !== "not_connected" && <PaidPagesCard days={days} initialPlatform="google" />}

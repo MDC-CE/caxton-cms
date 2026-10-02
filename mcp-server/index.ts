@@ -22,6 +22,7 @@ import { registerValidationIssuesTools } from "./tools/validation-issues.js";
 import { registerOrganicTrafficTools } from "./tools/organic-traffic.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerPaidTrafficTools } from "./tools/paid-traffic.js";
+import { registerAdsIssueTools } from "./tools/ads-issues.js";
 import { registerRuntimeIssuesTools } from "./tools/runtime-issues.js";
 import { registerVariableTools } from "./tools/variables.js";
 import {
@@ -424,6 +425,7 @@ async function createMcpServer(
   registerOrganicTrafficTools(mcp, mcpToken, grants);
   registerAnalyticsTools(mcp, mcpToken, grants);
   registerPaidTrafficTools(mcp, mcpToken, grants);
+  registerAdsIssueTools(mcp, mcpToken, grants);
   registerRuntimeIssuesTools(mcp, mcpToken, grants);
   return mcp;
 }

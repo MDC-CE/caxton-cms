@@ -5,6 +5,27 @@
 window_days: 6
 
 entries:
+  - date: "2026-10-01"
+    summary: "Ads issues: diagnostics is read-only; new update_ads_issue (run / recheck / mark_fixed / undo) with explicit verify model; snapshots and landing probes removed"
+    agent_impact:
+      - "BREAKING get_paid_traffic diagnostics: no snapshot_id arg / snapshot_expired / newer_data_available. Reads never run checks or probe landing pages; issues come from the last Run / Re-check (measured_at + window per issue). Issue ids are stable: ads:{platform}:{code}:{level}:{resource_id}[:{subject}]; check_key keeps the builder key (e.g. unrecognized_campaign:{key}). KPIs snap to 7 / 28 / 90 saved windows."
+      - "Each issue adds level, resource_id, affected_ads (list mode ≤20; full with issue_ids) + affected_ads_total, verify { state open|pending, action recheck|mark_fixed|wait|recheck_ready, verify.kind instant|after_sync|fresh_days, verify_after, waits_for_sync, ready_to_verify, progress (min_data) }, last_check, recheck_queued, not_checked. Responses carry run { never_run, last_run, active, last_failed, busy }. open_errors / open_warnings count only verify.state open."
+      - "New warnings: ads_diagnostics_model, ads_never_run, ads_run_in_progress, ads_recheck_in_progress, ads_last_job_failed, ads_platform_not_checked, ads_sync_active. next_actions point at update_ads_issue (run when never run; recheck / mark_fixed per issue)."
+      - "New mutating tool update_ads_issue (metrics_view, agent_session_id required): action run (background fork, 409 ads_run_busy / ads_sync_active), recheck (issue_id or platform+level+resource_id; instant or ready pending only, else 409 ads_recheck_not_instant / ads_recheck_not_ready), mark_fixed (report ≥40 chars required; pending until confirmed — never resolved directly), undo. Never changes Meta or Google Ads."
+      - "Codes landing_http_error / redirect_drops_params replaced by landing_not_live (in-process resolver, no HTTP). Resolved rows carry resolution verified_gone | soft_complete | resource_gone | rule_retired. Explain topic ads → Ads issues lifecycle."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/tools/ads-issues.ts
+      - mcp-server/explain/ads.md
+      - server/ads/diagnostics/
+      - server/ads/ads-rollups.ts
+      - server/ads/ads-setup.ts
+      - server/routes/ads.ts
+      - server/jobs/definitions/ads-recheck.ts
+      - shared/ads-issues.ts
+      - shared/mcp-tool-catalog.ts
+      - shared/agent-identity.ts
   - date: "2026-09-30"
     summary: "get_paid_traffic diagnostics: Meta missing-tracking verified against GA4 utm_content (meta_auto hidden; unverified info; Fix only on confirmed)"
     agent_impact:

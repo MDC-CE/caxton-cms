@@ -28,6 +28,17 @@ import {
   type MetaPixel,
   type MetaPixelEventStats,
 } from "./meta-client";
+import {
+  adsSetupRelPath,
+  applyMetaNames,
+  loadAdsSetup,
+  mergeMetaAccountAds,
+  metaCreativeFromAd,
+  saveAdsSetup,
+  setMetaAccount,
+  writeAdsSetupFile,
+  type AdsSetupCatalog,
+} from "./ads-setup";
 
 const log = child({ module: "ads/meta-ads-days" });
 
@@ -129,7 +140,6 @@ export type MetaSyncResult = {
 export const META_DAYS_DIR = "meta-ads-days";
 export const META_PLATFORM_DAYS_DIR = "meta-ads-platform-days";
 export const META_STATE_FILE = "meta-ads-state.json";
-export const META_CREATIVES_FILE = "meta-ads-creatives.json";
 export const META_CUSTOM_CONVERSIONS_FILE = "meta-custom-conversions.json";
 export const META_PIXEL_EVENTS_FILE = "meta-pixel-events.json";
 /** Pixel event history read each sync for lockstep checks. */
@@ -153,10 +163,6 @@ function platformDayPath(site: string, date: string): string {
 
 function statePath(site: string): string {
   return path.join(CACHE_DIR, site, META_STATE_FILE);
-}
-
-function creativesPath(site: string): string {
-  return path.join(CACHE_DIR, site, META_CREATIVES_FILE);
 }
 
 function readJson<T>(file: string): T | null {
@@ -212,8 +218,15 @@ export function saveMetaState(site: string, state: MetaAdsSyncState): void {
   writeJson(statePath(site), state);
 }
 
+/** Creative view of the Meta setup catalog (`ads-setup/meta.json`). */
 export function loadMetaCreatives(site: string): MetaAdsCreatives {
-  return readJson<MetaAdsCreatives>(creativesPath(site)) ?? { fetched_at: "", ads: {} };
+  return metaCreativesFromCatalog(loadAdsSetup(site, "meta"));
+}
+
+export function metaCreativesFromCatalog(catalog: AdsSetupCatalog): MetaAdsCreatives {
+  const ads: MetaAdsCreatives["ads"] = {};
+  for (const [id, a] of Object.entries(catalog.ads)) ads[id] = metaCreativeFromAd(a);
+  return { fetched_at: catalog.fetched_at, ads };
 }
 
 export function loadMetaCustomConversions(site: string): MetaCustomConversionsFile {
@@ -335,7 +348,8 @@ export type MetaSnapshot = {
   meta_days: MetaAdsDayFile[];
   platform_days: MetaAdsPlatformDayFile[];
   meta_state: MetaAdsSyncState;
-  creatives: MetaAdsCreatives;
+  /** Meta setup catalog (`ads-setup/meta.json`). */
+  meta_setup: AdsSetupCatalog;
   /** Optional: snapshots from before per-conversion counts omit these. */
   custom_conversions?: MetaCustomConversionsFile;
   pixel_events?: MetaPixelEventsFile;
@@ -353,7 +367,7 @@ export function exportMetaSnapshot(site: string, since: string): MetaSnapshot {
       .map((d) => loadMetaPlatformDay(site, d))
       .filter((f): f is MetaAdsPlatformDayFile => !!f),
     meta_state: loadMetaState(site),
-    creatives: loadMetaCreatives(site),
+    meta_setup: loadAdsSetup(site, "meta"),
     custom_conversions: loadMetaCustomConversions(site),
     pixel_events: loadMetaPixelEvents(site),
   };
@@ -365,7 +379,7 @@ export function stageMetaSnapshot(stagingRoot: string, snap: MetaSnapshot): void
   fs.mkdirSync(path.join(stagingRoot, META_PLATFORM_DAYS_DIR), { recursive: true });
   for (const f of snap.meta_days) writeJson(path.join(stagingRoot, META_DAYS_DIR, `${f.date}.json`), f);
   for (const f of snap.platform_days) writeJson(path.join(stagingRoot, META_PLATFORM_DAYS_DIR, `${f.date}.json`), f);
-  writeJson(path.join(stagingRoot, META_CREATIVES_FILE), snap.creatives);
+  writeAdsSetupFile(path.join(stagingRoot, adsSetupRelPath("meta")), snap.meta_setup);
   writeJson(path.join(stagingRoot, META_STATE_FILE), snap.meta_state);
   if (snap.custom_conversions) writeJson(path.join(stagingRoot, META_CUSTOM_CONVERSIONS_FILE), snap.custom_conversions);
   if (snap.pixel_events) writeJson(path.join(stagingRoot, META_PIXEL_EVENTS_FILE), snap.pixel_events);
@@ -583,7 +597,7 @@ export async function syncMetaAds(opts: {
     for (const d of dateRange(window.since, window.until)) byDate.set(d, []);
     const loadsFullHistory = mode !== "older" && byDate.size >= META_BACKFILL_DAYS;
 
-    const creatives = loadMetaCreatives(opts.site);
+    const setup = loadAdsSetup(opts.site, "meta");
     const prevConversions = loadMetaCustomConversions(opts.site);
     const conversionsFile: MetaCustomConversionsFile = { fetched_at: "", accounts: {} };
     for (const id of settings.ad_account_ids) {
@@ -603,6 +617,7 @@ export async function syncMetaAds(opts: {
       try {
         const info = await fetchAccountInfo(accountId);
         currency = info.currency;
+        setMetaAccount(setup, info, new Date().toISOString());
         state.accounts[accountId] = {
           name: info.name,
           currency: info.currency,
@@ -646,7 +661,7 @@ export async function syncMetaAds(opts: {
       }
       opts.onStep?.(`Meta: ${account}, ad creatives`);
       try {
-        for (const c of await fetchAdCreatives(accountId)) creatives.ads[c.ad_id] = { ...c, account_id: accountId };
+        mergeMetaAccountAds(setup, accountId, await fetchAdCreatives(accountId), new Date().toISOString());
         state.accounts[accountId].setup_read_at = new Date().toISOString();
         state.accounts[accountId].setup_error = undefined;
       } catch (err) {
@@ -692,10 +707,11 @@ export async function syncMetaAds(opts: {
       if (!acct.platform_history_since || w.since < acct.platform_history_since) acct.platform_history_since = w.since;
       if (mode !== "older" && dateRange(w.since, w.until).length >= META_BACKFILL_DAYS) acct.platform_history_loaded_at = fetchedAt;
     }
+    applyMetaNames(setup, Array.from(byDate.values()).flat(), fetchedAt);
     if (settings.ad_account_ids.every((id) => !state.accounts[id]?.setup_error && !state.accounts[id]?.sync_error)) {
-      creatives.fetched_at = fetchedAt;
+      setup.fetched_at = fetchedAt;
     }
-    writeJson(creativesPath(opts.site), creatives);
+    saveAdsSetup(opts.site, setup);
     conversionsFile.fetched_at = fetchedAt;
     saveMetaCustomConversions(opts.site, conversionsFile);
     if (pixelsFile) saveMetaPixelEvents(opts.site, { ...pixelsFile, fetched_at: fetchedAt });

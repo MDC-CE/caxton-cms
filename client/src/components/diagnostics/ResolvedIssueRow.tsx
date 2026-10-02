@@ -38,7 +38,7 @@ export type ResolvedArchiveRow = {
   report?: string;
   reopenedAt?: string;
   agent_session_id?: string;
-  resolution?: "verified_gone" | "soft_complete";
+  resolution?: "verified_gone" | "soft_complete" | "resource_gone" | "rule_retired";
 };
 
 type AgentSessionDetail = {
@@ -279,7 +279,11 @@ export function ResolvedIssueRow({
                         ? "Verified — checks were re-run and the problem was gone."
                         : row.resolution === "soft_complete"
                           ? "Marked in UI — someone clicked done without that check."
-                          : "How this was closed is not recorded."}
+                          : row.resolution === "resource_gone"
+                            ? "No longer applies — the ad, ad set or campaign was deleted in the ad platform."
+                            : row.resolution === "rule_retired"
+                              ? "No longer checked — this check was removed from Ads diagnostics."
+                              : "How this was closed is not recorded."}
                     </p>
                     <p>
                       The agent run is the same diary as Background Pipeline and lasts about 7 days;

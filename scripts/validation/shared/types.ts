@@ -7,6 +7,7 @@
 
 import type { ValidationScope, ValidatorRunClass } from "./runClass";
 import type { ContentIndex } from "../../../server/content-index";
+import type { AdsCompletionVerify, AdsIssueLevel, AdsStoredIssueData } from "../../../shared/ads-issues";
 
 export type { ValidationScope, ValidatorRunClass } from "./runClass";
 
@@ -91,7 +92,7 @@ export interface ValidatorMetadata {
   description: string;
   apiExposed: boolean;
   estimatedDuration: "fast" | "medium" | "slow";
-  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings";
+  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings" | "ads";
   /** Execution / clear-scope class. Defaults via runClass.ts map when omitted. */
   runClass?: ValidatorRunClass;
   /** Optional catalog of codes this validator may emit. */
@@ -114,7 +115,9 @@ export type IssueTarget =
   | { type: "redirect"; from: string }
   | { type: "media"; imageId: string }
   | { type: "database"; dbSlug: string }
-  | { type: "file"; path: string };
+  | { type: "file"; path: string }
+  /** Ads ladder: account → campaign → ad set → ad (`none` = site-wide Ads check). */
+  | { type: "ads"; platform: "meta" | "google" | "shared"; level: AdsIssueLevel; id: string | null };
 
 export interface StoredValidationIssue {
   id: string;
@@ -133,6 +136,8 @@ export interface StoredValidationIssue {
   staleSourceAgeMs?: number;
   staleSourceDatabase?: string;
   redirectSuggestion?: RemovedPageRedirectSuggestion;
+  /** Ads diagnostics issues only (`scopes: ["ads"]`). */
+  ads?: AdsStoredIssueData;
 }
 
 /** Soft-complete overlay — keyed by StoredValidationIssue.id; not part of the issue row. */
@@ -152,6 +157,8 @@ export interface ValidationIssueCompletion {
   actor?: ValidationIssueActor;
   /** MCP agent summary: what was changed and how. */
   report?: string;
+  /** Ads only: marked fixed, waiting to confirm (pending verification) — not resolved yet. */
+  verify?: AdsCompletionVerify;
 }
 
 /** In-progress claim overlay — keyed by StoredValidationIssue.id; TTL-based. */
@@ -185,7 +192,8 @@ export interface ResolvedIssueArchiveRow {
   actor?: ValidationIssueActor;
   report?: string;
   agent_session_id?: string;
-  resolution: "verified_gone" | "soft_complete";
+  /** resource_gone / rule_retired: Ads issue that no longer applies (deleted in the platform / check removed). */
+  resolution: "verified_gone" | "soft_complete" | "resource_gone" | "rule_retired";
   reopenedAt?: string;
 }
 
@@ -230,6 +238,8 @@ export interface ValidationCacheIndexes {
   byMedia: Record<string, string[]>;
   byDatabase: Record<string, string[]>;
   byRedirect: Record<string, string[]>;
+  /** Ads ladder: `${platform}:${level}:${id}` and `${platform}:ad:${adId}` per affected ad → issue ids. */
+  byAds?: Record<string, string[]>;
   /** Secondary: public URL → entryKey */
   byUrl: Record<string, string>;
 }

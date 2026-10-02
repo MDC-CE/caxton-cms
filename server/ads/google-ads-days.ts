@@ -2,8 +2,8 @@
  * Google Ads day cache, filled from the BigQuery Data Transfer (read-only).
  *
  * Cache: `.cache/{site}/google-ads-days/{date}.json` (spend rows per customer),
- * `google-ads-network-days/{date}.json` (campaign × network), `google-ads-setups.json`
- * (campaigns, ad groups, ads, customers, conversion actions) and `google-ads-state.json`.
+ * `google-ads-network-days/{date}.json` (campaign × network), the setup catalog
+ * `ads-setup/google.json` (campaigns, ad groups, ads, customers, conversion actions) and `google-ads-state.json`.
  *
  * Re-read rules: spend/clicks for the last 10 loaded days, conversions for the last 30,
  * plus any day whose BigQuery partition was reloaded after we cached it (backfills, repairs).
@@ -37,6 +37,14 @@ import {
   type GoogleNetworkDayRow,
   type RawConversion,
 } from "./google-ads-bq";
+import {
+  googleAdFromCatalog,
+  googleCampaignFromCatalog,
+  loadAdsSetup,
+  mergeGoogleCustomer,
+  saveAdsSetup,
+  type AdsSetupCatalog,
+} from "./ads-setup";
 
 const log = child({ module: "ads/google-ads-days" });
 
@@ -51,8 +59,6 @@ export const GOOGLE_TRANSFER_LAG_DAYS = 2;
 export const GOOGLE_DAYS_DIR = "google-ads-days";
 export const GOOGLE_NETWORK_DAYS_DIR = "google-ads-network-days";
 export const GOOGLE_STATE_FILE = "google-ads-state.json";
-export const GOOGLE_SETUPS_FILE = "google-ads-setups.json";
-
 export type GoogleCustomerDay<R> = { fetched_at: string; rows: R[] };
 export type GoogleAdsDayFile = { date: string; customers: Record<string, GoogleCustomerDay<GoogleAdDayRow>> };
 export type GoogleNetworkDayFile = { date: string; customers: Record<string, GoogleCustomerDay<GoogleNetworkDayRow>> };
@@ -159,17 +165,27 @@ function saveGoogleState(site: string, state: GoogleAdsSyncState): void {
   writeJson(path.join(CACHE_DIR, site, GOOGLE_STATE_FILE), state);
 }
 
+/** Google view of the setup catalog (`ads-setup/google.json`). */
 export function loadGoogleSetups(site: string): GoogleAdsSetups {
-  return (
-    readJson<GoogleAdsSetups>(path.join(CACHE_DIR, site, GOOGLE_SETUPS_FILE)) ?? {
-      fetched_at: "",
-      customers: {},
-      campaigns: {},
-      ad_groups: {},
-      ads: {},
-      conversion_actions: [],
-    }
-  );
+  return googleSetupsFromCatalog(loadAdsSetup(site, "google"));
+}
+
+export function googleSetupsFromCatalog(catalog: AdsSetupCatalog): GoogleAdsSetups {
+  const out: GoogleAdsSetups = {
+    fetched_at: catalog.fetched_at,
+    customers: {},
+    campaigns: {},
+    ad_groups: {},
+    ads: {},
+    conversion_actions: catalog.extras.conversion_actions ?? [],
+  };
+  for (const [id, a] of Object.entries(catalog.accounts)) {
+    out.customers[id] = { name: a.name, currency: a.currency, auto_tagging: a.extras?.auto_tagging ?? null };
+  }
+  for (const [id, c] of Object.entries(catalog.campaigns)) out.campaigns[id] = googleCampaignFromCatalog(c);
+  for (const [id, g] of Object.entries(catalog.adsets)) out.ad_groups[id] = { campaign_id: g.campaign_id, name: g.name };
+  for (const [id, a] of Object.entries(catalog.ads)) if (!a.gone_at) out.ads[id] = googleAdFromCatalog(a);
+  return out;
 }
 
 function pick<R>(file: { customers: Record<string, GoogleCustomerDay<R>> } | null, allow: Set<string> | null): R[] {
@@ -294,6 +310,8 @@ export type GoogleSyncResult = {
   skipped?: "google_not_connected";
   error?: string;
   customers: Record<string, { full_days: number; conversion_days: number; error?: string }>;
+  /** Days whose cached rows this sync rewrote (spend or conversions) — dirty for rollups. */
+  dates?: string[];
 };
 
 const inFlight = new Set<string>();
@@ -348,7 +366,8 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
   const result: GoogleSyncResult = { ok: true, customers: {} };
   const project = settings.bigquery.project!;
   const dataset = settings.bigquery.dataset!;
-  const setups = loadGoogleSetups(opts.site);
+  const setup = loadAdsSetup(opts.site, "google");
+  const dirtyDates = new Set<string>();
   const isLead = makeLeadActionMatcher(settings.lead_conversion_actions);
   try {
     opts.onStep?.("Google Ads: reading the BigQuery transfer");
@@ -356,7 +375,7 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
     const layout = await probeTransferLayout(client, project, dataset);
     state.available_customers = Object.keys(layout.customers).sort();
     state.probed_at = new Date().toISOString();
-    const actions: GoogleConversionActionInfo[] = setups.conversion_actions.filter((a) => !settings.customer_ids.includes(a.customer_id));
+    const actions: GoogleConversionActionInfo[] = (setup.extras.conversion_actions ?? []).filter((a) => !settings.customer_ids.includes(a.customer_id));
 
     for (let i = 0; i < settings.customer_ids.length; i++) {
       const cid = settings.customer_ids[i]!;
@@ -443,11 +462,8 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
         }
         info.sync_error = undefined;
         state.customers[cid] = info;
-        for (const [id, c] of Object.entries(meta.campaigns)) setups.campaigns[id] = c;
-        for (const [id, g] of Object.entries(meta.adGroups)) setups.ad_groups[id] = g;
-        for (const [id, a] of Object.entries(setups.ads)) if (a.customer_id === cid) delete setups.ads[id];
-        for (const [id, a] of Object.entries(meta.ads)) setups.ads[id] = a;
-        setups.customers[cid] = meta.customer;
+        mergeGoogleCustomer(setup, cid, meta, fetchedAt);
+        for (const d of [...plan.full, ...plan.conversionsOnly]) dirtyDates.add(d);
         const recentFrom = through ? addDays(through, -(GOOGLE_CONVERSION_REFRESH_DAYS - 1)) : "";
         actions.push(...summarizeActions(cid, convForCatalog.filter((c) => c.date >= recentFrom), isLead));
         result.customers[cid] = { full_days: plan.full.length, conversion_days: plan.conversionsOnly.length };
@@ -458,9 +474,10 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
         log.warn({ err, site: opts.site, customer: cid }, "[google-ads] customer sync failed");
       }
     }
-    setups.fetched_at = new Date().toISOString();
-    setups.conversion_actions = actions;
-    writeJson(path.join(CACHE_DIR, opts.site, GOOGLE_SETUPS_FILE), setups);
+    setup.fetched_at = new Date().toISOString();
+    setup.extras = { ...setup.extras, conversion_actions: actions };
+    saveAdsSetup(opts.site, setup);
+    result.dates = Array.from(dirtyDates).sort();
     pruneOld(opts.site, now);
 
     const synced = settings.customer_ids.filter((id) => !state.customers[id]?.sync_error);

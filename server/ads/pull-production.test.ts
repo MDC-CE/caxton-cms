@@ -50,7 +50,7 @@ function seedLocal() {
   writeJson(live("meta-ads-days", "2026-09-28.json"), metaDay("2026-09-28", 1));
   writeJson(live("meta-ads-state.json"), { consecutive_failures: 0, accounts: {}, last_success_at: "2026-09-01T00:00:00.000Z" });
   writeJson(live("paid-landing-days", "2026-08-01.json"), { date: "2026-08-01", candidates: [] });
-  writeJson(live("ads-diagnostics-snapshots", "ads_0123456789abcdef.json"), { id: "ads_0123456789abcdef" });
+  writeJson(live("ads-report-windows", "meta-28-last_paid.json"), { generation: 1 });
 }
 
 function okResponse(body: unknown): FetchProductionAdminResult {
@@ -82,7 +82,7 @@ describe("applyAdsSnapshot", () => {
       production_origin: ORIGIN,
       snapshot_last_date: "2026-09-29",
     });
-    expect(fs.existsSync(live("ads-diagnostics-snapshots"))).toBe(false);
+    expect(fs.existsSync(live("ads-report-windows"))).toBe(false);
     expect(fs.readdirSync(live()).filter((n) => n.includes(".pull-"))).toEqual([]);
   });
 
@@ -121,7 +121,7 @@ describe("pullProductionAds", () => {
     const fetchAdmin = vi.fn();
     const r = await pullProductionAds(SITE, {}, { isBusy: () => true, fetchAdmin });
     expect(r).toMatchObject({ success: false, pulled: false });
-    expect(r.reason).toContain("sync is running");
+    expect(r.reason).toContain("Ads Sync or Ads Run is in progress");
     expect(fetchAdmin).not.toHaveBeenCalled();
   });
 
