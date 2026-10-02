@@ -22,7 +22,7 @@ import {
 } from "@/components/sectionRegistry";
 import { SectionRenderErrorBoundary } from "@/components/editing/SectionRenderErrorBoundary";
 import { isSchemaOrgSection } from "@shared/schema-org-sections";
-import { resolveSectionBackgroundCss } from "@shared/theme-palette";
+import { sectionBackgroundPaint } from "@shared/theme-palette";
 
 // Spacing presets in pixels (top, bottom)
 const SPACING_PRESETS: Record<string, { top: string; bottom: string }> = {
@@ -175,7 +175,7 @@ export function getSectionWrapperStyles(section: Section): CSSProperties & Recor
   const marginX = parseResponsiveSpacingX(layoutSection.marginX);
   const maxWidth = parseResponsiveMaxWidth(layoutSection.maxWidth);
   const innerPaddingX = parseResponsiveInnerPaddingXFromMaxWidth(layoutSection.maxWidth);
-  const background = resolveSectionBackgroundCss(layoutSection.background);
+  const backgroundPaint = sectionBackgroundPaint(layoutSection.background);
 
   const styles: CSSProperties & Record<string, string> = {
     paddingTop: 'var(--section-pt)',
@@ -211,9 +211,9 @@ export function getSectionWrapperStyles(section: Section): CSSProperties & Recor
   styles['--section-inner-px-mobile'] = innerPaddingX?.mobile ?? DEFAULT_INNER_PADDING_X;
   styles['--section-inner-px-desktop'] = innerPaddingX?.desktop ?? DEFAULT_INNER_PADDING_X;
 
-  if (background) {
-    styles.background = background;
-  }
+  if (backgroundPaint.backgroundColor) styles.backgroundColor = backgroundPaint.backgroundColor;
+  if (backgroundPaint.backgroundImage) styles.backgroundImage = backgroundPaint.backgroundImage;
+  if (backgroundPaint.background) styles.background = backgroundPaint.background;
 
   return styles;
 }

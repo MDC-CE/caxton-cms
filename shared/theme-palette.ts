@@ -120,10 +120,94 @@ export function resolveSectionBackgroundCss(value: string | undefined): string |
   return value;
 }
 
+/** Light channels plus background entries, from the theme.json read that builds the page. */
+export type ThemePaint = {
+  light: Record<string, string>;
+  backgrounds: Pick<ThemePaletteEntry, "id" | "cssVar" | "value" | "lightValue">[];
+};
+
+let themePaint: ThemePaint | null = null;
+
+export function setThemePaint(paint: ThemePaint | null): void {
+  themePaint = paint;
+}
+
+const HSL_VAR_RE = /hsl\(\s*var\(\s*(--[a-z0-9-]+)\s*\)\s*(?:\/\s*([\d.]+%?)\s*)?\)/gi;
+
+function literalizeThemeVars(value: string): string {
+  const light = themePaint?.light;
+  if (!light) return value;
+  HSL_VAR_RE.lastIndex = 0;
+  return value.replace(HSL_VAR_RE, (full, name: string, alpha?: string) => {
+    const channel = light[name];
+    if (!channel) return full;
+    return alpha ? `hsl(${channel} / ${alpha})` : `hsl(${channel})`;
+  });
+}
+
+function isGradientCss(value: string): boolean {
+  return (
+    value.startsWith("linear-gradient") ||
+    value.startsWith("radial-gradient") ||
+    value.startsWith("repeating-linear-gradient") ||
+    value.startsWith("repeating-radial-gradient") ||
+    value.startsWith("conic-gradient")
+  );
+}
+
+function isSolidColorCss(value: string): boolean {
+  return (
+    value.startsWith("hsl(") ||
+    value.startsWith("hsla(") ||
+    value.startsWith("rgb(") ||
+    value.startsWith("rgba(") ||
+    value.startsWith("#")
+  );
+}
+
+/** A real color for a palette id, using colors.light. Null when the theme has no number for it. */
+function literalForThemeId(id: string): string | null {
+  if (!themePaint) return null;
+  const entry = themePaint.backgrounds.find((item) => item.id === id);
+  const written = entry?.lightValue || entry?.value;
+  if (written && !written.includes("var(")) return written;
+  if (entry?.cssVar) {
+    const channel = themePaint.light[entry.cssVar];
+    if (channel) return `hsl(${channel})`;
+  }
+  const source = written || LEGACY_BACKGROUND_TOKENS[id];
+  if (!source) return null;
+  const literal = literalizeThemeVars(source);
+  return literal.includes("var(") ? null : literal;
+}
+
+/**
+ * Inline background for a section. A resolved solid color uses background-color
+ * so extensions can rewrite it. Gradients use background-image. Unresolved ids
+ * stay on the background shorthand.
+ */
+export function sectionBackgroundPaint(value: string | undefined): {
+  background?: string;
+  backgroundColor?: string;
+  backgroundImage?: string;
+} {
+  if (!value || value === "inherit" || value === "none") return {};
+  const css = isThemeIdShape(value)
+    ? (literalForThemeId(value) ?? resolveSectionBackgroundCss(value))
+    : literalizeThemeVars(value);
+  if (!css) return {};
+  if (isGradientCss(css)) return { backgroundImage: css };
+  if (isSolidColorCss(css) && !css.includes("var(")) return { backgroundColor: css };
+  return { background: css };
+}
+
 /** Inline style for components that paint `data.background` themselves (IDs, colors, gradients). */
-export function sectionBackgroundStyle(value: string | undefined): { background?: string } {
-  const css = resolveSectionBackgroundCss(value);
-  return css ? { background: css } : {};
+export function sectionBackgroundStyle(value: string | undefined): {
+  background?: string;
+  backgroundColor?: string;
+  backgroundImage?: string;
+} {
+  return sectionBackgroundPaint(value);
 }
 
 /** `:root` / `.dark` blocks declaring `--theme-bg-<id>` for every background entry. */

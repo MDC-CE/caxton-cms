@@ -40,7 +40,8 @@ import {
 } from "./image-registry-subset";
 import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
-import { buildThemeBackgroundCss, type ThemePalettes } from "@shared/theme-palette";
+import { buildThemeBackgroundCss, type ThemePaint, type ThemePalettes } from "@shared/theme-palette";
+import { loadSiteTheme } from "./theme-config";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -87,6 +88,8 @@ export interface InitialDataPayload {
   locale?: string;
   /** When set, SSR HTML response should use this status (e.g. empty detached locale). */
   httpStatus?: number;
+  /** Light colors used to paint section backgrounds as real colors. */
+  themePaint?: import("@shared/theme-palette").ThemePaint;
 }
 
 export async function resolvePageQuery(
@@ -871,7 +874,13 @@ export async function resolveInitialData(
       ? 404
       : undefined;
 
-  return { queries, locale: resolvedLocale, ...(httpStatus ? { httpStatus } : {}) };
+  const themePaint = themePaintFor(ci.contentRoot);
+  return {
+    queries,
+    locale: resolvedLocale,
+    ...(themePaint ? { themePaint } : {}),
+    ...(httpStatus ? { httpStatus } : {}),
+  };
 }
 
 function buildContentTypesPayload(
@@ -908,6 +917,21 @@ function buildContentTypesPayload(
     });
   }
   return result;
+}
+
+function themePaintFor(contentRoot: string): ThemePaint | undefined {
+  const theme = loadSiteTheme(contentRoot);
+  const light = theme?.colors?.light;
+  if (!light || Object.keys(light).length === 0) return undefined;
+  const backgrounds = (theme?.backgrounds ?? [])
+    .filter((entry) => entry.id)
+    .map((entry) => ({
+      id: entry.id,
+      ...(entry.cssVar ? { cssVar: entry.cssVar } : {}),
+      ...(entry.value ? { value: entry.value } : {}),
+      ...(entry.lightValue ? { lightValue: entry.lightValue } : {}),
+    }));
+  return { light, backgrounds };
 }
 
 function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
