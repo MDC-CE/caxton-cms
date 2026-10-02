@@ -28,6 +28,7 @@ import { FolderRestoreDialog, type FolderRestoreResult, type FolderRestoreTarget
 import type { MenuView, ContentInfo, VersioningResponse } from "../types";
 import { STORAGE_KEY, OPEN_STORAGE_KEY } from "../types";
 import { PageHealthIndicators } from "./PageHealthIndicators";
+import { LayoutApprovalControl } from "./LayoutApprovalControl";
 import { VariantProposalBadge } from "./VariantProposalBadge";
 import type { PageErrorsTab } from "./PageErrorsModal";
 
@@ -1034,6 +1035,9 @@ export function VersioningView({
                 />
               )}
               <div className="flex items-center gap-0.5">
+                {contentInfo.type && contentInfo.slug && !isReservedContentSlug(contentInfo.slug) && (
+                  <LayoutApprovalControl contentType={contentInfo.type} slug={contentInfo.slug} />
+                )}
                 {!(isSharedLayout && isDetached) && (
                   <Button
                     size="sm"

@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ADS_ALERT_THRESHOLDS } from "@shared/ads-settings";
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import {
   adUrlRedirectIssues,
   indexAds,
   leadIssues,
-  purgeStaleDestinationIssues,
-  rollIssueState,
+  landingNotLiveIssues,
   setupLastReadAt,
   toIssueAd,
   trackingParamsCoverage,
-  type IssueState,
 } from "./ads-diagnostics";
 import type { DestinationResolver, Resolved } from "./ads-report";
 import type { MetaAdsCreatives } from "./meta-ads-days";
@@ -314,46 +311,44 @@ describe("leadIssues", () => {
   });
 });
 
-describe("rollIssueState", () => {
-  const issue = (id: string): AdsIssue =>
-    ({ id, code: "ledger_not_recording", severity: "info", title: id, why: "", how_to_fix: "", spend_affected: {}, scope: {}, site_fixable: true }) as AdsIssue;
+describe("landingNotLiveIssues", () => {
+  const resolve: DestinationResolver = (host, path) =>
+    ({
+      kind: path === "/landing/gone" ? "missing_page" : "entry",
+      key: path === "/landing/gone" ? `dest:${host}|${path}` : "entry:landing/x/en",
+      host,
+      path,
+      content_type: null,
+      slug: null,
+      locale: null,
+      redirect_chain: [],
+    }) as Resolved;
 
-  it("drops a suppressed gap from open without listing it as Resolved", () => {
-    const state: IssueState = {
-      open: {
-        ga4_ledger_gap: { first_seen: "2026-09-01T00:00:00.000Z", title: "GA4 and our lead records disagree", severity: "warning" },
-        clicks_visits_low: { first_seen: "2026-09-01T00:00:00.000Z", title: "Few ad clicks become visits", severity: "warning" },
-      },
-      resolved: [],
-      resolver_version: 2,
-    };
-    rollIssueState(state, [issue("ledger_not_recording")], "2026-09-29T12:00:00.000Z", new Set(["ga4_ledger_gap"]));
-    expect(Object.keys(state.open)).toEqual(["ledger_not_recording"]);
-    expect(state.resolved.map((r) => r.id)).toEqual(["clicks_visits_low"]);
-  });
-});
-
-describe("purgeStaleDestinationIssues", () => {
-  const open = (severity: "warning" | "info" = "warning") => ({ first_seen: "2026-09-01T00:00:00.000Z", title: "t", severity });
-
-  it("drops stale missing-page rows once without touching other issues", () => {
-    const state: IssueState = {
-      open: {
-        "unmanaged_destination:dest:4geeks.com|/landing/ai-engineering-salaries": open(),
-        "unmanaged_destination:dest:4geeks.com|/landing/deleted": open(),
-        "landing_http_error:https://4geeks.com/x": open(),
-      },
-      resolved: [],
-    };
-    purgeStaleDestinationIssues(state, new Set(["unmanaged_destination:dest:4geeks.com|/landing/deleted"]));
-    expect(Object.keys(state.open)).toEqual(["unmanaged_destination:dest:4geeks.com|/landing/deleted", "landing_http_error:https://4geeks.com/x"]);
-    expect(state.resolved).toEqual([]);
-    expect(state.resolver_version).toBe(2);
-  });
-
-  it("does nothing once the state is on the current version", () => {
-    const state: IssueState = { open: { "unmanaged_destination:dest:4geeks.com|/landing/deleted": open() }, resolved: [], resolver_version: 2 };
-    purgeStaleDestinationIssues(state, new Set());
-    expect(Object.keys(state.open)).toEqual(["unmanaged_destination:dest:4geeks.com|/landing/deleted"]);
+  it("groups checked ads by the missing page (no HTTP probe) and ignores live pages", () => {
+    const ads = Array.from(
+      indexAds({
+        creatives: creatives(
+          creative("a1", { links: ["https://4geeks.com/landing/gone?utm_source=x"] }),
+          creative("a2", { links: ["https://4geeks.com/landing/gone"] }),
+          creative("a3", { links: ["https://4geeks.com/landing/ok"] }),
+        ).ads,
+        rows: [row("a1", 40), row("a2", 10), row("a3", 99)],
+      }).values(),
+    );
+    const issues = landingNotLiveIssues({
+      ads,
+      resolve,
+      totalSpend: { USD: 149 },
+      t: DEFAULT_ADS_ALERT_THRESHOLDS,
+      detailsFor: (list) => ({ ads: list.map(toIssueAd) }) as never,
+    });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      id: "landing_not_live:https://4geeks.com/landing/gone",
+      code: "landing_not_live",
+      spend_affected: { USD: 50 },
+      site_fixable: true,
+    });
+    expect(issues[0]!.how_to_fix).toContain("Re-check");
   });
 });

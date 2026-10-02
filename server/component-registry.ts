@@ -17,6 +17,7 @@ import {
 } from "../shared/registry-resolve";
 import { resolveComponentBehaviors } from "@shared/component-behaviors";
 import type { TextLimitsByVariant } from "@shared/component-text-limits";
+import type { ComponentLayoutBlock, VariantMetadata } from "@shared/component-layout-traits";
 import { getPackageRoot, getProjectRoot } from "@shared/paths";
 import { child } from "./logger";
 const log = child({ module: "component-registry" });
@@ -107,7 +108,9 @@ export interface ComponentSchema {
     conversion?: { via: string; notes?: string };
   };
   props: Record<string, unknown>;
-  variants?: Record<string, { description?: string; best_for?: string }>;
+  /** How the section sits in page flow (see shared/component-layout-traits.ts). */
+  layout?: ComponentLayoutBlock;
+  variants?: Record<string, VariantMetadata>;
   variant_props?: Record<string, Record<string, unknown>>;
   /**
    * Visible-character limits per section variant (`"*"` = every variant).
@@ -218,6 +221,14 @@ export function listVersions(componentType: string, contentFolder?: string): str
     log.error({ err: error }, `Error listing versions for ${componentType}:`);
     return [];
   }
+}
+
+/** Absolute schema.yml path for a component version (shared or site registry), or null. */
+export function schemaYmlPath(componentType: string, version: string, contentFolder?: string): string | null {
+  const componentPath = componentTypeDir(componentType, contentFolder);
+  if (!componentPath) return null;
+  const p = path.join(componentPath, version, "schema.yml");
+  return fs.existsSync(p) ? p : null;
 }
 
 export function loadSchema(componentType: string, version: string, contentFolder?: string): ComponentSchema | null {

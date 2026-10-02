@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerSeoClusterTools } from "./tools/seo-clusters.js";
 import { registerComponentTools } from "./tools/components.js";
+import { registerDesignTools } from "./tools/design.js";
 import { registerUserTools } from "./tools/user.js";
 import { registerExplainTools } from "./tools/explain.js";
 import { registerProductTools } from "./tools/product.js";
@@ -22,6 +23,7 @@ import { registerValidationIssuesTools } from "./tools/validation-issues.js";
 import { registerOrganicTrafficTools } from "./tools/organic-traffic.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerPaidTrafficTools } from "./tools/paid-traffic.js";
+import { registerAdsIssueTools } from "./tools/ads-issues.js";
 import { registerRuntimeIssuesTools } from "./tools/runtime-issues.js";
 import { registerVariableTools } from "./tools/variables.js";
 import {
@@ -408,6 +410,7 @@ async function createMcpServer(
   registerPageTools(mcp, mcpAuthor, mcpToken, grants);
   registerSeoClusterTools(mcp, mcpToken, grants);
   registerComponentTools(mcp, mcpToken, grants);
+  registerDesignTools(mcp, mcpToken, grants);
   registerUserTools(mcp, mcpToken, grants, {
     activeRoleId: opts?.activeRoleId,
     roleDescription: opts?.roleDescription,
@@ -424,6 +427,7 @@ async function createMcpServer(
   registerOrganicTrafficTools(mcp, mcpToken, grants);
   registerAnalyticsTools(mcp, mcpToken, grants);
   registerPaidTrafficTools(mcp, mcpToken, grants);
+  registerAdsIssueTools(mcp, mcpToken, grants);
   registerRuntimeIssuesTools(mcp, mcpToken, grants);
   return mcp;
 }

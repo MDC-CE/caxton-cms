@@ -362,6 +362,120 @@ export function readDemoYamlText(hash: string, cwd = getProjectRoot()): string |
   }
 }
 
+// ─── Page demos (multi-section throwaway layouts) ──────────────────────────
+
+export const MAX_PAGE_DEMO_YAML_BYTES = 300 * 1024;
+export const MAX_PAGE_DEMO_SECTIONS = 40;
+
+export type PageDemoRecord = {
+  created_at: string;
+  locale: string;
+  title?: string;
+  sections: Array<Record<string, unknown>>;
+};
+
+export function pageDemosDir(cwd = getProjectRoot()): string {
+  return path.join(cwd, ".cache", "page-demos");
+}
+
+export function pageDemoFilePath(hash: string, cwd = getProjectRoot()): string {
+  if (!DEMO_HASH_RE.test(hash)) throw new Error("Invalid demo hash");
+  return path.join(pageDemosDir(cwd), `${hash}.yml`);
+}
+
+/** Accept a sections array or `{ sections: [...] }`; every section is validated against its registry schema. */
+export function parseAndValidatePageDemoYaml(opts: {
+  yamlText: string;
+  contentFolder?: string;
+}):
+  | { ok: true; sections: Array<Record<string, unknown>> }
+  | { ok: false; error: DemoValidationError } {
+  if (Buffer.byteLength(opts.yamlText, "utf8") > MAX_PAGE_DEMO_YAML_BYTES) {
+    return { ok: false, error: { message: `YAML exceeds ${MAX_PAGE_DEMO_YAML_BYTES} bytes` } };
+  }
+  let parsed: unknown;
+  try {
+    parsed = yaml.load(opts.yamlText);
+  } catch (e) {
+    return { ok: false, error: { message: `Invalid YAML: ${(e as Error).message}` } };
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : isPlainObject(parsed) && Array.isArray(parsed.sections)
+      ? parsed.sections
+      : null;
+  if (!list || list.length === 0) {
+    return { ok: false, error: { message: "YAML must be a non-empty sections array (or { sections: [...] })", property_path: "sections" } };
+  }
+  if (list.length > MAX_PAGE_DEMO_SECTIONS) {
+    return { ok: false, error: { message: `At most ${MAX_PAGE_DEMO_SECTIONS} sections per page demo`, property_path: "sections" } };
+  }
+  const out: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < list.length; i++) {
+    const section = list[i];
+    if (!isPlainObject(section)) {
+      return { ok: false, error: { message: `sections[${i}] must be an object`, property_path: `sections[${i}]` } };
+    }
+    const type = typeof section.type === "string" ? section.type.trim() : "";
+    const checked = validateSectionAgainstSchema(section, type, undefined, opts.contentFolder);
+    if (!checked.ok) {
+      const inner = checked.error.property_path;
+      return {
+        ok: false,
+        error: {
+          ...checked.error,
+          message: `sections[${i}]: ${checked.error.message}`,
+          property_path: inner ? `sections[${i}].${inner}` : `sections[${i}]`,
+        },
+      };
+    }
+    out.push(checked.section);
+  }
+  return { ok: true, sections: out };
+}
+
+export function createPageDemo(opts: {
+  sections: Array<Record<string, unknown>>;
+  locale: string;
+  title?: string;
+  cwd?: string;
+}): { hash: string; relativePath: string } {
+  const cwd = opts.cwd ?? getProjectRoot();
+  fs.mkdirSync(pageDemosDir(cwd), { recursive: true });
+  const hash = crypto.randomBytes(16).toString("hex");
+  const record: PageDemoRecord = {
+    created_at: new Date().toISOString(),
+    locale: opts.locale,
+    ...(opts.title ? { title: opts.title } : {}),
+    sections: opts.sections,
+  };
+  const body = yaml.dump(record, { lineWidth: 120, noRefs: true });
+  if (Buffer.byteLength(body, "utf8") > MAX_PAGE_DEMO_YAML_BYTES) {
+    throw new Error(`Serialized page demo exceeds ${MAX_PAGE_DEMO_YAML_BYTES} bytes`);
+  }
+  const filePath = pageDemoFilePath(hash, cwd);
+  fs.writeFileSync(filePath, body, "utf8");
+  return { hash, relativePath: path.relative(cwd, filePath).split(path.sep).join("/") };
+}
+
+export function readPageDemo(hash: string, cwd = getProjectRoot()): PageDemoRecord | null {
+  if (!DEMO_HASH_RE.test(hash)) return null;
+  const filePath = pageDemoFilePath(hash, cwd);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const parsed = yaml.load(fs.readFileSync(filePath, "utf8"));
+    if (!isPlainObject(parsed) || !Array.isArray(parsed.sections)) return null;
+    return {
+      created_at: typeof parsed.created_at === "string" ? parsed.created_at : "",
+      locale: typeof parsed.locale === "string" ? parsed.locale : "en",
+      ...(typeof parsed.title === "string" ? { title: parsed.title } : {}),
+      sections: parsed.sections.filter(isPlainObject),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Every stored demo section of one component type. Backs preview-first save
  * validation (a component hook checks whether a section was demoed before an

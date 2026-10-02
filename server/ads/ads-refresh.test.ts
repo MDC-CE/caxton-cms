@@ -19,6 +19,7 @@ vi.mock("../settings", () => ({
   getAdsSettings: () => ({ meta: { enabled: true, ad_account_ids: ["111"] } }),
 }));
 vi.mock("./meta-client", () => ({ isMetaTokenConfigured: () => true }));
+vi.mock("./ads-rollups", () => ({ afterAdsSync: vi.fn(async () => undefined) }));
 vi.mock("./meta-ads-days", () => ({
   isMetaStale: () => true,
   isMetaSyncInFlight: () => false,

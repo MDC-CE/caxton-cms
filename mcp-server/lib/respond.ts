@@ -202,6 +202,23 @@ export function promoteFailureNextActions(opts: {
     ...(opts.site ? { site: opts.site } : {}),
   };
   switch (opts.code) {
+    case "render_review_required":
+      return [
+        {
+          tool: "review_page_render",
+          priority: "required",
+          reason:
+            "New or restructured page layouts need a render review before an agent publishes. Review the draft, fix error findings on the draft, then retry this publish. Staff and template-attached entries are not gated.",
+          args_hint: {
+            source: "entry",
+            contentType: opts.contentType,
+            slug: opts.slug,
+            ...(opts.locale ? { locale: opts.locale } : {}),
+            variant: opts.variantSlug,
+            ...(opts.site ? { site: opts.site } : {}),
+          },
+        },
+      ];
     case "draft_in_proposal": {
       const proposalId = opts.details?.proposal_id;
       return [

@@ -59,6 +59,16 @@ import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-fie
 import { isSeoMonitoringEnabled } from "../seo-monitoring";
 import { checkLocaleSeoTarget } from "../content-proposals/locale-seo-gate";
 import { evaluatePageTextLimitsForSite } from "../text-limits";
+import { loadSiteTheme } from "../theme-config";
+import { evaluateRenderReviewGate } from "../design/review-freshness";
+import { recordLayoutPublish, templateLayoutKey } from "../design/layout-approval";
+import { deliveredFingerprint } from "../design/fingerprint";
+import {
+  evaluatePageThemeColors,
+  summarizeThemeViolations,
+  themeViolationDetails,
+  THEME_COLORS_CODE,
+} from "../design/theme-gate";
 import {
   TEXT_LIMITS_EXCEEDED_CODE,
   summarizeTextLimitViolations,
@@ -557,6 +567,64 @@ export async function promoteVariantWithOptionalTeardown(
         fields: textLimitViolations.flatMap((v) => v.fields.map((f) => `${v.section_path}.${f}`)),
       });
     }
+
+    // Theme colors: agents cannot publish off-theme values the draft
+    // introduced (vs live); staff publish with a warning.
+    const theme = loadSiteTheme(contentRoot);
+    const themeViolations = evaluatePageThemeColors(mergedForGate, { theme, before: liveForGate });
+    if (themeViolations.length > 0) {
+      if (args.callerIsMcp) {
+        return {
+          ok: false,
+          code: THEME_COLORS_CODE,
+          error: `Cannot promote: use theme IDs for colors — ${summarizeThemeViolations(themeViolations)}. Fix them on the draft and retry.`,
+          details: themeViolationDetails(themeViolations, theme),
+        };
+      }
+      warnings.push({
+        code: "theme_colors_off_theme",
+        message: `Published with colors outside the theme: ${summarizeThemeViolations(themeViolations)}`,
+        fields: themeViolations.map((v) => v.property_path),
+      });
+    }
+
+    // Agents need a render review matching this structure before a new or
+    // restructured entry-owned page goes live (warn-only when reviews cannot run).
+    const reviewGate = evaluateRenderReviewGate({
+      callerIsMcp: args.callerIsMcp === true,
+      templateMode,
+      contentType,
+      slug,
+      locale,
+      variantSlug,
+      site: contentRootName,
+      contentRoot,
+      draftSections: mergedForGate.sections,
+      liveSections: liveForGate ? liveForGate.sections ?? [] : null,
+    });
+    if (reviewGate.status === "required") {
+      return {
+        ok: false,
+        code: "render_review_required",
+        error:
+          reviewGate.reason === "never_reviewed"
+            ? "Cannot promote: this page layout has not been render-reviewed. Run review_page_render on the draft, fix findings, then retry."
+            : "Cannot promote: the layout changed since the last render review (sections added, removed, reordered, or a variant/background switched). Re-run review_page_render, then retry.",
+        details: {
+          reason: reviewGate.reason,
+          fingerprint: reviewGate.fingerprint,
+          reviewed_fingerprint: reviewGate.review?.fingerprint ?? null,
+          last_review_job_id: reviewGate.review?.job_id ?? null,
+          review_args: { content_type: contentType, slug, locale, variant: variantSlug },
+        },
+      };
+    }
+    if (reviewGate.status === "unavailable") {
+      warnings.push({
+        code: "render_review_unavailable",
+        message: `Published without a render review (review service unavailable: ${reviewGate.reason}).`,
+      });
+    }
     const commonBefore = !templateMode && fs.existsSync(commonFilePath) ? fs.readFileSync(commonFilePath, "utf-8") : null;
     const routed = templateMode
       ? { localeRaw: variantContent, commonRaw: commonBefore, commonChanged: false, paths: [] as string[], draftCommon: {} as Record<string, unknown> }
@@ -746,6 +814,21 @@ export async function promoteVariantWithOptionalTeardown(
       });
     } catch {
       /* non-fatal */
+    }
+
+    try {
+      const sectionsLive = Array.isArray(mergedForGate.sections) && mergedForGate.sections.length > 0;
+      if (sectionsLive) {
+        recordLayoutPublish(
+          path.basename(contentRootName),
+          templateMode ? templateLayoutKey(contentType) : `${contentType}/${slug}`,
+          deliveredFingerprint(mergedForGate.sections),
+          author,
+          args.callerIsMcp === true,
+        );
+      }
+    } catch {
+      /* non-fatal: implicit approval bookkeeping only */
     }
 
     return {

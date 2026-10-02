@@ -866,7 +866,7 @@ export interface EntryPreviewSettings {
 export const DEFAULT_ENTRY_PREVIEW_SETTINGS: EntryPreviewSettings = {
   min_interval_ms: 10_000,
   max_concurrency: 1,
-  max_retries: 5,
+  max_retries: 3,
 };
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {

@@ -51,6 +51,7 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `proposals` | **Hub** — omit `subtopic` for index; playbooks: `overview`, `reading`, `situations`, `internal-links`, `serp-title-description`, `funnel-classification`, `idea-opportunity-harm`, `existing-demand`, `broken-url`, `translations` |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
 | `ads` | Paid traffic `get_paid_traffic`: Meta spend, paid landing pages, lead credit, consent limits, ad tracking diagnostics |
+| `design` | Designing a page: `get_page_recipe` → `get_component_variant` → `create_page_demo` → `review_page_render`; theme IDs, layout traits, learned rules, render-review publish gate |
 
 Legacy flat proposal topics (`reading-proposals`, `review-situations`, `*-proposals`) still resolve as aliases with a deprecation warning — prefer `topic: "proposals"` + `subtopic`.
 

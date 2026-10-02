@@ -1,21 +1,16 @@
 /**
- * Ads diagnostics: gathers Meta sync state, the Meta paid-traffic report, a
- * trailing baseline, creative URL params, landing probes and consent counters,
- * then applies the pure rules in shared/ads-diagnostics-rules.ts.
- * Issues auto-resolve on the next build once the condition clears.
+ * Meta (+ shared) Ads checks: gathers Meta sync state, the Meta paid-traffic report over the
+ * issue window, a trailing baseline, ad setups (catalog), the in-process landing check
+ * (public URL resolver — never an HTTP fetch) and consent counters, then applies the pure rules
+ * in shared/ads-diagnostics-rules.ts. Runs only inside an Ads diagnostics job (fork / ads_recheck);
+ * results are saved to the validation cache by the web process (see server/ads/diagnostics/).
  */
 
-import fs from "fs";
-import path from "path";
-import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
-import { child } from "../logger";
+import type { ContentIndex } from "../content-index";
 import {
   ADS_ISSUE_WINDOW_DAYS,
   clicksVisitsIssue,
-  isClicksVisitsMismatch,
-  currenciesMissingFloor,
-  droppedParams,
   ga4LedgerGapIssue,
   hasNonPaidMedium,
   leadGapComparable,
@@ -23,7 +18,6 @@ import {
   ledgerNotRecordingIssue,
   missingTemplateParams,
   parseTrackingParams,
-  resolveAdsDiagnosticsWindows,
   severityForSpend,
   sortAdsIssues,
   unclearShareIssue,
@@ -37,13 +31,10 @@ import {
   type AdsUncheckedReason,
   type TrackingParamsCoverage,
 } from "@shared/ads-diagnostics-rules";
-import { META_UTM_TEMPLATE, adsThresholds, isKnownExternalCampaign, type AdsAlertThresholds, type KnownExternalCampaign } from "@shared/ads-settings";
+import { adsThresholds, isKnownExternalCampaign, type AdsAlertThresholds, type KnownExternalCampaign } from "@shared/ads-settings";
 import {
   buildAdsReport,
-  getAdsReport,
   makeDestinationResolver,
-  type AdsLeadConversions,
-  type AdsMetaPlatforms,
   type AdsReport,
   type AdsUnrecognizedCampaigns,
   type DestinationResolver,
@@ -79,144 +70,21 @@ import {
 } from "./observed-tagging";
 import { ledgerLastRecordedAt } from "./lead-ledger";
 import { hasMetaData } from "./ads-refresh";
-import { consentDropPct, consentTotals, loadConsentWindow } from "../legal/legal-diagnostics";
+import { consentDropPct, loadConsentWindow } from "../legal/legal-diagnostics";
+import type { AdsUniverse } from "./diagnostics/grouping";
 
-const log = child({ module: "ads/ads-diagnostics" });
 
-const PROBE_TTL_MS = 6 * 60 * 60 * 1000;
-const PROBE_TIMEOUT_MS = 8000;
-const MAX_PROBES = 10;
-
-export type AdsDiagnostics = {
+export type MetaChecks = {
   generated_at: string;
-  /** KPI window (money/traffic numbers). */
-  window_days: number;
-  /** Problem checks, error/warning counts and consent_accept_pct always use this window. */
-  issue_window_days: number;
-  status: "not_connected" | "ok" | "warnings" | "errors";
-  meta: AdsReport["meta"];
-  ga4: AdsReport["ga4"];
-  refreshing: boolean;
-  refresh: AdsReport["refresh"];
-  collecting_since: string | null;
-  kpis: {
-    tracked_spend: MoneyByCurrency;
-    spend: MoneyByCurrency;
-    open_errors: number;
-    open_warnings: number;
-    meta_leads: number;
-    site_leads: number;
-    /** Meta keys behind `meta_leads` with window counts (standard Lead when nothing is picked). */
-    meta_conversions: AdsLeadConversions["meta"];
-    /** Site conversion names behind `site_leads`. */
-    site_conversions: AdsLeadConversions["site"];
-    /** Conversions picked in Settings → Ads → Meta; empty = counting the standard Lead event. */
-    meta_lead_conversions_picked: string[];
-    lead_conversions_changed_at: string | null;
-    meta_conversions_incomplete_days: number;
-    snapshot_lacks_conversions: boolean;
-    repeat_submissions: number;
-    /** Matched visits / link clicks from tagged on-site ads on GA4-exported days, in percent. */
-    clicks_to_visits_pct: number | null;
-    /** Ratio above 110%: GA4 and Meta measure different traffic; show "Mismatch", not a loss. */
-    clicks_to_visits_mismatch: boolean;
-    unmatched_meta_visits: number;
-    untagged_clicks: number;
-    meta_unclear_pct: number | null;
-    consent_accept_pct: number | null;
-  };
-  missing_floor_currencies: string[];
-  /** Facebook vs Instagram over the KPI window; null when Meta is not connected or the build skipped it (issue follow-ups). */
-  meta_platforms: AdsMetaPlatforms | null;
+  window: { start: string; end: string; days: number };
+  connected: boolean;
+  /** Meta + shared issues (`platform` set); builder ids — identity / grouping happen on save. */
   issues: AdsIssue[];
-  resolved: Array<{ id: string; title: string; severity: AdsIssue["severity"]; resolved_at: string }>;
-  utm_template: string;
-  warnings: AdsReport["warnings"];
+  /** Spending Meta ads in the window (coverage universe for grouping). */
+  universe: AdsUniverse;
+  /** Checks skipped for lack of data (never listed as resolved by themselves). */
+  suppressed: string[];
 };
-
-// ── Landing probes ──────────────────────────────────────────────────────────
-type ProbeResult = { status: number | null; final_url: string; error?: string };
-const probeCache = new Map<string, { at: number; result: ProbeResult }>();
-
-async function probeUrl(url: string): Promise<ProbeResult> {
-  const hit = probeCache.get(url);
-  if (hit && Date.now() - hit.at < PROBE_TTL_MS) return hit.result;
-  let current = url;
-  let result: ProbeResult = { status: null, final_url: url };
-  try {
-    for (let hop = 0; hop < 6; hop++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-      let res: Response;
-      try {
-        res = await fetch(current, {
-          redirect: "manual",
-          signal: controller.signal,
-          headers: { "User-Agent": "4GeeksAdsDiagnostics/1.0 (+landing check)" },
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-      const loc = res.headers.get("location");
-      if (res.status >= 300 && res.status < 400 && loc) {
-        current = new URL(loc, current).toString();
-        continue;
-      }
-      result = { status: res.status, final_url: current };
-      break;
-    }
-  } catch (err) {
-    result = { status: null, final_url: current, error: err instanceof Error ? err.message : String(err) };
-  }
-  probeCache.set(url, { at: Date.now(), result });
-  return result;
-}
-
-function withTags(link: string, urlTags?: string): string {
-  if (!urlTags) return link;
-  const sample = urlTags.replace(/\{\{[^}]+\}\}/g, "1");
-  return link.includes("?") ? `${link}&${sample}` : `${link}?${sample}`;
-}
-
-// ── Issue state (Issues | Resolved) ─────────────────────────────────────────
-export type IssueState = {
-  open: Record<string, { first_seen: string; title: string; severity: AdsIssue["severity"] }>;
-  resolved: AdsDiagnostics["resolved"];
-  /** Bumped when destination matching changes; older states get a one-time cleanup. */
-  resolver_version?: number;
-};
-
-const ISSUE_STATE_RESOLVER_VERSION = 2;
-
-/**
- * One-time cleanup: before version 2 every landing looked missing, so those
- * `unmanaged_destination` rows were false alarms — drop them without listing them as Resolved.
- */
-export function purgeStaleDestinationIssues(state: IssueState, openIds: Set<string>): void {
-  if ((state.resolver_version ?? 0) >= ISSUE_STATE_RESOLVER_VERSION) return;
-  for (const id of Object.keys(state.open)) {
-    if (id.startsWith("unmanaged_destination:") && !openIds.has(id)) delete state.open[id];
-  }
-  state.resolver_version = ISSUE_STATE_RESOLVER_VERSION;
-}
-
-/**
- * Move issues that cleared to Resolved and record the open set. `suppressed` ids
- * (checks skipped for lack of data) leave the open set without being listed as Resolved.
- */
-export function rollIssueState(state: IssueState, issues: AdsIssue[], nowIso: string, suppressed: Set<string> = new Set()): void {
-  const openIds = new Set(issues.map((i) => i.id));
-  purgeStaleDestinationIssues(state, openIds);
-  for (const [id, prev] of Object.entries(state.open)) {
-    if (!openIds.has(id) && !suppressed.has(id) && prev.severity !== "info") {
-      state.resolved.unshift({ id, title: prev.title, severity: prev.severity, resolved_at: nowIso });
-    }
-  }
-  state.resolved = state.resolved.filter((r) => !openIds.has(r.id)).slice(0, 50);
-  state.open = Object.fromEntries(
-    issues.map((i) => [i.id, { first_seen: state.open[i.id]?.first_seen ?? nowIso, title: i.title, severity: i.severity }]),
-  );
-}
 
 // ── Lead records vs GA4 ─────────────────────────────────────────────────────
 /**
@@ -279,29 +147,6 @@ export function leadIssues(input: {
     ],
     suppressed: [],
   };
-}
-
-/** Meta keeps the original file name; Google has its own so the two Resolved lists never mix. */
-export const META_ISSUE_STATE_FILE = "ads-issues.json";
-export const GOOGLE_ISSUE_STATE_FILE = "ads-issues-google.json";
-
-function issueStatePath(site: string, file: string): string {
-  return path.join(CACHE_DIR, site, file);
-}
-
-export function loadIssueState(site: string, file = META_ISSUE_STATE_FILE): IssueState {
-  try {
-    const f = issueStatePath(site, file);
-    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, "utf-8")) as IssueState;
-  } catch {
-    /* ignore */
-  }
-  return { open: {}, resolved: [] };
-}
-
-export function saveIssueState(site: string, state: IssueState, file = META_ISSUE_STATE_FILE): void {
-  fs.mkdirSync(path.dirname(issueStatePath(site, file)), { recursive: true });
-  fs.writeFileSync(issueStatePath(site, file), JSON.stringify(state), "utf-8");
 }
 
 /** Checks that aren't about one ad platform (lead records, consent). Listed once on the overview. */
@@ -494,7 +339,7 @@ type AdSpendInfo = { spend: MoneyByCurrency; campaign_id: string; campaign_name:
 
 /**
  * One warning per ad URL that goes through our content redirects before reaching a page.
- * `skipUrls` holds bare URLs already covered by `redirect_drops_params`.
+ * Our redirects keep the query string, so tracking survives; the extra hop only costs time.
  */
 export function adUrlRedirectIssues(input: {
   spendByAd: Map<string, AdSpendInfo>;
@@ -535,6 +380,53 @@ export function adUrlRedirectIssues(input: {
     scope: { url: bare, page_key: a.page_key, ad_id: a.top.adId, campaign_id: a.top.campaign_id, campaign_name: a.top.campaign_name },
     site_fixable: false,
   }));
+}
+
+/**
+ * Ads linking to one of our own URLs that is not live (no page, no redirect to a live page), per
+ * bare URL. Answered in-process by the public URL resolver (same rules as the live site) — no
+ * HTTP request, so runtime outages (5xx / DNS) are not covered here.
+ */
+export function landingNotLiveIssues(input: {
+  ads: IndexedAd[];
+  resolve: DestinationResolver;
+  totalSpend: MoneyByCurrency;
+  t: AdsAlertThresholds;
+  detailsFor: (ads: IndexedAd[]) => AdsIssueDetails;
+}): AdsIssue[] {
+  const byBare = new Map<string, { ads: IndexedAd[]; path: string }>();
+  for (const a of input.ads) {
+    if (a.state !== "checked" || !a.landing_url) continue;
+    let link: URL;
+    try {
+      link = new URL(a.landing_url);
+    } catch {
+      continue;
+    }
+    const r = input.resolve(link.hostname, link.pathname);
+    if (r.kind !== "missing_page") continue;
+    const bare = a.landing_url.split("?")[0]!;
+    const cur = byBare.get(bare) ?? { ads: [], path: r.path };
+    cur.ads.push(a);
+    byBare.set(bare, cur);
+  }
+  return Array.from(byBare.entries()).map(([bare, g]) => {
+    const spend: MoneyByCurrency = {};
+    g.ads.forEach((a) => addSpend(spend, a.spend));
+    const top = g.ads[0]!;
+    return {
+      id: `landing_not_live:${bare}`,
+      code: "landing_not_live",
+      severity: severityForSpend(spend, input.totalSpend, input.t),
+      title: `Ad links to a page that isn't live: ${bare}`,
+      why: `${g.ads.length} ad${g.ads.length === 1 ? "" : "s"} send people to ${g.path}, which isn't a live page on this site and doesn't redirect to one. People who click see a "page not found".`,
+      how_to_fix: "Publish the page, add a redirect to the right live page, or change the ad URL in Meta. Then press Re-check.",
+      spend_affected: roundMoney(spend),
+      scope: { url: bare, ad_id: top.ad_id, campaign_id: top.campaign_id, campaign_name: top.campaign_name },
+      site_fixable: true,
+      details: input.detailsFor(g.ads),
+    };
+  });
 }
 
 /** Coverage over the fixed issue window (same days Diagnostics checks), read from the last sync. */
@@ -610,32 +502,31 @@ export function ga4OnlyOffSiteWhy(visits: number, tags: AdsGa4SeenRow[], flagged
 export async function buildAdsDiagnostics(opts: {
   site: string;
   contentRoot?: string;
-  days?: number;
-  probe?: boolean;
-  /** Issue detail requests: skip the separate KPI-window report (kpis then reflect the issue window). */
-  issuesOnly?: boolean;
+  /** Explicit window (post-fix verification); default = the fixed issue window ending yesterday. */
+  window?: { since: string; until: string };
+  /** Worker processes pass a light index for the site (no site-context map). */
+  contentIndex?: ContentIndex;
   now?: Date;
-}): Promise<AdsDiagnostics> {
+}): Promise<MetaChecks> {
   const now = opts.now ?? new Date();
-  const { kpiDays, issueDays } = resolveAdsDiagnosticsWindows(opts.days);
+  const issueDays = ADS_ISSUE_WINDOW_DAYS;
   const settings = getAdsSettings(opts.contentRoot);
   const t = adsThresholds(settings);
-  const reuseIssueReport = kpiDays === issueDays || !!opts.issuesOnly;
-  const report = await getAdsReport({
+  const report = buildAdsReport({
     site: opts.site,
     contentRoot: opts.contentRoot,
-    days: issueDays,
+    ...(opts.window ? { since: opts.window.since, until: opts.window.until } : { days: issueDays }),
     platform: "meta",
     includeGa4Ads: true,
-    includeMetaPlatforms: reuseIssueReport && !opts.issuesOnly,
+    includeMetaPlatforms: false,
+    noRefresh: true,
+    contentIndex: opts.contentIndex,
     now,
   });
-  const kpiReport = reuseIssueReport
-    ? report
-    : buildAdsReport({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "meta", noRefresh: true, now });
   const baseline = buildAdsReport({
     site: opts.site,
     contentRoot: opts.contentRoot,
+    contentIndex: opts.contentIndex,
     days: 28,
     platform: "meta",
     includeMetaPlatforms: false,
@@ -654,7 +545,7 @@ export async function buildAdsDiagnostics(opts: {
   const spendingAds = Array.from(adIndex.values())
     .filter((a) => a.total > 0)
     .sort((a, b) => b.total - a.total || a.ad_id.localeCompare(b.ad_id));
-  const resolveDest = makeDestinationResolver(opts.site);
+  const resolveDest = makeDestinationResolver(opts.site, opts.contentIndex);
   const bareOf = (a: IndexedAd): string | null => (a.state === "checked" && a.landing_url ? a.landing_url.split("?")[0]! : null);
   const adsByDest = new Map<string, IndexedAd[]>();
   for (const a of spendingAds) {
@@ -761,80 +652,19 @@ export async function buildAdsDiagnostics(opts: {
     });
   }
 
-  if (opts.probe !== false) {
-    // One probe per bare ad URL (highest-spend ads first); spend = every ad sharing that URL
-    const byBare = new Map<string, { top: IndexedAd; spend: MoneyByCurrency }>();
-    for (const a of spendingAds) {
-      const bare = bareOf(a);
-      if (!bare) continue;
-      const cur = byBare.get(bare);
-      if (cur) addSpend(cur.spend, a.spend);
-      else byBare.set(bare, { top: a, spend: { ...a.spend } });
-    }
-    const probes = Array.from(byBare.entries())
-      .slice(0, MAX_PROBES)
-      .map(([bare, g]) => ({ bare, url: withTags(g.top.landing_url!, g.top.url_tags ?? undefined), top: g.top, spend: roundMoney(g.spend) }));
-    const results = await Promise.all(probes.map(async (p) => ({ p, r: await probeUrl(p.url) })));
-    for (const { p, r } of results) {
-      const ads = adsOnBare(p.bare);
-      const scope = { url: p.bare, ad_id: p.top.ad_id, campaign_id: p.top.campaign_id, campaign_name: p.top.campaign_name, account_id: accountOf(ads) };
-      if (r.status == null || r.status >= 400) {
-        issues.push({
-          id: `landing_http_error:${p.bare}`,
-          code: "landing_http_error",
-          severity: severityForSpend(p.spend, totalSpend, t),
-          title: `Ad landing page is failing: ${p.bare}`,
-          why: r.status ? `The page answered HTTP ${r.status}. People who click the ad do not see the page.` : `The page did not answer (${r.error ?? "timeout"}).`,
-          how_to_fix: "Restore the page or point the ad to a working URL. If the page moved, add a redirect.",
-          spend_affected: p.spend,
-          scope,
-          site_fixable: true,
-          details: detailsFor(ads),
-        });
-        continue;
-      }
-      const dropped = droppedParams(p.url, r.final_url);
-      if (dropped.length > 0) {
-        issues.push({
-          id: `redirect_drops_params:${p.bare}`,
-          code: "redirect_drops_params",
-          severity: severityForSpend(p.spend, totalSpend, t),
-          title: `Redirect removes tracking parameters: ${p.bare}`,
-          why: `The ad URL redirects to ${r.final_url.split("?")[0]} and loses ${dropped.join(", ")}. Visits look unpaid and cannot be matched to the ad.`,
-          how_to_fix: "Point the ad straight to the final URL, or make the redirect keep the query string.",
-          spend_affected: p.spend,
-          scope,
-          site_fixable: true,
-          details: detailsFor(ads),
-        });
-      }
-    }
-  }
-
-  const state = loadIssueState(opts.site, META_ISSUE_STATE_FILE);
+  // Own landing pages that aren't live (in-process public URL resolver — never an HTTP fetch)
+  const notLive = landingNotLiveIssues({ ads: spendingAds, resolve: resolveDest, totalSpend, t, detailsFor });
+  issues.push(...notLive);
+  const notLiveAds = new Set(notLive.flatMap((i) => (i.details?.ads ?? []).map((a) => a.ad_id)));
 
   // Ads whose URL goes through one of our content redirects (paths only — www/http hops are not checked)
-  const dropsParams = new Set(issues.filter((i) => i.code === "redirect_drops_params").map((i) => i.scope.url));
-  if (opts.probe === false) {
-    for (const id of Object.keys(state.open)) if (id.startsWith("redirect_drops_params:")) dropsParams.add(id.slice("redirect_drops_params:".length));
-  }
   const spendByAd = new Map(spendingAds.map((a) => [a.ad_id, { spend: a.spend, campaign_id: a.campaign_id, campaign_name: a.campaign_name }]));
-  for (const issue of adUrlRedirectIssues({ spendByAd, creatives, resolve: resolveDest, skipUrls: dropsParams })) {
+  for (const issue of adUrlRedirectIssues({ spendByAd, creatives, resolve: resolveDest })) {
     const ads = adsOnBare(issue.scope.url);
     issues.push({ ...issue, scope: { ...issue.scope, account_id: accountOf(ads) }, details: detailsFor(ads) });
   }
 
-  // Broken links / zero-visit pages — skip confirmed-missing for those ads only
-  const brokenLinks = new Set<string>();
-  for (const i of issues) {
-    if ((i.code === "landing_http_error" || i.code === "redirect_drops_params") && i.scope.url) brokenLinks.add(i.scope.url);
-  }
-  if (opts.probe === false) {
-    for (const id of Object.keys(state.open)) {
-      if (id.startsWith("landing_http_error:")) brokenLinks.add(id.slice("landing_http_error:".length));
-      if (id.startsWith("redirect_drops_params:")) brokenLinks.add(id.slice("redirect_drops_params:".length));
-    }
-  }
+  // Pages that aren't live / zero-visit pages — skip confirmed-missing for those ads only
   const zeroVisitPages = new Set(
     issues.filter((i) => i.code === "spend_zero_visits" && i.scope.page_key).map((i) => i.scope.page_key!),
   );
@@ -887,7 +717,7 @@ export async function buildAdsDiagnostics(opts: {
     if (resolved.state === "meta_auto") return "meta_auto";
     const onlyUtmId = !a.dubious_utm_content && a.missing?.length === 1 && a.missing[0] === "utm_id";
     const verdict: "missing" | "unverified" = resolved.state === "unverified" || onlyUtmId ? "unverified" : "missing";
-    if (verdict === "missing" && (brokenLinks.has(bareOf(a) ?? "") || adsOnZeroVisit.has(a.ad_id))) return null;
+    if (verdict === "missing" && (notLiveAds.has(a.ad_id) || adsOnZeroVisit.has(a.ad_id))) return null;
     return {
       ...a,
       tagging_source: "none",
@@ -1022,7 +852,6 @@ export async function buildAdsDiagnostics(opts: {
   }
 
   // Pixel not reporting leads while the site records Meta leads
-  // Pixel not reporting leads while the site records Meta leads
   const pickedConversions = settings.meta.lead_conversions ?? [];
   const conversionNames = connected ? metaConversionNames(opts.site) : new Map<string, string>();
   const floorHit = Object.entries(totalSpend).some(([c, v]) => v >= (t.severity_spend_floor[c] ?? Infinity));
@@ -1140,6 +969,7 @@ export async function buildAdsDiagnostics(opts: {
       d.kind === "instant_form" ? "instant_form_destination" : d.kind === "off_site" || d.kind === "other_site" ? "off_site_destination" : "unmanaged_destination";
     if (d.kind === "unknown_destination") continue;
     const ads = adsByDest.get(d.key) ?? [];
+    if (d.kind === "missing_page" && ads.some((a) => notLiveAds.has(a.ad_id))) continue;
     const ga4Seen = ads.length === 0 && (d.ga4_ads?.length ?? 0) > 0 ? { ga4_seen: d.ga4_ads, ga4_untagged_visits: d.ga4_untagged_visits ?? 0 } : {};
     const ga4OnlyOffSite = code === "off_site_destination" && ads.length === 0 && d.paid_visits > 0;
     issues.push({
@@ -1168,88 +998,28 @@ export async function buildAdsDiagnostics(opts: {
     });
   }
 
-  // Issues | Resolved bookkeeping (full builds only — probe-less roll-ups would "resolve" landing issues)
-  const nowIso = now.toISOString();
-  if (opts.probe !== false) {
-    rollIssueState(state, issues, nowIso, new Set(leads.suppressed));
-    try {
-      saveIssueState(opts.site, state);
-    } catch (err) {
-      log.warn({ err }, "[ads-diagnostics] failed to persist issue state");
-    }
-  }
-
-  for (const i of issues) {
-    const firstSeen = state.open[i.id]?.first_seen;
-    if (firstSeen) i.first_seen = firstSeen;
-    i.platform = SHARED_ISSUE_CODES.has(i.code) ? "shared" : "meta";
-  }
+  for (const i of issues) i.platform = SHARED_ISSUE_CODES.has(i.code) ? "shared" : "meta";
   sortAdsIssues(issues);
-  const openErrors = issues.filter((i) => i.severity === "error").length;
-  const openWarnings = issues.filter((i) => i.severity === "warning").length;
-  const k = kpiReport.totals;
-  const lc = kpiReport.lead_conversions as AdsLeadConversions | undefined;
-  const kpiRatio = k.ratio_clicks > 0 && kpiReport.ga4.configured ? k.matched_visits / k.ratio_clicks : null;
-  const refresh = kpiReport.refresh;
-  const warnings = kpiReport.warnings;
+  const accountNames: Record<string, string> = {};
+  for (const [id, a] of Object.entries(metaState.accounts ?? {})) if (a?.name) accountNames[id] = a.name;
   return {
-    generated_at: nowIso,
-    window_days: kpiDays,
-    issue_window_days: issueDays,
-    status: !connected ? "not_connected" : openErrors > 0 ? "errors" : openWarnings > 0 ? "warnings" : "ok",
-    meta: kpiReport.meta,
-    ga4: kpiReport.ga4,
-    refreshing: kpiReport.refreshing,
-    refresh,
-    collecting_since: kpiReport.collecting_since,
-    kpis: {
-      tracked_spend: k.tracked_spend,
-      spend: k.spend,
-      open_errors: openErrors,
-      open_warnings: openWarnings,
-      meta_leads: k.meta_leads,
-      site_leads: k.unique_leads,
-      meta_conversions: lc?.meta ?? [],
-      site_conversions: lc?.site ?? [],
-      meta_lead_conversions_picked: lc?.meta_picked ?? pickedConversions,
-      lead_conversions_changed_at: lc?.meta_changed_at ?? settings.meta.lead_conversions_changed_at ?? null,
-      meta_conversions_incomplete_days: lc?.meta_incomplete_days ?? 0,
-      snapshot_lacks_conversions: lc?.snapshot_lacks_conversions ?? false,
-      repeat_submissions: k.repeat_submissions,
-      clicks_to_visits_pct: kpiRatio != null ? Math.round(kpiRatio * 1000) / 10 : null,
-      clicks_to_visits_mismatch: isClicksVisitsMismatch(kpiRatio),
-      unmatched_meta_visits: k.unmatched_meta_visits,
-      untagged_clicks: k.untagged_clicks,
-      meta_unclear_pct:
-        k.paid_visits + k.unclear_visits > 0 ? Math.round((k.unclear_visits / (k.paid_visits + k.unclear_visits)) * 1000) / 10 : null,
-      consent_accept_pct: consentTotals(consentWindow.current).accept_pct,
-    },
-    missing_floor_currencies: currenciesMissingFloor(totalSpend, t),
-    meta_platforms: kpiReport.meta_platforms ?? null,
+    generated_at: now.toISOString(),
+    window: { start: report.window.start, end: report.window.end, days: report.window.days },
+    connected,
     issues,
-    resolved: state.resolved,
-    utm_template: META_UTM_TEMPLATE,
-    warnings,
+    universe: {
+      account_names: accountNames,
+      ads: spendingAds.map((a) => ({
+        ad_id: a.ad_id,
+        adset_id: a.adset_id,
+        campaign_id: a.campaign_id,
+        account_id: a.account_id,
+        ad_name: a.ad_name,
+        adset_name: a.adset_name,
+        campaign_name: a.campaign_name,
+        spend: a.spend,
+      })),
+    },
+    suppressed: leads.suppressed,
   };
-}
-
-/** Light roll-up for the Global tab (no landing probes). */
-export async function adsDiagnosticsSummary(site: string, contentRoot?: string): Promise<{ status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number }> {
-  return summarizeMetaDiagnostics(site, await buildAdsDiagnostics({ site, contentRoot, days: ADS_ISSUE_WINDOW_DAYS, probe: false }));
-}
-
-/** Probe-less build + landing issues still open from the last full build (probes are skipped in roll-ups). */
-export function summarizeMetaDiagnostics(
-  site: string,
-  d: AdsDiagnostics,
-): { status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number } {
-  const severities = new Map<string, AdsIssue["severity"]>();
-  for (const [id, prev] of Object.entries(loadIssueState(site).open)) {
-    if (id.startsWith("landing_http_error:") || id.startsWith("redirect_drops_params:")) severities.set(id, prev.severity);
-  }
-  for (const i of d.issues) severities.set(i.id, i.severity);
-  const open_errors = Array.from(severities.values()).filter((s) => s === "error").length;
-  const open_warnings = Array.from(severities.values()).filter((s) => s === "warning").length;
-  const status = d.status === "not_connected" ? d.status : open_errors > 0 ? "errors" : open_warnings > 0 ? "warnings" : "ok";
-  return { status, open_errors, open_warnings };
 }

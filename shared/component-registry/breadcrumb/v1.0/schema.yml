@@ -50,6 +50,38 @@ variants:
   blogWithTags:
     file: client/src/components/breadcrumb/variants/BreadcrumbBlogWithTags.tsx
     description: Breadcrumb trail plus tag chips from section tags field
+    content_shape:
+      items:
+        items:
+          min: 3
+          max: 3
+          typical: 3
+          limit:
+            min: 1
+      image: unused
+      icon: unused
+      sample_pages: 3
+      measured_at: "2026-10-02"
+    best_for: Blog post pages with 3 hierarchy items that also need to display tag chips below the breadcrumb trail.
+    avoid_when: Non-blog pages, pages without tags, or when you need more or fewer than 3 breadcrumb items.
+    metadata_status: draft
   default:
     file: client/src/components/breadcrumb/variants/BreadcrumbDefault.tsx
     description: Standard breadcrumb trail
+    content_shape:
+      items:
+        items:
+          min: 2
+          max: 3
+          typical: 3
+          limit:
+            min: 1
+      image: unused
+      icon: unused
+      sample_pages: 25
+      measured_at: "2026-10-02"
+    best_for: >-
+      Content pages with 2-3 level hierarchies like blog posts, programs and landings to show location and enable
+      back-navigation
+    avoid_when: Pages needing tag chips below the trail or pages with 1-level or 4+ level navigation
+    metadata_status: draft

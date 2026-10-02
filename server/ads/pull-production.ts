@@ -4,6 +4,7 @@
  * `leads-pull-production.ts` so other screens can pull them on their own.
  */
 
+import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import {
@@ -15,7 +16,6 @@ import {
   addDays,
   exportMetaSnapshot,
   isMetaSyncInFlight,
-  META_CREATIVES_FILE,
   META_CUSTOM_CONVERSIONS_FILE,
   META_DAYS_DIR,
   META_PIXEL_EVENTS_FILE,
@@ -24,7 +24,6 @@ import {
   META_STATE_FILE,
   stageMetaSnapshot,
   utcDate,
-  type MetaAdsCreatives,
   type MetaCustomConversionsFile,
   type MetaPixelEventsFile,
   type MetaAdsDayFile,
@@ -41,7 +40,9 @@ import {
   type PaidLandingSnapshot,
   type PaidLandingState,
 } from "./paid-detection";
-import { clearAdsSnapshots } from "./ads-diagnostics-snapshots";
+import type { MetaAdCreativeInfo } from "./meta-client";
+import { ADS_SETUP_DIR, adsSetupRelPath, emptyAdsSetup, mergeMetaAccountAds, type AdsSetupCatalog } from "./ads-setup";
+import { clearAdsDerivedData } from "./ads-rollups";
 import { cleanupPullArtifacts, makeStagingDir, swapStagedEntries } from "./cache-swap";
 
 export const ADS_PULL_DEFAULT_DAYS = 90;
@@ -51,7 +52,7 @@ const SWAP_ENTRIES = [
   META_DAYS_DIR,
   META_PLATFORM_DAYS_DIR,
   PAID_LANDING_DAYS_DIR,
-  META_CREATIVES_FILE,
+  adsSetupRelPath("meta"),
   META_CUSTOM_CONVERSIONS_FILE,
   META_PIXEL_EVENTS_FILE,
   PAID_LANDING_STATE_FILE,
@@ -90,6 +91,30 @@ function dayFiles<T extends { date: string }>(v: unknown, rowsKey: string): T[] 
   );
 }
 
+/**
+ * Meta setup catalog from an export. Production still on the old layout sends `creatives`
+ * (id → creative); those are converted in memory — only the catalog is ever written.
+ */
+function parseMetaSetup(b: Record<string, unknown>): AdsSetupCatalog {
+  const setup = b.meta_setup as AdsSetupCatalog | undefined;
+  if (setup && typeof setup === "object" && setup.platform === "meta" && setup.ads && typeof setup.ads === "object") {
+    return { ...emptyAdsSetup("meta"), ...setup };
+  }
+  const catalog = emptyAdsSetup("meta");
+  const legacy = b.creatives as { fetched_at?: string; ads?: Record<string, MetaAdCreativeInfo> } | undefined;
+  if (!legacy?.ads || typeof legacy.ads !== "object") return catalog;
+  const byAccount = new Map<string, MetaAdCreativeInfo[]>();
+  for (const c of Object.values(legacy.ads)) {
+    if (!c || typeof c !== "object" || !c.ad_id) continue;
+    const acct = c.account_id ?? "";
+    byAccount.set(acct, [...(byAccount.get(acct) ?? []), { ...c, links: Array.isArray(c.links) ? c.links : [] }]);
+  }
+  const at = legacy.fetched_at || new Date().toISOString();
+  for (const [acct, list] of Array.from(byAccount.entries())) mergeMetaAccountAds(catalog, acct, list, at);
+  catalog.fetched_at = legacy.fetched_at ?? "";
+  return catalog;
+}
+
 export function parseAdsExport(body: unknown): AdsExportPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
@@ -100,7 +125,7 @@ export function parseAdsExport(body: unknown): AdsExportPayload | null {
     meta_days: dayFiles<MetaAdsDayFile>(b.meta_days, "rows"),
     platform_days: dayFiles<MetaAdsPlatformDayFile>(b.platform_days, "rows"),
     meta_state: { consecutive_failures: 0, accounts: {}, ...(state as Partial<MetaAdsSyncState>) },
-    creatives: (b.creatives && typeof b.creatives === "object" ? b.creatives : { fetched_at: "", ads: {} }) as MetaAdsCreatives,
+    meta_setup: parseMetaSetup(b),
     custom_conversions:
       b.custom_conversions && typeof b.custom_conversions === "object" ? (b.custom_conversions as MetaCustomConversionsFile) : undefined,
     pixel_events: b.pixel_events && typeof b.pixel_events === "object" ? (b.pixel_events as MetaPixelEventsFile) : undefined,
@@ -121,7 +146,8 @@ export type AppliedAdsSnapshot = {
 
 /**
  * Stage the snapshot, then swap it in all at once. On any failure live data is left as it was.
- * Stamps the Meta state as a production download and clears saved Diagnostics Ads builds.
+ * Stamps the Meta state as a production download and clears derived rollups / report windows
+ * (rebuilt from the new day files on next read or Sync).
  */
 export function applyAdsSnapshot(
   site: string,
@@ -155,8 +181,9 @@ export function applyAdsSnapshot(
     cleanupPullArtifacts(liveRoot);
     throw err;
   }
+  fs.mkdirSync(path.join(liveRoot, ADS_SETUP_DIR), { recursive: true });
   swapStagedEntries(liveRoot, staging, SWAP_ENTRIES, opts.rename);
-  clearAdsSnapshots(site);
+  clearAdsDerivedData(site);
   return {
     meta_days: snap.meta_days.length,
     platform_days: snap.platform_days.length,
@@ -184,6 +211,8 @@ export type PullProductionAdsDeps = {
 
 async function defaultIsBusy(site: string): Promise<boolean> {
   if (isMetaSyncInFlight(site)) return true;
+  const { isAdsRunActive } = await import("./diagnostics/run-lock");
+  if (isAdsRunActive(site)) return true;
   const { isAdsRefreshing } = await import("./ads-refresh");
   return isAdsRefreshing(site);
 }
@@ -207,7 +236,7 @@ export async function pullProductionAds(
     return fail("Could not resolve production URL for this site. Set PRODUCTION_SITE_URL or configure the site domain in sites.yml.");
   }
   const busy = deps.isBusy ? deps.isBusy(site) : await defaultIsBusy(site);
-  if (busy) return fail("A local Ads sync is running. Wait for it to finish, then download again.");
+  if (busy) return fail("A local Ads Sync or Ads Run is in progress. Wait for it to finish, then download again.");
 
   const url = new URL("/api/ads/export", productionOrigin);
   url.searchParams.set("days", String(clampExportDays(opts.days)));

@@ -8,6 +8,7 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import type { DynamicTableSection } from "@shared/schema";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 
 interface DynamicTableProps {
   data: DynamicTableSection;
@@ -630,17 +631,7 @@ export function DynamicTable({ data }: DynamicTableProps) {
     }
   };
 
-  const bgStyle: React.CSSProperties = {};
-  if (data.background) {
-    if (
-      data.background.startsWith("linear-gradient") ||
-      data.background.startsWith("radial-gradient")
-    ) {
-      bgStyle.backgroundImage = data.background;
-    } else {
-      bgStyle.backgroundColor = data.background;
-    }
-  }
+  const bgStyle: React.CSSProperties = sectionBackgroundStyle(data.background);
 
   return (
     <section className="py-12" style={bgStyle} data-testid="section-dynamic-table">

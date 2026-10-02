@@ -10,6 +10,7 @@ import type {
   CareerSupportTab,
   CareerSupportTestimonial,
 } from "@shared/schema";
+import { sectionBackgroundStyle } from "@shared/theme-palette";
 import { getIcon } from "@/lib/icons";
 
 interface CareerSupportExplainProps {
@@ -822,7 +823,7 @@ export default function CareerSupportExplain({ data }: CareerSupportExplainProps
   return (
     <section
       className="w-full"
-      style={data.background ? { background: data.background } : undefined}
+      style={sectionBackgroundStyle(data.background)}
       data-testid="section-career-support-explain"
     >
       <div className="max-w-6xl mx-auto px-4 md:px-8 py-12 md:py-16">

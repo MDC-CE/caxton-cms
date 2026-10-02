@@ -40,6 +40,7 @@ import {
 } from "./image-registry-subset";
 import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
+import { buildThemeBackgroundCss, type ThemePalettes } from "@shared/theme-palette";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -913,11 +914,10 @@ function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
   try {
     const themePath = path.join(contentRoot, "theme.json");
     if (!fs.existsSync(themePath)) return "";
-    const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as {
+    const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as ThemePalettes & {
       colors?: { light?: Record<string, string>; dark?: Record<string, string> };
     };
-    const colors = theme.colors;
-    if (!colors) return "";
+    const colors = theme.colors ?? {};
     let css = "";
     if (colors.light && Object.keys(colors.light).length > 0) {
       const vars = Object.entries(colors.light)
@@ -931,6 +931,7 @@ function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
         .join("\n");
       css += `.dark {\n${vars}\n}\n`;
     }
+    css += buildThemeBackgroundCss(theme);
     return css ? `<style id="__theme_overrides__">\n${css}</style>` : "";
   } catch {
     return "";

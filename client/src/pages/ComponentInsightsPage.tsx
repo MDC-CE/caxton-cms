@@ -13,6 +13,7 @@ import type { ComponentInsightsData, ComponentPairing, ComponentSequence } from 
 import ComponentGraph from "@/components/ComponentGraph";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
+import { DesignRecipesPanel } from "@/components/insights/DesignRecipesPanel";
 
 type SortKey = "from" | "to" | "count" | "frequency" | "pmi" | "distance";
 type SortDir = "asc" | "desc";
@@ -616,6 +617,8 @@ function ComponentInsightsPageInner() {
           );
         })}
       </Tabs>
+
+      <DesignRecipesPanel data={data} canEdit={canMutateMetrics} />
 
       <Card>
         <CardHeader>

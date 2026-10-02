@@ -23,7 +23,7 @@ vi.mock("./content-types", async (importOriginal) => {
   };
 });
 
-import { findCanonicalSoftMatch, inspectRedirect, isLivePublicUrl, resolveRedirectRequestLocale, testRedirect } from "./redirects";
+import { findCanonicalSoftMatch, inspectRedirect, isLivePublicUrl, mergeQueryIntoTarget, resolveRedirectRequestLocale, testRedirect } from "./redirects";
 import { canonicalizePillarPath } from "./seo-fields";
 import { applyRedirectTraceCookie } from "./redirect-trace-cookie";
 import {
@@ -496,5 +496,34 @@ describe("redirect trace cookie", () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.from).toBe("/es/interactive-exercise/foo");
     expect(parsed[0]?.matchType).toBe("fallback");
+  });
+});
+
+describe("mergeQueryIntoTarget", () => {
+  it("appends the inbound query when the target has none", () => {
+    expect(mergeQueryIntoTarget("/en/landing", "/old?utm_source=fb&utm_medium=paid_social")).toBe(
+      "/en/landing?utm_source=fb&utm_medium=paid_social",
+    );
+  });
+
+  it("merges into a target that already has a query instead of adding a second ?", () => {
+    const out = mergeQueryIntoTarget("/en/landing?foo=1", "/old?utm_source=fb");
+    expect(out).toBe("/en/landing?foo=1&utm_source=fb");
+    expect(out.split("?")).toHaveLength(2);
+  });
+
+  it("lets the inbound value win on the same key", () => {
+    expect(mergeQueryIntoTarget("/en/landing?utm_source=site&foo=1", "/old?utm_source=fb")).toBe(
+      "/en/landing?utm_source=fb&foo=1",
+    );
+  });
+
+  it("leaves the target alone when neither side has a query", () => {
+    expect(mergeQueryIntoTarget("/en/landing", "/old")).toBe("/en/landing");
+    expect(mergeQueryIntoTarget("/en/landing?foo=1", "/old")).toBe("/en/landing?foo=1");
+  });
+
+  it("keeps the target hash after the merged query", () => {
+    expect(mergeQueryIntoTarget("https://x.com/a?foo=1#top", "/old?utm_id=9")).toBe("https://x.com/a?foo=1&utm_id=9#top");
   });
 });

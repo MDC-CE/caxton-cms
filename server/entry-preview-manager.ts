@@ -10,7 +10,6 @@ import {
   type PreviewPropResolveContext,
 } from "@shared/entry-preview-props";
 import { isUsableOgImageUrl } from "@shared/ogImageUrl";
-import { buildPreviewPropResolveContext } from "./entry-preview-resolve";
 import { child } from "./logger";
 
 const log = child({ module: "entry-preview-manager" });
@@ -105,7 +104,11 @@ export class EntryPreviewManager {
   private readonly contentRootName: string;
   private readonly mediaGallery: MediaGallery;
   private readonly writeLocks = new Map<string, Promise<void>>();
-  private listCache: { at: number; contentType: string; metas: EntryPreviewMeta[] } | null = null;
+  private listCache: {
+    at: number;
+    contentType: string;
+    byKey: Map<string, EntryPreviewMeta>;
+  } | null = null;
   private readonly listTtlMs = 60_000;
 
   constructor(contentRoot: string, mediaGallery: MediaGallery) {
@@ -499,68 +502,135 @@ export class EntryPreviewManager {
     return [...locales];
   }
 
-  async listMetas(contentType: string): Promise<EntryPreviewMeta[]> {
+  /**
+   * Parse storage key `entry-previews/{type}/{slug}/{locale}/{width}.meta.json`
+   * into map key `${slug}:${locale}` (width stored on meta).
+   */
+  private parseMetaStorageKey(
+    storageKey: string,
+    contentType: string,
+  ): { slug: string; locale: string; width: number } | null {
+    const prefix = `entry-previews/${sanitizeSegment(contentType)}/`;
+    if (!storageKey.startsWith(prefix) || !storageKey.endsWith(".meta.json")) return null;
+    const rest = storageKey.slice(prefix.length, -".meta.json".length);
+    const parts = rest.split("/");
+    if (parts.length < 3) return null;
+    const widthRaw = parts[parts.length - 1];
+    const locale = parts[parts.length - 2];
+    const slug = parts.slice(0, -2).join("/");
+    const width = Number(widthRaw);
+    if (!slug || !locale || !Number.isFinite(width)) return null;
+    return { slug, locale, width };
+  }
+
+  private metaMapKey(slug: string, locale: string, width: number): string {
+    return `${slug}:${locale}:${width}`;
+  }
+
+  /**
+   * Batch-load all metas for a content type, keyed by `slug:locale:width`.
+   * Prefer this over N× getMeta for list/stats endpoints.
+   */
+  async listMetasByKey(contentType: string): Promise<Map<string, EntryPreviewMeta>> {
     const now = Date.now();
     if (
       this.listCache &&
       this.listCache.contentType === contentType &&
       now - this.listCache.at < this.listTtlMs
     ) {
-      return this.listCache.metas;
+      return this.listCache.byKey;
     }
 
+    const byKey = new Map<string, EntryPreviewMeta>();
     const provider = this.provider();
-    const metas: EntryPreviewMeta[] = [];
     const prefix = `entry-previews/${sanitizeSegment(contentType)}/`;
 
     try {
       if (provider.name === "gcs" && provider.list) {
-        const keys = await provider.list(prefix);
-        for (const key of keys) {
-          if (!key.endsWith(".meta.json")) continue;
-          try {
-            const download = (provider as StorageProvider & { download?: (k: string) => Promise<Buffer | null> }).download;
-            let raw: EntryPreviewMeta | null = null;
-            if (download) {
-              const buf = await download.call(provider, key);
-              if (buf) raw = JSON.parse(buf.toString("utf8")) as EntryPreviewMeta;
-            } else {
-              const url = provider.getPublicUrl(key);
-              const res = await fetch(url);
-              if (res.ok) raw = (await res.json()) as EntryPreviewMeta;
+        const keys = (await provider.list(prefix)).filter((k) => k.endsWith(".meta.json"));
+        const download = (
+          provider as StorageProvider & { download?: (k: string) => Promise<Buffer | null> }
+        ).download;
+
+        await Promise.all(
+          keys.map(async (key) => {
+            try {
+              const parsed = this.parseMetaStorageKey(key, contentType);
+              if (!parsed) return;
+              let raw: EntryPreviewMeta | null = null;
+              if (download) {
+                const buf = await download.call(provider, key);
+                if (buf) raw = JSON.parse(buf.toString("utf8")) as EntryPreviewMeta;
+              } else {
+                const url = provider.getPublicUrl(key);
+                const res = await fetch(url);
+                if (res.ok) raw = (await res.json()) as EntryPreviewMeta;
+              }
+              if (!raw) return;
+              const normalized = this.normalizeMeta(
+                raw,
+                parsed.locale || raw.locale || "en",
+                parsed.width || raw.width || DEFAULT_PREVIEW_WIDTH,
+              );
+              if (!normalized) return;
+              byKey.set(
+                this.metaMapKey(parsed.slug, normalized.locale, normalized.width),
+                normalized,
+              );
+            } catch {
+              /* skip */
             }
-            if (!raw) continue;
-            const normalized = this.normalizeMeta(raw, raw.locale || "en", raw.width || DEFAULT_PREVIEW_WIDTH);
-            if (normalized) metas.push(normalized);
-          } catch {
-            /* skip */
-          }
-        }
+          }),
+        );
       } else {
-        const root = path.join(this.contentRoot, "images", "entry-previews", sanitizeSegment(contentType));
+        const root = path.join(
+          this.contentRoot,
+          "images",
+          "entry-previews",
+          sanitizeSegment(contentType),
+        );
         if (fs.existsSync(root)) {
-          this.walkLocalMetas(root, metas);
+          this.walkLocalMetasByKey(root, contentType, "", byKey);
         }
       }
     } catch (err) {
-      log.warn({ err, contentType }, "Failed to list entry preview metas");
+      log.warn({ err, contentType }, "Failed to list entry preview metas by key");
     }
 
-    this.listCache = { at: now, contentType, metas };
-    return metas;
+    this.listCache = { at: now, contentType, byKey };
+    return byKey;
   }
 
-  private walkLocalMetas(dir: string, out: EntryPreviewMeta[]): void {
+  async listMetas(contentType: string): Promise<EntryPreviewMeta[]> {
+    const byKey = await this.listMetasByKey(contentType);
+    return [...byKey.values()];
+  }
+
+  private walkLocalMetasByKey(
+    dir: string,
+    contentType: string,
+    relUnderType: string,
+    out: Map<string, EntryPreviewMeta>,
+  ): void {
     for (const name of fs.readdirSync(dir)) {
       const full = path.join(dir, name);
       const st = fs.statSync(full);
       if (st.isDirectory()) {
-        this.walkLocalMetas(full, out);
+        const nextRel = relUnderType ? `${relUnderType}/${name}` : name;
+        this.walkLocalMetasByKey(full, contentType, nextRel, out);
       } else if (name.endsWith(".meta.json")) {
         try {
+          const storageKey = `entry-previews/${sanitizeSegment(contentType)}/${
+            relUnderType ? `${relUnderType}/` : ""
+          }${name}`;
+          const parsed = this.parseMetaStorageKey(storageKey, contentType);
           const raw = JSON.parse(fs.readFileSync(full, "utf8")) as EntryPreviewMeta;
-          const normalized = this.normalizeMeta(raw, raw.locale || "en", raw.width || DEFAULT_PREVIEW_WIDTH);
-          if (normalized) out.push(normalized);
+          const locale = parsed?.locale || raw.locale || "en";
+          const width = parsed?.width || raw.width || DEFAULT_PREVIEW_WIDTH;
+          const slug = parsed?.slug;
+          if (!slug) continue;
+          const normalized = this.normalizeMeta(raw, locale, width);
+          if (normalized) out.set(this.metaMapKey(slug, normalized.locale, normalized.width), normalized);
         } catch {
           /* skip */
         }
@@ -576,14 +646,16 @@ export class EntryPreviewManager {
   ): Promise<EntryPreviewStats> {
     const { getEntryMetaOgImage, isHandPickedOgImage } = await import("./entry-preview-og-yaml");
     const width = previewConfig?.widths?.[0] ?? DEFAULT_PREVIEW_WIDTH;
-    // Auto lifecycle: always compare props hash when preview is configured.
-    const dirtyOnPropChange = !!previewConfig;
+    // Status board: use batched metas only — do not re-hash props on every stats poll.
     let fromSource = 0;
     let generated = 0;
     let missing = 0;
     let dirty = 0;
     let failed = 0;
     const failures: EntryPreviewFailure[] = [];
+
+    const metaByKey =
+      previewConfig != null ? await this.listMetasByKey(contentType) : new Map<string, EntryPreviewMeta>();
 
     for (const entry of entries) {
       const slug = String(entry.slug ?? "");
@@ -601,7 +673,7 @@ export class EntryPreviewManager {
         continue;
       }
 
-      const meta = await this.getMeta(contentType, slug, locale, width);
+      const meta = metaByKey.get(this.metaMapKey(slug, locale, width)) ?? null;
 
       // Hand-picked social (not cover) counts as fromSource — soft generate skips these.
       if (isHandPickedOgImage(entry, meta?.url || null)) {
@@ -623,24 +695,6 @@ export class EntryPreviewManager {
       if (meta?.dirty) {
         dirty++;
         continue;
-      }
-      if (dirtyOnPropChange) {
-        const propsHash = hashPreviewProps(
-          previewConfig.props,
-          await buildPreviewPropResolveContext({
-            contentType,
-            slug,
-            locale,
-            entry,
-            contentRoot: this.contentRoot,
-            mediaGallery: this.mediaGallery,
-            theme: previewConfig.theme === "light" ? "light" : "dark",
-          }),
-        );
-        if (meta?.propsHash && propsHash !== meta.propsHash) {
-          dirty++;
-          continue;
-        }
       }
       if (meta?.url) {
         generated++;

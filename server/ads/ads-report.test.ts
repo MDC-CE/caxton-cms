@@ -227,7 +227,8 @@ const fixture: {
   ledgerRows,
   collectingSince: Date.parse("2026-08-01T00:00:00.000Z"),
 };
-vi.mock("./paid-detection", () => ({
+vi.mock("./paid-detection", async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
   isGa4Configured: () => true,
   loadPaidLandingState: () => ({ last_success_at: NOW.toISOString(), last_export_date: DAY }),
   loadPaidLandingDays: () => fixture.paidDays,

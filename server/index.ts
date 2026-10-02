@@ -4,7 +4,7 @@ import { registerRoutes, startBackgroundSync } from "./routes/index";
 import { setupVite, serveStatic, log } from "./vite";
 import { registerDevViteForHubRender } from "./render-hub-html";
 import type { ViteDevServer } from "vite";
-import { fallbackRedirectMiddleware } from "./redirects";
+import { fallbackRedirectMiddleware, mergeQueryIntoTarget } from "./redirects";
 import { privateHtmlAuthMiddleware } from "./private-html-auth";
 import { initialDataMiddleware } from "./initial-data-middleware";
 import compression from "compression";
@@ -95,10 +95,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     if (p.startsWith(IPN_MOUNT_PATH)) {
       return next();
     }
-    const url = req.originalUrl;
-    const qIndex = url.indexOf('?');
-    const qs = qIndex >= 0 ? url.slice(qIndex) : '';
-    return res.redirect(301, p.slice(0, -1) + qs);
+    return res.redirect(301, mergeQueryIntoTarget(p.slice(0, -1), req.originalUrl));
   }
   next();
 });
@@ -113,10 +110,7 @@ const _legacyPageRedirects: Record<string, string> = {
 app.use((req: Request, res: Response, next: NextFunction) => {
   const target = _legacyPageRedirects[req.path];
   if (target) {
-    const url = req.originalUrl;
-    const qIndex = url.indexOf("?");
-    const qs = qIndex >= 0 ? url.slice(qIndex) : "";
-    return res.redirect(301, target + qs);
+    return res.redirect(301, mergeQueryIntoTarget(target, req.originalUrl));
   }
   next();
 });

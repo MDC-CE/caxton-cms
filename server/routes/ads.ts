@@ -22,10 +22,13 @@
  *   GET /api/ads/report                   — paid pages / destinations / campaigns;
  *       since / until (≤90 days) and campaign_ids / adset_ids / ad_ids (≤20 each) narrow it
  *   GET /api/content-types/:type/ads-entries — Ads perspective for one content type
- *   GET /api/diagnostics/ads              — Diagnostics Ads; ?platform=meta (default) | google | overview;
- *       ?summary=1 = worst status across platforms (Global tab; platform=meta for Meta only);
- *       Meta: snapshot_id / issue_ids (≤10) / ads_limit / ads_offset page each issue's affected ads;
+ *   GET /api/diagnostics/ads              — Diagnostics Ads (read-only: last Run / Re-check + saved 7/28/90 day windows);
+ *       ?platform=meta (default) | google | overview; ?summary=1 = worst status (Global tab; platform=meta for Meta only);
+ *       Meta: issue_ids (≤10) / ads_limit / ads_offset page each issue's stored ads (top 50; affected_ads lists all);
  *       campaign_ids / adset_ids / ad_ids keep issues touching those ads. Google: issue_ids only.
+ *   POST /api/diagnostics/ads/run         — start a full Run (background; 409 when a Run or Sync is busy)
+ *   POST /api/diagnostics/ads/recheck     — Re-check one issue or resource (instant or ready-to-confirm only)
+ *   POST /api/diagnostics/ads/mark-fixed  — pending verification (MCP must send report); /undo reopens it
  *   GET /api/ads/export, GET /api/ads/leads/export — snapshots for local "Download from production"
  * Dev only (metrics_view): /api/ads/pull-production(/origin), /api/ads/leads/pull-production
  */
@@ -36,7 +39,7 @@ import { api } from "../rate-limit/api";
 import { getDefaultContentFolder, getDefaultContentRoot } from "../site-config";
 import { getAdsSettings, updateAdsSettings } from "../settings";
 import { markFileAsModified } from "../sync-state";
-import { isMcpLoopbackRequest, requireCapability } from "./_helpers";
+import { isMcpLoopbackRequest, requireCapability, resolveIssueActor } from "./_helpers";
 import { child } from "../logger";
 import {
   MAX_EXPECTED_EVENT_PAIRS,
@@ -50,7 +53,6 @@ import {
   normalizeGoogleCustomerId,
   normalizeMetaLeadConversionKey,
 } from "@shared/ads-settings";
-import { resolveAdsDiagnosticsWindows } from "@shared/ads-diagnostics-rules";
 import { parseAttributionModel } from "@shared/paid-attribution";
 import { GOOGLE_URL_SUFFIX_TEMPLATE, type AdPlatform } from "@shared/paid-traffic";
 import {
@@ -80,27 +82,28 @@ import { listMetaDayDates, loadMetaState, META_BACKFILL_DAYS, META_REFRESH_DAYS,
 import { isGa4Configured, loadPaidLandingState } from "../ads/paid-detection";
 import { getAdsRefreshStatus, hasMetaData, requestAdsRefresh } from "../ads/ads-refresh";
 import { isRefreshActive } from "@shared/ads-refresh-status";
-import { AdsPlatformRequiredError, AdsReportRangeError, getAdsReport } from "../ads/ads-report";
-import { adsDiagnosticsSummary, buildAdsDiagnostics, loadTrackingParamsCoverage } from "../ads/ads-diagnostics";
+import { AdsPlatformRequiredError, AdsReportRangeError } from "../ads/ads-report";
+import { assembleAdsReportFromRollups } from "../ads/ads-rollups";
+import { loadTrackingParamsCoverage } from "../ads/ads-diagnostics";
 import { adsOverviewSummary, buildAdsDiagnosticsOverview } from "../ads/ads-diagnostics-overview";
-import { buildGoogleAdsDiagnostics } from "../ads/google-ads-diagnostics";
 import {
   ADS_DETAIL_ADS_LIMIT,
   ADS_LIST_ADS_LIMIT,
   AdsIdFilterError,
   clampAdsLimit,
   clampAdsOffset,
-  currentSnapshotMarkers,
   filterIssuesByIds,
   hasAdIdFilters,
-  loadAdsSnapshot,
-  newerDataAvailable,
   parseAdIdFilters,
   parseIssueIds,
-  saveAdsSnapshot,
   trimIssueAds,
-  type AdsDiagnosticsSnapshot,
-} from "../ads/ads-diagnostics-snapshots";
+} from "../ads/ads-query";
+import { adsIssueCounts, readGoogleDiagnostics, readMetaDiagnostics } from "../ads/diagnostics/read";
+import { adsValidationCache } from "../ads/diagnostics/save";
+import { startAdsForkJob } from "../ads/diagnostics/fork-service";
+import { requestAdsRecheck } from "../ads/diagnostics/recheck";
+import { markAdsIssueFixed, undoAdsIssueFixed } from "../ads/diagnostics/actions";
+import type { AdsCheckPlatform, AdsRecheckScope } from "@shared/ads-issues";
 import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
 import { listLeadConversionOptions } from "../ads/meta-conversion-options";
 import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
@@ -109,24 +112,38 @@ import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 
 const log = child({ module: "routes/ads" });
 
+const ADS_ISSUE_ID = /^ads:(meta|google|shared):[a-z0-9_]{1,60}:(account|campaign|adset|ad|none):[\w.-]{1,80}(:[\w.-]{1,80})?$/;
+
 const trackingFixSchema = z.object({
-  issue_id: z.string().regex(/^missing_tracking_params:\d{1,30}$/),
-  snapshot_id: z.string().max(64).optional(),
+  issue_id: z.string().regex(/^ads:meta:missing_tracking_params:(campaign|adset|ad|account):\d{1,30}$/),
 });
 
 const trackingFixApplySchema = trackingFixSchema.extend({
   ad_ids: z.array(z.string().regex(/^\d{1,30}$/)).min(1).max(TRACKING_FIX_MAX_ADS),
 });
 
-/** The issue from the staff's snapshot, or a fresh build when it expired. */
-async function findTrackingIssue(site: string, contentRoot: string, issueId: string, snapshotId?: string): Promise<AdsIssue | null> {
-  const lookup = snapshotId ? loadAdsSnapshot(site, snapshotId) : null;
-  const issues =
-    lookup?.status === "ok"
-      ? lookup.snapshot.diagnostics.issues
-      : saveAdsSnapshot(site, await buildAdsDiagnostics({ site, contentRoot, days: resolveAdsDiagnosticsWindows(undefined).kpiDays, issuesOnly: true }))
-          .diagnostics.issues;
-  return issues.find((i) => i.id === issueId && i.code === "missing_tracking_params") ?? null;
+const adsIssueActionSchema = z.object({
+  issue_id: z.string().regex(ADS_ISSUE_ID),
+  report: z.string().max(2000).optional(),
+  model: z.string().max(120).optional(),
+});
+
+const adsRecheckSchema = z.union([
+  z.object({ issue_id: z.string().regex(ADS_ISSUE_ID) }),
+  z.object({
+    platform: z.enum(["meta", "google"]),
+    level: z.enum(["account", "campaign", "adset", "ad"]),
+    id: z.string().regex(/^[\w-]{1,40}$/),
+  }),
+]);
+
+const adsRunSchema = z.object({ platforms: z.array(z.enum(["meta", "google"])).min(1).max(2).optional() });
+
+/** The open tracking issue from the last Run / Re-check (evidence keeps up to 50 ads). */
+function findTrackingIssue(site: string, issueId: string): AdsIssue | null {
+  const issue = adsValidationCache(site)?.getIssueById(issueId);
+  if (!issue?.ads || issue.code !== "missing_tracking_params") return null;
+  return { ...issue.ads.evidence, id: issue.id };
 }
 
 function isBadReportQuery(err: unknown): err is Error {
@@ -652,7 +669,7 @@ export function registerAdsRoutes(app: Express): void {
     if (!auth.authorized) return;
     try {
       const q = parseReportQuery(req);
-      const report = await getAdsReport({ site: getSite(res), contentRoot: getContentRoot(res), ...q });
+      const report = await assembleAdsReportFromRollups({ site: getSite(res), contentRoot: getContentRoot(res), ...q });
       res.json(report);
     } catch (err) {
       if (isBadReportQuery(err)) return res.status(400).json(badQueryBody(err));
@@ -666,7 +683,7 @@ export function registerAdsRoutes(app: Express): void {
     if (!auth.authorized) return;
     try {
       const q = parseReportQuery(req);
-      const report = await getAdsReport({
+      const report = await assembleAdsReportFromRollups({
         site: getSite(res),
         contentRoot: getContentRoot(res),
         ...q,
@@ -712,17 +729,27 @@ export function registerAdsRoutes(app: Express): void {
         return res.status(400).json({ error: "platform must be meta, google or overview" });
       }
       if (req.query.summary === "1") {
-        return res.json(req.query.platform === "meta" ? await adsDiagnosticsSummary(site, contentRoot) : await adsOverviewSummary(site, contentRoot));
+        if (req.query.platform === "meta") {
+          const c = adsIssueCounts(site, ["meta", "shared"]);
+          const connected = hasMetaData(site, contentRoot);
+          return res.json({
+            status: !connected ? "not_connected" : c.open_errors > 0 ? "errors" : c.open_warnings > 0 ? "warnings" : "ok",
+            open_errors: c.open_errors,
+            open_warnings: c.open_warnings,
+            never_run: c.run.never_run,
+          });
+        }
+        return res.json(adsOverviewSummary(site, contentRoot));
       }
-      const { kpiDays } = resolveAdsDiagnosticsWindows(req.query.days);
       if (platformParam === "overview") {
-        return res.json(await buildAdsDiagnosticsOverview({ site, contentRoot, days: kpiDays }));
+        return res.json(await buildAdsDiagnosticsOverview({ site, contentRoot, days: req.query.days }));
       }
+      const issueIds = parseIssueIds(req.query.issue_ids);
+      const detail = issueIds.length > 0;
       if (platformParam === "google") {
-        const d = await buildGoogleAdsDiagnostics({ site, contentRoot, days: kpiDays });
-        const ids = parseIssueIds(req.query.issue_ids);
-        if (ids.length === 0) return res.json(d);
-        const wanted = new Set(ids);
+        const d = await readGoogleDiagnostics({ site, contentRoot, days: req.query.days });
+        if (!detail) return res.json(d);
+        const wanted = new Set(issueIds);
         return res.json({
           generated_at: d.generated_at,
           platform: "google",
@@ -731,41 +758,21 @@ export function registerAdsRoutes(app: Express): void {
           refreshing: d.refreshing,
           refresh: d.refresh,
           url_suffix_template: d.url_suffix_template,
+          run: d.run,
           issues: d.issues.filter((i) => wanted.has(i.id)),
-          missing_issue_ids: ids.filter((id) => !d.issues.some((i) => i.id === id)),
+          missing_issue_ids: issueIds.filter((id) => !d.issues.some((i) => i.id === id)),
         });
       }
       const idFilters = parseAdIdFilters(req.query as Record<string, unknown>);
       const filtersEcho = hasAdIdFilters(idFilters)
         ? { filters: { campaign_ids: idFilters.campaign_ids ?? [], adset_ids: idFilters.adset_ids ?? [], ad_ids: idFilters.ad_ids ?? [] } }
         : {};
-      const issueIds = parseIssueIds(req.query.issue_ids);
-      const detail = issueIds.length > 0;
       const adsLimit = clampAdsLimit(req.query.ads_limit, detail ? ADS_DETAIL_ADS_LIMIT : ADS_LIST_ADS_LIMIT);
       const adsOffset = clampAdsOffset(req.query.ads_offset);
-      const requested = typeof req.query.snapshot_id === "string" ? req.query.snapshot_id : null;
-
-      let snap: AdsDiagnosticsSnapshot;
-      let snapshotExpired = false;
-      let newer = false;
-      const lookup = requested ? loadAdsSnapshot(site, requested) : null;
-      if (lookup?.status === "ok") {
-        snap = lookup.snapshot;
-        newer = newerDataAvailable(snap, currentSnapshotMarkers(site));
-      } else {
-        snapshotExpired = lookup?.status === "expired";
-        snap = saveAdsSnapshot(site, await buildAdsDiagnostics({ site, contentRoot, days: kpiDays, issuesOnly: detail }));
-      }
-      const snapshotFields = {
-        snapshot_id: snap.id,
-        snapshot_expires_at: snap.expires_at,
-        ...(snapshotExpired ? { snapshot_expired: true } : {}),
-        ...(newer ? { newer_data_available: true } : {}),
-      };
-      const d = snap.diagnostics;
+      const d = await readMetaDiagnostics({ site, contentRoot, days: req.query.days });
       const issues = filterIssuesByIds(d.issues, idFilters);
       if (!detail) {
-        return res.json({ ...d, issues: trimIssueAds(issues, adsLimit, adsOffset), ...filtersEcho, ...snapshotFields });
+        return res.json({ ...d, issues: trimIssueAds(issues, adsLimit, adsOffset), ...filtersEcho });
       }
       const wanted = new Set(issueIds);
       const found = issues.filter((i) => wanted.has(i.id));
@@ -777,17 +784,69 @@ export function registerAdsRoutes(app: Express): void {
         refreshing: d.refreshing,
         refresh: d.refresh,
         utm_template: d.utm_template,
+        run: d.run,
         issues: trimIssueAds(found, adsLimit, adsOffset),
         missing_issue_ids: issueIds.filter((id) => !found.some((i) => i.id === id) && !filteredOut.includes(id)),
         ...(filteredOut.length > 0 ? { filtered_out_issue_ids: filteredOut } : {}),
         ...filtersEcho,
-        ...snapshotFields,
       });
     } catch (err) {
       if (isBadReportQuery(err)) return res.status(400).json(badQueryBody(err));
       log.warn({ err }, "[ads] diagnostics failed");
-      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build Ads diagnostics" });
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to read Ads diagnostics" });
     }
+  });
+
+  api.post(app, "/api/diagnostics/ads/run", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = adsRunSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    const site = getSite(res);
+    const platforms: AdsCheckPlatform[] = parsed.data.platforms ?? ["meta", "google"];
+    const started = startAdsForkJob({ site, contentRoot: getContentRoot(res), kind: "run", mode: "full", platforms, requestedBy: auth.username ?? null });
+    if (!started.ok) return res.status(409).json({ error: started.message, code: started.code, active_job_id: started.active_job_id ?? null });
+    res.status(202).json({ job_id: started.job.job_id, status: started.job.status, lane: "fork" });
+  });
+
+  api.post(app, "/api/diagnostics/ads/recheck", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = adsRecheckSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    const scope: AdsRecheckScope =
+      "issue_id" in parsed.data
+        ? { type: "issue", issue_id: parsed.data.issue_id }
+        : { type: "resource", platform: parsed.data.platform, level: parsed.data.level, id: parsed.data.id };
+    const out = requestAdsRecheck({ site: getSite(res), contentRoot: getContentRoot(res), scope, requestedBy: auth.username ?? null });
+    if (!out.ok) return res.status(out.status).json({ error: out.message, code: out.code });
+    res.status(202).json({ job_id: out.job_id, lane: out.lane, coalesced: out.coalesced ?? false });
+  });
+
+  api.post(app, "/api/diagnostics/ads/mark-fixed", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = adsIssueActionSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    const out = await markAdsIssueFixed({
+      site: getSite(res),
+      issueId: parsed.data.issue_id,
+      by: auth.username ?? "staff",
+      actor: resolveIssueActor(req, { model: parsed.data.model }),
+      report: parsed.data.report,
+    });
+    if (!out.ok) return res.status(out.status).json({ error: out.message, code: out.code });
+    res.json(out);
+  });
+
+  api.post(app, "/api/diagnostics/ads/undo", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = adsIssueActionSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    const out = await undoAdsIssueFixed({ site: getSite(res), issueId: parsed.data.issue_id });
+    if (!out.ok) return res.status(out.status).json({ error: out.message, code: out.code });
+    res.json(out);
   });
 
   const trackingFixDeps = (site: string, contentRoot: string): TrackingFixDeps => ({
@@ -806,7 +865,7 @@ export function registerAdsRoutes(app: Express): void {
     try {
       const site = getSite(res);
       const contentRoot = getContentRoot(res);
-      const issue = await findTrackingIssue(site, contentRoot, parsed.data.issue_id, parsed.data.snapshot_id);
+      const issue = findTrackingIssue(site, parsed.data.issue_id);
       if (!issue) return res.status(404).json({ error: "This issue is no longer open. Reload the Ads tab." });
       res.json(await previewTrackingFix(issue, trackingFixDeps(site, contentRoot)));
     } catch (err) {
@@ -831,7 +890,7 @@ export function registerAdsRoutes(app: Express): void {
     try {
       const site = getSite(res);
       const contentRoot = getContentRoot(res);
-      const issue = await findTrackingIssue(site, contentRoot, parsed.data.issue_id, parsed.data.snapshot_id);
+      const issue = findTrackingIssue(site, parsed.data.issue_id);
       if (!issue) return res.status(404).json({ error: "This issue is no longer open. Reload the Ads tab." });
       const result = await applyTrackingFix(
         { issue, adIds: parsed.data.ad_ids, actor: auth.username ?? null, site },

@@ -14,6 +14,10 @@ export function isPrivateEmbedPath(pathname: string): boolean {
   if (/^\/private\/demo\/[a-f0-9]{32}\/?$/.test(path)) {
     return true;
   }
+  // Data API enforces staff session / capture token / demo hash.
+  if (path === "/private/page-preview" || path === "/private/page-preview/") {
+    return true;
+  }
   return /^\/private\/component-showcase\/[^/]+\/preview\/?$/.test(path);
 }
 

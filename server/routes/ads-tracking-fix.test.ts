@@ -12,6 +12,7 @@ vi.mock("../rate-limit/api", () => {
 
 vi.mock("./_helpers", () => ({
   isMcpLoopbackRequest: () => state.loopback,
+  resolveIssueActor: () => (state.loopback ? { type: "mcp", client: "test" } : { type: "ui" }),
   requireCapability: async (_req: Request, res: Response, cap: string) => {
     if (state.grants.has(cap)) return { authorized: true, token: "t", username: "staff@4geeks.com", author: "staff@4geeks.com" };
     res.status(403).json({ error: `Insufficient permissions: ${cap} required` });
@@ -69,7 +70,7 @@ beforeEach(() => {
 });
 
 describe("tracking-fix routes", () => {
-  const body = { issue_id: "missing_tracking_params:123", ad_ids: ["1"] };
+  const body = { issue_id: "ads:meta:missing_tracking_params:campaign:123", ad_ids: ["1"] };
 
   it("require ads_edit", async () => {
     state.grants = new Set(["ads_settings", "metrics_view"]);
@@ -87,7 +88,7 @@ describe("tracking-fix routes", () => {
 
   it("reject non-tracking issue ids and too many ads", async () => {
     state.grants = new Set(["ads_edit"]);
-    expect((await call("POST /api/ads/meta/tracking-fix/preview", { issue_id: "landing_http_error:x" })).statusCode).toBe(400);
+    expect((await call("POST /api/ads/meta/tracking-fix/preview", { issue_id: "ads:meta:landing_not_live:none:none" })).statusCode).toBe(400);
     const many = Array.from({ length: 51 }, (_, i) => String(i + 1));
     expect((await call("POST /api/ads/meta/tracking-fix/apply", { ...body, ad_ids: many })).statusCode).toBe(400);
   });
@@ -96,6 +97,29 @@ describe("tracking-fix routes", () => {
     state.grants = new Set(["ads_edit"]);
     state.tokenConfigured = false;
     expect((await call("POST /api/ads/meta/tracking-fix/apply", body)).statusCode).toBe(409);
+  });
+});
+
+describe("Ads diagnostics action routes", () => {
+  it("need metrics_view", async () => {
+    for (const key of ["run", "recheck", "mark-fixed", "undo"]) {
+      expect((await call(`POST /api/diagnostics/ads/${key}`, { issue_id: "ads:meta:missing_tracking_params:campaign:1" })).statusCode).toBe(403);
+    }
+  });
+
+  it("reject malformed issue ids and scopes", async () => {
+    state.grants = new Set(["metrics_view"]);
+    expect((await call("POST /api/diagnostics/ads/mark-fixed", { issue_id: "missing_tracking_params:1" })).statusCode).toBe(400);
+    expect((await call("POST /api/diagnostics/ads/undo", {})).statusCode).toBe(400);
+    expect((await call("POST /api/diagnostics/ads/recheck", { platform: "tiktok", level: "ad", id: "1" })).statusCode).toBe(400);
+    expect((await call("POST /api/diagnostics/ads/run", { platforms: ["bing"] })).statusCode).toBe(400);
+  });
+
+  it("404 when the issue is not in the saved results", async () => {
+    state.grants = new Set(["metrics_view"]);
+    const res = await call("POST /api/diagnostics/ads/mark-fixed", { issue_id: "ads:meta:missing_tracking_params:campaign:1" });
+    expect(res.statusCode).toBe(404);
+    expect((res.body as { code: string }).code).toBe("ads_issue_not_found");
   });
 });
 

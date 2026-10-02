@@ -6,7 +6,7 @@ vi.mock("../lib/content.js", () => ({ resolveSiteContext: () => ({ ok: true, dom
 vi.mock("../lib/oauth.js", () => ({ getTokenUsername: () => "staff@4geeks.com" }));
 vi.mock("../lib/auth.js", () => ({ denyUnlessMetricsView: async () => null, checkCap: async () => false }));
 
-const { registerPaidTrafficTools, accountSyncWarnings, overviewNextActions } = await import("./paid-traffic");
+const { registerPaidTrafficTools, accountSyncWarnings, overviewNextActions, adsRunWarnings, adsIssueNextActions } = await import("./paid-traffic");
 
 describe("accountSyncWarnings", () => {
   it("flags unreadable accounts and accounts still waiting on their first load", () => {
@@ -46,11 +46,16 @@ function parse(res: Awaited<ReturnType<Handler>>) {
 }
 
 const ISSUE = {
-  id: "missing_tracking_params:c1",
+  id: "ads:meta:missing_tracking_params:campaign:c1",
   code: "missing_tracking_params",
   severity: "warning",
+  affected_ads: Array.from({ length: 30 }, (_, i) => `a${i + 1}`),
+  affected_ads_total: 30,
+  verify: { action: "recheck", state: "open", verify: { kind: "instant" } },
   details: { ads: [{ ad_id: "a1" }, { ad_id: "a2" }, { ad_id: "a3" }], ads_total: 8, ads_offset: 0, unchecked: [{ reason: "setup_fetch_failed", ads: 2 }] },
 };
+
+const RUN = { never_run: false, last_run: { finished_at: "2026-09-29T10:00:00.000Z", skipped: [] }, active: [], last_failed: null, busy: null };
 
 const calls: Array<{ url: string; method: string }> = [];
 let reportWarnings: Array<{ code: string; message: string }> = [];
@@ -111,7 +116,7 @@ beforeEach(() => {
       }
       const detail = url.includes("issue_ids");
       const body = detail
-        ? { issue_window_days: 28, issues: [ISSUE], missing_issue_ids: ["gone:1"], snapshot_id: "ads_0123456789abcdef", refresh: { state: "idle" } }
+        ? { issue_window_days: 28, issues: [ISSUE], missing_issue_ids: ["gone:1"], refresh: { state: "idle" }, run: RUN }
         : {
             window_days: 28,
             issue_window_days: 28,
@@ -119,8 +124,8 @@ beforeEach(() => {
             kpis: {},
             issues: [ISSUE],
             warnings: [],
-            snapshot_id: "ads_0123456789abcdef",
             refresh: { state: "idle" },
+            run: RUN,
           };
       return new Response(JSON.stringify(body), { status: 200 });
     }),
@@ -157,26 +162,30 @@ describe("get_paid_traffic diagnostics details", () => {
     expect(decodeURIComponent(calls.find((c) => c.url.includes("/api/diagnostics/ads"))!.url)).toContain("platform=meta");
     expect(codes).toContain("tracking_unchecked_setup_fetch_failed");
     expect(codes).toContain("ads_truncated");
-    expect(out.snapshot_id).toBe("ads_0123456789abcdef");
+    expect(codes).toContain("ads_diagnostics_model");
+    expect((out.issues[0] as unknown as { affected_ads: string[] }).affected_ads).toHaveLength(20);
+    const next = (out as unknown as { next_actions: Array<{ tool: string; args_hint?: Record<string, unknown> }> }).next_actions;
+    expect(next).toContainEqual(expect.objectContaining({ tool: "update_ads_issue", args_hint: { action: "recheck", issue_id: ISSUE.id } }));
+    expect(out.side_effects).toEqual([]);
   });
 
   it("detail mode: sends issue_ids, reports missing ids and the next ads_offset", async () => {
     const out = parse(
       await register([{ name: "metrics_view" } as CatalogGrant])({
         mode: "diagnostics",
-        snapshot_id: "ads_0123456789abcdef",
-        issue_ids: ["missing_tracking_params:c1", "gone:1"],
+        issue_ids: [ISSUE.id, "gone:1"],
       }),
     );
     const diag = calls.find((c) => c.url.includes("/api/diagnostics/ads"))!;
-    expect(decodeURIComponent(diag.url)).toContain("issue_ids[]=missing_tracking_params:c1");
-    expect(decodeURIComponent(diag.url)).toContain("snapshot_id=ads_0123456789abcdef");
+    expect(decodeURIComponent(diag.url)).toContain(`issue_ids[]=${ISSUE.id}`);
+    expect(decodeURIComponent(diag.url)).not.toContain("snapshot_id");
     const notFound = out.warnings.find((w) => w.code === "issue_not_found");
     expect(notFound?.message).toContain("gone:1");
     expect(out.warnings.map((w) => w.code)).toContain("diagnostics_platform_defaulted");
     const truncated = out.warnings.find((w) => w.code === "ads_truncated");
     expect(truncated?.message).toContain("ads_offset 3");
-    expect(out.side_effects.map((s) => s.kind)).not.toContain("landing_probe");
+    expect((out.issues[0] as unknown as { affected_ads: string[] }).affected_ads).toHaveLength(30);
+    expect(out.side_effects).toEqual([]);
   });
 });
 
@@ -240,13 +249,13 @@ describe("get_paid_traffic diagnostics platforms", () => {
     expect(out.side_effects).toEqual([]);
   });
 
-  it("google: forwards status warnings, records issue state, flags ignored Meta-only args", async () => {
-    const out = parse(await register(metricsOnly)({ mode: "diagnostics", platform: "google", snapshot_id: "ads_x" }));
+  it("google: forwards status warnings, writes nothing, flags ignored Meta-only args", async () => {
+    const out = parse(await register(metricsOnly)({ mode: "diagnostics", platform: "google", ads_limit: 5 }));
     const codes = out.warnings.map((w) => w.code);
     expect(codes).toContain("google_data_through");
     expect(codes).not.toContain("other");
     expect(codes).toContain("google_diagnostics_args_ignored");
-    expect(out.side_effects.map((s) => s.kind)).toContain("issue_state_recorded");
+    expect(out.side_effects).toEqual([]);
     expect(out.issues.map((i) => i.id)).toEqual(["google_transfer_stale"]);
   });
 
@@ -264,5 +273,43 @@ describe("get_paid_traffic diagnostics platforms", () => {
         google: { connected: true, open_errors: 0, open_warnings: 0 },
       }),
     ).toEqual([]);
+  });
+});
+
+describe("Ads run state for agents", () => {
+  it("never run → warning + a single run next action", () => {
+    const run = { never_run: true, last_run: null, active: [], last_failed: null, busy: null };
+    expect(adsRunWarnings(run).map((w) => w.code)).toEqual(["ads_never_run"]);
+    expect(adsIssueNextActions([{ id: "x", verify: { action: "recheck" } }], run)).toEqual([
+      expect.objectContaining({ tool: "update_ads_issue", args_hint: { action: "run" } }),
+    ]);
+  });
+
+  it("flags running Runs, failures and skipped platforms (not fixed, not re-evaluated)", () => {
+    const codes = adsRunWarnings({
+      never_run: false,
+      last_run: { finished_at: "2026-09-29", skipped: [{ platform: "google", reason: "not connected" }] },
+      active: [{ job_id: "j", kind: "run", lane: "fork", status: "running" }],
+      last_failed: { kind: "recheck", error: "Meta timeout." },
+      busy: { code: "ads_sync_active", message: "Ads Sync is running." },
+    });
+    expect(codes.map((w) => w.code)).toEqual(["ads_run_in_progress", "ads_last_job_failed", "ads_platform_not_checked", "ads_sync_active"]);
+    expect(codes[2]!.message).toContain("not fixed, not re-evaluated");
+  });
+
+  it("maps verify.action to recheck / mark_fixed (with report hint) and skips waiting issues", () => {
+    const next = adsIssueNextActions(
+      [
+        { id: "a", verify: { action: "recheck_ready" } },
+        { id: "b", verify: { action: "mark_fixed", verify: { kind: "fresh_days" } } },
+        { id: "c", verify: { action: "wait" } },
+      ],
+      { never_run: false },
+    );
+    expect(next.map((n) => [n.args_hint?.action, n.args_hint?.issue_id, n.priority])).toEqual([
+      ["recheck", "a", "recommended"],
+      ["mark_fixed", "b", "optional"],
+    ]);
+    expect(next[1]!.args_hint).toHaveProperty("report");
   });
 });

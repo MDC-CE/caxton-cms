@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, Loader2, Megaphone, Route } from "lucide-react";
+import { ChevronDown, Info, Loader2, Megaphone, Route } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -14,6 +14,8 @@ import { formatGoogleCustomerId } from "@shared/ads-settings";
 import { NO_URL_DESTINATION_KINDS, type AdsCampaignGroup, type AdsMetaStatus, type AdsPageRow, type AdsReport } from "./ads-types";
 import { formatMoney, formatNum, formatWhen, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 import { PaidPageRow, type PaidPerspective } from "./PaidPageRow";
+import { AttributedOnlyDialog } from "./AttributedOnlyDialog";
+import { UnknownDestinationDialog } from "./UnknownDestinationDialog";
 
 const PERSPECTIVES: { id: PaidPerspective; label: string }[] = [
   { id: "traffic", label: "Traffic" },
@@ -267,6 +269,7 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
               {data.meta.connected || !data.google?.connected ? `Meta synced ${formatWhen(data.meta.last_synced_at)} · ` : ""}
               {data.google?.connected ? `Google data through ${data.google.data_through ?? "—"} · ` : ""}
               GA4 through {data.ga4.last_export_date ?? "—"}
+              {data.ga4.old_rule_days ? ` · ${data.ga4.old_rule_days} days still use the older paid-visit rule; next sync finishes them` : ""}
               {isRefreshActive(data.refresh) ? " · refreshing…" : ""}
               {data.refresh?.state === "failed" || data.refresh?.state === "worker_down" ? " · last refresh didn't run" : ""}
             </p>
@@ -323,6 +326,7 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
                   </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <AttributedOnlyLine report={data} />
                   <p>
                     Credit: each lead goes to one page — the {model === "first_paid" ? "first" : "most recent"} paid visit within 30 days before the
                     lead. No splitting; the form page never gets credit.
@@ -365,6 +369,53 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
   );
 }
 
+function DestinationRowContent({ row: r, explainable }: { row: AdsPageRow; explainable: boolean }) {
+  const metaLeads = r.meta_leads + r.instant_form_leads;
+  return (
+    <>
+      <div className="min-w-0">
+        <p className="flex items-center gap-1.5 truncate text-sm text-foreground">
+          {NO_URL_DESTINATION_KINDS.has(r.kind) ? r.title : r.url}
+          {explainable && <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label="Why?" />}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {r.kind_label}
+          {r.platforms.length > 0 ? ` · ${r.platforms.map((p) => PLATFORM_LABELS[p] ?? p).join(", ")}` : ""}
+        </p>
+      </div>
+      <div className="flex gap-5 text-sm tabular-nums">
+        <span>{formatMoney(r.spend)}</span>
+        <span className="text-muted-foreground">{formatNum(r.paid_visits)} visits</span>
+        {r.platforms.includes("meta") || metaLeads > 0 ? <span className="text-muted-foreground">{formatNum(metaLeads)} Meta leads</span> : null}
+        {r.platforms.includes("google") || r.google_leads ? (
+          <span className="text-muted-foreground">{formatNum(r.google_leads ?? 0)} Google leads</span>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+function AttributedOnlyLine({ report }: { report: AdsReport }) {
+  const attributed = report.totals.attributed_only_visits;
+  if (attributed === undefined || (attributed && attributed.total === 0)) return null;
+  const link = (
+    <AttributedOnlyDialog data={attributed}>
+      <button type="button" className="font-medium text-foreground underline underline-offset-2" data-testid="button-attributed-only">
+        What does this mean?
+      </button>
+    </AttributedOnlyDialog>
+  );
+  return (
+    <p data-testid="text-attributed-only">
+      Paid visits need ad tags or click IDs on the landing URL.{" "}
+      {attributed
+        ? `${formatNum(attributed.total)} visits GA4 credits to ads were not counted. `
+        : "GA4's export doesn't include the field needed to measure how many visits this leaves out. "}
+      {link}
+    </p>
+  );
+}
+
 export function OtherDestinationsCard({ rows, spendTotal }: { rows: AdsPageRow[]; spendTotal: Record<string, number> }) {
   return (
     <Card data-testid="card-other-destinations">
@@ -383,22 +434,25 @@ export function OtherDestinationsCard({ rows, spendTotal }: { rows: AdsPageRow[]
             All paid traffic landed on managed pages.
           </p>
         ) : (
-          rows.map((r) => (
-            <div key={r.key} className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5 last:border-b-0" data-testid={`other-destination-${r.key}`}>
-              <div className="min-w-0">
-                <p className="truncate text-sm text-foreground">{NO_URL_DESTINATION_KINDS.has(r.kind) ? r.title : r.url}</p>
-                <p className="text-xs text-muted-foreground">{r.kind_label}</p>
+          rows.map((r) => {
+            const rowClass = "flex w-full items-center justify-between gap-3 border-b border-border px-3 py-2.5 text-left last:border-b-0";
+            const content = <DestinationRowContent row={r} explainable={r.kind === "unknown_destination"} />;
+            return r.kind === "unknown_destination" ? (
+              <UnknownDestinationDialog key={r.key} row={r}>
+                <button
+                  type="button"
+                  className={`${rowClass} hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring`}
+                  data-testid={`other-destination-${r.key}`}
+                >
+                  {content}
+                </button>
+              </UnknownDestinationDialog>
+            ) : (
+              <div key={r.key} className={rowClass} data-testid={`other-destination-${r.key}`}>
+                {content}
               </div>
-              <div className="flex gap-5 text-sm tabular-nums">
-                <span>{formatMoney(r.spend)}</span>
-                <span className="text-muted-foreground">{formatNum(r.paid_visits)} visits</span>
-                {r.meta_leads + r.instant_form_leads > 0 || !r.google_leads ? (
-                  <span className="text-muted-foreground">{formatNum(r.meta_leads + r.instant_form_leads)} Meta leads</span>
-                ) : null}
-                {r.google_leads ? <span className="text-muted-foreground">{formatNum(r.google_leads)} Google leads</span> : null}
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </CardContent>
     </Card>

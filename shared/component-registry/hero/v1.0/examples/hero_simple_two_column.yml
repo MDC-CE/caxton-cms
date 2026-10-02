@@ -13,7 +13,7 @@ yaml: |
       - text: Join our partnership network
         url: "#apply-modal"
         variant: primary
-    background: linear-gradient(to bottom, hsl(210 100% 50% / 0.05), transparent)
+    background: light-blue-5-gradient
     marginY:
       desktop: none lg
     paddingY:

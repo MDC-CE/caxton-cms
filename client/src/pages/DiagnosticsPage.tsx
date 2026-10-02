@@ -1620,6 +1620,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
     { key: "integrity", label: "Integrity" },
     { key: "content", label: "Content" },
     { key: "components", label: "Components" },
+    { key: "design", label: "Design" },
     { key: "forms", label: "Forms" },
     { key: "bindings", label: "Bindings" },
     { key: "performance", label: "Performance" },

@@ -13,6 +13,7 @@ export const GLOBAL_HEALTH_SCOPE_KEYS = [
   "integrity",
   "content",
   "components",
+  "design",
   "forms",
   "bindings",
   "performance",

@@ -2,6 +2,9 @@ import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import type { AttributionModel } from "@shared/paid-attribution";
 import type { AdPlatform, GoogleNetworkRow, MetaPlacementRow } from "@shared/paid-traffic";
 import type { AdsRefreshStatus } from "@shared/ads-refresh-status";
+import type { AdsIssueRow, AdsResolvedRow, AdsRunInfo } from "@shared/ads-issues";
+
+export type { AdsIssueRow, AdsResolvedRow, AdsRunInfo };
 
 export type MoneyByCurrency = Record<string, number>;
 
@@ -142,7 +145,18 @@ export type AdsMetaStatus = {
   accounts: Array<{ id: string; name?: string; currency?: string; history_loaded?: boolean; sync_error?: string }>;
 };
 
-export type AdsGa4Status = { configured: boolean; last_synced_at: string | null; last_export_date: string | null; last_error: string | null };
+export type AdsGa4Status = {
+  configured: boolean;
+  last_synced_at: string | null;
+  last_export_date: string | null;
+  last_error: string | null;
+  /** GA4 days in the window still read with the older paid-visit rule. */
+  old_rule_days?: number;
+  attributed_only_unavailable_reason?: string | null;
+};
+
+/** Sessions GA4 credits to ads that had no ad evidence on the landing URL (not counted as paid). */
+export type AdsAttributedOnlyVisits = { total: number; by_host: Array<{ host: string; sessions: number }> };
 
 export type AdsReport = {
   window: { start: string; end: string; days: number };
@@ -179,6 +193,8 @@ export type AdsReport = {
     submissions: number;
     repeat_submissions: number;
     test_submissions: number;
+    /** Undefined on reports saved before this field existed; null = can't measure. */
+    attributed_only_visits?: AdsAttributedOnlyVisits | null;
   };
   meta_split_days?: { covered: number; total: number };
   pages: AdsPageRow[];
@@ -272,15 +288,12 @@ export type AdsDiagnostics = {
   missing_floor_currencies: string[];
   /** Missing on snapshots built before the placement split shipped. */
   meta_platforms?: AdsMetaPlatforms | null;
-  issues: AdsIssue[];
-  resolved: Array<{ id: string; title: string; severity: AdsIssue["severity"]; resolved_at: string }>;
+  /** From the last Run / Re-check (saved), not built on this read. */
+  issues: AdsIssueRow[];
+  resolved: AdsResolvedRow[];
   utm_template: string;
   warnings: AdsWarning[];
-  /** Issues read with this id keep the same ads list for 30 minutes. */
-  snapshot_id: string;
-  snapshot_expires_at: string;
-  snapshot_expired?: boolean;
-  newer_data_available?: boolean;
+  run: AdsRunInfo;
 };
 
 export type AdsDiagnosticsStatus = AdsDiagnostics["status"];
@@ -312,10 +325,11 @@ export type GoogleAdsDiagnostics = {
   };
   networks: AdsGoogleNetworks | null;
   matching: { ga4_link_available: boolean | null; gclid_join_tables: number; gclid_join_error: string | null };
-  issues: AdsIssue[];
-  resolved: AdsDiagnostics["resolved"];
+  issues: AdsIssueRow[];
+  resolved: AdsResolvedRow[];
   url_suffix_template: string;
   warnings: AdsWarning[];
+  run: AdsRunInfo;
 };
 
 export type AdsPlatformCard = {
@@ -340,18 +354,16 @@ export type AdsDiagnosticsOverview = {
   open_errors: number;
   open_warnings: number;
   platforms: { meta: AdsPlatformCard; google: AdsPlatformCard };
-  shared_issues: AdsIssue[];
+  shared_issues: AdsIssueRow[];
   totals: { spend: MoneyByCurrency; site_leads: number; paid_visits: number };
+  run: AdsRunInfo;
 };
 
 /** GET /api/diagnostics/ads?issue_ids=… — full ads lists for a few issues. */
 export type AdsIssueDetailResponse = {
   generated_at: string;
   issue_window_days: number;
-  issues: AdsIssue[];
+  issues: AdsIssueRow[];
   missing_issue_ids: string[];
-  snapshot_id: string;
-  snapshot_expires_at: string;
-  snapshot_expired?: boolean;
-  newer_data_available?: boolean;
+  run: AdsRunInfo;
 };

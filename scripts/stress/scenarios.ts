@@ -371,13 +371,26 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "get_component_usage",
     tool: "get_component_usage",
-    about: "Where a component appears, scoped to the primary contentType.",
+    about: "Where a component appears, scoped to the primary contentType (+ suggest_next and weighted variant_pairings).",
     buildArgs: (ctx) =>
       withSite(ctx, {
         componentType: ctx.componentName!,
         contentType: ctx.contentType,
       }),
     skipIf: needComponent,
+  },
+  {
+    id: "get_page_recipe_landing",
+    tool: "get_page_recipe",
+    about: "Page recipe for a new landing (decision stage): weighted skeleton slots, variant pairings and learned rules. Called at the start of every page design.",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "landing", stage: "decision", locale: ctx.locale }),
+    phase: "both",
+  },
+  {
+    id: "get_page_recipe_fields_blog",
+    tool: "get_page_recipe",
+    about: "Fields-mode recipe for a new blog post attached to the shared template (template sections + bound entry fields).",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "blog", locale: ctx.locale }),
   },
 
   {
@@ -538,15 +551,16 @@ export const SCENARIOS: Scenario[] = [
     id: "get_paid_traffic_diagnostics_90d",
     tool: "get_paid_traffic",
     about:
-      "Cross-platform ads overview (diagnostics without platform) with a 90-day KPI window: builds Meta diagnostics (no landing probes) and Google diagnostics in parallel plus an all-platform report, then returns platform cards + shared issues. Writes nothing. Soft N.C. when not set up.",
+      "Cross-platform ads overview (diagnostics without platform), 90-day KPIs: serves three saved report windows (meta / google / all) + the saved issue rows from the validation cache, then returns platform cards + shared issues + run state. Read-only (no checks, no probes). Soft N.C. when not set up.",
     buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", days: 90, limit: 50 }),
   },
   {
     id: "get_paid_traffic_diagnostics_meta_90d",
     tool: "get_paid_traffic",
     about:
-      "Meta ads diagnostics with a 90-day KPI window and 50 issues per page: two reports (fixed 28-day issue window + 90-day KPIs), per-issue ad index (top 3 ads each), up to 10 landing probes (cached 6h) and a saved snapshot. Soft N.C. when Meta is not set up.",
+      "Meta ads diagnostics, 90-day KPIs and 50 issues per page: the saved 90-day report window + saved issue rows (verify view per issue reads daily rollups for pending ones), top 3 ads and ≤20 affected ad ids per issue, job records for run state. Read-only — the most common agent loop read, so also in burst. Soft N.C. when Meta is not set up.",
     buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "meta", days: 90, limit: 50 }),
+    phase: "both",
   },
   {
     id: "get_paid_traffic_summary_google",
@@ -559,7 +573,7 @@ export const SCENARIOS: Scenario[] = [
     id: "get_paid_traffic_diagnostics_google",
     tool: "get_paid_traffic",
     about:
-      "Google Ads diagnostics (28-day issues): Google-only report + transfer health, matching and network checks; records Issues/Resolved in ads-issues-google.json. No landing probes. Returns not_connected quickly when Google isn't set up.",
+      "Google Ads diagnostics (28-day KPIs): saved Google report window + transfer / matching / network blocks + saved Google issue rows and run state. Read-only. Returns not_connected quickly when Google isn't set up.",
     buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "google" }),
   },
   {

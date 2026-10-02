@@ -9,6 +9,7 @@ import { EditModeWrapper } from "@/components/editing/EditModeWrapper";
 import { DebugAuthProvider, useDebugAuth } from "@/hooks/useDebugAuth";
 import { ImagePickerProvider } from "@/contexts/ImagePickerContext";
 import { usePageTracking } from "@/hooks/usePageTracking";
+import { ThemeBackgroundVars } from "@/components/ThemeBackgroundVars";
 import type { ContentTypeApiItem } from "@/hooks/useContentTypes";
 import {
   buildContentTypeRoutes,
@@ -298,6 +299,7 @@ function App({ ssrQueryClient }: AppProps = {}) {
             <EcommerceBootstrap />
             <Router />
             <ClientOnly>
+              <ThemeBackgroundVars />
               <Toaster />
               {import.meta.env.DEV ? (
                 <Suspense fallback={null}>

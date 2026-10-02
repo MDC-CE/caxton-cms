@@ -1,253 +1,110 @@
 /**
  * Backgrounds Validator
- * 
- * Validates that all background values in YAML content files
- * are defined in the theme.json configuration.
- * 
- * Can be used:
- * - Preventively: Called from UI when saving to block invalid colors
- * - Reactively: Called via CLI to scan all content files
+ *
+ * Section wrapper backgrounds (`sections[i].background`) must be theme
+ * palette IDs from the site's theme.json. CSS strings that equal a palette
+ * value warn with the ID to use; anything else is off-theme. Warning only:
+ * staff may keep overrides; agent writes/publishes are gated separately.
  */
 
 import * as fs from "fs";
-import * as path from "path";
 import * as yaml from "js-yaml";
 import type { Validator, ValidationContext, ValidatorResult, ValidationIssue } from "../shared/types";
-import { getAllDirectories } from "../../../server/content-types";
+import { classifyThemeValue, paletteIds } from "../../../shared/theme-palette";
+import { escapeTemplateVars, unescapeObjectVars } from "../../../shared/templateVars";
+import { loadSiteTheme, siteThemePath } from "../../../server/theme-config";
+import { getDefaultContentRoot } from "../../../server/site-config";
 import { BACKGROUNDS_ISSUE_CODES } from "./backgrounds.issueCodes";
-
-const THEME_PATH = path.join(process.cwd(), "4geeks-com", "theme.json");
-const CONTENT_DIRS = getAllDirectories().map(dir => `4geeks-com/${dir}`);
-
-interface ThemeColor {
-  id: string;
-  label: string;
-  cssVar?: string;
-  value?: string;
-}
-
-interface ThemeConfig {
-  backgrounds: ThemeColor[];
-  accents?: ThemeColor[];
-  text?: ThemeColor[];
-}
-
-interface SectionWithBackground {
-  type?: string;
-  background?: string;
-  [key: string]: unknown;
-}
-
-function loadTheme(): ThemeConfig | null {
-  try {
-    if (!fs.existsSync(THEME_PATH)) {
-      return null;
-    }
-    const content = fs.readFileSync(THEME_PATH, "utf-8");
-    return JSON.parse(content) as ThemeConfig;
-  } catch {
-    return null;
-  }
-}
-
-function buildAllowedValues(theme: ThemeConfig): Set<string> {
-  const allowed = new Set<string>();
-  
-  allowed.add("");
-  
-  for (const bg of theme.backgrounds) {
-    allowed.add(bg.id);
-    
-    if (bg.cssVar) {
-      allowed.add(`hsl(var(${bg.cssVar}))`);
-    }
-    if (bg.value) {
-      allowed.add(bg.value);
-    }
-  }
-  
-  return allowed;
-}
-
-function extractBackgrounds(obj: unknown, results: { value: string; path: string }[], currentPath: string = ""): void {
-  if (!obj || typeof obj !== "object") return;
-  
-  if (Array.isArray(obj)) {
-    obj.forEach((item, index) => {
-      extractBackgrounds(item, results, `${currentPath}[${index}]`);
-    });
-    return;
-  }
-  
-  const record = obj as Record<string, unknown>;
-  
-  if ("background" in record && typeof record.background === "string" && record.background) {
-    results.push({
-      value: record.background,
-      path: currentPath ? `${currentPath}.background` : "background",
-    });
-  }
-  
-  for (const [key, value] of Object.entries(record)) {
-    if (key !== "background" && typeof value === "object" && value !== null) {
-      extractBackgrounds(value, results, currentPath ? `${currentPath}.${key}` : key);
-    }
-  }
-}
-
-function scanYamlFile(filePath: string): SectionWithBackground[] {
-  try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    const parsed = yaml.load(content) as Record<string, unknown>;
-    
-    const backgrounds: { value: string; path: string }[] = [];
-    extractBackgrounds(parsed, backgrounds);
-    
-    return backgrounds.map(b => ({
-      type: "extracted",
-      background: b.value,
-      _path: b.path,
-    }));
-  } catch {
-    return [];
-  }
-}
-
-function scanAllContentFiles(): { file: string; backgrounds: { value: string; path: string }[] }[] {
-  const results: { file: string; backgrounds: { value: string; path: string }[] }[] = [];
-  
-  for (const dir of CONTENT_DIRS) {
-    const fullDir = path.join(process.cwd(), dir);
-    if (!fs.existsSync(fullDir)) continue;
-    
-    const walkDir = (currentDir: string) => {
-      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        const fullPath = path.join(currentDir, entry.name);
-        
-        if (entry.isDirectory()) {
-          walkDir(fullPath);
-        } else if (entry.name.endsWith(".yml") || entry.name.endsWith(".yaml")) {
-          try {
-            const content = fs.readFileSync(fullPath, "utf-8");
-            const parsed = yaml.load(content);
-            const backgrounds: { value: string; path: string }[] = [];
-            extractBackgrounds(parsed, backgrounds);
-            
-            if (backgrounds.length > 0) {
-              results.push({
-                file: fullPath,
-                backgrounds,
-              });
-            }
-          } catch {
-          }
-        }
-      }
-    };
-    
-    walkDir(fullDir);
-  }
-  
-  return results;
-}
-
-export function validateBackground(value: string, theme: ThemeConfig): { valid: boolean; suggestion?: string } {
-  if (!value || value === "") {
-    return { valid: true };
-  }
-  
-  const allowed = buildAllowedValues(theme);
-  
-  if (allowed.has(value)) {
-    return { valid: true };
-  }
-  
-  const cssValues = theme.backgrounds
-    .filter(bg => bg.cssVar)
-    .map(bg => `hsl(var(${bg.cssVar}))`);
-  
-  return {
-    valid: false,
-    suggestion: `Allowed values: ${cssValues.join(", ")}`,
-  };
-}
 
 export const backgroundsValidator: Validator = {
   name: "backgrounds",
   issueCodes: BACKGROUNDS_ISSUE_CODES,
-  description: "Validates background colors against theme.json definitions",
+  description: "Section backgrounds must be theme palette IDs from the site's theme.json",
   apiExposed: true,
   estimatedDuration: "fast",
-  category: "content",
+  category: "design",
 
-  async run(_context: ValidationContext): Promise<ValidatorResult> {
+  async run(context: ValidationContext): Promise<ValidatorResult> {
     const startTime = Date.now();
-    const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
+    const contentRoot = context.contentRoot ?? getDefaultContentRoot();
+    const theme = loadSiteTheme(contentRoot);
 
-    const theme = loadTheme();
-    
     if (!theme) {
       warnings.push({
         type: "warning",
         code: "NO_THEME_CONFIG",
-        message: "Theme configuration not found at 4geeks-com/theme.json",
-        suggestion: "Create a theme.json file to define allowed background colors",
+        message: `Theme configuration not found at ${siteThemePath(contentRoot)}`,
+        suggestion: "Create theme.json (Theme editor) to define allowed background colors",
       });
-      
       return {
         name: this.name,
         description: this.description,
         status: "warning",
-        errors,
+        errors: [],
         warnings,
         duration: Date.now() - startTime,
       };
     }
 
-    const allowed = buildAllowedValues(theme);
-    const filesWithBackgrounds = scanAllContentFiles();
-    
+    const entries = theme.backgrounds ?? [];
+    const allowed = paletteIds(entries);
+    const allowedHint = allowed.slice(0, 8).join(", ");
     let totalBackgrounds = 0;
-    let invalidBackgrounds = 0;
+    let legacy = 0;
+    let offTheme = 0;
 
-    for (const { file, backgrounds } of filesWithBackgrounds) {
-      for (const bg of backgrounds) {
+    for (const file of context.contentFiles) {
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        if (!fs.existsSync(file.filePath)) continue;
+        const { escaped, map } = escapeTemplateVars(fs.readFileSync(file.filePath, "utf-8"));
+        parsed = unescapeObjectVars(yaml.load(escaped), map) as Record<string, unknown> | null;
+      } catch {
+        continue;
+      }
+      if (!parsed || !Array.isArray(parsed.sections)) continue;
+
+      parsed.sections.forEach((section, i) => {
+        if (!section || typeof section !== "object") return;
+        const bg = (section as Record<string, unknown>).background;
+        const cls = classifyThemeValue(bg, entries);
+        if (cls.kind === "empty") return;
         totalBackgrounds++;
-        
-        if (!allowed.has(bg.value)) {
-          invalidBackgrounds++;
-          const allowedList = Array.from(allowed)
-            .filter(v => v !== "")
-            .slice(0, 5)
-            .join(", ");
-          
-          errors.push({
-            type: "error",
-            code: "INVALID_BACKGROUND",
-            message: `Invalid background value: "${bg.value}" at ${bg.path}`,
-            file,
-            suggestion: `Use a theme-defined value. Examples: ${allowedList}`,
+        if (cls.kind === "theme_css") {
+          legacy++;
+          warnings.push({
+            type: "warning",
+            code: "LEGACY_BACKGROUND_CSS",
+            message: `sections[${i}].background uses CSS "${String(bg)}" instead of theme ID "${cls.id}"`,
+            file: file.filePath,
+            suggestion: `Replace with background: ${cls.id} (same color, follows theme changes and dark mode).`,
+          });
+        } else if (cls.kind === "off_theme") {
+          offTheme++;
+          warnings.push({
+            type: "warning",
+            code: "OFF_THEME_BACKGROUND",
+            message: `sections[${i}].background "${String(bg)}" is not a theme background`,
+            file: file.filePath,
+            suggestion: `Use a theme ID (${allowedHint}) or add the color to the theme. Staff may keep it; agents cannot write or publish it.`,
           });
         }
-      }
+      });
     }
 
-    const duration = Date.now() - startTime;
     return {
       name: this.name,
       description: this.description,
-      status: errors.length > 0 ? "failed" : warnings.length > 0 ? "warning" : "passed",
-      errors,
+      status: warnings.length > 0 ? "warning" : "passed",
+      errors: [],
       warnings,
-      duration,
+      duration: Date.now() - startTime,
       artifacts: {
         totalBackgrounds,
-        invalidBackgrounds,
-        filesScanned: filesWithBackgrounds.length,
-        allowedValues: Array.from(allowed).filter(v => v !== ""),
+        legacyCss: legacy,
+        offTheme,
+        allowedIds: allowed,
       },
     };
   },

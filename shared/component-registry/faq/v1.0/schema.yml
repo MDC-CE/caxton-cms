@@ -44,9 +44,7 @@ props:
       answer:
         type: string
         required: true
-        description: >-
-          Answer body. Accepts light markdown ([text](url), newlines, **bold**,
-          *italic*) or rich-text HTML.
+        description: Answer body. Accepts light markdown ([text](url), newlines, **bold**, *italic*) or rich-text HTML.
         example: No prior experience is required. We start from the fundamentals.
     description: >-
       Runtime-resolved Q&A pairs from dynamic_entries (not authored). Prefer dynamic_entries / hardcoded_entries for
@@ -86,9 +84,7 @@ props:
           answer:
             type: string
             required: true
-            description: >-
-              Answer body. Accepts light markdown ([text](url), newlines, **bold**,
-              *italic*) or rich-text HTML.
+            description: Answer body. Accepts light markdown ([text](url), newlines, **bold**, *italic*) or rich-text HTML.
       permanent_filters:
         type: array
         required: false
@@ -123,8 +119,8 @@ props:
             type: boolean
             required: false
             description: >
-              Server-injected when the field editor enables CSV splitting (source of truth is
-              Treat comma-separated strings as multiple values on the CT/DB field).
+              Server-injected when the field editor enables CSV splitting (source of truth is Treat comma-separated
+              strings as multiple values on the CT/DB field).
       ignored_entries:
         type: array
         required: false
@@ -146,9 +142,7 @@ props:
       answer:
         type: string
         required: true
-        description: >-
-          Answer body. Accepts light markdown ([text](url), newlines, **bold**,
-          *italic*) or rich-text HTML.
+        description: Answer body. Accepts light markdown ([text](url), newlines, **bold**, *italic*) or rich-text HTML.
     description: >-
       Authored Q&A pairs used when there is no dynamic database/content_type, or merged ahead of dynamic results (also
       allowed under dynamic_entries).
@@ -179,3 +173,23 @@ props:
             required: true
             example: /contact
     description: Optional call-to-action section below the FAQ accordion. Only shown if at least text or button is provided.
+variants:
+  default:
+    content_shape:
+      items:
+        hardcoded_entries:
+          min: 4
+          max: 9
+          typical: 6
+      text:
+        title:
+          min: 3
+          max: 68
+          typical: 20
+      image: unused
+      icon: unused
+      sample_pages: 119
+      measured_at: "2026-10-02"
+    best_for: Best for location, landing, and program pages with 4-9 FAQ items addressing common objections and questions.
+    avoid_when: Avoid when page goal needs visuals, hero media, or when content has fewer than 4 questions.
+    metadata_status: draft

@@ -90,7 +90,7 @@ yaml: |
     video_title: GeekForce Career Support
     marginY:
       desktop: none
-    background: linear-gradient(to bottom, hsl(210 100% 50% / 0.05), transparent)
+    background: light-blue-5-gradient
     paddingY:
       desktop: md none
     marginX:

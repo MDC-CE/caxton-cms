@@ -99,32 +99,7 @@ async function loadEntriesForPreview(
   });
 }
 
-function buildPreviewSection(
-  preview: NonNullable<ReturnType<typeof getPreviewConfig>>,
-  ctx: import("@shared/entry-preview-props").PreviewPropResolveContext,
-): { section: Record<string, unknown>; missing: string[] } {
-  const data: Record<string, unknown> = {};
-  const { missing } = applyPreviewPropMappings(data, preview.props, ctx, RESERVED_IMAGE_FIELD);
-  materializeOgPreviewReadingTime(data, preview.props, ctx.entry);
-
-  // Only required component props block capture. Optional mappings (category, author,
-  // content → reading_time, etc.) simply omit that part of the card when empty.
-  const schema = loadSchema(preview.component, preview.version || "1.0");
-  const mappable = collectMappablePropsFromSchema(schema, preview.variant || "default");
-  const requiredKeys = new Set(mappable.filter((p) => p.required).map((p) => p.key));
-  const missingVisible = missing.filter((k) => requiredKeys.has(k));
-
-  return {
-    section: {
-      type: preview.component,
-      version: preview.version || "1.0",
-      variant: preview.variant || "default",
-      ...data,
-      section_id: `entry-preview-${preview.component}`,
-    },
-    missing: missingVisible,
-  };
-}
+import { buildPreviewSection } from "../entry-preview-build-section";
 import {
   redirectMiddleware,
   getRedirects,
@@ -4343,6 +4318,9 @@ export function registerContentRoutes(app: Express): void {
       const localeFilter = typeof req.query.locale === "string" ? req.query.locale : undefined;
       const entries = await loadEntriesForPreview(res, type, localeFilter);
       const localeKey = getLocaleKey(type, ctRoot(res));
+      const { isHandPickedOgImage } = await import("../entry-preview-og-yaml");
+      // Batch metas once — do not resolve/hash props per row on this status board.
+      const metaByKey = captureReady ? await epm.listMetasByKey(type) : new Map();
       const index: Record<
         string,
         {
@@ -4361,29 +4339,16 @@ export function registerContentRoutes(app: Express): void {
         const locale = localeKey
           ? String(entry[localeKey] || "en")
           : String(entry.lang ?? entry.locale ?? entry.language ?? "en");
-        const meta = await epm.getMeta(type, slug, locale, width);
-        const { isHandPickedOgImage } = await import("../entry-preview-og-yaml");
+        const meta =
+          (metaByKey.get(`${slug}:${locale}:${width}`) as EntryPreviewMeta | undefined) ?? null;
         // fromSource = hand-picked meta.og_image (cover/_image is not social)
         const fromSource = isHandPickedOgImage(entry, meta?.url || null);
-        let propsHash: string | undefined;
-        if (preview) {
-          const ctx = await buildPreviewPropResolveContext({
-            contentType: type,
-            slug,
-            locale,
-            entry,
-            contentRoot: getContentRoot(res),
-            db: getDB(res),
-            mediaGallery: getMediaGallery(res),
-            theme: preview.theme === "light" ? "light" : "dark",
-          });
-          propsHash = hashPreviewProps(preview.props, ctx);
-        }
+        // Status board: dirty/missing only (prop-drift hashing stays on enqueue/save).
         const needsCapture =
           captureReady &&
           !fromSource &&
           !!preview &&
-          epm.needsCapture(meta, propsHash, true);
+          epm.needsCapture(meta, undefined, false);
         index[`${slug}:${locale}`] = {
           slug,
           locale,
@@ -4391,7 +4356,6 @@ export function registerContentRoutes(app: Express): void {
           cacheBustedUrl: epm.cacheBustedUrl(meta),
           needsCapture,
           fromSource,
-          propsHash,
         };
       }
       res.json({
@@ -4420,10 +4384,8 @@ export function registerContentRoutes(app: Express): void {
       const preview = getPreviewConfig(type, ctRoot(res));
       const captureReady = isPreviewCaptureReady(preview);
       const mappingValidation = preview ? validatePreviewPropMappings(preview) : null;
-      // Hydrate mapped content whenever preview is configured (props-hash always on for auto dirty).
-      const entries = await loadEntriesForPreview(res, type, undefined, {
-        hydrateMappedContent: !!preview,
-      });
+      // Listing only — no per-entry content hydrate / props-hash (status board).
+      const entries = await loadEntriesForPreview(res, type, undefined);
       const localeKey = getLocaleKey(type, ctRoot(res));
       const stats = await getEntryPreviewManager(res).stats(
         type,

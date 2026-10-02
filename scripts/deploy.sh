@@ -304,6 +304,8 @@ done
 echo "[deploy] wiping component section demos"
 rm -rf "$PERSISTENT/.cache/component-section-demos"
 mkdir -p "$PERSISTENT/.cache/component-section-demos"
+rm -rf "$PERSISTENT/.cache/page-demos"
+mkdir -p "$PERSISTENT/.cache/page-demos"
 
 ensure_release_site_dirs
 

@@ -170,6 +170,7 @@ export const MCP_MUTATING_TOOLS = new Set<string>([
   "create_or_update_database",
   "reindex_database",
   "update_issue",
+  "update_ads_issue",
   "propose_change",
   "update_proposal",
   "run_entry_diagnostics",

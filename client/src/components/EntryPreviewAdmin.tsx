@@ -1143,7 +1143,8 @@ export function EntryPreviewCard({
                     </p>
                     <p>
                       Queue: server/entry-preview-capture-queue.ts · CF client: server/cloudflare-browser.ts ·
-                      Storage: server/entry-preview-manager.ts · Frame: client/src/pages/EntryPreviewFrame.tsx.
+                      Storage: server/entry-preview-manager.ts · Capture HTML: server/entry-preview-capture-html.ts
+                      (staff in-browser preview still uses EntryPreviewFrame).
                     </p>
                   </PopoverContent>
                 </Popover>
@@ -1333,15 +1334,15 @@ export function EntryPreviewCard({
             <DialogDescription asChild>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  This queues screenshot captures for this content type. Each entry is rendered with
-                  the configured preview component, then saved as the admin thumbnail and{" "}
-                  <code className="text-xs">og:image</code> when the reserved image field is empty.
+                  Queues screenshot captures for this content type. Prefer Missing only on Free rate limits —
+                  regenerating everything burns the shared Browser budget quickly. If content changed but the
+                  list still looks up to date, use force regenerate (⋯ menu); this list no longer re-checks
+                  every row for content drift.
                 </p>
                 <ul className="list-disc pl-4 space-y-1 text-xs">
-                  <li>Runs on the server (Cloudflare), paced between captures.</li>
+                  <li>Runs on the server (Cloudflare), paced between captures; rate limits share one wait.</li>
                   <li>Does not overwrite hand-picked social images — use “Regenerate all og images” in the ⋯ menu for that.</li>
                   <li>Cover / listing images are never changed.</li>
-                  <li>Regenerate all (soft) re-captures generated social when dirty or missing.</li>
                 </ul>
               </div>
             </DialogDescription>

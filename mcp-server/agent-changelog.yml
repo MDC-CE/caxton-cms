@@ -5,6 +5,61 @@
 window_days: 6
 
 entries:
+  - date: "2026-10-02"
+    summary: "Designing pages: get_page_recipe + page demos + review_page_render loop, theme-ID colors, render-review publish gate, design validators"
+    agent_impact:
+      - "New tools (content_view): get_page_recipe (skeleton slots, variant pairings, learned rules from approved + well-performing layouts; fallback 'site_wide' under 3 scoped layouts; mode 'fields' for template entries — fill fields, no add_section), create_page_demo (throwaway multi-section page), review_page_render + get_render_review (Cloudflare desktop/mobile screenshots, findings per section with fix_hint, include_images / crop_section; entry reviews write render-review issues, category design)."
+      - "BREAKING for agents: publish_draft / promote_variant on new, detached or restructured entry-owned pages return action_required render_review_required until a review matches the draft's section structure. Copy-only changes, template entries and staff are not gated; when Cloudflare / public SITE_URL is unavailable the gate only warns (render_review_unavailable)."
+      - "Colors: section background must be a theme ID; rich text must not hardcode color / font-size / letter-spacing outside the theme. Agent writes/publishes that add or change off-theme values fail with theme_colors_required (property_path + allowed IDs); existing staff overrides never block."
+      - "Diagnostics: new entry-local design validators rich-text-styles and design-layout (self-padded wrapper padding, styled out-of-flow sections, learned layout rules with evidence) next to backgrounds; run_entry_diagnostics categories ['design']."
+      - "get_component_usage adds suggest_next and variant_pairings (weighted; shared templates count once). create_entry on entry-owned types returns discovery_path + layout_owner and next_actions get_page_recipe → review_page_render; add_section / replace_entry_sections point to review_page_render. explain_site topic design; conventions §7h."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/design.ts
+      - mcp-server/lib/design-guidance.ts
+      - mcp-server/lib/render-review-mcp.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/components.ts
+      - mcp-server/explain/design.md
+      - mcp-server/agent-conventions.md
+      - server/design/
+      - server/analytics/page-performance.ts
+      - server/component-insights.ts
+      - scripts/validation/validators/design-layout.ts
+      - scripts/validation/validators/rich-text-styles.ts
+      - shared/mcp-tool-catalog.ts
+  - date: "2026-10-02"
+    summary: "get_paid_traffic: paid visits need per-visit ad evidence (landing URL click id / UTMs or collected_traffic_source); GA4 carried-over last-click no longer counts"
+    agent_impact:
+      - "Paid visits drop vs before: GA4 session_traffic_source_last_click and first-user traffic_source are ignored for paid detection, so returning visitors who once clicked an ad (e.g. students opening the LMS) are no longer paid visits or Other destinations rows. The GA4 Google Ads link only supplies campaign ids behind a Google click id. Spend and all lead counts unchanged."
+      - "New totals.attributed_only_visits { total, by_host[] (top 10 + '(other)') } — sessions GA4 credits to ads without per-visit evidence; whole window, all platforms, ignores filters; null + ga4.attributed_only_unavailable_reason when the export lacks the last-click field. New ga4.old_rule_days (days still at the older rule; normally 0)."
+      - "GA4 paid-landing schema_version 3: the next sync re-reads every cached day (whole retention) in one run, so the first sync after deploy is longer. explain topic ads → What counts as a paid visit."
+    tools_changed: false
+    paths:
+      - server/ads/paid-detection.ts
+      - server/ads/ads-report.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-01"
+    summary: "Ads issues: diagnostics is read-only; new update_ads_issue (run / recheck / mark_fixed / undo) with explicit verify model; snapshots and landing probes removed"
+    agent_impact:
+      - "BREAKING get_paid_traffic diagnostics: no snapshot_id arg / snapshot_expired / newer_data_available. Reads never run checks or probe landing pages; issues come from the last Run / Re-check (measured_at + window per issue). Issue ids are stable: ads:{platform}:{code}:{level}:{resource_id}[:{subject}]; check_key keeps the builder key (e.g. unrecognized_campaign:{key}). KPIs snap to 7 / 28 / 90 saved windows."
+      - "Each issue adds level, resource_id, affected_ads (list mode ≤20; full with issue_ids) + affected_ads_total, verify { state open|pending, action recheck|mark_fixed|wait|recheck_ready, verify.kind instant|after_sync|fresh_days, verify_after, waits_for_sync, ready_to_verify, progress (min_data) }, last_check, recheck_queued, not_checked. Responses carry run { never_run, last_run, active, last_failed, busy }. open_errors / open_warnings count only verify.state open."
+      - "New warnings: ads_diagnostics_model, ads_never_run, ads_run_in_progress, ads_recheck_in_progress, ads_last_job_failed, ads_platform_not_checked, ads_sync_active. next_actions point at update_ads_issue (run when never run; recheck / mark_fixed per issue)."
+      - "New mutating tool update_ads_issue (metrics_view, agent_session_id required): action run (background fork, 409 ads_run_busy / ads_sync_active), recheck (issue_id or platform+level+resource_id; instant or ready pending only, else 409 ads_recheck_not_instant / ads_recheck_not_ready), mark_fixed (report ≥40 chars required; pending until confirmed — never resolved directly), undo. Never changes Meta or Google Ads."
+      - "Codes landing_http_error / redirect_drops_params replaced by landing_not_live (in-process resolver, no HTTP). Resolved rows carry resolution verified_gone | soft_complete | resource_gone | rule_retired. Explain topic ads → Ads issues lifecycle."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/tools/ads-issues.ts
+      - mcp-server/explain/ads.md
+      - server/ads/diagnostics/
+      - server/ads/ads-rollups.ts
+      - server/ads/ads-setup.ts
+      - server/routes/ads.ts
+      - server/jobs/definitions/ads-recheck.ts
+      - shared/ads-issues.ts
+      - shared/mcp-tool-catalog.ts
+      - shared/agent-identity.ts
   - date: "2026-09-30"
     summary: "get_paid_traffic diagnostics: Meta missing-tracking verified against GA4 utm_content (meta_auto hidden; unverified info; Fix only on confirmed)"
     agent_impact:
