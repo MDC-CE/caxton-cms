@@ -497,7 +497,9 @@ systemctl daemon-reload
 systemctl enable --now cpu-capture.service
 ```
 
-The unit gives `CAP_PERFMON` and `CAP_SYS_PTRACE` as ambient capabilities, so only this service has them. `/usr/bin/perf` stays a normal file. The script writes the heartbeat and the status file as mode `0644` on purpose: the service umask is `0027`, and without that chmod `website-runtime` could not read them.
+The unit gives `CAP_PERFMON` and `CAP_SYS_PTRACE` as ambient capabilities, so only this service has them. `/usr/bin/perf` stays a normal file. The script writes the heartbeat and the status file as mode `0644` on purpose: the service umask is `0027`, and without that chmod `website-runtime` could not read them. `perf record` creates `perf.data` as mode `0600`. The recorder then chmods it to `0640` so the web user can run `perf script`. Without that chmod the page stores "Permission denied".
+
+The running program is `/opt/cpu-capture/recorder.mjs`, not the file in the release. A deploy does not replace it. After this script changes, copy it again as root and restart the unit.
 
 `PrivateTmp=yes` is set because the recorder never opens the name map. The web app reads `/tmp/perf-<pid>.map` in its own mount namespace. If the web service is later given `PrivateTmp`, the map will not be the host `/tmp` and JavaScript names will disappear; do not do that without moving the map.
 

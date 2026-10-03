@@ -252,6 +252,15 @@ async function record(pid) {
   fs.mkdirSync(part, { recursive: true });
   const dataFile = path.join(part, "perf.data");
   const result = await runPerf(pid, dataFile);
+  // perf creates the file as 0600. Group read is what lets the web user summarize it.
+  if (result.ok) {
+    try {
+      fs.chmodSync(dataFile, 0o640);
+    } catch (err) {
+      result.ok = false;
+      result.error = `could not share the recording: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400);
+    }
+  }
   const meta = {
     timestamp: Number(id),
     processName: "web",
