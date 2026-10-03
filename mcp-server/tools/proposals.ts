@@ -278,17 +278,19 @@ function ideaSeoTargetFailure(
   });
 }
 
-/** Hub-mode follow-up after apply: one cluster-fix propose_change per member. */
-function hubFollowUpActions(warnings: unknown): Array<{
+const APPLY_FOLLOW_UP_CODES = new Set(["idea_seo_hub_members_follow_up", "idea_page_released_waiting_ideas"]);
+
+/** Apply follow-ups carried in warnings: hub members (propose_change) and ideas waiting on a released page (list_proposals). */
+function followUpActionsFromWarnings(warnings: unknown): Array<{
   tool: string;
   reason: string;
   priority: "required" | "recommended" | "optional";
   args_hint: Record<string, unknown>;
 }> {
   if (!Array.isArray(warnings)) return [];
-  const out: ReturnType<typeof hubFollowUpActions> = [];
+  const out: ReturnType<typeof followUpActionsFromWarnings> = [];
   for (const w of warnings as Array<{ code?: string; details?: { next_actions?: unknown } }>) {
-    if (w?.code !== "idea_seo_hub_members_follow_up" || !Array.isArray(w.details?.next_actions)) continue;
+    if (!w?.code || !APPLY_FOLLOW_UP_CODES.has(w.code) || !Array.isArray(w.details?.next_actions)) continue;
     for (const a of w.details.next_actions as Array<Record<string, unknown>>) {
       out.push({
         tool: String(a.tool ?? "propose_change"),
@@ -1379,7 +1381,9 @@ export function registerProposalTools(
       "needs_review:true → open|partial edits whose attention is awaiting_rereview or no_feedback (author rewrite or cleared blockers, nothing still waiting on the author). Excludes blocked and escalated. Forces that queue even if status/kind differ. " +
       "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted (unless stalled). " +
       "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked|needs_author. " +
-      "needs_author = 1.0 draft went stale (live or translation source moved, conflict, or draft missing) — out of the reviewer queue until the author revises; stale_flagged_at set after 30 idle days, closes as abandoned_stale after 90. " +
+      "needs_author = 1.0 draft went stale (live or translation source moved, conflict, or draft missing) — out of the reviewer queue until the author revises; stale_flagged_at set after 10 idle days, closes as abandoned_stale after 30. " +
+      "blocked = open blockers. Daily sweep (any kind, open|partial, not escalated): 10 days with no real work → blocked_flagged_at (event proposal_blocked_flagged); 30 → withdrawn close_reason abandoned_blocked (no prior flag required; partial: published entries stay live; drafts the proposal created deleted, pre-existing unlinked). " +
+      "Clock = newest open blocker / revise_entries / author-marked fix / reviewer action — claim and release do NOT reset it. Zero open blockers (awaiting_rereview) never auto-closes. " +
       "awaiting_rereview = blockers fixed, or the author rewrote entries / marked a blocker fixed, and no open blockers remain. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
@@ -1389,7 +1393,7 @@ export function registerProposalTools(
       "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "outcome_review* / outcome_lesson* fields = human-only steward retro on closed proposals (good|bad, what went wrong, what should have happened, lesson captured). " +
-      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured; none = closed, unreviewed, excluding system closures abandoned_stale|legacy_version). " +
+      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured; none = closed, unreviewed, excluding system closures abandoned_stale|abandoned_blocked|legacy_version). " +
       "proposal_stats.by_outcome = whole-site all-time { good, bad, bad_open, none } with the same meanings. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
@@ -1454,7 +1458,7 @@ export function registerProposalTools(
         .optional()
         .describe(
           "Steward outcome review on closed proposals (finished|rejected|withdrawn). good | bad; bad_open = bad with no lesson captured yet; " +
-            "none = closed and not reviewed, excluding system closures (close_reason abandoned_stale | legacy_version). Omit status (or use a closed status) — open/partial never match.",
+            "none = closed and not reviewed, excluding system closures (close_reason abandoned_stale | abandoned_blocked | legacy_version). Omit status (or use a closed status) — open/partial never match.",
         ),
       attention: z
         .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked", "needs_author"])
@@ -1871,8 +1875,9 @@ export function registerProposalTools(
       "Legacy (pre-1.0) proposals return legacy_version for anything but withdraw/reject/release — re-file. " +
       "Both (Publisher): full set. " +
       "Reject is rare (bad/impossible/illegal/harmful/duplicate/target missing): confirm_reject + reject_kind + close_note (min 80). Prefer add_blocker for polish; then revise_entries (proposer; idle or self-claim). " +
-      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page); new-URL ideas need idea_funnel first (no YAML); SEO-monitored new pages also need idea_seo_target (hub live + same locale; keyword not held by a live page or another accepted idea). " +
+      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page until an implementing edit is applied with none open; accepted_entry_taken → leave the idea open, accept later); new-URL ideas need idea_funnel first (no YAML); SEO-monitored new pages also need idea_seo_target (hub live + same locale; keyword not held by a live page or another accepted idea). " +
       "apply of a hub-mode idea's first go-live returns warning idea_seo_hub_members_follow_up + one propose_change next_action per member. " +
+      "apply that frees an idea's page returns idea_page_released_waiting_ideas + one list_proposals next_action per open idea waiting on it (nothing auto-accepted). " +
       "close notes/ideas: close_reason + close_note. Withdraw: close_note min 20. Open blockers block apply/accept only (revise does not clear them). Four-eyes = username+role. " +
       "Multi-situation: review each pack independently; drop failing ops via revise_entries then apply (atomic). " +
       "Before apply, list_proposals(proposal_id) for live review_context.",
@@ -2330,16 +2335,37 @@ export function registerProposalTools(
               ],
             });
           }
-          if (data.code === "accepted_entry_required" || data.code === "accepted_entry_taken") {
+          if (data.code === "accepted_entry_taken") {
+            const d = (data.details ?? {}) as { holder_id?: string; open_edit_id?: string | null; releases_when?: string };
+            const watchId = d.open_edit_id || d.holder_id;
+            return fail(String(data.error ?? data.code), {
+              code: "accepted_entry_taken",
+              details: d,
+              warnings: [
+                "Leave this idea open; do not close it as tracked_elsewhere. The page frees up once the holder's implementing edit is applied (with none still open); accept again then.",
+                "Applying the holder's edit returns idea_page_released_waiting_ideas listing this idea when its related_entries name the page.",
+              ],
+              next_actions: watchId
+                ? [
+                    {
+                      tool: "list_proposals",
+                      reason: d.open_edit_id
+                        ? "Track the open edit that holds the page; accept this idea after it is applied."
+                        : "The holder idea has no applied edit yet (stalled); its follow-up edit must ship before this idea can be accepted.",
+                      priority: "recommended",
+                      args_hint: { proposal_id: watchId },
+                    },
+                  ]
+                : [],
+            });
+          }
+          if (data.code === "accepted_entry_required") {
             return fail(String(data.error ?? data.code), {
               code: String(data.code),
               next_actions: [
                 {
                   tool: "update_proposal",
-                  reason:
-                    data.code === "accepted_entry_taken"
-                      ? "Pick a different contentType/slug/locale — another accepted idea already locked that page."
-                      : "Retry accept with accepted_entry { contentType, slug, locale } plus next_step.",
+                  reason: "Retry accept with accepted_entry { contentType, slug, locale } plus next_step.",
                   priority: "required",
                   args_hint: {
                     proposal_id: args.proposal_id,
@@ -2556,7 +2582,7 @@ export function registerProposalTools(
           args_hint: Record<string, unknown>;
         }> = [];
 
-        if (args.action === "apply") next.push(...hubFollowUpActions(data.warnings));
+        if (args.action === "apply") next.push(...followUpActionsFromWarnings(data.warnings));
 
         if (args.action === "reject") {
           next.push({

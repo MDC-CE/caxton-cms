@@ -24,7 +24,8 @@ export type AdmissionErrorCode =
   | "auth_email_unverified"
   | "staff_identity_ambiguous"
   | "staff_not_pre_registered"
-  | "staff_no_role";
+  | "staff_no_role"
+  | "staff_previously_deleted";
 
 export interface AdmissionOk {
   ok: true;

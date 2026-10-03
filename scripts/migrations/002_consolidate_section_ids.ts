@@ -2,6 +2,8 @@
  * @migration 002_consolidate_section_ids
  * @description Consolidates the dual section identifiers (`id` + `section_id`) into a
  * single canonical `section_id` for shared-template content types (blog).
+ * @scope all
+ * @dry-run
  *
  * What it does, per locale template (single.{locale}.yml):
  *   1. Builds a rename map { legacyInternalId -> section_id } from template sections

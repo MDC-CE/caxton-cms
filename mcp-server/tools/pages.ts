@@ -726,7 +726,14 @@ async function callRenameSlugApi(
     });
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok) {
-      return { ok: false, error: fail((data.error as string) || `Server error: ${res.status}`) };
+      const { error, ...details } = data;
+      return {
+        ok: false,
+        error: fail(
+          (error as string) || `Server error: ${res.status}`,
+          Object.keys(details).length > 0 ? details : undefined,
+        ),
+      };
     }
     return { ok: true, data };
   } catch (e) {

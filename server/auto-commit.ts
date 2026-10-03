@@ -27,6 +27,7 @@ import { getAllFolders } from './content-types';
 import { getSiteConfigs, type SiteConfig } from './site-config';
 import { child } from "./logger";
 import { formatAutoSyncCommitMessage } from "@shared/git-commit-attribution";
+import { skipAutoCommitForProposalDraft } from "./proposal-draft-push-guard";
 const log = child({ module: "auto-commit" });
 
 
@@ -208,6 +209,7 @@ export function queueFileChange(
 
   const matchedSite = sites.find(s => relativePath.startsWith(s.contentFolder.replace(/\/$/, '') + '/'));
   if (!shouldTrackFile(relativePath, allowedExceptions, matchedSite?.contentFolder)) return;
+  if (skipAutoCommitForProposalDraft(relativePath)) return;
 
   const resolvedAuthor = author || (isContentTypeFile(relativePath) ? 'Unknown' : 'System');
 

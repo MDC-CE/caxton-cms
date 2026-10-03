@@ -280,7 +280,7 @@ function isSwarmCaller(req: Request): boolean {
 export type VariantProposalBadge = {
   id: string;
   env: string;
-  /** False when the link comes from `_draft.proposal` and the proposal is not in this environment's DB. */
+  /** False when the link comes from `_draft.proposal` and the proposal is not in this copy of the proposals DB. */
   local: boolean;
   title?: string;
   status?: string;
@@ -299,11 +299,11 @@ async function proposalsByVariantFor(opts: {
   const out: Record<string, Record<string, VariantProposalBadge>> = {};
   const { readDraftMeta } = await import("../versioning/draft-meta");
   let local: import("../content-proposals").OpenProposalForEntry[] = [];
-  let env = "unknown";
+  let env = "production";
   try {
     const mod = await import("../content-proposals");
     local = mod.listOpenProposalsForEntry(opts.site, opts.contentType, opts.slug);
-    env = mod.pipelineEnv();
+    env = mod.DRAFT_LINK_ENV;
   } catch {
     /* proposals DB unavailable — fall back to file links only */
   }

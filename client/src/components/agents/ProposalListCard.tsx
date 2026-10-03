@@ -66,6 +66,7 @@ export type ProposalCardData = {
   all_or_nothing?: boolean;
   stale_since?: string | null;
   stale_flagged_at?: string | null;
+  blocked_flagged_at?: string | null;
   reverts_proposal_id?: string | null;
   created_at: number;
   updated_at?: number;
@@ -360,6 +361,7 @@ export function ProposalListCard({
                     count={blockers}
                     stopLinkNavigation
                     testIdSuffix={`-${p.id}`}
+                    flaggedAt={p.escalated ? null : p.blocked_flagged_at}
                   />
                 ) : null}
                 {p.attention === "awaiting_rereview" || p.attention === "no_feedback" ? (

@@ -220,4 +220,21 @@ describe("sumRollupsSince", () => {
     expect(s.spend).toEqual({ USD: 5 });
     expect(s.days_with_spend).toBe(1);
   });
+
+  it("leaves out days when every affected ad was switching links", async () => {
+    const { loadAdsSetup } = await import("../ads-setup");
+    const v = (n: number, path: string, first: string | null, last: string) => ({ v: n, landing_urls: [`https://x.com${path}`], url_tags: null, destination: "website", first_seen_at: first, last_seen_at: last });
+    vi.mocked(loadAdsSetup).mockReturnValueOnce({
+      accounts: { act1: { timezone: "UTC" } },
+      ads: { a1: { account_id: "act1", versions: [v(1, "/a", null, "2026-09-11T08:00:00.000Z"), v(2, "/b", "2026-09-11T12:00:00.000Z", "2026-09-13T08:00:00.000Z")] } },
+    } as never);
+    day("2026-09-10", [{ ad_id: "a1", spend: 4, clicks: 8 }]);
+    day("2026-09-11", [{ ad_id: "a1", spend: 9, clicks: 30 }]);
+    day("2026-09-12", [{ ad_id: "a1", spend: 2, clicks: 4 }]);
+    const s = sumRollupsSince(SITE, { platform: "meta", ad_ids: ["a1"] }, "2026-09-10", "2026-09-12");
+    expect(s.days_counted).toBe(2);
+    expect(s.url_change_days).toEqual(["2026-09-11"]);
+    expect(s.clicks).toBe(12);
+    expect(s.spend).toEqual({ USD: 6 });
+  });
 });

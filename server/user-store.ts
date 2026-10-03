@@ -129,6 +129,10 @@ export interface UserRecord {
    */
   mcpReadEnabled?: boolean;
   mcpWriteEnabled?: boolean;
+  /** Soft delete: record kept for history (staff id, identities), roles cleared. */
+  deletedAt?: string;
+  /** Username of the admin who deleted this user. */
+  deletedBy?: string;
 }
 
 /** Normalized MCP access flags (defaults: read on, write off; write implies read). */
@@ -137,16 +141,29 @@ export interface McpAccess {
   mcpWriteEnabled: boolean;
 }
 
+export interface PreviouslyDeletedInfo {
+  username: string;
+  staffId: string;
+  deletedAt: string;
+  deletedBy?: string;
+}
+
 export interface PendingUserRecord {
   email: string;
-  role: string;
+  /** Pre-assigned role. Absent on previously-deleted sign-in attempts (admin restores instead). */
+  role?: string;
   createdAt: string;
+  /** Set when a soft-deleted user tried to sign in again. */
+  previouslyDeleted?: PreviouslyDeletedInfo;
+  lastAttemptAt?: string;
 }
 
 interface UsersState {
   roles: Record<string, RoleDefinition>;
   users: Record<string, UserRecord>;
   pendingUsers?: Record<string, PendingUserRecord>;
+  /** Staff ids of permanently removed duplicate records → surviving staff id. */
+  staffIdAliases?: Record<string, string>;
   /** Staff-edited MCP descriptions for built-in roles (capabilities still come from code). */
   builtInDescriptionOverrides?: Record<string, string>;
   /** One-time role migrations already applied (so staff removals are not re-granted on boot). */
@@ -662,10 +679,29 @@ function finishLoad(persist: "local" | "all"): void {
 
 let state: UsersState = { roles: { ...DEFAULT_STATE.roles }, users: {} };
 let loaded = false;
+let persistenceDisabledForTests = false;
+
+/** Tests only: replace in-memory users/pending/aliases and stop writing to disk or GCS. */
+export function _setUsersStateForTests(next: {
+  users?: Record<string, UserRecord>;
+  pendingUsers?: Record<string, PendingUserRecord>;
+  staffIdAliases?: Record<string, string>;
+}): void {
+  persistenceDisabledForTests = true;
+  state = {
+    roles: { ...DEFAULT_STATE.roles },
+    users: next.users ?? {},
+    pendingUsers: next.pendingUsers ?? {},
+    staffIdAliases: next.staffIdAliases ?? {},
+  };
+  syncBuiltInRoles();
+  loaded = true;
+}
 
 // ─── Persistence ───────────────────────────────────────────────────────────────
 
 function saveLocal(): void {
+  if (persistenceDisabledForTests) return;
   try {
     const dir = path.dirname(getLocalPath());
     if (!fs.existsSync(dir)) {
@@ -678,7 +714,7 @@ function saveLocal(): void {
 }
 
 async function saveToBucket(): Promise<void> {
-  if (!IS_PRODUCTION || !gcs.available) return;
+  if (persistenceDisabledForTests || !IS_PRODUCTION || !gcs.available) return;
   try {
     const content = JSON.stringify(state, null, 2);
     gcs.debouncedUpload(GCS_KEY, Buffer.from(content, "utf-8"), "application/json");
@@ -833,6 +869,7 @@ function collectExistingIds(exceptUsername?: string): Set<string> {
     if (exceptUsername && uname === exceptUsername) continue;
     if (user.id) ids.add(user.id);
   }
+  for (const aliasId of Object.keys(state.staffIdAliases ?? {})) ids.add(aliasId);
   return ids;
 }
 
@@ -867,7 +904,7 @@ function ensureUserHasId(username: string): string {
 function backfillMissingUserIds(): void {
   if (!state.users) state.users = {};
   let changed = false;
-  const taken = new Set<string>();
+  const taken = new Set<string>(Object.keys(state.staffIdAliases ?? {}));
   for (const user of Object.values(state.users)) {
     if (user.id) taken.add(user.id);
   }
@@ -1226,9 +1263,24 @@ export function hasCapabilityInRole(
   );
 }
 
+/** All records, including soft-deleted ones. */
 export function getAllUsers(): UserRecord[] {
   ensureLoaded();
   return Object.values(state.users);
+}
+
+export function isUserDeleted(user: UserRecord | null | undefined): boolean {
+  return Boolean(user?.deletedAt);
+}
+
+export function getActiveUsers(): UserRecord[] {
+  ensureLoaded();
+  return Object.values(state.users).filter((u) => !u.deletedAt);
+}
+
+export function getDeletedUsers(): UserRecord[] {
+  ensureLoaded();
+  return Object.values(state.users).filter((u) => Boolean(u.deletedAt));
 }
 
 export function getUser(username: string): UserRecord | null {
@@ -1236,14 +1288,214 @@ export function getUser(username: string): UserRecord | null {
   return state.users[username] ?? null;
 }
 
-/** Look up a staff user by immutable staff id (used in `_label.requester` / `owner`). */
+const STAFF_ID_ALIAS_MAX_HOPS = 5;
+
+/**
+ * Look up a staff user by immutable staff id (used in `_label.requester` / `owner`).
+ * Follows `staffIdAliases` so history from removed duplicate records resolves to the survivor.
+ */
 export function getUserByStaffId(staffId: string): UserRecord | null {
   ensureLoaded();
   if (!staffId) return null;
-  for (const user of Object.values(state.users)) {
-    if (user.id === staffId) return user;
+  let current = staffId;
+  for (let hop = 0; hop <= STAFF_ID_ALIAS_MAX_HOPS; hop++) {
+    for (const user of Object.values(state.users)) {
+      if (user.id === current) return user;
+    }
+    const next = state.staffIdAliases?.[current];
+    if (!next || next === current) return null;
+    current = next;
   }
   return null;
+}
+
+function normalizeEmail(email?: string): string | undefined {
+  const n = email?.toLowerCase().trim();
+  return n || undefined;
+}
+
+function recordEmails(key: string, user: UserRecord): Set<string> {
+  const emails = new Set<string>();
+  const fromField = normalizeEmail(user.email);
+  if (fromField) emails.add(fromField);
+  const keyNorm = key.toLowerCase().trim();
+  if (keyNorm.includes("@")) emails.add(keyNorm);
+  return emails;
+}
+
+function identityKeys(user: UserRecord): Set<string> {
+  return new Set(
+    (user.identities ?? []).map((id) => `${id.provider}:${id.providerUserId}`),
+  );
+}
+
+/**
+ * Other active (not soft-deleted) records that belong to the same person:
+ * same normalized email (field or email-shaped key) or same provider identity.
+ * Sorted by most recent sign-in first (records without lastLoginAt last).
+ */
+export function findActiveDuplicates(username: string): Array<{ key: string; user: UserRecord }> {
+  ensureLoaded();
+  const target = state.users[username];
+  if (!target) return [];
+  const emails = recordEmails(username, target);
+  const identities = identityKeys(target);
+  const matches: Array<{ key: string; user: UserRecord }> = [];
+  for (const [key, user] of Object.entries(state.users)) {
+    if (key === username || user.deletedAt) continue;
+    const sameEmail = Array.from(recordEmails(key, user)).some((e) => emails.has(e));
+    const sameIdentity = Array.from(identityKeys(user)).some((i) => identities.has(i));
+    if (sameEmail || sameIdentity) matches.push({ key, user });
+  }
+  return matches.sort((a, b) => {
+    const at = a.user.lastLoginAt ? Date.parse(a.user.lastLoginAt) : -Infinity;
+    const bt = b.user.lastLoginAt ? Date.parse(b.user.lastLoginAt) : -Infinity;
+    return bt - at;
+  });
+}
+
+/** Find any record (active or soft-deleted) by normalized email (field or email-shaped key). */
+export function findUserByEmailIncludingDeleted(
+  email: string,
+): { key: string; user: UserRecord; deleted: boolean } | null {
+  ensureLoaded();
+  const wanted = normalizeEmail(email);
+  if (!wanted) return null;
+  let deletedMatch: { key: string; user: UserRecord; deleted: boolean } | null = null;
+  for (const [key, user] of Object.entries(state.users)) {
+    if (!recordEmails(key, user).has(wanted)) continue;
+    if (!user.deletedAt) return { key, user, deleted: false };
+    deletedMatch ??= { key, user, deleted: true };
+  }
+  return deletedMatch;
+}
+
+/** Number of active records whose roles grant `capName`, optionally excluding one key. */
+export function countActiveUsersWithCapability(
+  capName: CapabilityName,
+  excludingUsername?: string,
+): number {
+  ensureLoaded();
+  let n = 0;
+  for (const [key, user] of Object.entries(state.users)) {
+    if (key === excludingUsername || user.deletedAt) continue;
+    if (getEffectiveCapabilities(key).some((g) => g.name === capName)) n += 1;
+  }
+  return n;
+}
+
+/** Roles on `username` that `survivorKey` does not have. */
+export function rolesMissingOnSurvivor(username: string, survivorKey: string): string[] {
+  ensureLoaded();
+  const target = state.users[username];
+  const survivor = state.users[survivorKey];
+  if (!target || !survivor) return [];
+  return target.roles.filter((r) => !survivor.roles.includes(r));
+}
+
+/** Soft delete: keep identity for history, clear roles, stamp who/when. */
+export function softDeleteUser(
+  username: string,
+  deletedBy?: string,
+): { ok: true; user: UserRecord } | { ok: false; error: string } {
+  ensureLoaded();
+  const user = state.users[username];
+  if (!user) return { ok: false, error: "User not found" };
+  if (user.deletedAt) return { ok: false, error: "User is already deleted" };
+  ensureUserHasId(username);
+  user.roles = [];
+  user.deletedAt = new Date().toISOString();
+  if (deletedBy) user.deletedBy = deletedBy;
+  else delete user.deletedBy;
+  save();
+  return { ok: true, user };
+}
+
+/**
+ * Permanently remove one duplicate record. Its staff id is aliased to the survivor
+ * so history keeps resolving to a real person; aliases pointing at it are re-pointed.
+ */
+export function hardDeleteDuplicate(
+  username: string,
+  survivorKey: string,
+): { ok: true; survivor: UserRecord; rolesLost: string[] } | { ok: false; error: string } {
+  ensureLoaded();
+  const target = state.users[username];
+  const survivor = state.users[survivorKey];
+  if (!target) return { ok: false, error: "User not found" };
+  if (!survivor || survivor.deletedAt || survivorKey === username) {
+    return { ok: false, error: "Surviving duplicate not found" };
+  }
+  const rolesLost = rolesMissingOnSurvivor(username, survivorKey);
+  const removedId = target.id || ensureUserHasId(username);
+  const survivorId = survivor.id || ensureUserHasId(survivorKey);
+  if (!state.staffIdAliases) state.staffIdAliases = {};
+  for (const [from, to] of Object.entries(state.staffIdAliases)) {
+    if (to === removedId) state.staffIdAliases[from] = survivorId;
+  }
+  if (removedId !== survivorId) state.staffIdAliases[removedId] = survivorId;
+  delete state.users[username];
+  save();
+  return { ok: true, survivor, rolesLost };
+}
+
+/** Restore a soft-deleted user with the given roles (same staff id and identities). */
+export function restoreUser(
+  username: string,
+  roles: string[],
+): { ok: true; user: UserRecord } | { ok: false; error: string } {
+  ensureLoaded();
+  const user = state.users[username];
+  if (!user) return { ok: false, error: "User not found" };
+  if (!user.deletedAt) return { ok: false, error: "User is not deleted" };
+  const unknown = roles.filter((r) => !state.roles[r]);
+  if (unknown.length > 0) return { ok: false, error: `Unknown role(s): ${unknown.join(", ")}` };
+  if (roles.length === 0) return { ok: false, error: "Pick at least one role" };
+  user.roles = Array.from(new Set(roles));
+  delete user.deletedAt;
+  delete user.deletedBy;
+  if (state.pendingUsers) {
+    for (const [email, pending] of Object.entries(state.pendingUsers)) {
+      if (pending.previouslyDeleted?.username === username) delete state.pendingUsers[email];
+    }
+  }
+  save();
+  return { ok: true, user };
+}
+
+/**
+ * A soft-deleted user tried to sign in: keep a single Pending entry (no role)
+ * flagged as previously deleted, refreshing `lastAttemptAt` on repeat attempts.
+ */
+export function recordDeletedUserSignInAttempt(
+  username: string,
+  attemptEmail?: string,
+): PendingUserRecord | null {
+  ensureLoaded();
+  const user = state.users[username];
+  if (!user?.deletedAt) return null;
+  const email =
+    normalizeEmail(user.email) ??
+    (username.includes("@") ? normalizeEmail(username) : undefined) ??
+    normalizeEmail(attemptEmail);
+  if (!email) return null;
+  if (!state.pendingUsers) state.pendingUsers = {};
+  const now = new Date().toISOString();
+  const existing = state.pendingUsers[email];
+  const entry: PendingUserRecord = {
+    email,
+    createdAt: existing?.createdAt ?? now,
+    lastAttemptAt: now,
+    previouslyDeleted: {
+      username,
+      staffId: user.id || ensureUserHasId(username),
+      deletedAt: user.deletedAt,
+      ...(user.deletedBy ? { deletedBy: user.deletedBy } : {}),
+    },
+  };
+  state.pendingUsers[email] = entry;
+  save();
+  return entry;
 }
 
 /** Display name for UI: "First Last", else username, else staff id. */
@@ -1262,6 +1514,7 @@ export function getStaffDirectory(): Array<{
 }> {
   ensureLoaded();
   return Object.values(state.users)
+    .filter((u) => !u.deletedAt)
     .map((u) => ({
       id: u.id || ensureUserHasId(u.username),
       username: u.username,
@@ -1284,16 +1537,6 @@ export function setRole(roleId: string, definition: RoleDefinition): void {
   ensureLoaded();
   state.roles[roleId] = definition;
   save();
-}
-
-export function deleteUser(username: string): { ok: boolean; error?: string } {
-  ensureLoaded();
-  if (!state.users[username]) {
-    return { ok: false, error: "User not found" };
-  }
-  delete state.users[username];
-  save();
-  return { ok: true };
 }
 
 export function findUserByIdentity(
@@ -1411,6 +1654,9 @@ export function renameUser(oldUsername: string, newUsername: string): { ok: bool
   if (!state.users[oldUsername]) {
     return { ok: false, error: "User not found" };
   }
+  if (state.users[oldUsername].deletedAt) {
+    return { ok: false, error: "Deleted users cannot be renamed. Restore them first." };
+  }
   if (state.users[newUsername]) {
     return { ok: false, error: `Username "${newUsername}" is already taken` };
   }
@@ -1422,12 +1668,34 @@ export function renameUser(oldUsername: string, newUsername: string): { ok: bool
 
 // ─── Pending Users API ─────────────────────────────────────────────────────────
 
-export function addPendingUser(email: string, role: string): { ok: boolean; error?: string } {
+export type AddPendingUserResult =
+  | { ok: true }
+  | { ok: false; error: string; code?: undefined }
+  | { ok: false; error: string; code: "user_exists" | "user_previously_deleted"; user: UserRecord };
+
+export function addPendingUser(email: string, role: string): AddPendingUserResult {
   ensureLoaded();
   if (!state.pendingUsers) state.pendingUsers = {};
   const normalizedEmail = email.toLowerCase().trim();
   if (!normalizedEmail) return { ok: false, error: "Email is required" };
   if (!state.roles[role]) return { ok: false, error: `Role "${role}" does not exist` };
+  const existing = findUserByEmailIncludingDeleted(normalizedEmail);
+  if (existing && !existing.deleted) {
+    return {
+      ok: false,
+      code: "user_exists",
+      error: `${normalizedEmail} is already a staff user (${formatStaffDisplayName(existing.user)}). Edit their roles instead.`,
+      user: existing.user,
+    };
+  }
+  if (existing?.deleted) {
+    return {
+      ok: false,
+      code: "user_previously_deleted",
+      error: `${normalizedEmail} belongs to a deleted user. Restore them instead.`,
+      user: existing.user,
+    };
+  }
   state.pendingUsers[normalizedEmail] = {
     email: normalizedEmail,
     role,
@@ -1464,7 +1732,7 @@ export function claimPendingUser(email: string): string | null {
   if (!state.pendingUsers) return null;
   const normalizedEmail = email.toLowerCase().trim();
   const pending = state.pendingUsers[normalizedEmail];
-  if (!pending) return null;
+  if (!pending?.role) return null;
   delete state.pendingUsers[normalizedEmail];
   save();
   return pending.role;
@@ -1480,7 +1748,13 @@ export function assignPendingToUser(email: string, username: string): { ok: bool
   const normalizedEmail = email.toLowerCase().trim();
   const pending = state.pendingUsers[normalizedEmail];
   if (!pending) return { ok: false, error: "Pending user not found" };
+  if (!pending.role) {
+    return { ok: false, error: "This entry is a previously deleted user. Restore them instead." };
+  }
   if (!state.users[username]) return { ok: false, error: "User not found" };
+  if (state.users[username].deletedAt) {
+    return { ok: false, error: "That user is deleted. Restore them first." };
+  }
   const currentRoles = state.users[username].roles ?? [];
   if (!currentRoles.includes(pending.role)) {
     state.users[username].roles = [...currentRoles, pending.role];

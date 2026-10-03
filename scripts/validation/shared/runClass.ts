@@ -105,6 +105,7 @@ export const ENTRY_LOCAL_VALIDATOR_NAMES = [
   "binding-integrity",
   "component-behaviors",
   "cta-tracking",
+  "internal-link-utm",
   "static-field-overrides",
   "url-param-locale",
   "nonlocalized-common-locale",

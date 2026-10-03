@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdsIssue, AdsIssueAd } from "@shared/ads-diagnostics-rules";
-import { META_UTM_TEMPLATE } from "@shared/ads-settings";
+import { metaUtmTemplate } from "@shared/ads-settings";
+
+const META_UTM_TEMPLATE = metaUtmTemplate();
 import { MetaApiError } from "./meta-client";
 import type { MetaAdForFix } from "./meta-write";
-import { applyTrackingFix, mergeMissingTags, planAdFix, previewTrackingFix, type TrackingFixDeps } from "./tracking-fix";
+import { applyTrackingFix, fixOptionsFor, mergeMissingTags, planAdFix, previewTrackingFix, replaceViolatingTags, type TrackingFixDeps } from "./tracking-fix";
+import { TRACKING_FIX_RE_REVIEW_WARNING } from "@shared/ads-tracking-fix";
 
 function live(ad_id: string, over: Partial<MetaAdForFix> = {}): MetaAdForFix {
   return {
@@ -169,5 +172,51 @@ describe("applyTrackingFix", () => {
     expect(replace).toHaveBeenCalledTimes(1);
     expect(r.skipped.map((a) => [a.ad_id, a.reason])).toEqual([["a2", "not_attempted"]]);
     expect(d.requestRefresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("replace mode (utm_* issues)", () => {
+  const ref = { ad_id: "a1", ad_name: "A", account_id: "123" };
+  const scope = { campaign_id: "c1", account_id: "123" };
+  const opts = { mode: "replace" as const, keys: ["utm_source"] };
+
+  it("replaces only the flagged params in the URL parameters", () => {
+    const r = replaceViolatingTags("utm_source=facebook&utm_medium=paid_social&custom=1", undefined, ["utm_source"]);
+    expect(r).toEqual({ tags: "utm_source={{site_source_name}}&utm_medium=paid_social&custom=1", replaced: ["utm_source"], in_link: [] });
+  });
+
+  it("never touches params outside utm_source / utm_medium", () => {
+    expect(replaceViolatingTags("utm_campaign=Bad Name", undefined, ["utm_campaign"]).replaced).toEqual([]);
+  });
+
+  it("skips ads that are already correct or carry the value in the link", () => {
+    expect(planAdFix(ref, live("a1", { url_tags: META_UTM_TEMPLATE }), scope, opts)).toMatchObject({ status: "skipped", reason: "already_correct" });
+    expect(planAdFix(ref, live("a1", { url_tags: undefined, links: ["https://4geeks.com/l?utm_source=facebook"] }), scope, opts)).toMatchObject({
+      status: "skipped",
+      reason: "value_in_link",
+    });
+  });
+
+  it("marks the ad fixable with replaced params", () => {
+    const p = planAdFix(ref, live("a1", { url_tags: "utm_source=facebook&utm_medium=paid_social" }), scope, opts);
+    expect(p).toMatchObject({ status: "fixable", replaced: ["utm_source"], added: [] });
+    expect(p.after).toBe("utm_source={{site_source_name}}&utm_medium=paid_social");
+  });
+
+  it("preview reports mode and the re-review warning; keys come from the issue's UTM evidence", async () => {
+    const i: AdsIssue = {
+      ...issue(["a1"]),
+      id: "utm_source_alias:c1",
+      code: "utm_source_alias",
+      details: {
+        ...(issue(["a1"]).details as NonNullable<AdsIssue["details"]>),
+        utm: { params: ["utm_source"], values: [], ga4_channel: null, rule: "r", visits: 0, leads: 0 },
+      },
+    };
+    expect(fixOptionsFor(i)).toMatchObject({ mode: "replace", keys: ["utm_source"] });
+    const p = await previewTrackingFix(i, deps([live("a1", { url_tags: "utm_source=facebook&utm_medium=paid_social" })]));
+    expect(p.mode).toBe("replace");
+    expect(p.warning).toBe(TRACKING_FIX_RE_REVIEW_WARNING);
+    expect(p.ads[0]).toMatchObject({ status: "fixable", replaced: ["utm_source"] });
   });
 });

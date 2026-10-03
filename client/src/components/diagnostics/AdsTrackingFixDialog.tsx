@@ -10,6 +10,7 @@ import { apiFetch } from "@/lib/queryClient";
 import type { AdsIssue } from "@shared/ads-diagnostics-rules";
 import {
   TRACKING_FIX_SKIP_LABELS,
+  trackingFixModeFor,
   type TrackingFixAdPlan,
   type TrackingFixAdResult,
   type TrackingFixApplyResponse,
@@ -24,7 +25,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return json as T;
 }
 
-function TagsDiff({ before, after, added }: { before: string | null; after: string | null; added: string[] }) {
+function TagsDiff({ before, after, added, replaced = [] }: { before: string | null; after: string | null; added: string[]; replaced?: string[] }) {
   return (
     <div className="mt-1 space-y-0.5 font-mono text-[10px] leading-snug">
       <p className="break-all text-muted-foreground">
@@ -38,6 +39,7 @@ function TagsDiff({ before, after, added }: { before: string | null; after: stri
         </p>
       )}
       {added.length > 0 && <p className="font-sans text-[11px] text-chart-3">Adds {added.join(", ")}</p>}
+      {replaced.length > 0 && <p className="font-sans text-[11px] text-chart-3">Replaces {replaced.join(", ")}</p>}
     </div>
   );
 }
@@ -147,6 +149,7 @@ export function AdsTrackingFixDialog({
     });
 
   const campaign = issue.scope.campaign_name ?? "this campaign";
+  const replaceMode = (preview.data?.mode ?? trackingFixModeFor(issue.code)) === "replace";
 
   return (
     <Dialog open={open} onOpenChange={(o) => !apply.isPending && onOpenChange(o)}>
@@ -154,11 +157,12 @@ export function AdsTrackingFixDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Wand2 className="h-4 w-4 text-muted-foreground" />
-            Add missing tracking parameters
+            {replaceMode ? "Fix tracking values in Meta" : "Add missing tracking parameters"}
           </DialogTitle>
           <DialogDescription>
-            This adds the missing tracking parameters to these ads in Meta so visits and leads can be matched to the exact ad.
-            Tags the ads already have stay as they are.
+            {replaceMode
+              ? "This replaces the source and medium on these ads in Meta with the values from your tagging rules, so GA4 counts the visits in the right channel. Other tags stay as they are."
+              : "This adds the missing tracking parameters to these ads in Meta so visits and leads can be matched to the exact ad. Tags the ads already have stay as they are."}
           </DialogDescription>
         </DialogHeader>
 
@@ -187,7 +191,7 @@ export function AdsTrackingFixDialog({
                 <AlertTriangle className="h-4 w-4 text-amber-500" /> Before you confirm
               </p>
               <ul className="mt-1 list-disc space-y-0.5 pl-5 text-muted-foreground">
-                <li>Changed ads go back to Meta review and may pause briefly until approved.</li>
+                <li>{preview.data.warning ?? "Changed ads go back to Meta review and may pause briefly until approved."}</li>
                 <li>The ad set may re-enter the learning phase, so results can dip for a few days.</li>
                 <li>Budgets, audiences, and the ads' content don't change.</li>
               </ul>
@@ -212,7 +216,7 @@ export function AdsTrackingFixDialog({
                       />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm text-foreground">{ad.ad_name || ad.ad_id}</p>
-                        <TagsDiff before={ad.before} after={ad.after} added={ad.added} />
+                        <TagsDiff before={ad.before} after={ad.after} added={ad.added} replaced={ad.replaced} />
                       </div>
                     </li>
                   ))}
@@ -246,11 +250,20 @@ export function AdsTrackingFixDialog({
                   Meta doesn't allow editing an ad's URL parameters in place. For each ad we create a new creative from the same page post (so likes
                   and comments stay) with the merged <code className="font-mono">url_tags</code>, then point the ad at it.
                 </p>
-                <p>
-                  Only template parameters the ad lacks are added (from its link or URL parameters); existing values, including a non-paid{" "}
-                  <code className="font-mono">utm_medium</code>, are kept. Dynamic / Advantage+ creatives, catalog ads, Instant Form ads, and ads
-                  without a reusable post are skipped.
-                </p>
+                {replaceMode ? (
+                  <p>
+                    Only <code className="font-mono">utm_source</code> / <code className="font-mono">utm_medium</code> values in the ad&apos;s URL
+                    parameters that break the convention in <code className="font-mono">ads-config.yml</code> are replaced. Values baked into the
+                    website link itself can&apos;t be edited here and are skipped. Dynamic / Advantage+ creatives, catalog ads, Instant Form ads, and
+                    ads without a reusable post are skipped.
+                  </p>
+                ) : (
+                  <p>
+                    Only template parameters the ad lacks are added (from its link or URL parameters); existing values, including a non-paid{" "}
+                    <code className="font-mono">utm_medium</code>, are kept. Dynamic / Advantage+ creatives, catalog ads, Instant Form ads, and ads
+                    without a reusable post are skipped.
+                  </p>
+                )}
                 <p>
                   After a successful run we re-read ad setups from Meta; the issue only clears when a Re-check or Run checks confirms it. Uses the server's{" "}
                   <code className="font-mono">META_ADS_ACCESS_TOKEN</code> (needs <code className="font-mono">ads_management</code>); each change is

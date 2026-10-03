@@ -73,7 +73,7 @@ export function VariantProposalBadge({
           </Button>
         ) : (
           <p className="text-xs text-muted-foreground">
-            The proposal lives in another environment ({link.env}), so it cannot be opened from here.
+            This proposal isn't in this copy of the data. Download proposals from production to open it.
           </p>
         )}
         {unlinkUrl ? (

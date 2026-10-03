@@ -10,9 +10,11 @@ import { getAdsSettings } from "../settings";
 import type { ContentIndex } from "../content-index";
 import {
   ADS_ISSUE_WINDOW_DAYS,
+  parseTrackingParams,
   severityForSpend,
   sortAdsIssues,
   type AdsIssue,
+  type UtmGrace,
 } from "@shared/ads-diagnostics-rules";
 import {
   adsThresholds,
@@ -21,12 +23,15 @@ import {
   isKnownExternalCampaign,
   type AdsAlertThresholds,
   type GoogleAdsSettings,
+  type UtmConvention,
 } from "@shared/ads-settings";
 import { googleSuffixHasIds } from "@shared/paid-traffic";
 import { buildAdsReport, type AdsReport, type MoneyByCurrency } from "./ads-report";
 import { GOOGLE_BACKFILL_DAYS, loadGoogleSetups, loadGoogleState, type GoogleAdsSetups, type GoogleAdsSyncState } from "./google-ads-days";
 import { addDays, utcDate } from "./meta-ads-days";
 import { lastCompleteGa4Date, loadPaidLandingState, type PaidLandingState } from "./paid-detection";
+import { utmGraceState } from "./utm-convention-history";
+import { loadObservedUtmGroups, utmIssues, type DeclaredUtm, type ObservedUtmGroup } from "./utm-issues";
 
 /** Transfer more than this many days behind "expected through" is an error, not a warning. */
 export const GOOGLE_STALE_ERROR_DAYS = 3;
@@ -65,6 +70,8 @@ export type GoogleIssueInput = {
   paidState: PaidLandingState;
   t: AdsAlertThresholds;
   now: Date;
+  /** UTM convention checks (final URL suffixes + paid Google visits / leads); skipped when omitted. */
+  utm?: { convention: UtmConvention; grace: UtmGrace; observed: ObservedUtmGroup[] };
 };
 
 /** Pure: every Google issue for one build. */
@@ -114,8 +121,21 @@ export function googleIssues(input: GoogleIssueInput): AdsIssue[] {
   const available = new Set(state.available_customers ?? []);
   for (const id of settings.customer_ids) {
     const c = state.customers[id];
+    const subAccounts = state.manager_customers?.[id];
     const missing = (state.available_customers && !available.has(id)) || /no tables/i.test(c?.sync_error ?? "");
-    if (missing) {
+    if (subAccounts) {
+      push({
+        id: `google_transfer_missing_account:${id}`,
+        code: "google_transfer_missing_account",
+        severity: "error",
+        title: `Manager account ticked instead of its accounts: ${formatGoogleCustomerId(id)}`,
+        why: `${formatGoogleCustomerId(id)} is the manager account the transfer runs on. Spend belongs to the accounts under it (${subAccounts.map(formatGoogleCustomerId).join(", ")}), so nothing is counted for the manager itself.`,
+        how_to_fix: "In Settings → Ads → Google Ads, untick the manager account and tick the accounts this site reports on.",
+        spend_affected: {},
+        scope: { account_id: id },
+        site_fixable: false,
+      });
+    } else if (missing) {
       push({
         id: `google_transfer_missing_account:${id}`,
         code: "google_transfer_missing_account",
@@ -312,6 +332,35 @@ export function googleIssues(input: GoogleIssueInput): AdsIssue[] {
     }
   }
 
+  // UTM convention / GA4 standard: campaign final URL suffixes + paid Google visits and leads
+  if (input.utm) {
+    const ticked = new Set(settings.customer_ids);
+    const declared: DeclaredUtm[] = [];
+    for (const [cid, info] of Object.entries(setups.campaigns)) {
+      if (!info.final_url_suffix?.trim() || (ticked.size > 0 && !ticked.has(info.customer_id))) continue;
+      const c = campaignSpend.get(cid);
+      declared.push({
+        campaign_id: cid,
+        campaign_name: c?.campaign_name || info.name || cid,
+        account_id: info.customer_id,
+        params: parseTrackingParams(info.final_url_suffix),
+        spend: c?.spend ?? {},
+      });
+    }
+    for (const i of utmIssues({
+      platform: "google",
+      convention: input.utm.convention,
+      grace: input.utm.grace,
+      declared,
+      observed: input.utm.observed,
+      totalSpend,
+      t,
+      known: settings.known_external_campaigns,
+    })) {
+      push(i);
+    }
+  }
+
   return issues;
 }
 
@@ -338,8 +387,26 @@ export async function buildGoogleAdsDiagnostics(opts: {
     now,
   });
   const connected = report.google.connected;
+  const convention = settings.utm_convention;
   const issues = connected
-    ? googleIssues({ report, state: loadGoogleState(opts.site), setups: loadGoogleSetups(opts.site), settings: google, paidState: loadPaidLandingState(opts.site), t, now })
+    ? googleIssues({
+        report,
+        state: loadGoogleState(opts.site),
+        setups: loadGoogleSetups(opts.site),
+        settings: google,
+        paidState: loadPaidLandingState(opts.site),
+        t,
+        now,
+        ...(convention
+          ? {
+              utm: {
+                convention,
+                grace: utmGraceState(opts.site, convention, now),
+                observed: loadObservedUtmGroups(opts.site, report.window.start, report.window.end).filter((g) => g.platform === "google"),
+              },
+            }
+          : {}),
+      })
     : [];
   sortAdsIssues(issues);
   return {

@@ -38,6 +38,7 @@ import { brokenAnchorsValidator } from "./broken-anchors";
 import { sectionVariantsValidator } from "./section-variants";
 import { componentBehaviorsValidator } from "./component-behaviors";
 import { ctaTrackingValidator } from "./cta-tracking";
+import { internalLinkUtmValidator } from "./internal-link-utm";
 import { requiredFieldsValidator } from "./required-fields";
 import { schemaOrgCompanionsValidator } from "./schema-org-companions";
 import { staticFieldOverridesValidator } from "./static-field-overrides";
@@ -102,6 +103,7 @@ export const validators: Validator[] = [
   brokenAnchorsValidator,
   componentBehaviorsValidator,
   ctaTrackingValidator,
+  internalLinkUtmValidator,
   updatedAtValidator,
   siteLinkIndexValidator,
   siteRelationIndexValidator,

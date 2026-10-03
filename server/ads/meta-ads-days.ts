@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
+import { adsConfigReadError } from "../ads-config";
 import { child } from "../logger";
 import {
   fetchAccountInfo,
@@ -16,6 +17,8 @@ import {
   fetchAdCreatives,
   fetchAdInsights,
   fetchAdPlatformInsights,
+  fetchAdsets,
+  fetchCampaigns,
   fetchCustomConversions,
   fetchPixelEventStats,
   isMetaTokenConfigured,
@@ -33,12 +36,27 @@ import {
   applyMetaNames,
   loadAdsSetup,
   mergeMetaAccountAds,
+  mergeMetaAdsets,
+  mergeMetaCampaigns,
   metaCreativeFromAd,
+  noteCampaignNamesFromRows,
   saveAdsSetup,
   setMetaAccount,
   writeAdsSetupFile,
+  type AdsChangeSink,
   type AdsSetupCatalog,
 } from "./ads-setup";
+import {
+  ADS_CHANGE_LOG_DIR,
+  appendChanges,
+  changeLogFileName,
+  listChangeLogFiles,
+  pruneChangeLog,
+  readChangeLogFile,
+  type AdsChange,
+  type AdsChangePlatform,
+} from "./ads-change-log";
+import { restoreAdsHistoryIfMissing } from "./ads-history-backup";
 
 const log = child({ module: "ads/meta-ads-days" });
 
@@ -79,6 +97,10 @@ export type MetaAdsSyncState = {
   production_origin?: string;
   /** Newest day in the downloaded snapshot. */
   snapshot_last_date?: string;
+  /** Last successful push of `ads-history/` to the content repo (production only). */
+  backup_pushed_at?: string;
+  /** Why the last history backup push failed; cleared on success. */
+  backup_error?: string;
 };
 
 export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "account_status"> & {
@@ -103,6 +125,8 @@ export type MetaAccountSyncInfo = Pick<MetaAccountInfo, "name" | "currency" | "a
   conversions_error?: string;
   /** Day-row field shape last fully loaded (see `META_ROW_SHAPE`). Missing or lower → one-time 90-day re-read. */
   row_shape?: number;
+  /** Why the last campaign / ad set settings read failed (previous settings kept); cleared on success. */
+  delivery_error?: string;
 };
 
 /** Custom conversions shared with each ad account (read every sync). */
@@ -134,7 +158,7 @@ export type MetaSyncResult = {
   dates: string[];
   rows: number;
   error?: string;
-  skipped?: "not_enabled" | "no_accounts" | "no_token" | "in_progress";
+  skipped?: "not_enabled" | "no_accounts" | "no_token" | "in_progress" | "ads_config_unreadable";
 };
 
 export const META_DAYS_DIR = "meta-ads-days";
@@ -353,11 +377,14 @@ export type MetaSnapshot = {
   /** Optional: snapshots from before per-conversion counts omit these. */
   custom_conversions?: MetaCustomConversionsFile;
   pixel_events?: MetaPixelEventsFile;
+  /** Campaign change history, every kept month (both platforms). Missing from older productions. */
+  change_log?: Array<{ platform: AdsChangePlatform; month: string; changes: AdsChange[] }>;
 };
 
 /** Every cached Meta file on or after `since` (for "Download from production"). */
 export function exportMetaSnapshot(site: string, since: string): MetaSnapshot {
   return {
+    change_log: listChangeLogFiles(site).map((f) => ({ platform: f.platform, month: f.month, changes: readChangeLogFile(f.file) })),
     meta_days: listMetaDayDates(site)
       .filter((d) => d >= since)
       .map((d) => loadMetaDay(site, d))
@@ -383,6 +410,10 @@ export function stageMetaSnapshot(stagingRoot: string, snap: MetaSnapshot): void
   writeJson(path.join(stagingRoot, META_STATE_FILE), snap.meta_state);
   if (snap.custom_conversions) writeJson(path.join(stagingRoot, META_CUSTOM_CONVERSIONS_FILE), snap.custom_conversions);
   if (snap.pixel_events) writeJson(path.join(stagingRoot, META_PIXEL_EVENTS_FILE), snap.pixel_events);
+  if (snap.change_log) {
+    fs.mkdirSync(path.join(stagingRoot, ADS_CHANGE_LOG_DIR), { recursive: true });
+    for (const f of snap.change_log) writeJson(path.join(stagingRoot, ADS_CHANGE_LOG_DIR, changeLogFileName(f.platform, f.month)), f.changes);
+  }
 }
 
 export function pruneMetaDays(site: string, now = new Date()): number {
@@ -483,13 +514,13 @@ function savePlatformDays(
 type DateWindow = { since: string; until: string };
 
 /**
- * Steps `syncMetaAds` will report: per account (lookup + insight chunks + placement chunks + creatives + conversions),
- * then pixel events and one save. `platformWindows` defaults to the main window for every account.
+ * Steps `syncMetaAds` will report: per account (lookup + insight chunks + placement chunks + creatives + campaigns
+ * + ad sets + conversions), then pixel events and one save. `platformWindows` defaults to the main window for every account.
  */
 export function metaSyncStepCount(accountCount: number, window: DateWindow | null, platformWindows?: DateWindow[]): number {
   if (!window || accountCount <= 0) return 0;
   const platformChunks = (platformWindows ?? Array.from({ length: accountCount }, () => window)).reduce((n, w) => n + fetchChunkCount(w), 0);
-  return accountCount * (fetchChunkCount(window) + 3) + platformChunks + 2;
+  return accountCount * (fetchChunkCount(window) + 5) + platformChunks + 2;
 }
 
 /** Placement read window: the main window, widened to 90 days until the account has a full placement history. */
@@ -572,6 +603,7 @@ export async function syncMetaAds(opts: {
   const requestedMode = opts.mode ?? "refresh";
   const settings = getAdsSettings(opts.contentRoot).meta;
   const base = { mode: requestedMode, dates: [] as string[], rows: 0 };
+  if (adsConfigReadError(opts.contentRoot) != null) return { ...base, ok: false, skipped: "ads_config_unreadable" };
   if (!settings.enabled) return { ...base, ok: false, skipped: "not_enabled" };
   if (settings.ad_account_ids.length === 0) return { ...base, ok: false, skipped: "no_accounts" };
   if (!isMetaTokenConfigured()) return { ...base, ok: false, skipped: "no_token" };
@@ -597,7 +629,9 @@ export async function syncMetaAds(opts: {
     for (const d of dateRange(window.since, window.until)) byDate.set(d, []);
     const loadsFullHistory = mode !== "older" && byDate.size >= META_BACKFILL_DAYS;
 
+    restoreAdsHistoryIfMissing(opts.site, opts.contentRoot, "meta", opts.now);
     const setup = loadAdsSetup(opts.site, "meta");
+    const changeSink: AdsChangeSink = { changes: [], source: "sync" };
     const prevConversions = loadMetaCustomConversions(opts.site);
     const conversionsFile: MetaCustomConversionsFile = { fetched_at: "", accounts: {} };
     for (const id of settings.ad_account_ids) {
@@ -631,6 +665,7 @@ export async function syncMetaAds(opts: {
           conversions_loaded_at: prev?.conversions_loaded_at,
           conversions_error: prev?.conversions_error,
           row_shape: prev?.row_shape,
+          delivery_error: prev?.delivery_error,
         };
         for (const [start, end] of chunks(window)) {
           opts.onStep?.(`Meta: ${account}, ${shortDateRange(start, end)}`);
@@ -661,13 +696,29 @@ export async function syncMetaAds(opts: {
       }
       opts.onStep?.(`Meta: ${account}, ad creatives`);
       try {
-        mergeMetaAccountAds(setup, accountId, await fetchAdCreatives(accountId), new Date().toISOString());
+        mergeMetaAccountAds(setup, accountId, await fetchAdCreatives(accountId), new Date().toISOString(), changeSink);
         state.accounts[accountId].setup_read_at = new Date().toISOString();
         state.accounts[accountId].setup_error = undefined;
       } catch (err) {
         state.accounts[accountId].setup_error = err instanceof Error ? err.message : String(err);
         log.warn({ err, accountId }, "[meta] creatives fetch failed (non-fatal)");
       }
+      const deliveryErrors: string[] = [];
+      opts.onStep?.(`Meta: ${account}, campaign settings`);
+      try {
+        mergeMetaCampaigns(setup, accountId, await fetchCampaigns(accountId), new Date().toISOString(), changeSink);
+      } catch (err) {
+        deliveryErrors.push(`campaigns: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn({ err, accountId }, "[meta] campaign settings read failed (non-fatal)");
+      }
+      opts.onStep?.(`Meta: ${account}, ad set settings`);
+      try {
+        mergeMetaAdsets(setup, accountId, await fetchAdsets(accountId), new Date().toISOString(), changeSink);
+      } catch (err) {
+        deliveryErrors.push(`ad sets: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn({ err, accountId }, "[meta] ad set settings read failed (non-fatal)");
+      }
+      state.accounts[accountId].delivery_error = deliveryErrors.length > 0 ? deliveryErrors.join("; ") : undefined;
       opts.onStep?.(`Meta: ${account}, conversions and pixels`);
       try {
         conversionsFile.accounts[accountId] = { conversions: await fetchCustomConversions(accountId) };
@@ -708,10 +759,16 @@ export async function syncMetaAds(opts: {
       if (mode !== "older" && dateRange(w.since, w.until).length >= META_BACKFILL_DAYS) acct.platform_history_loaded_at = fetchedAt;
     }
     applyMetaNames(setup, Array.from(byDate.values()).flat(), fetchedAt);
+    if (!setup.extras.names_seeded_at) {
+      for (const d of listMetaDayDates(opts.site)) noteCampaignNamesFromRows(setup, loadMetaDay(opts.site, d)?.rows ?? [], fetchedAt);
+      setup.extras.names_seeded_at = fetchedAt;
+    }
     if (settings.ad_account_ids.every((id) => !state.accounts[id]?.setup_error && !state.accounts[id]?.sync_error)) {
       setup.fetched_at = fetchedAt;
     }
     saveAdsSetup(opts.site, setup);
+    appendChanges(opts.site, changeSink.changes);
+    pruneChangeLog(opts.site, opts.now);
     conversionsFile.fetched_at = fetchedAt;
     saveMetaCustomConversions(opts.site, conversionsFile);
     if (pixelsFile) saveMetaPixelEvents(opts.site, { ...pixelsFile, fetched_at: fetchedAt });

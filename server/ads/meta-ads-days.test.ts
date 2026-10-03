@@ -18,6 +18,8 @@ vi.mock("./meta-client", () => ({
   fetchAdInsights: vi.fn(async () => []),
   fetchAdPlatformInsights: vi.fn(async () => []),
   fetchAdCreatives: vi.fn(async () => []),
+  fetchCampaigns: vi.fn(async () => []),
+  fetchAdsets: vi.fn(async () => []),
   fetchCustomConversions: vi.fn(async () => []),
   fetchAccountPixels: vi.fn(async () => []),
   fetchPixelEventStats: vi.fn(async () => []),
@@ -95,15 +97,15 @@ afterAll(() => {
 });
 
 describe("metaSyncStepCount", () => {
-  it("counts lookup + insight chunks + placement chunks + creatives + conversions per account, plus pixel events and one save", () => {
-    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(7);
-    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 6 + 3) + 2);
+  it("counts lookup + insight chunks + placement chunks + creatives + campaigns + ad sets + conversions per account, plus pixel events and one save", () => {
+    expect(metaSyncStepCount(1, { since: "2026-09-20", until: "2026-09-29" })).toBe(9);
+    expect(metaSyncStepCount(2, { since: "2026-07-02", until: "2026-09-29" })).toBe(2 * (6 + 6 + 5) + 2);
   });
 
   it("uses per-account placement windows when given", () => {
     const refresh = { since: "2026-09-20", until: "2026-09-29" };
     const firstFill = { since: "2026-07-02", until: "2026-09-29" };
-    expect(metaSyncStepCount(2, refresh, [refresh, firstFill])).toBe(2 * (1 + 3) + 1 + 6 + 2);
+    expect(metaSyncStepCount(2, refresh, [refresh, firstFill])).toBe(2 * (1 + 5) + 1 + 6 + 2);
   });
 
   it("is 0 with no window or no accounts", () => {
@@ -127,37 +129,37 @@ describe("platformWindowFor", () => {
 describe("planMetaSyncSteps", () => {
   it("plans the 90-day first load when no days are cached", () => {
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 5) + 2);
   });
 
   it("plans the 10-day refresh once days are cached and history is loaded", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(7);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(9);
   });
 
   it("plans a 90-day placement fill when only placement history is missing", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"], false);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(1 + 1 + 6 + 1 + 1 + 1 + 1);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(1 + 1 + 6 + 1 + 1 + 1 + 1 + 1 + 1);
   });
 
   it("plans a 90-day backfill when an account never loaded history", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"]);
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 5) + 2);
   });
 
   it("plans a one-time 90-day refill when per-conversion counts were never loaded", () => {
     seedDay("2026-09-01");
     seedLoaded(["111"], true, false);
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(6 + 6 + 3 + 2);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(6 + 6 + 5 + 2);
   });
 
   it("plans 90 older days before the earliest cached day", () => {
     seedDay("2026-09-01");
-    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 6 + 3 + 2);
+    expect(planMetaSyncSteps(SITE, undefined, "older", NOW)).toBe(6 + 6 + 5 + 2);
   });
 
   it("is 0 when the sync would skip", () => {
@@ -206,6 +208,50 @@ describe("syncMetaAds ad-setup read state", () => {
     const acct = loadMetaState(SITE).accounts["111"];
     expect(acct.setup_read_at).toBe(before);
     expect(acct.setup_error).toBe("boom");
+  });
+});
+
+describe("syncMetaAds campaign / ad set settings and change log", () => {
+  const campaign = (daily_budget: string) => ({
+    id: "c1",
+    account_id: "111",
+    name: "Brand",
+    status: "ACTIVE",
+    effective_status: "ACTIVE",
+    objective: "OUTCOME_LEADS",
+    daily_budget,
+    lifetime_budget: null,
+    bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+    spend_cap: null,
+  });
+  const changeLogDir = () => path.join(h.cacheDir, SITE, "ads-change-log");
+
+  it("seeds history on the first read and logs only real changes after", async () => {
+    vi.mocked(metaClient.fetchCampaigns).mockResolvedValueOnce([campaign("5000")]);
+    await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(fs.existsSync(changeLogDir())).toBe(false);
+    const setup = JSON.parse(fs.readFileSync(path.join(h.cacheDir, SITE, "ads-setup", "meta.json"), "utf-8"));
+    expect(setup.campaigns.c1.history.fields.daily_budget).toBe("5000");
+    expect(setup.campaigns.c1.extras.objective).toBe("OUTCOME_LEADS");
+
+    vi.mocked(metaClient.fetchCampaigns).mockResolvedValueOnce([campaign("8000")]);
+    await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    const files = fs.readdirSync(changeLogDir());
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^meta-\d{4}-\d{2}\.json$/);
+    const changes = JSON.parse(fs.readFileSync(path.join(changeLogDir(), files[0]!), "utf-8"));
+    expect(changes).toEqual([expect.objectContaining({ level: "campaign", id: "c1", field: "daily_budget", from: "5000", to: "8000", source: "sync" })]);
+  });
+
+  it("keeps previous settings and records delivery_error when the reads fail", async () => {
+    vi.mocked(metaClient.fetchCampaigns).mockResolvedValueOnce([campaign("5000")]);
+    await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    vi.mocked(metaClient.fetchCampaigns).mockRejectedValueOnce(new Error("rate limited"));
+    const res = await syncMetaAds({ site: SITE, mode: "refresh", now: NOW });
+    expect(res.ok).toBe(true);
+    expect(loadMetaState(SITE).accounts["111"].delivery_error).toContain("campaigns: rate limited");
+    const setup = JSON.parse(fs.readFileSync(path.join(h.cacheDir, SITE, "ads-setup", "meta.json"), "utf-8"));
+    expect(setup.campaigns.c1.history.fields.daily_budget).toBe("5000");
   });
 });
 
@@ -278,7 +324,7 @@ describe("syncMetaAds history loading", () => {
     expect(loadMetaState(SITE).accounts["222"]).toBeUndefined();
 
     h.meta.ad_account_ids = ["111", "222"];
-    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 3) + 2);
+    expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (6 + 6 + 5) + 2);
   });
 });
 
@@ -314,7 +360,7 @@ describe("syncMetaAds per-conversion refill, custom conversions and pixel events
       expect(state.accounts["222"].sync_error).toBeTruthy();
       // Broken account is skipped for shape backfill; healthy account is current → 10-day refresh.
       expect(effectiveMetaSyncMode("refresh", ["111", "222"], state)).toBe("refresh");
-      expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (1 + 1 + 3) + 2);
+      expect(planMetaSyncSteps(SITE, undefined, "refresh", NOW)).toBe(2 * (1 + 1 + 5) + 2);
     } finally {
       vi.mocked(metaClient.fetchAccountInfo).mockImplementation(async () => ({ id: "", name: "Acct", currency: "USD", account_status: 1 }));
     }

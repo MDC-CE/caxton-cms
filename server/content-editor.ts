@@ -2779,7 +2779,14 @@ function invalidateContentCaches(contentType?: string): void {
 
 type ContentLifecycleResult<T extends Record<string, unknown>> =
   | { success: true; data: T }
-  | { success: false; statusCode: number; error: string; code?: string; deprecated?: DeprecatedFieldErrorInfo };
+  | {
+      success: false;
+      statusCode: number;
+      error: string;
+      code?: string;
+      deprecated?: DeprecatedFieldErrorInfo;
+      details?: Record<string, unknown>;
+    };
 
 // ─── renameContentSlug ────────────────────────────────────────────────────────
 
@@ -2797,48 +2804,77 @@ export interface RenameContentSlugInput {
   ci?: ContentIndex;
 }
 
-export async function renameContentSlug(
-  input: RenameContentSlugInput,
-): Promise<ContentLifecycleResult<{
-  success: boolean; folderSlug: string; oldSlug: string; newSlug: string;
-  oldUrl: string; newUrl: string; locale: string; redirectCreated: boolean; routed: boolean;
-  clusterRewireQueued: boolean;
-}>> {
-  const { contentType, folderSlug, locale, newSlug, createRedirect = false, enforceRedirectPolicy = false, author } = input;
+export type CheckSlugRenameInput = Pick<
+  RenameContentSlugInput,
+  "contentType" | "folderSlug" | "locale" | "newSlug" | "ci"
+>;
+
+export type CheckSlugRenameFailure = {
+  ok: false;
+  statusCode: number;
+  code: string;
+  error: string;
+  conflictUrl?: string;
+  redirectTo?: string;
+  redirectSource?: string;
+};
+
+export type CheckSlugRenameSuccess = {
+  ok: true;
+  newUrl: string;
+  oldUrl: string;
+  localeSlug: string;
+  /** New URL is one of this entry's own `meta.redirects` (renaming back to an older slug). */
+  ownRedirectHit: boolean;
+  contentFolder: string;
+  resolvedFolderSlug: string;
+  folderPath: string;
+  effectiveLocale: string;
+  localeFile: string;
+  localeFilePath: string;
+  parsed: Record<string, unknown>;
+  commonData: Record<string, unknown>;
+  currentSlug: string;
+};
+
+/**
+ * Read-only checks shared by the live slug-availability check and `renameContentSlug`:
+ * format, reserved slugs, entry/locale file, URL ownership, index readiness, redirect conflicts.
+ */
+export async function checkSlugRename(
+  input: CheckSlugRenameInput,
+): Promise<CheckSlugRenameSuccess | CheckSlugRenameFailure> {
+  const { contentType, folderSlug, locale, newSlug } = input;
   const ci = input.ci ?? contentIndex;
-  const rootName = input.contentRootName ?? ci.contentRootName ?? getDefaultContentRootName();
-  let clusterRewireQueued = false;
 
   if (!contentType || !folderSlug || !locale || !newSlug) {
-    return { success: false, statusCode: 400, error: "Missing required fields: contentType, folderSlug, locale, newSlug" };
+    return { ok: false, statusCode: 400, code: "missing_fields", error: "Missing required fields: contentType, folderSlug, locale, newSlug" };
   }
   if (!isValidType(contentType)) {
-    return { success: false, statusCode: 400, error: `Invalid type. Must be one of: ${getAllTypes().join(", ")}` };
+    return { ok: false, statusCode: 400, code: "invalid_type", error: `Invalid type. Must be one of: ${getAllTypes().join(", ")}` };
   }
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newSlug)) {
-    return { success: false, statusCode: 400, error: "Invalid slug format. Use lowercase letters, numbers, and hyphens only." };
+    return { ok: false, statusCode: 400, code: "invalid_slug", error: "Invalid slug format. Use lowercase letters, numbers, and hyphens only." };
   }
   if (isReservedTemplateVariantSlug(newSlug)) {
     return {
-      success: false,
+      ok: false,
       statusCode: 400,
+      code: "reserved_slug",
       error: 'Slug "template" and "single" are reserved for the shared-layout shell and cannot be used as entry slugs.',
     };
   }
 
-  const {
-    assertCreateRedirectIfRequired,
-    assertLocaleUrlAvailable,
-    entryAgeHours,
-    readPublishedAtFromCommon,
-  } = await import("./locale-url-slug.js");
+  const { assertLocaleUrlAvailable, assertNoRedirectConflict, redirectPathsFromMeta } = await import(
+    "./locale-url-slug.js"
+  );
 
   const contentFolder = ci.getFolderName(contentType);
   const resolvedFolderSlug = ci.resolveBaseSlug(folderSlug, contentType);
   const folderPath = ci.getContentFolderPath(contentType, folderSlug);
 
   if (!fs.existsSync(folderPath)) {
-    return { success: false, statusCode: 404, error: `Content folder not found: ${folderSlug} (resolved: ${resolvedFolderSlug})` };
+    return { ok: false, statusCode: 404, code: "entry_not_found", error: `Content folder not found: ${folderSlug} (resolved: ${resolvedFolderSlug})` };
   }
 
   const effectiveLocale =
@@ -2850,29 +2886,20 @@ export async function renameContentSlug(
     (f) => fs.existsSync(path.join(folderPath, f)),
   );
   if (!localeFile) {
-    return { success: false, statusCode: 404, error: `Locale file not found: ${effectiveLocale}` };
+    return { ok: false, statusCode: 404, code: "locale_not_found", error: `Locale file not found: ${effectiveLocale}` };
   }
 
   const localeFilePath = path.join(folderPath, localeFile);
   const raw = fs.readFileSync(localeFilePath, "utf-8");
   const parsed = ci.safeYamlLoad(raw) as Record<string, unknown> | null;
-  if (!parsed) return { success: false, statusCode: 500, error: "Failed to parse locale file" };
+  if (!parsed) return { ok: false, statusCode: 500, code: "parse_failed", error: "Failed to parse locale file" };
 
   const currentSlug = (parsed.slug as string) || folderSlug;
   if (currentSlug === newSlug) {
-    return { success: false, statusCode: 400, error: "New slug is the same as current slug" };
+    return { ok: false, statusCode: 400, code: "same_slug", error: "New slug is the same as current slug" };
   }
 
   const commonData = ci.loadCommonData(contentType, resolvedFolderSlug) || {};
-  const redirectGate = assertCreateRedirectIfRequired({
-    ageHours: entryAgeHours(readPublishedAtFromCommon(commonData)),
-    createRedirect: !!createRedirect,
-    isLiveSlugChange: true,
-    enforceRedirectPolicy,
-  });
-  if (!redirectGate.ok) {
-    return { success: false, statusCode: redirectGate.statusCode, error: redirectGate.error };
-  }
 
   const mergedForUrl = { ...commonData, ...parsed, slug: newSlug };
   const urlCheck = assertLocaleUrlAvailable({
@@ -2883,7 +2910,39 @@ export async function renameContentSlug(
     ci,
   });
   if (!urlCheck.ok) {
-    return { success: false, statusCode: urlCheck.statusCode, error: urlCheck.error };
+    return {
+      ok: false,
+      statusCode: urlCheck.statusCode,
+      code: urlCheck.code,
+      error: urlCheck.error,
+      ...(urlCheck.url ? { conflictUrl: urlCheck.url } : {}),
+    };
+  }
+
+  if (!ci.isSlowPhaseReady()) {
+    return {
+      ok: false,
+      statusCode: 503,
+      code: "index_warming",
+      error: "index_warming: site content is still loading, so redirects cannot be checked yet. Try again in a moment.",
+    };
+  }
+
+  const redirectCheck = assertNoRedirectConflict({
+    url: urlCheck.url,
+    redirects: ci.getRedirects(),
+    ownRedirectPaths: [...redirectPathsFromMeta(parsed), ...redirectPathsFromMeta(commonData)],
+  });
+  if (!redirectCheck.ok) {
+    return {
+      ok: false,
+      statusCode: redirectCheck.statusCode,
+      code: redirectCheck.code,
+      error: redirectCheck.error,
+      conflictUrl: redirectCheck.conflictUrl,
+      redirectTo: redirectCheck.redirectTo,
+      redirectSource: redirectCheck.redirectSource,
+    };
   }
 
   const mergedOldForUrl = { ...commonData, ...parsed, slug: currentSlug };
@@ -2897,7 +2956,93 @@ export async function renameContentSlug(
   const oldUrl = oldUrlResult.ok
     ? oldUrlResult.url
     : ci.buildUrl(contentType, effectiveLocale, currentSlug);
-  const newUrl = urlCheck.url;
+
+  return {
+    ok: true,
+    newUrl: urlCheck.url,
+    oldUrl,
+    localeSlug: urlCheck.localeSlug,
+    ownRedirectHit: redirectCheck.ownRedirectHit,
+    contentFolder,
+    resolvedFolderSlug,
+    folderPath,
+    effectiveLocale,
+    localeFile,
+    localeFilePath,
+    parsed,
+    commonData,
+    currentSlug,
+  };
+}
+
+export async function renameContentSlug(
+  input: RenameContentSlugInput,
+): Promise<ContentLifecycleResult<{
+  success: boolean; folderSlug: string; oldSlug: string; newSlug: string;
+  oldUrl: string; newUrl: string; locale: string; redirectCreated: boolean; routed: boolean;
+  clusterRewireQueued: boolean;
+}>> {
+  const { contentType, newSlug, createRedirect = false, enforceRedirectPolicy = false, author } = input;
+  const ci = input.ci ?? contentIndex;
+  const rootName = input.contentRootName ?? ci.contentRootName ?? getDefaultContentRootName();
+  let clusterRewireQueued = false;
+
+  const check = await checkSlugRename(input);
+  if (!check.ok) {
+    const { ok: _ok, statusCode, code, error, ...details } = check;
+    return {
+      success: false,
+      statusCode,
+      code,
+      error,
+      ...(Object.keys(details).length > 0 ? { details } : {}),
+    };
+  }
+
+  const {
+    assertCreateRedirectIfRequired,
+    entryAgeHours,
+    readPublishedAtFromCommon,
+    removeRedirectPathFromMeta,
+  } = await import("./locale-url-slug.js");
+
+  const {
+    contentFolder,
+    resolvedFolderSlug,
+    folderPath,
+    effectiveLocale,
+    localeFile,
+    localeFilePath,
+    parsed,
+    commonData,
+    currentSlug,
+    oldUrl,
+    newUrl,
+  } = check;
+
+  const redirectGate = assertCreateRedirectIfRequired({
+    ageHours: entryAgeHours(readPublishedAtFromCommon(commonData)),
+    createRedirect: !!createRedirect,
+    isLiveSlugChange: true,
+    enforceRedirectPolicy,
+  });
+  if (!redirectGate.ok) {
+    return { success: false, statusCode: redirectGate.statusCode, code: redirectGate.code, error: redirectGate.error };
+  }
+
+  if (check.ownRedirectHit) {
+    removeRedirectPathFromMeta(parsed, newUrl);
+    const commonFile = ["_common.yml", "_common.yaml"].find((f) => fs.existsSync(path.join(folderPath, f)));
+    if (commonFile) {
+      const commonPath = path.join(folderPath, commonFile);
+      const commonDoc = ci.safeYamlLoad(fs.readFileSync(commonPath, "utf-8")) as Record<string, unknown> | null;
+      if (commonDoc && removeRedirectPathFromMeta(commonDoc, newUrl)) {
+        fs.writeFileSync(commonPath, safeYamlDump(commonDoc, { lineWidth: -1, noRefs: true }), "utf-8");
+        markFileAsModified(`${rootName}/${contentFolder}/${resolvedFolderSlug}/${commonFile}`, author);
+      }
+    }
+  }
+
   parsed.slug = newSlug;
 
   if (createRedirect) {
@@ -2911,7 +3056,7 @@ export async function renameContentSlug(
   const updated = safeYamlDump(parsed, { lineWidth: -1, noRefs: true });
   fs.writeFileSync(localeFilePath, updated, "utf-8");
   markFileAsModified(`${rootName}/${contentFolder}/${resolvedFolderSlug}/${localeFile}`, author);
-  ci.refresh({ syncSlow: !!createRedirect });
+  ci.refresh({ syncSlow: !!createRedirect || check.ownRedirectHit });
   const routed = ci.resolveUrl(newUrl)?.slug === resolvedFolderSlug;
   refreshSitemapEntry(contentType, resolvedFolderSlug, effectiveLocale);
   clearRedirectCache();

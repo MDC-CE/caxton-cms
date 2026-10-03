@@ -255,9 +255,9 @@ export function AdsAlertThresholdsCard({
                       hours where either event fired.
                     </p>
                     <p>
-                      Stored in <code className="font-mono">settings.yml → ads.alert_thresholds</code> (shared by Meta and Google; older files used{" "}
-                      <code className="font-mono">ads.meta.alert_thresholds</code>, still read as a fallback). Campaigns marked as known live in{" "}
-                      <code className="font-mono">settings.yml → ads.meta.known_external_campaigns</code>.
+                      Stored in <code className="font-mono">ads-config.yml → alert_thresholds</code> (shared by Meta and Google; older files used{" "}
+                      <code className="font-mono">meta.alert_thresholds</code>, still read as a fallback). Campaigns marked as known live in{" "}
+                      <code className="font-mono">ads-config.yml → meta.known_external_campaigns</code>.
                     </p>
                     <p>
                       A campaign counts as connected when any of its ids appears in the stored Meta data (about 90 days) or ad setups, or its name

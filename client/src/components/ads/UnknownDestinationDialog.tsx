@@ -6,9 +6,6 @@ import type { AdPlatform } from "@shared/paid-traffic";
 import type { AdsPageRow, MoneyByCurrency } from "./ads-types";
 import { formatMoney, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 
-/** Server keeps at most this many campaigns per row. */
-const MAX_CAMPAIGNS = 10;
-
 type PlatformCopy = { why: string; check: string };
 
 const PLATFORM_COPY: Partial<Record<AdPlatform, PlatformCopy>> = {
@@ -55,8 +52,7 @@ export function UnknownDestinationDialog({ row, children }: { row: AdsPageRow; c
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const platforms: AdPlatform[] = row.platforms.length > 0 ? row.platforms : ["google", "meta"];
   const campaignSpend = spendByPlatform(row);
-  const campaigns = [...row.campaigns].sort((a, b) => moneyTotal(b.spend) - moneyTotal(a.spend));
-  const campaignsCapped = row.campaigns.length >= MAX_CAMPAIGNS;
+  const campaigns = row.campaigns.filter((c) => !c.untagged).sort((a, b) => moneyTotal(b.spend) - moneyTotal(a.spend));
 
   return (
     <Dialog>
@@ -75,7 +71,7 @@ export function UnknownDestinationDialog({ row, children }: { row: AdsPageRow; c
             const copy = PLATFORM_COPY[p] ?? OTHER_PLATFORM_COPY;
             const spend = campaignSpend.get(p);
             return (
-              <Section key={p} title={`${PLATFORM_LABELS[p] ?? p}${spend && !campaignsCapped ? ` · ${formatMoney(spend)}` : ""}`}>
+              <Section key={p} title={`${PLATFORM_LABELS[p] ?? p}${spend ? ` · ${formatMoney(spend)}` : ""}`}>
                 <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3" data-testid={`unknown-destination-platform-${p}`}>
                   <p>{copy.why}</p>
                   <p>
@@ -88,7 +84,7 @@ export function UnknownDestinationDialog({ row, children }: { row: AdsPageRow; c
           })}
 
           {campaigns.length > 0 && (
-            <Section title={campaignsCapped ? `Top ${MAX_CAMPAIGNS} campaigns by spend` : "Campaigns"}>
+            <Section title="Campaigns">
               <ul className="divide-y divide-border rounded-md border border-border" data-testid="unknown-destination-campaigns">
                 {campaigns.map((c) => (
                   <li key={`${c.platform ?? ""}|${c.campaign_id ?? c.campaign_name}`} className="flex items-center justify-between gap-3 px-3 py-2">
@@ -125,7 +121,7 @@ export function UnknownDestinationDialog({ row, children }: { row: AdsPageRow; c
               </p>
               <p>
                 The row key is <code className="font-mono">dest:unknown</code>. Its spend is in the report totals but excluded from cost per lead,
-                cost per visit and the clicks → visits ratio. Campaign lists keep at most {MAX_CAMPAIGNS} campaigns per row.
+                cost per visit and the clicks → visits ratio.
               </p>
             </CollapsibleContent>
           </Collapsible>

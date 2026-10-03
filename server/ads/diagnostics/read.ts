@@ -7,8 +7,7 @@
 import type { AdsIssue, AdsIssuePlatform } from "@shared/ads-diagnostics-rules";
 import { ADS_ISSUE_WINDOW_DAYS, currenciesMissingFloor, sortAdsIssues } from "@shared/ads-diagnostics-rules";
 import type { AdsIssueRow, AdsResolvedRow, AdsRunInfo } from "@shared/ads-issues";
-import { META_UTM_TEMPLATE, adsThresholds } from "@shared/ads-settings";
-import { GOOGLE_URL_SUFFIX_TEMPLATE } from "@shared/paid-traffic";
+import { adsThresholds } from "@shared/ads-settings";
 import type { StoredValidationIssue, ValidationIssueCompletion } from "../../../scripts/validation/shared/types";
 import { getAdsSettings } from "../../settings";
 import { getSiteContextMap } from "../../site-manager";
@@ -24,6 +23,7 @@ import { verifyContextFor } from "./context";
 import { activeAdsJobs, latestCompletedRun, listAdsJobRecords, updateAdsJobRecord } from "./jobs";
 import { adsValidationCache } from "./save";
 import { computeVerifyView, type VerifyContext } from "./verify";
+import { utmConventionView, utmConventionWarnings } from "../utm-convention-view";
 
 /** Queued Re-checks older than this never reached the worker (lost on restart) → failed. */
 const QUEUE_STALE_MS = 30 * 60 * 1000;
@@ -149,6 +149,7 @@ export async function readMetaDiagnostics(opts: { site: string; contentRoot?: st
   const run = adsRunInfo(opts.site, now.getTime());
   const issues = issueRows(opts.site, ["meta", "shared"], run);
   const counts = openCounts(issues);
+  const utm = utmConventionView(opts.site, settings, opts.contentRoot, now);
   const consent = consentTotals(loadConsentWindow(opts.site, ADS_ISSUE_WINDOW_DAYS, now).current).accept_pct;
   return {
     generated_at: now.toISOString(),
@@ -161,12 +162,15 @@ export async function readMetaDiagnostics(opts: { site: string; contentRoot?: st
     refreshing: report.refreshing,
     refresh: report.refresh,
     collecting_since: report.collecting_since,
+    url_history: report.attribution?.url_history ?? null,
     kpis: metaKpis(report, counts, consent, settings.meta.lead_conversions ?? [], settings.meta.lead_conversions_changed_at ?? null),
     missing_floor_currencies: currenciesMissingFloor(report.totals.spend, adsThresholds(settings)),
     meta_platforms: report.meta_platforms ?? null,
     issues,
     resolved: resolvedRows(opts.site, ["ads-meta", "ads-shared"]),
-    utm_template: META_UTM_TEMPLATE,
+    utm_template: utm.meta_template,
+    utm_convention: utm,
+    utm_warnings: utmConventionWarnings(utm),
     warnings: report.warnings,
     run,
   };
@@ -177,6 +181,7 @@ export async function readGoogleDiagnostics(opts: { site: string; contentRoot?: 
   const kpiDays = snapKpiDays(opts.days);
   const report = await assembleAdsReportFromRollups({ site: opts.site, contentRoot: opts.contentRoot, days: kpiDays, platform: "google", includeMetaPlatforms: false });
   const run = adsRunInfo(opts.site, now.getTime());
+  const utm = utmConventionView(opts.site, getAdsSettings(opts.contentRoot), opts.contentRoot, now);
   const issues = issueRows(opts.site, ["google"], run);
   const counts = openCounts(issues);
   const paidState = loadPaidLandingState(opts.site);
@@ -220,7 +225,9 @@ export async function readGoogleDiagnostics(opts: { site: string; contentRoot?: 
     },
     issues,
     resolved: resolvedRows(opts.site, ["ads-google"]),
-    url_suffix_template: GOOGLE_URL_SUFFIX_TEMPLATE,
+    url_suffix_template: utm.google_template,
+    utm_convention: utm,
+    utm_warnings: utmConventionWarnings(utm),
     warnings: report.warnings,
     run,
   };

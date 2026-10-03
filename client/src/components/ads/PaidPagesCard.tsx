@@ -177,7 +177,8 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
           </div>
           <p className="text-sm text-muted-foreground">
             Every page that received paid visits, with what it cost and how visitors behaved. Leads count for the page the ad sent them to;
-            repeat submissions from the same person are shown but not counted twice.
+            repeat submissions from the same person are shown but not counted twice. Expand a page to see which campaigns paid for it. If one
+            campaign is far worse than the others, the problem is the campaign, not the page.
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Select value={platform} onValueChange={setPlatform}>
@@ -332,6 +333,11 @@ export function PaidPagesCard({ days, issues = [], initialPlatform = "all" }: { 
                     lead. No splitting; the form page never gets credit.
                   </p>
                   <p>Repeats (same browser, same form, 24h) are submissions, not leads. Test leads are excluded.</p>
+                  <p data-testid="text-paid-campaign-breakdown-advanced">
+                    Campaign breakdown: visits and site leads join a campaign by the campaign id in the ad link; anything without a known id goes to
+                    "Visits without campaign tag" (never spend). Site leads per campaign follow the credit setting above. Meta leads per campaign use
+                    Meta&apos;s own attribution. Organic numbers are page-level only.
+                  </p>
                   <p>
                     Rates grey out under {data.thresholds.min_paid_visits_for_rates} paid visits. Site leads cover {data.covered_days.covered} of{" "}
                     {data.covered_days.total} days.

@@ -1,7 +1,16 @@
 /**
- * Per-site Ads settings (`ads:` in site_<name>/settings.yml). Non-secret only —
- * the Meta token lives in META_ADS_ACCESS_TOKEN.
+ * Per-site Ads settings (site_<name>/ads-config.yml; legacy `ads:` block in settings.yml until
+ * migration 004 runs). Non-secret only — the Meta token lives in META_ADS_ACCESS_TOKEN.
  */
+
+import {
+  GA4_SEARCH_SOURCES,
+  GA4_SOCIAL_SOURCES,
+  GA4_VIDEO_SOURCES,
+  META_SITE_SOURCES_OUTSIDE_GA4,
+  isGa4DisplayMedium,
+  isGa4PaidMedium,
+} from "./utm-standards";
 
 export interface AdsAlertThresholds {
   /** An issue is an error when it affects ≥ this % of account spend … */
@@ -50,6 +59,10 @@ export interface AdsAlertThresholds {
   tracking_missing_max_visit_pct: number;
   /** Primary verification window: last N complete GA4 days (diagnostics; reports use their own range). */
   tracking_check_days: number;
+  /** A UTM issue with no spend behind it needs at least this many paid visits over the issue window … */
+  utm_issue_min_visits: number;
+  /** … and is an error at ≥ this many visits. */
+  utm_issue_error_visits: number;
 }
 
 /** A campaign staff know about but don't connect (agency, partner). Still shown, never counted as a problem. */
@@ -109,6 +122,10 @@ export interface AdsSettings {
   alert_thresholds: AdsAlertThresholds;
   /** Lead emails matching any of these (glob with `*`) are flagged `is_test` (still delivered). */
   test_email_patterns: string[];
+  /** Parsed `utm_convention` (hand-edited in ads-config.yml; never written by the app). */
+  utm_convention: UtmConvention;
+  /** Convention values ignored because they are outside the GA4 standard. */
+  utm_convention_rejected: UtmConventionRejection[];
 }
 
 export const DEFAULT_ADS_ALERT_THRESHOLDS: AdsAlertThresholds = {
@@ -135,6 +152,8 @@ export const DEFAULT_ADS_ALERT_THRESHOLDS: AdsAlertThresholds = {
   tracking_missing_min_clicks: 20,
   tracking_missing_max_visit_pct: 10,
   tracking_check_days: 7,
+  utm_issue_min_visits: 5,
+  utm_issue_error_visits: 50,
 };
 
 export const MAX_KNOWN_EXTERNAL_CAMPAIGNS = 100;
@@ -146,6 +165,22 @@ export const DEFAULT_GOOGLE_ADS_SETTINGS: GoogleAdsSettings = {
   bigquery: { project: null, dataset: null },
   lead_conversion_actions: [],
   known_external_campaigns: [],
+};
+
+/** Values Meta writes for `{{site_source_name}}`. */
+export const META_SITE_SOURCE_VALUES: readonly string[] = ["fb", "ig", "msg", "an"];
+
+export const DEFAULT_UTM_CONVENTION: UtmConvention = {
+  case: "lowercase",
+  separator: "_",
+  sources: {
+    meta: { canonical: [...META_SITE_SOURCE_VALUES], aliases: ["facebook", "instagram"] },
+    google: { canonical: ["google"], aliases: ["adwords"] },
+  },
+  mediums: { meta: "paid_social", google: "cpc" },
+  campaign_pattern: null,
+  require_ids: true,
+  exceptions: [],
 };
 
 export const DEFAULT_ADS_SETTINGS: AdsSettings = {
@@ -161,6 +196,8 @@ export const DEFAULT_ADS_SETTINGS: AdsSettings = {
   google: { ...DEFAULT_GOOGLE_ADS_SETTINGS, bigquery: { project: null, dataset: null } },
   alert_thresholds: { ...DEFAULT_ADS_ALERT_THRESHOLDS },
   test_email_patterns: [],
+  utm_convention: cloneConvention(DEFAULT_UTM_CONVENTION),
+  utm_convention_rejected: [],
 };
 
 /** Thresholds for any platform, tolerant of settings objects built before `alert_thresholds` moved up a level. */
@@ -260,6 +297,8 @@ export function parseAdsAlertThresholds(raw: unknown): AdsAlertThresholds {
     tracking_missing_min_clicks: Math.round(num(r.tracking_missing_min_clicks, d.tracking_missing_min_clicks, 1)),
     tracking_missing_max_visit_pct: num(r.tracking_missing_max_visit_pct, d.tracking_missing_max_visit_pct, 0, 100),
     tracking_check_days: Math.round(num(r.tracking_check_days, d.tracking_check_days, 3, 28)),
+    utm_issue_min_visits: Math.round(num(r.utm_issue_min_visits, d.utm_issue_min_visits, 1)),
+    utm_issue_error_visits: Math.round(num(r.utm_issue_error_visits, d.utm_issue_error_visits, 1)),
   };
 }
 
@@ -358,6 +397,8 @@ export function parseAdsSettings(raw: unknown): AdsSettings {
       google: parseGoogleAdsSettings(undefined),
       alert_thresholds: thresholds,
       test_email_patterns: [],
+      utm_convention: parseUtmConvention(undefined).convention,
+      utm_convention_rejected: [],
     };
   }
   const r = raw as Record<string, unknown>;
@@ -388,6 +429,10 @@ export function parseAdsSettings(raw: unknown): AdsSettings {
           .filter((p) => p.length > 0 && p.length <= 200),
       ),
     ),
+    ...(() => {
+      const parsed = parseUtmConvention(r.utm_convention);
+      return { utm_convention: parsed.convention, utm_convention_rejected: parsed.rejected };
+    })(),
   };
 }
 
@@ -402,6 +447,149 @@ export function emailMatchesPattern(email: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`).test(email.trim().toLowerCase());
 }
 
+// ── UTM convention (ads-config.yml → utm_convention; edited in the file only) ──
+
+export type UtmConventionPlatform = "meta" | "google";
+export const UTM_CONVENTION_PLATFORMS: readonly UtmConventionPlatform[] = ["meta", "google"];
+
+export interface UtmSourceRule {
+  /** Values that are correct in utm_source (lowercase). */
+  canonical: string[];
+  /** Known wrong spellings, named in the issue copy (anything outside `canonical` is still flagged). */
+  aliases: string[];
+}
+
+export interface UtmConvention {
+  /** `lowercase`: source and medium must be lowercase. `any`: case is not checked. */
+  case: "lowercase" | "any";
+  /** Word separator suggested in issue copy for campaign names. */
+  separator: "_" | "-";
+  sources: Record<UtmConventionPlatform, UtmSourceRule>;
+  mediums: Record<UtmConventionPlatform, string>;
+  /** Regex utm_campaign must match (literal values only); null = not checked. */
+  campaign_pattern: string | null;
+  /** Google / GA4-observed traffic must carry numeric utm_id + utm_term. */
+  require_ids: boolean;
+  /** Campaign ids or utm_campaign names whose UTM issues are info only. */
+  exceptions: KnownExternalCampaign[];
+}
+
+export type UtmConventionRejection = { field: string; value: string; reason: string; default_used: string };
+
+function cloneConvention(c: UtmConvention): UtmConvention {
+  return {
+    ...c,
+    sources: {
+      meta: { canonical: [...c.sources.meta.canonical], aliases: [...c.sources.meta.aliases] },
+      google: { canonical: [...c.sources.google.canonical], aliases: [...c.sources.google.aliases] },
+    },
+    mediums: { ...c.mediums },
+    exceptions: c.exceptions.map((e) => ({ ...e })),
+  };
+}
+
+function utmValueList(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
+  return Array.from(new Set(list.filter((v): v is string => typeof v === "string").map((v) => v.trim().toLowerCase()).filter(Boolean))).slice(0, 50);
+}
+
+/**
+ * Parses `utm_convention`. Values outside the GA4 default channel group (see shared/utm-standards.ts)
+ * are ignored and reported in `rejected`; that field then uses the default.
+ */
+export function parseUtmConvention(raw: unknown): { convention: UtmConvention; rejected: UtmConventionRejection[] } {
+  const d = DEFAULT_UTM_CONVENTION;
+  const out = cloneConvention(d);
+  const rejected: UtmConventionRejection[] = [];
+  if (raw == null) return { convention: out, rejected };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    rejected.push({ field: "utm_convention", value: String(raw), reason: "must be a map of settings", default_used: "the default convention" });
+    return { convention: out, rejected };
+  }
+  const r = raw as Record<string, unknown>;
+
+  if (r.case != null) {
+    if (r.case === "lowercase" || r.case === "any") out.case = r.case;
+    else rejected.push({ field: "case", value: String(r.case), reason: "must be lowercase or any", default_used: d.case });
+  }
+  if (r.separator != null) {
+    if (r.separator === "_" || r.separator === "-") out.separator = r.separator;
+    else rejected.push({ field: "separator", value: String(r.separator), reason: 'must be "_" or "-"', default_used: d.separator });
+  }
+
+  const sources = r.sources && typeof r.sources === "object" ? (r.sources as Record<string, unknown>) : {};
+  const mediums = r.mediums && typeof r.mediums === "object" ? (r.mediums as Record<string, unknown>) : {};
+  for (const p of UTM_CONVENTION_PLATFORMS) {
+    const s = sources[p] && typeof sources[p] === "object" ? (sources[p] as Record<string, unknown>) : null;
+    if (s) {
+      if (s.canonical != null) {
+        const kept: string[] = [];
+        for (const v of utmValueList(s.canonical)) {
+          const reason = utmSourceRejection(p, v);
+          if (reason) rejected.push({ field: `sources.${p}.canonical`, value: v, reason, default_used: d.sources[p].canonical.join(", ") });
+          else kept.push(v);
+        }
+        out.sources[p].canonical = kept.length > 0 ? kept : [...d.sources[p].canonical];
+      }
+      if (s.aliases != null) out.sources[p].aliases = utmValueList(s.aliases).filter((a) => !out.sources[p].canonical.includes(a));
+    }
+    const m = mediums[p];
+    if (m != null) {
+      const v = typeof m === "string" ? m.trim().toLowerCase() : String(m);
+      const reason = typeof m === "string" ? utmMediumRejection(p, v) : "must be text";
+      if (reason) rejected.push({ field: `mediums.${p}`, value: v, reason, default_used: d.mediums[p] });
+      else out.mediums[p] = v;
+    }
+  }
+
+  if (r.campaign_pattern != null && r.campaign_pattern !== "") {
+    const v = String(r.campaign_pattern);
+    try {
+      new RegExp(v);
+      out.campaign_pattern = v.slice(0, 500);
+    } catch {
+      rejected.push({ field: "campaign_pattern", value: v, reason: "is not a valid regular expression", default_used: "not checked" });
+    }
+  }
+  if (typeof r.require_ids === "boolean") out.require_ids = r.require_ids;
+  out.exceptions = parseKnownExternalCampaigns(r.exceptions);
+  return { convention: out, rejected };
+}
+
+function utmSourceRejection(p: UtmConventionPlatform, v: string): string | null {
+  if (p === "meta") {
+    return GA4_SOCIAL_SOURCES.has(v) || META_SITE_SOURCES_OUTSIDE_GA4.includes(v)
+      ? null
+      : "GA4 only files Meta visits as Paid Social when the source is on its social list (fb, ig, facebook, instagram, …)";
+  }
+  return GA4_SEARCH_SOURCES.has(v) || GA4_VIDEO_SOURCES.has(v)
+    ? null
+    : "GA4 only files Google visits as Paid Search / Paid Video when the source is on its search or video list (google, youtube)";
+}
+
+function utmMediumRejection(p: UtmConventionPlatform, v: string): string | null {
+  if (isGa4PaidMedium(v)) return null;
+  if (p === "google" && isGa4DisplayMedium(v)) return null;
+  return p === "meta"
+    ? "GA4 only counts Meta visits as Paid Social when the medium matches ^(.*cp.*|ppc|retargeting|paid.*)$ (e.g. paid_social, cpc)"
+    : "GA4 only counts Google visits as paid when the medium matches ^(.*cp.*|ppc|retargeting|paid.*)$ or is a display medium (e.g. cpc, display)";
+}
+
+/** utm_source the Meta template writes: `{{site_source_name}}` when the convention accepts Meta's per-placement values. */
+export function metaTemplateSource(c: UtmConvention): string {
+  const canonical = c.sources.meta.canonical;
+  return canonical.length > 1 && canonical.every((v) => META_SITE_SOURCE_VALUES.includes(v)) ? "{{site_source_name}}" : canonical[0]!;
+}
+
 /** Meta URL parameters template staff paste into every ad (ids enable matching). */
-export const META_UTM_TEMPLATE =
-  "utm_source={{site_source_name}}&utm_medium=paid_social&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
+export function metaUtmTemplate(c: UtmConvention = DEFAULT_UTM_CONVENTION): string {
+  return `utm_source=${metaTemplateSource(c)}&utm_medium=${c.mediums.meta}&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}`;
+}
+
+/**
+ * Google Ads final URL suffix staff add at account level. Fallback for matching visits when
+ * GA4 isn't linked to Google Ads and gclid can't be joined (same id slots as the Meta template).
+ */
+export function googleUrlSuffixTemplate(c: UtmConvention = DEFAULT_UTM_CONVENTION): string {
+  return `utm_source=${c.sources.google.canonical[0]}&utm_medium=${c.mediums.google}&utm_campaign={campaignid}&utm_id={campaignid}&utm_term={adgroupid}&utm_content={creative}`;
+}

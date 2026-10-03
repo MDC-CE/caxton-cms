@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  accountTables,
   buildCustomerSql,
   buildGoogleDayRows,
+  buildSetAccountsSql,
   makeLeadActionMatcher,
+  managerTableSets,
   missingTablesFor,
   parseFinalUrls,
   parseTransferLayout,
@@ -23,12 +26,37 @@ describe("parseTransferLayout", () => {
       { table_name: `p_Campaign_${CID}`, column_name: "campaign_id" },
       { table_name: "events_20260901", column_name: "event_name" },
     ]);
-    expect(Object.keys(layout.customers)).toEqual([CID]);
-    const t = layout.customers[CID]!;
+    expect(Object.keys(layout.table_sets)).toEqual([CID]);
+    expect(layout.accounts).toEqual({ [CID]: CID });
+    const t = accountTables(layout, CID)!;
     expect(t.CampaignBasicStats).toMatchObject({ name: `ads_CampaignBasicStats_${CID}`, partitioned_name: `p_ads_CampaignBasicStats_${CID}` });
     expect(t.CampaignBasicStats!.columns).toContain("metrics_cost_micros");
     expect(t.Campaign?.name).toBe(`p_Campaign_${CID}`);
     expect(missingTablesFor(t)).toEqual(["CampaignConversionStats", "LandingPageStats", "Customer"]);
+  });
+
+  it("maps a manager-account table set to the accounts inside it", () => {
+    const MCC = "2305323396";
+    const layout = parseTransferLayout("proj", "ds", [{ table_name: `ads_CampaignBasicStats_${MCC}`, column_name: "customer_id" }], {
+      [MCC]: ["4759757599", "6067074954"],
+    });
+    expect(layout.accounts).toEqual({ "4759757599": MCC, "6067074954": MCC });
+    expect(accountTables(layout, "6067074954")?.CampaignBasicStats?.name).toBe(`ads_CampaignBasicStats_${MCC}`);
+    expect(accountTables(layout, MCC)).toBeUndefined();
+    expect(managerTableSets(layout)).toEqual({ [MCC]: ["4759757599", "6067074954"] });
+  });
+
+  it("prefers an account's own table set over its manager's", () => {
+    const layout = parseTransferLayout(
+      "proj",
+      "ds",
+      [
+        { table_name: `ads_CampaignBasicStats_${CID}`, column_name: "customer_id" },
+        { table_name: "ads_CampaignBasicStats_9999999999", column_name: "customer_id" },
+      ],
+      { [CID]: [CID], "9999999999": [CID, "1111111111"] },
+    );
+    expect(layout.accounts).toEqual({ [CID]: CID, "1111111111": "9999999999" });
   });
 });
 
@@ -41,7 +69,41 @@ describe("buildCustomerSql", () => {
     expect(sql.campaign_stats).toContain("CAST(NULL AS STRING) AS network");
     expect(sql.campaign_stats).toContain("SUM(metrics_cost_micros)");
     expect(sql.campaign_stats).toContain("SUM(CAST(NULL AS INT64)) AS clicks");
+    expect(sql.campaign_stats).not.toContain("@cid");
     expect(sql.landing_stats).toBeUndefined();
+  });
+
+  it("filters every query to the @cid account when the table has customer_id", () => {
+    const cols = ["customer_id", "segments_date", "campaign_id", "_DATA_DATE", "_LATEST_DATE"];
+    const sql = buildCustomerSql(
+      { project: "p", dataset: "d" },
+      {
+        CampaignBasicStats: { name: "ads_CampaignBasicStats_1", columns: cols },
+        LandingPageStats: { name: "ads_LandingPageStats_1", columns: cols },
+        CampaignConversionStats: { name: "ads_CampaignConversionStats_1", columns: cols },
+        Campaign: { name: "ads_Campaign_1", columns: cols },
+        AdGroup: { name: "ads_AdGroup_1", columns: cols },
+        Ad: { name: "ads_Ad_1", columns: cols },
+        Customer: { name: "ads_Customer_1", columns: cols },
+      },
+    );
+    for (const q of Object.values(sql)) expect(q).toContain("CAST(customer_id AS STRING) = @cid");
+    expect(sql.campaigns).toContain("AND _DATA_DATE = _LATEST_DATE");
+  });
+});
+
+describe("buildSetAccountsSql", () => {
+  it("lists non-manager Customer rows plus accounts with recent stats", () => {
+    const sql = buildSetAccountsSql(
+      { project: "p", dataset: "d" },
+      {
+        Customer: { name: "ads_Customer_1", columns: ["customer_id", "customer_manager"] },
+        CampaignBasicStats: { name: "ads_CampaignBasicStats_1", columns: ["customer_id", "segments_date"] },
+      },
+    )!;
+    expect(sql).toContain("NOT IFNULL(customer_manager, FALSE)");
+    expect(sql).toContain("UNION DISTINCT");
+    expect(buildSetAccountsSql({ project: "p", dataset: "d" }, { Campaign: { name: "ads_Campaign_1", columns: ["campaign_id"] } })).toBeNull();
   });
 });
 

@@ -14,16 +14,19 @@ import fs from "fs";
 import path from "path";
 import { CACHE_DIR } from "../db-cache";
 import { getAdsSettings } from "../settings";
+import { adsConfigReadError } from "../ads-config";
 import { child } from "../logger";
-import type { GoogleAdsSettings } from "@shared/ads-settings";
+import { formatGoogleCustomerId, type GoogleAdsSettings } from "@shared/ads-settings";
 import { addDays, dateRange, utcDate, type SyncStepCallback } from "./meta-ads-days";
 import {
+  accountTables,
   allocateLeads,
   buildGoogleDayRows,
   campaignStatsTable,
   clickStatsRef,
   googleBigQueryClient,
   makeLeadActionMatcher,
+  managerTableSets,
   missingTablesFor,
   probeTransferLayout,
   queryCustomerMeta,
@@ -42,9 +45,13 @@ import {
   googleCampaignFromCatalog,
   loadAdsSetup,
   mergeGoogleCustomer,
+  noteCampaignNamesFromRows,
   saveAdsSetup,
+  type AdsChangeSink,
   type AdsSetupCatalog,
 } from "./ads-setup";
+import { appendChanges, pruneChangeLog } from "./ads-change-log";
+import { restoreAdsHistoryIfMissing } from "./ads-history-backup";
 
 const log = child({ module: "ads/google-ads-days" });
 
@@ -106,8 +113,10 @@ export type GoogleAdsSyncState = {
   /** Newest day loaded across synced customers (min across customers = safe "data through"). */
   data_through?: string | null;
   customers: Record<string, GoogleCustomerSyncInfo>;
-  /** Customers with transfer tables in the dataset (ticked or not). */
+  /** Accounts with rows in the transfer dataset (ticked or not). */
   available_customers?: string[];
+  /** Manager accounts the transfer runs on → the accounts inside them. */
+  manager_customers?: Record<string, string[]>;
   probed_at?: string;
   /** Downloaded from production (dev only). */
   pulled_from_production_at?: string;
@@ -307,7 +316,7 @@ export function planGoogleSyncSteps(contentRoot?: string): number {
 
 export type GoogleSyncResult = {
   ok: boolean;
-  skipped?: "google_not_connected";
+  skipped?: "google_not_connected" | "ads_config_unreadable";
   error?: string;
   customers: Record<string, { full_days: number; conversion_days: number; error?: string }>;
   /** Days whose cached rows this sync rewrote (spend or conversions) — dirty for rollups. */
@@ -356,6 +365,7 @@ function summarizeActions(cid: string, conversions: RawConversion[], isLead: (c:
 }
 
 export async function syncGoogleAds(opts: { site: string; contentRoot?: string; now?: Date; onStep?: SyncStepCallback }): Promise<GoogleSyncResult> {
+  if (adsConfigReadError(opts.contentRoot) != null) return { ok: false, skipped: "ads_config_unreadable", customers: {} };
   const settings = getAdsSettings(opts.contentRoot).google;
   if (!settings || !isGoogleConfiguredSettings(settings)) return { ok: false, skipped: "google_not_connected", customers: {} };
   if (inFlight.has(opts.site)) return { ok: true, customers: {} };
@@ -366,14 +376,17 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
   const result: GoogleSyncResult = { ok: true, customers: {} };
   const project = settings.bigquery.project!;
   const dataset = settings.bigquery.dataset!;
+  restoreAdsHistoryIfMissing(opts.site, opts.contentRoot, "google", now);
   const setup = loadAdsSetup(opts.site, "google");
+  const changeSink: AdsChangeSink = { changes: [], source: "sync" };
   const dirtyDates = new Set<string>();
   const isLead = makeLeadActionMatcher(settings.lead_conversion_actions);
   try {
     opts.onStep?.("Google Ads: reading the BigQuery transfer");
     const client = googleBigQueryClient(project);
     const layout = await probeTransferLayout(client, project, dataset);
-    state.available_customers = Object.keys(layout.customers).sort();
+    state.available_customers = Object.keys(layout.accounts).sort();
+    state.manager_customers = managerTableSets(layout);
     state.probed_at = new Date().toISOString();
     const actions: GoogleConversionActionInfo[] = (setup.extras.conversion_actions ?? []).filter((a) => !settings.customer_ids.includes(a.customer_id));
 
@@ -381,7 +394,15 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
       const cid = settings.customer_ids[i]!;
       opts.onStep?.(`Google Ads: account ${i + 1} of ${settings.customer_ids.length}`);
       const info: GoogleCustomerSyncInfo = { ...(state.customers[cid] ?? {}) };
-      const tables = layout.customers[cid];
+      const tables = accountTables(layout, cid);
+      const subAccounts = state.manager_customers?.[cid];
+      if (subAccounts) {
+        info.sync_error = `This is a manager account, so it has no spend of its own. Tick the accounts under it instead: ${subAccounts.map(formatGoogleCustomerId).join(", ")}.`;
+        info.missing_tables = undefined;
+        state.customers[cid] = info;
+        result.customers[cid] = { full_days: 0, conversion_days: 0, error: info.sync_error };
+        continue;
+      }
       if (!tables || !campaignStatsTable(tables)) {
         info.sync_error = "The BigQuery transfer has no tables for this account yet. Add it to the transfer in Google Cloud, or wait for the first load.";
         info.missing_tables = tables ? missingTablesFor(tables) : ["CampaignBasicStats"];
@@ -462,7 +483,7 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
         }
         info.sync_error = undefined;
         state.customers[cid] = info;
-        mergeGoogleCustomer(setup, cid, meta, fetchedAt);
+        mergeGoogleCustomer(setup, cid, meta, fetchedAt, changeSink);
         for (const d of [...plan.full, ...plan.conversionsOnly]) dirtyDates.add(d);
         const recentFrom = through ? addDays(through, -(GOOGLE_CONVERSION_REFRESH_DAYS - 1)) : "";
         actions.push(...summarizeActions(cid, convForCatalog.filter((c) => c.date >= recentFrom), isLead));
@@ -476,7 +497,16 @@ export async function syncGoogleAds(opts: { site: string; contentRoot?: string; 
     }
     setup.fetched_at = new Date().toISOString();
     setup.extras = { ...setup.extras, conversion_actions: actions };
+    if (!setup.extras.names_seeded_at) {
+      for (const d of listGoogleDayDates(opts.site)) {
+        const rows = Object.values(loadGoogleDay(opts.site, d)?.customers ?? {}).flatMap((c) => c.rows);
+        noteCampaignNamesFromRows(setup, rows.map((r) => ({ ...r, account_id: r.customer_id })), setup.fetched_at);
+      }
+      setup.extras.names_seeded_at = setup.fetched_at;
+    }
     saveAdsSetup(opts.site, setup);
+    appendChanges(opts.site, changeSink.changes);
+    pruneChangeLog(opts.site, now);
     result.dates = Array.from(dirtyDates).sort();
     pruneOld(opts.site, now);
 

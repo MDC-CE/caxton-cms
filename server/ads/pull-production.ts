@@ -43,7 +43,15 @@ import {
 import type { MetaAdCreativeInfo } from "./meta-client";
 import { ADS_SETUP_DIR, adsSetupRelPath, emptyAdsSetup, mergeMetaAccountAds, type AdsSetupCatalog } from "./ads-setup";
 import { clearAdsDerivedData } from "./ads-rollups";
+import { ADS_CHANGE_LOG_DIR } from "./ads-change-log";
 import { cleanupPullArtifacts, makeStagingDir, swapStagedEntries } from "./cache-swap";
+import {
+  exportUtmConventionSnapshot,
+  parseUtmConventionSnapshot,
+  stageUtmConventionSnapshot,
+  UTM_CONVENTION_HISTORY_FILE,
+  type UtmConventionSnapshot,
+} from "./utm-convention-history";
 
 export const ADS_PULL_DEFAULT_DAYS = 90;
 
@@ -60,7 +68,8 @@ const SWAP_ENTRIES = [
 ];
 
 export type AdsExportPayload = MetaSnapshot &
-  PaidLandingSnapshot & {
+  PaidLandingSnapshot &
+  UtmConventionSnapshot & {
     window: { since: string; until: string; days: number };
   };
 
@@ -77,6 +86,7 @@ export function buildAdsExport(site: string, days: number, now = new Date()): Ad
   return {
     ...exportMetaSnapshot(site, since),
     ...exportPaidLandingSnapshot(site, since),
+    ...exportUtmConventionSnapshot(site),
     window: { since, until, days },
   };
 }
@@ -115,12 +125,28 @@ function parseMetaSetup(b: Record<string, unknown>): AdsSetupCatalog {
   return catalog;
 }
 
+const MONTH_RE = /^\d{4}-\d{2}$/;
+
+function parseChangeLog(v: unknown): MetaSnapshot["change_log"] {
+  if (!Array.isArray(v)) return undefined;
+  return v.filter(
+    (f): f is NonNullable<MetaSnapshot["change_log"]>[number] =>
+      !!f &&
+      typeof f === "object" &&
+      (f.platform === "meta" || f.platform === "google") &&
+      typeof f.month === "string" &&
+      MONTH_RE.test(f.month) &&
+      Array.isArray(f.changes),
+  );
+}
+
 export function parseAdsExport(body: unknown): AdsExportPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   const state = b.meta_state;
   if (!state || typeof state !== "object") return null;
   const window = (b.window ?? {}) as AdsExportPayload["window"];
+  const utmHistory = parseUtmConventionSnapshot(b.utm_convention_history);
   return {
     meta_days: dayFiles<MetaAdsDayFile>(b.meta_days, "rows"),
     platform_days: dayFiles<MetaAdsPlatformDayFile>(b.platform_days, "rows"),
@@ -129,10 +155,12 @@ export function parseAdsExport(body: unknown): AdsExportPayload | null {
     custom_conversions:
       b.custom_conversions && typeof b.custom_conversions === "object" ? (b.custom_conversions as MetaCustomConversionsFile) : undefined,
     pixel_events: b.pixel_events && typeof b.pixel_events === "object" ? (b.pixel_events as MetaPixelEventsFile) : undefined,
+    change_log: parseChangeLog(b.change_log),
     paid_landing_days: dayFiles<PaidLandingDayFile>(b.paid_landing_days, "candidates"),
     paid_landing_state: (b.paid_landing_state && typeof b.paid_landing_state === "object"
       ? b.paid_landing_state
       : { consecutive_failures: 0 }) as PaidLandingState,
+    ...(utmHistory ? { utm_convention_history: utmHistory } : {}),
     window,
   };
 }
@@ -177,12 +205,19 @@ export function applyAdsSnapshot(
   try {
     stageMetaSnapshot(staging, { ...snap, meta_state });
     stagePaidLandingSnapshot(staging, snap);
+    if (snap.utm_convention_history) stageUtmConventionSnapshot(staging, snap.utm_convention_history);
   } catch (err) {
     cleanupPullArtifacts(liveRoot);
     throw err;
   }
   fs.mkdirSync(path.join(liveRoot, ADS_SETUP_DIR), { recursive: true });
-  swapStagedEntries(liveRoot, staging, SWAP_ENTRIES, opts.rename);
+  // Older productions send no change log / convention history; keep the local ones instead of swapping in nothing.
+  const entries = [
+    ...(snap.change_log ? [ADS_CHANGE_LOG_DIR] : []),
+    ...(snap.utm_convention_history ? [UTM_CONVENTION_HISTORY_FILE] : []),
+    ...SWAP_ENTRIES,
+  ];
+  swapStagedEntries(liveRoot, staging, entries, opts.rename);
   clearAdsDerivedData(site);
   return {
     meta_days: snap.meta_days.length,

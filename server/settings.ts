@@ -11,6 +11,14 @@ import {
   type ConsentWindowSettings,
 } from "@shared/consent";
 import { parseAdsSettings, type AdsSettings, type GoogleAdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
+import {
+  ADS_CONFIG_FILENAME,
+  loadAdsConfig,
+  readAdsConfigRaw,
+  writeAdsConfigRaw,
+  type AdsConfigLoad,
+  type AdsConfigStatus,
+} from "./ads-config";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
 import {
   type AuthSignupFieldMapEntry,
@@ -922,7 +930,9 @@ interface SiteSettings {
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
+  /** Legacy `ads:` block; ads-config.yml wins when it exists (read through getAdsSettings). */
   ads: AdsSettings;
+  ads_legacy_present: boolean;
 }
 
 function parseSiteConsentSettings(raw: unknown): SiteConsentSettings {
@@ -1056,6 +1066,7 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
     consent: { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } },
     ads: parseAdsSettings(undefined),
+    ads_legacy_present: false,
   };
 
   if (!fs.existsSync(settingsPath)) {
@@ -1275,6 +1286,7 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
       ads: parseAdsSettings(parsed.ads),
+      ads_legacy_present: parsed.ads != null && typeof parsed.ads === "object",
     };
     log.info(
       `[Settings] Loaded: ${i18n.supported_locales.length} locale(s), default="${i18n.default_locale}", home_page="${home_page.slug}", conversion_events=${tracking.conversion_events.length}, block_indexing=${robots.block_indexing}`
@@ -2103,8 +2115,40 @@ export function updateSearchConsoleOrganicMarkets(
   return updated;
 }
 
+/** Raw legacy `ads:` block from settings.yml (pre-migration sites), or null. */
+function readLegacyAdsBlock(contentRoot?: string): Record<string, unknown> | null {
+  const settingsPath = getSettingsPath(contentRoot);
+  if (!fs.existsSync(settingsPath)) return null;
+  try {
+    const parsed = yaml.load(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown> | null;
+    const ads = parsed?.ads;
+    return ads && typeof ads === "object" && !Array.isArray(ads) ? { ...(ads as Record<string, unknown>) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadAds(contentRoot?: string): AdsConfigLoad {
+  return loadAdsConfig(contentRoot, () => {
+    const s = loadSettings(contentRoot);
+    return { present: s.ads_legacy_present, settings: s.ads };
+  });
+}
+
 export function getAdsSettings(contentRoot?: string): AdsSettings {
-  return loadSettings(contentRoot).ads;
+  return loadAds(contentRoot).settings;
+}
+
+/** Whether ads-config.yml is readable; syncs skip with `ads_config_unreadable` when it isn't. */
+export function getAdsConfigStatus(contentRoot?: string): AdsConfigStatus {
+  return loadAds(contentRoot).status;
+}
+
+export class AdsConfigUnreadableError extends Error {
+  readonly code = "ads_config_unreadable";
+  constructor(detail?: string) {
+    super(`${ADS_CONFIG_FILENAME} can't be read${detail ? ` (${detail})` : ""}. Fix the file before saving Ads settings.`);
+  }
 }
 
 export type AdsSettingsUpdate = {
@@ -2117,19 +2161,23 @@ export type AdsSettingsUpdate = {
   test_email_patterns?: string[];
 };
 
+/**
+ * Patch the Ads settings in ads-config.yml (created from the legacy settings.yml block on first save).
+ * Keys staff edit by hand (utm_convention, unknown keys) are kept as written.
+ */
 export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string): AdsSettings {
-  const settingsPath = getSettingsPath(contentRoot);
-  let existing: Record<string, unknown> = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      const raw = fs.readFileSync(settingsPath, "utf-8");
-      existing = (yaml.load(raw) as Record<string, unknown>) || {};
-    } catch {}
+  const raw = readAdsConfigRaw(contentRoot);
+  if (!raw.ok) throw new AdsConfigUnreadableError(raw.error);
+  const existing: Record<string, unknown> = raw.exists ? { ...raw.data } : {};
+  if (!raw.exists) {
+    const legacy = readLegacyAdsBlock(contentRoot);
+    if (legacy) Object.assign(existing, legacy);
   }
 
-  const current = parseAdsSettings(existing.ads);
+  const current = parseAdsSettings(existing);
   const { alert_thresholds: legacyThresholds, ...metaInput } = input.meta ?? {};
   const merged = parseAdsSettings({
+    utm_convention: existing.utm_convention,
     meta: { ...current.meta, ...metaInput },
     google: {
       ...current.google,
@@ -2144,7 +2192,8 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
   const picksChanged = m.lead_conversions.join(",") !== current.meta.lead_conversions.join(",");
   if (picksChanged) m.lead_conversions_changed_at = new Date().toISOString();
   const googleConfigured = g.enabled || g.customer_ids.length > 0 || !!g.bigquery.project || !!g.bigquery.dataset;
-  existing.ads = {
+  const { meta: _m, google: _g, alert_thresholds: _t, test_email_patterns: _p, ...handEdited } = existing;
+  const next: Record<string, unknown> = {
     meta: {
       enabled: m.enabled,
       ad_account_ids: m.ad_account_ids,
@@ -2166,13 +2215,12 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
       : {}),
     alert_thresholds: merged.alert_thresholds,
     test_email_patterns: merged.test_email_patterns,
+    ...handEdited,
   };
 
-  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
-  fs.writeFileSync(settingsPath, output, "utf-8");
-  resetSettings(resolveSettingsRoot(contentRoot));
+  writeAdsConfigRaw(next, contentRoot);
   log.info(
-    `[Settings] Updated ads meta_enabled=${merged.meta.enabled} meta_accounts=${merged.meta.ad_account_ids.length} ` +
+    `[Settings] Updated ${ADS_CONFIG_FILENAME} meta_enabled=${merged.meta.enabled} meta_accounts=${merged.meta.ad_account_ids.length} ` +
       `google_enabled=${g.enabled} google_accounts=${g.customer_ids.length} test_patterns=${merged.test_email_patterns.length}`,
   );
   return merged;

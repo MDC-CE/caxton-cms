@@ -46,7 +46,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiFetch, apiRequest, queryClient } from "@/lib/queryClient";
+import { RestoreUserDialog, type RestorableUser } from "@/components/settings/RestoreUserDialog";
 import { useDebugAuth, getDebugUserName } from "@/hooks/useDebugAuth";
 import {
   CAPABILITY_REGISTRY,
@@ -329,6 +330,13 @@ interface UserRecord {
   /** Missing ⇒ true (MCP overlay; CMS roles unchanged). */
   mcpReadEnabled?: boolean;
   mcpWriteEnabled?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  /** Present when another active record matches this person (delete removes only this copy). */
+  duplicate?: {
+    survivor: { username: string; displayName: string };
+    rolesLost: string[];
+  };
 }
 
 function normalizeUserMcpAccess(user: UserRecord): { mcpReadEnabled: boolean; mcpWriteEnabled: boolean } {
@@ -339,8 +347,16 @@ function normalizeUserMcpAccess(user: UserRecord): { mcpReadEnabled: boolean; mc
 
 interface PendingUserRecord {
   email: string;
-  role: string;
+  /** Absent on Previously Deleted sign-in attempts. */
+  role?: string;
   createdAt: string;
+  previouslyDeleted?: {
+    username: string;
+    staffId: string;
+    deletedAt: string;
+    deletedBy?: string;
+  };
+  lastAttemptAt?: string;
 }
 
 interface CapabilityFormState {
@@ -1647,6 +1663,10 @@ function UsersTab() {
     queryKey: ["/api/admin/pending-users"],
     enabled: isValidated === true,
   });
+  const { data: deletedUsers } = useQuery<UserRecord[]>({
+    queryKey: ["/api/admin/users/deleted"],
+    enabled: isValidated === true,
+  });
   const { data: rolesResponse } = useQuery<AdminRolesResponse>({
     queryKey: ["/api/admin/roles"],
     enabled: isValidated === true,
@@ -1668,9 +1688,50 @@ function UsersTab() {
   const [assignTargetUsername, setAssignTargetUsername] = useState("");
   const [assignSaving, setAssignSaving] = useState(false);
   const [mcpAccessSaving, setMcpAccessSaving] = useState<string | null>(null);
+  const [deletingUser, setDeletingUser] = useState<string | null>(null);
+  const [deleteUserSaving, setDeleteUserSaving] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<{ user: RestorableUser; intro?: string } | null>(null);
 
   const allRoles = rolesData ? Object.entries(rolesData) : [];
   const allUsers = users ?? [];
+  const archivedUsers = deletedUsers ?? [];
+
+  function roleLabel(roleId: string): string {
+    return rolesData?.[roleId]?.label ?? roleId;
+  }
+
+  async function handleDeleteUser(user: UserRecord) {
+    setDeleteUserSaving(true);
+    try {
+      const res = await apiFetch(`/api/admin/users/${encodeURIComponent(user.username)}`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Failed to delete user");
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users/deleted"] });
+      setDeletingUser(null);
+      const name = [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username;
+      if (body.agentsDisconnected === false) {
+        toast({
+          title: "User deleted",
+          description:
+            "Connected agents couldn't be disconnected right now. They can't do anything because the user has no access.",
+        });
+      } else if (body.mode === "duplicate_removed") {
+        toast({
+          title: "Duplicate removed",
+          description: `${name} was removed. ${body.survivor?.displayName ?? "The other copy"} keeps its access.`,
+        });
+      } else {
+        toast({ title: "User deleted", description: `${name} was removed and signed out.` });
+      }
+    } catch (err: any) {
+      toast({ title: "Failed to delete user", description: err.message, variant: "destructive" });
+    } finally {
+      setDeleteUserSaving(false);
+    }
+  }
 
   function startEditRoles(user: UserRecord) {
     setEditingUser(user.username);
@@ -1737,9 +1798,24 @@ function UsersTab() {
     }
     setAddingSaving(true);
     try {
-      const res = await apiRequest("POST", "/api/admin/pending-users", { email: newEmail.trim(), role: newRole });
+      const res = await apiFetch("/api/admin/pending-users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: newEmail.trim(), role: newRole }),
+      });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
+        if (err.code === "user_previously_deleted" && err.user) {
+          setRestoreTarget({
+            user: err.user,
+            intro: "This person previously existed. Restore their original account instead of adding them again.",
+          });
+          return;
+        }
+        if (err.code === "user_exists") {
+          toast({ title: "Already a staff user", description: err.error, variant: "destructive" });
+          return;
+        }
         throw new Error(err.error || "Failed to add user");
       }
       queryClient.invalidateQueries({ queryKey: ["/api/admin/pending-users"] });
@@ -1871,6 +1947,94 @@ function UsersTab() {
           {pending.map((p) => {
             const isDeleting = deletingPendingEmail === p.email;
             const isAssigning = assigningEmail === p.email;
+            if (p.previouslyDeleted) {
+              const info = p.previouslyDeleted;
+              const archived = archivedUsers.find((u) => u.username === info.username);
+              const restorable: RestorableUser = {
+                username: info.username,
+                staffId: info.staffId,
+                email: archived?.email ?? p.email,
+                firstName: archived?.firstName,
+                lastName: archived?.lastName,
+                deletedAt: info.deletedAt,
+                deletedBy: info.deletedBy,
+              };
+              return (
+                <Card key={p.email} data-testid={`card-pending-${p.email}`}>
+                  <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+                    <div className="space-y-0.5 flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium truncate">{p.email}</span>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className="shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              data-testid={`badge-previously-deleted-${p.email}`}
+                            >
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] gap-1 font-medium text-amber-700 dark:text-amber-400 border-amber-500/40 cursor-pointer"
+                              >
+                                <IconInfoCircle className="h-3 w-3" aria-hidden />
+                                Previously Deleted User
+                              </Badge>
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent align="start" className="w-80 text-xs text-muted-foreground leading-relaxed">
+                            <p className="font-medium text-foreground text-sm mb-1.5">Previously deleted user</p>
+                            <p>
+                              Deleted on {new Date(info.deletedAt).toLocaleDateString()}
+                              {info.deletedBy ? ` by ${info.deletedBy}` : ""}. They tried to sign in again
+                              {p.lastAttemptAt ? ` (last tried ${new Date(p.lastAttemptAt).toLocaleString()})` : ""}{" "}
+                              and can't access anything until you restore them and pick a role. Restoring brings
+                              back their original account, so their history stays linked.
+                            </p>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                      {p.lastAttemptAt && (
+                        <p className="text-xs text-muted-foreground">
+                          Last tried {new Date(p.lastAttemptAt).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                    {!isDeleting && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setRestoreTarget({ user: restorable })}
+                          data-testid={`button-restore-pending-${p.email}`}
+                        >
+                          Restore
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Dismiss"
+                          onClick={() => { setDeletingPendingEmail(p.email); setAssigningEmail(null); }}
+                          data-testid={`button-delete-pending-${p.email}`}
+                        >
+                          <IconX className="h-4 w-4 text-muted-foreground" />
+                        </Button>
+                      </div>
+                    )}
+                  </CardHeader>
+                  {isDeleting && (
+                    <CardContent className="pt-0">
+                      <div className="flex items-center gap-2 py-1">
+                        <span className="text-sm text-muted-foreground flex-1">
+                          Dismiss? It comes back if they try to sign in again.
+                        </span>
+                        <Button size="sm" variant="destructive" onClick={() => handleDeletePending(p.email)} data-testid={`button-confirm-delete-pending-${p.email}`}>Dismiss</Button>
+                        <Button size="sm" variant="ghost" onClick={() => setDeletingPendingEmail(null)} data-testid={`button-cancel-delete-pending-${p.email}`}>Cancel</Button>
+                      </div>
+                    </CardContent>
+                  )}
+                </Card>
+              );
+            }
             return (
               <Card key={p.email} data-testid={`card-pending-${p.email}`}>
                 <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
@@ -1881,7 +2045,7 @@ function UsersTab() {
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs text-muted-foreground">Role:</span>
-                      <RoleSummaryBadge roleId={p.role} rolesData={rolesData} />
+                      {p.role && <RoleSummaryBadge roleId={p.role} rolesData={rolesData} />}
                     </div>
                   </div>
                   {!isDeleting && !isAssigning && (
@@ -2019,6 +2183,7 @@ function UsersTab() {
             const emailNorm = user.email?.trim().toLowerCase() ?? "";
             const usernameIsEmail =
               Boolean(emailNorm) && user.username.toLowerCase() === emailNorm;
+            const isSelf = user.username === getDebugUserName();
             return (
             <Card key={user.username} data-testid={`card-user-${user.username}`}>
               <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
@@ -2060,6 +2225,24 @@ function UsersTab() {
                         MCP propose only
                       </Badge>
                     )}
+                    {user.duplicate && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] gap-1 font-medium text-amber-700 dark:text-amber-400 border-amber-500/40"
+                            data-testid={`badge-duplicate-${user.username}`}
+                          >
+                            <IconAlertCircle className="h-3 w-3" aria-hidden />
+                            Duplicate
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs text-xs">
+                          Same person as {user.duplicate.survivor.displayName} ({user.duplicate.survivor.username}).
+                          Deleting removes only this copy.
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                   </div>
                   {user.email && !( !displayName && usernameIsEmail) && (
                     <p className="text-xs text-muted-foreground">{user.email}</p>
@@ -2085,17 +2268,88 @@ function UsersTab() {
                     </Button>
                   </div>
                 ) : (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => startEditRoles(user)}
-                    data-testid={`button-edit-user-${user.username}`}
-                  >
-                    <IconPencil className="h-4 w-4 text-muted-foreground" />
-                  </Button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => { startEditRoles(user); setDeletingUser(null); }}
+                      data-testid={`button-edit-user-${user.username}`}
+                    >
+                      <IconPencil className="h-4 w-4 text-muted-foreground" />
+                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span tabIndex={isSelf ? 0 : -1}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            disabled={isSelf}
+                            aria-label="Delete user"
+                            onClick={() => { setDeletingUser(user.username); setEditingUser(null); }}
+                            data-testid={`button-delete-user-${user.username}`}
+                          >
+                            <IconTrash className="h-4 w-4 text-muted-foreground" />
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="text-xs">
+                        {isSelf ? "You cannot delete your own account" : "Delete user"}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
                 )}
               </CardHeader>
               <CardContent className="pt-0 space-y-3">
+                {deletingUser === user.username && (
+                  <div
+                    className="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+                    data-testid={`confirm-delete-user-${user.username}`}
+                  >
+                    {user.duplicate ? (
+                      <>
+                        <p className="text-sm text-foreground">
+                          This is a duplicate of {user.duplicate.survivor.displayName} (most recently used). Only this
+                          copy is removed. Past work by this copy will show {user.duplicate.survivor.displayName}'s name.
+                        </p>
+                        {user.duplicate.rolesLost.length > 0 && (
+                          <p className="text-xs text-amber-700 dark:text-amber-400 inline-flex items-start gap-1.5">
+                            <IconAlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
+                            {user.duplicate.survivor.displayName} does not have:{" "}
+                            {user.duplicate.rolesLost.map(roleLabel).join(", ")}. Add them first if they still need that
+                            access.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-sm text-foreground">
+                        Delete {displayName || user.username}? They're signed out and lose all roles right away. Their
+                        GitHub connection and any connected agents are disconnected. Their name stays on past work. If
+                        they sign in again, they'll show up under Pending.
+                      </p>
+                    )}
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setDeletingUser(null)}
+                        disabled={deleteUserSaving}
+                        data-testid={`button-cancel-delete-user-${user.username}`}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => handleDeleteUser(user)}
+                        disabled={deleteUserSaving}
+                        data-testid={`button-confirm-delete-user-${user.username}`}
+                      >
+                        {deleteUserSaving ? <IconLoader2 className="h-4 w-4 animate-spin" /> : <IconTrash className="h-4 w-4" />}
+                        {user.duplicate ? "Remove duplicate" : "Delete"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 {editingUser === user.username ? (
                   <div className="flex flex-col gap-3">
                     <div className="flex flex-col gap-1">
@@ -2206,12 +2460,83 @@ function UsersTab() {
         </div>
       )}
 
-      {allUsers.length === 0 && pending.length === 0 && (
+      {archivedUsers.length > 0 && (
+        <Collapsible className="space-y-2" data-testid="section-deleted-users">
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="group flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
+              data-testid="button-toggle-deleted-users"
+            >
+              <IconChevronDown className="h-3.5 w-3.5 -rotate-90 transition-transform group-data-[state=open]:rotate-0" />
+              Deleted users ({archivedUsers.length})
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              People removed from staff. Their past activity keeps their name. Restore to give access again.
+            </p>
+            {archivedUsers.map((u) => {
+              const name = [u.firstName, u.lastName].filter(Boolean).join(" ") || u.username;
+              return (
+                <Card key={u.username} className="bg-muted/20" data-testid={`card-deleted-user-${u.username}`}>
+                  <CardHeader className="flex flex-row items-center justify-between gap-2 py-3">
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="text-sm font-medium truncate block">{name}</span>
+                      {u.email && <p className="text-xs text-muted-foreground truncate">{u.email}</p>}
+                      {u.deletedAt && (
+                        <p className="text-xs text-muted-foreground">
+                          Deleted {new Date(u.deletedAt).toLocaleDateString()}
+                          {u.deletedBy ? ` by ${u.deletedBy}` : ""}
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() =>
+                        setRestoreTarget({
+                          user: {
+                            username: u.username,
+                            staffId: u.id,
+                            email: u.email,
+                            firstName: u.firstName,
+                            lastName: u.lastName,
+                            deletedAt: u.deletedAt,
+                            deletedBy: u.deletedBy,
+                          },
+                        })
+                      }
+                      data-testid={`button-restore-deleted-${u.username}`}
+                    >
+                      Restore
+                    </Button>
+                  </CardHeader>
+                </Card>
+              );
+            })}
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+
+      {allUsers.length === 0 && pending.length === 0 && archivedUsers.length === 0 && (
         <div className="flex flex-col items-center justify-center py-12 gap-2 text-muted-foreground">
           <IconAlertCircle className="h-8 w-8" />
           <p className="text-sm">No users yet. Pre-register users above, or wait for someone to log in.</p>
         </div>
       )}
+      <RestoreUserDialog
+        user={restoreTarget?.user ?? null}
+        intro={restoreTarget?.intro}
+        open={restoreTarget !== null}
+        onOpenChange={(open) => { if (!open) setRestoreTarget(null); }}
+        onRestored={() => {
+          setShowAddForm(false);
+          setNewEmail("");
+          setNewRole("");
+        }}
+      />
       </CardContent>
     </Card>
   );

@@ -6,6 +6,109 @@ window_days: 6
 
 entries:
   - date: "2026-10-02"
+    summary: "Ads: UTM convention checks (utm_* issue codes) + Ads settings move to site_<name>/ads-config.yml"
+    agent_impact:
+      - "Ads settings now live in site_<name>/ads-config.yml (meta, google, alert_thresholds, test_email_patterns, utm_convention). settings.yml ads: is a fallback only while ads-config.yml is missing; staff move it with data migration 004_move_ads_settings_to_ads_config (both exist → ads-config.yml wins). Unparseable ads-config.yml → issue + warning ads_config_unreadable {error, file}; Meta / Google / GA4 syncs skip until fixed."
+      - "New diagnostics codes over the 28-day window (declared Meta url_tags / Google final URL suffix + observed GA4 paid landings + lead ledger): utm_unfilled_macro, utm_case_mixed, utm_bad_chars, utm_medium_nonstandard, utm_source_alias, utm_medium_off_convention, utm_campaign_pattern (info), utm_missing_ids (Google), utm_convention_invalid. One issue per campaign + code; details.utm {params, values[], ga4_channel, rule, visits, leads}. Paid classification unchanged."
+      - "utm_convention is YAML-only (no API / MCP write); GA4-strict (non-standard mediums rejected, default used, rejected[] in warning utm_convention_invalid). Diagnostics meta / google return utm_convention (read view) and generated utm_template / url_suffix_template."
+      - "Convention change → 28-day grace: issues in_grace + grace_ends_at at info, warning utm_convention_changed {changed_at, grace_ends_at, accepted_old_values[], file}. History per environment (.cache/{site}/utm-convention-history.json), included in Download from production."
+      - "Staff Fix via Meta also replaces wrong utm_source / utm_medium on Meta-evidence utm_* issues (preview mode: replace, warning re-review, replaced[]). Agents still cannot run it."
+      - "New content validator internal-link-utm (INTERNAL_LINK_HAS_UTM, warning): same-site links carrying utm_* in content YAML. Fix with update_fields; other domains are not flagged. explain topics ads -> UTM convention and checks, lead-forms."
+    tools_changed: false
+    paths:
+      - server/ads-config.ts
+      - server/ads-config-migration.ts
+      - scripts/migrations/004_move_ads_settings_to_ads_config.ts
+      - shared/ads-settings.ts
+      - shared/utm-standards.ts
+      - shared/ads-diagnostics-rules.ts
+      - server/ads/utm-issues.ts
+      - server/ads/utm-convention-history.ts
+      - server/ads/utm-convention-view.ts
+      - server/ads/tracking-fix.ts
+      - scripts/validation/validators/internal-link-utm.ts
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-02"
+    summary: "get_paid_traffic: visits with only a utm_campaign name map to the campaign that had that name on the visit's day"
+    agent_impact:
+      - "Paid visits with no campaign id (no utm_id / Google campaign id) but a utm_campaign now join the campaign whose name history (catalog names[], account-time-zone days) covers that day. Several campaigns with the name that day → stays untagged. No campaign that day → only mapped when a single campaign ever used the name."
+      - "New optional totals: campaign_name_matched_visits, campaign_name_ambiguous_visits. Unchanged: classification, matched_visits, id filters, visits with utm_id. unrecognized_campaign treats every past campaign name as known."
+      - "History only (no tool reads it): campaign / ad set / ad delivery settings are logged on change to .cache/{site}/ads-change-log/{platform}-{yyyy-mm}.json and backed up by production to {content folder}/ads-history/. explain topic ads -> Campaign name mapping."
+    tools_changed: false
+    paths:
+      - server/ads/ads-setup.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-change-log.ts
+      - server/ads/ads-history-backup.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-02"
+    summary: "get_paid_traffic: Meta spend follows each ad's URL history (page per day); changeover days split and flagged"
+    agent_impact:
+      - "Meta ads keep link versions (new version = host/path change; parameter-only edits = tag_changes). Spend, clicks, LPV and Meta leads go to the page the ad pointed to that day (account time zone), so an ad that moved from /a to /b no longer shows /a with 0 spend. Google unchanged (already per landing page). ADS_ATTRIBUTION_VERSION 3: saved windows rebuild once; attribution.url_history { since, recomputed_at }."
+      - "Changeover days whose links reach different final pages are split by that day's GA4 sessions with utm_content = ad id (basis ga4), else all to the new page (basis whole_day_new). New fields: rows url_change_days, url_change_spend, url_changes[] (<=5), unconfirmed_page_spend; report url_changes[] (top 50) + url_changes_total (summary keeps top 10); warnings ad_url_changed and ad_page_unconfirmed (older untagged spend assumed on the earliest known link; totals unchanged)."
+      - "Diagnostics: spend_zero_visits skips pages fed only by changeover days; details.ads covers every ad that pointed at the page in the window and adds previous_urls[]; fresh_days verification skips days when every affected ad was switching links. explain topic ads -> Ad URL history (Meta)."
+    tools_changed: false
+    paths:
+      - server/ads/ads-setup.ts
+      - server/ads/ad-url-history.ts
+      - server/ads/ads-report.ts
+      - server/ads/ads-rollups.ts
+      - server/ads/ads-diagnostics.ts
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-02"
+    summary: "Proposals auto-close faster: stale drafts 10/30 days (was 30/90); new abandoned_blocked closure for unresolved blockers"
+    agent_impact:
+      - "Stale 1.0 drafts: stale_flagged_at after 10 idle days, withdrawn abandoned_stale after 30 (was 30 / 90). Anything already idle 30+ days closes on the next daily sweep."
+      - "New: open|partial proposals (any kind, not escalated) with open blockers and no real work for 10 days get blocked_flagged_at (event proposal_blocked_flagged, payload closes_at); at 30 → withdrawn close_reason abandoned_blocked (event proposal_closed_abandoned_blocked). No prior flag required. Partial: published entries stay live; pending drafts the proposal created are deleted, pre-existing unlinked."
+      - "Clock resets only on revise_entries, blocker add/resolve/reopen, or reviewer action — claim/release do NOT. Zero open blockers (awaiting_rereview) never auto-closes. outcome_review:none excludes abandoned_blocked like abandoned_stale. list_proposals rows carry blocked_flagged_at."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/jobs/definitions/proposal-maintenance.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-02"
+    summary: "Live slug rename refuses redirect sources and a still-loading index; errors carry code + details"
+    agent_impact:
+      - "update_fields field_path 'slug' can now fail with code redirect_conflict (409): the new URL is the from of a redirect not owned by this entry. Details: conflictUrl, redirectTo, redirectSource (file path, e.g. site_x/custom-redirects.yml or another entry's locale file). Pick another slug or remove that redirect first; nothing is edited automatically."
+      - "Can also fail with code index_warming (503) right after a server restart, before redirects are indexed. Retry shortly; no write happened."
+      - "Renaming back to one of this entry's own meta.redirects (locale file or _common.yml) is allowed and removes that path from meta.redirects. Rename failures now pass code (e.g. slug_already_owned_by_other_entry, create_redirect_required) alongside message."
+    tools_changed: false
+    paths:
+      - server/content-editor.ts
+      - server/locale-url-slug.ts
+      - server/routes/sections.ts
+      - mcp-server/tools/pages.ts
+  - date: "2026-10-02"
+    summary: "Accepted-idea page lock releases once its edit is applied; waiting ideas surface on apply"
+    agent_impact:
+      - "An accepted idea holds its page only until one implementing edit is applied with none still open/partial (rejected/withdrawn edits keep the hold; reverts do not re-hold). After release, edits without implements_proposal_id are allowed, and a new idea can be accepted for the page."
+      - "accept → accepted_entry_taken now means the page is still held: details.holder_id / open_edit_id / releases_when. Leave the idea open and accept later — do not close it as tracked_elsewhere. next_action points at the holder (list_proposals)."
+      - "apply that frees a page returns warning idea_page_released_waiting_ideas (released_entry, waiting_ideas) + one list_proposals next_action per open idea whose related_entries name that page. Nothing is auto-accepted; proposal_finished events carry waiting_idea_ids."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+      - mcp-server/agent-conventions.md
+  - date: "2026-10-02"
+    summary: "get_paid_traffic entries: per-campaign metrics on each page row (is it the page or one campaign?)"
+    agent_impact:
+      - "entries[].campaigns now carry clicks, impressions, landing_page_views, engaged_sessions, unique_leads (site, same model), meta_leads + pixel_leads_click (difference = saw the ad only), google_leads and rates (cost_per_visit, ctr, cpc, conversion_rate, cost_per_lead, meta_*, bounce_rate, low_sample); no 10-campaign cap. New row field comparable_campaigns; group=page keeps the top 3 by spend + campaigns_total."
+      - "New untagged: true campaign row per page (\"Visits without campaign tag\"): paid visits / site leads with no known campaign id, never spend; tag_texts = top 5 utm_campaign texts, visits_by_platform. Visits and leads join campaigns by id only (no name matching)."
+      - "A campaign with spend and paid_visits 0 has no rates: its link / tracking doesn't reach the page. Saved report windows rebuild once (ADS_ATTRIBUTION_VERSION 2). explain topic ads → Campaign breakdown per page."
+      - "Campaign refs are compact in entries / destinations: zero counts, null rates, empty money and low_sample false are omitted (absent count = 0, absent rate = no denominator; a computed 0 rate is kept). Identity keys always present."
+    tools_changed: false
+    paths:
+      - server/ads/ads-report.ts
+      - server/ads/ads-rollups.ts
+      - mcp-server/tools/paid-traffic.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-02"
     summary: "Designing pages: get_page_recipe + page demos + review_page_render loop, theme-ID colors, render-review publish gate, design validators"
     agent_impact:
       - "New tools (content_view): get_page_recipe (skeleton slots, variant pairings, learned rules from approved + well-performing layouts; fallback 'site_wide' under 3 scoped layouts; mode 'fields' for template entries — fill fields, no add_section), create_page_demo (throwaway multi-section page), review_page_render + get_render_review (Cloudflare desktop/mobile screenshots, findings per section with fix_hint, include_images / crop_section; entry reviews write render-review issues, category design)."

@@ -207,8 +207,21 @@ const ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY =
 type ProposalWarning = {
   code?: string;
   message: string;
-  details?: { placeholders?: Array<{ name: string; missing: number; total: number }> };
+  details?: {
+    placeholders?: Array<{ name: string; missing: number; total: number }>;
+    waiting_ideas?: Array<{ id: string; title: string }>;
+  };
 };
+
+/** "Published. This page is free again, and 1 idea was waiting on it: …" */
+function plainWaitingIdeas(w: ProposalWarning): string {
+  const ideas = w.details?.waiting_ideas ?? [];
+  if (!ideas.length) return w.message;
+  const titles = ideas.map((i) => `"${i.title}"`).join(", ");
+  return ideas.length === 1
+    ? `Published. This page is free again, and 1 idea was waiting on it: ${titles}. Open it from the Ideas list to accept it.`
+    : `Published. This page is free again, and ${ideas.length} ideas were waiting on it: ${titles}. Open them from the Ideas list to accept one.`;
+}
 
 /** "12 of 80 pages have no value for hero_image — those pages will show an empty spot." */
 function plainPlaceholderGaps(w: ProposalWarning): string[] {
@@ -222,6 +235,8 @@ function plainWarningTitle(warnings: ProposalWarning[]): string {
   const byCode = (code: string) => warnings.find((w) => w.code === code);
   if (byCode("accepted_entry_not_creatable")) return ACCEPTED_ENTRY_NOT_CREATABLE_COPY;
   if (byCode("accepted_entry_needs_layout")) return ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY;
+  const waiting = byCode("idea_page_released_waiting_ideas");
+  if (waiting) return plainWaitingIdeas(waiting);
   const gaps = byCode("template_placeholders_unfilled");
   if (gaps) return plainPlaceholderGaps(gaps).join(" ") || gaps.message;
   return warnings[0]!.message;
@@ -284,6 +299,7 @@ type Proposal = {
   all_or_nothing?: boolean;
   stale_since?: string | null;
   stale_flagged_at?: string | null;
+  blocked_flagged_at?: string | null;
   reverts_proposal_id?: string | null;
   co_authors?: Array<{ username: string }>;
   affected_entries?: {
@@ -1636,6 +1652,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     <BlockersBadge
                       count={p.open_blocker_count ?? 0}
                       labelMode="needs_changes"
+                      flaggedAt={p.escalated ? null : p.blocked_flagged_at}
                     />
                   ) : null}
                   {p.escalated ? <EscalatedBadge /> : null}

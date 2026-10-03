@@ -280,7 +280,8 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     title: "Accept greenlights a brief only",
     why: "Accept does not create pages or write YAML. The build is a later edits proposal.",
     look_for: [
-      "accepted_entry required (contentType, slug, locale) — locks that page+locale",
+      "accepted_entry required (contentType, slug, locale) — locks that page+locale until an implementing edit is applied with none still open",
+      "accepted_entry_taken → another idea still holds the page: leave this idea open and accept after the holder's edit is applied (never close as tracked_elsewhere)",
       "next_step is concrete (min 20 characters)",
       "new-URL ideas: structured idea_funnel (stage + products) required before accept — missing → add_blocker; do not invent funnel for the author; products \"all\" only with awareness",
       "new-URL ideas on SEO-monitored types: idea_seo_target required (accept refuses without it) — main_keyword matches the brief's search claim (not a broader head term); join hub fits the topic; hub-mode members are real live posts that belong under it; standalone only for fast_decay_news / broken_url with a credible reason — weak fit → add_blocker naming the better hub",

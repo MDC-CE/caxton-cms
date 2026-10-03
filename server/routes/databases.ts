@@ -9,13 +9,11 @@ import { getAllJobStates, type DbJobState } from "../db-job-state";
 import { countDatabaseCacheErrors } from "../../scripts/validation/shared/databaseHealthChecks";
 import { getValidationCacheService } from "../services/validationCacheService";
 import { getDatabaseUsage } from "../database-usage";
-import { getPackageRoot, getProjectRoot } from "@shared/paths";
-
 
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import { execSync as _execSync, execFile } from "child_process";
+import { execSync as _execSync } from "child_process";
 import {
   versioningUpdateSchema,
   type CareerProgram,
@@ -222,6 +220,13 @@ import {
   FixerItemStatus,
 } from "./_helpers";
 import { child } from "../logger";
+import { api } from "../rate-limit/api";
+import {
+  defaultMigrationDeps,
+  listMigrations,
+  markMigrationDone,
+  startMigration,
+} from "../data-migrations/service";
 const log = child({ module: "routes/databases" });
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
@@ -253,63 +258,57 @@ export function registerDatabasesRoutes(app: Express): void {
     const query = qIndex >= 0 ? req.originalUrl.slice(qIndex) : "";
     res.redirect(307, `/api/content-pages/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}${query}`);
   });
-  app.get("/api/migrations", (_req, res) => {
+  api.get(app, "/api/migrations", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "migrations_run");
+    if (!auth.authorized) return;
     try {
-      const migrationsDir = path.join(getPackageRoot(), "scripts", "migrations");
-      if (!fs.existsSync(migrationsDir)) {
-        res.json([]);
-        return;
-      }
-      const files = fs.readdirSync(migrationsDir)
-        .filter(f => /^\d{3}_[\w]+\.ts$/.test(f))
-        .sort();
-      const result = files.map(filename => {
-        const fullPath = path.join(migrationsDir, filename);
-        const content = fs.readFileSync(fullPath, "utf-8");
-        const nameMatch = content.match(/@migration\s+([^\n*]+)/);
-        const descMatch = content.match(/@description\s+([^\n*]+(?:\n\s*\*\s+[^\n*@]+)*)/);
-        const name = nameMatch ? nameMatch[1].trim() : filename.replace(/\.ts$/, "");
-        const description = descMatch
-          ? descMatch[1].replace(/\n\s*\*\s*/g, " ").trim()
-          : "No description provided.";
-        return { filename, name, description };
-      });
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || String(err) });
+      res.json(listMigrations(defaultMigrationDeps(), getContentRootName(res)));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
-  app.post("/api/migrations/run", async (req, res) => {
+  api.post(app, "/api/migrations/run", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireCapability(req, res, "migrations_run");
     if (!auth.authorized) return;
+    const { filename, mode, confirm_rerun } = req.body || {};
+    try {
+      const result = startMigration(defaultMigrationDeps(), {
+        filename,
+        mode: mode === "dry_run" ? "dry_run" : "run",
+        confirmRerun: confirm_rerun,
+        actor: auth.author ?? auth.username ?? null,
+        currentSite: getContentRootName(res),
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ success: false, code: result.code, error: result.error });
+        return;
+      }
+      res.status(202).json({ success: true, run_id: result.run_id, recorded_in: result.recorded_in });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
-    const { filename } = req.body || {};
-    if (!filename || !/^\d{3}_[\w]+\.ts$/.test(filename)) {
-      res.status(400).json({ error: "Invalid migration filename." });
-      return;
+  api.post(app, "/api/migrations/mark-done", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "migrations_run");
+    if (!auth.authorized) return;
+    const { filename, note } = req.body || {};
+    try {
+      const result = markMigrationDone(defaultMigrationDeps(), {
+        filename,
+        note,
+        actor: auth.author ?? auth.username ?? null,
+        currentSite: getContentRootName(res),
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ success: false, code: result.code, error: result.error });
+        return;
+      }
+      res.json({ success: true, run: result.run, recorded_in: result.recorded_in });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
     }
-    const migrationsDir = path.join(getPackageRoot(), "scripts", "migrations");
-    const fullPath = path.join(migrationsDir, filename);
-    if (!fs.existsSync(fullPath)) {
-      res.status(404).json({ error: "Migration script not found." });
-      return;
-    }
-    execFile(
-      "npx",
-      ["tsx", fullPath],
-      { cwd: getProjectRoot(), timeout: 120000 },
-      (err, stdout, stderr) => {
-        const output = [stdout, stderr].filter(Boolean).join("\n").trim();
-        if (err && err.killed) {
-          res.json({ success: false, output: `Timed out after 120s.\n${output}` });
-        } else if (err && err.code !== 0) {
-          res.json({ success: false, output: output || err.message });
-        } else {
-          res.json({ success: true, output });
-        }
-      },
-    );
   });
   // ── Database routes ──────────────────────────────────────────
   app.get("/api/databases", async (req, res) => {

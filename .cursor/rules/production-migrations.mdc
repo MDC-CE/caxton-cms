@@ -1,0 +1,45 @@
+---
+description: One-time production data migrations live in scripts/migrations and run from Settings → General → Migrations
+alwaysApply: true
+---
+
+# Production data migrations
+
+Any one-time fix to production data (content files, proposals, registries, pipeline rows) is a **data migration**. Staff run it from **Settings → General → Migrations**, which records who ran it and when, so it is not run twice by accident.
+
+## Where
+
+- `scripts/migrations/NNN_short_name.ts`, using the next free number. Never put one-off scripts loose in `scripts/`: the page only lists `NNN_*.ts` in that folder.
+- Never edit a shipped migration. Fixes go in a new numbered file (the page flags a file that changed after it completed).
+
+## Header tags (JSDoc at the top)
+
+| Tag | Required | Meaning |
+|---|---|---|
+| `@migration NNN_name` | yes | Name shown on the page |
+| `@description …` | yes | Plain English for staff: what changes, for whom |
+| `@scope site` / `@scope all` | yes | `site`: runs and records per site; reads `MIGRATION_SITE`. `all`: runs once, recorded in the first site in `sites.yml`. Missing → treated as `all` and flagged |
+| `@dry-run` | when `--dry-run` is honored | Shows the Dry run button. Expected for anything that withdraws, deletes, or pushes |
+| `@timeout <seconds>` | when it can exceed 120 s | Default 120, max 1800. Timed-out runs never count as completed |
+| `@production-only` | when a run off the live server would touch shared state | Content repo pushes, production data. Run / Mark as done are blocked off the live server; Dry run still works |
+
+## Behavior
+
+- Apply by default (no `--apply` flag); `--dry-run` previews and writes nothing.
+- Idempotent: a second run finds nothing to do.
+- Exit non-zero on any partial failure (including a failed or SHA-less content push) so the run is never recorded as completed.
+- A re-run after an interruption must finish the job: recover unpushed work first, then continue.
+- `site_*` changes push to the content repo and print `commitSha` (see [site-content-github.mdc](site-content-github.mdc)).
+- Pipeline database schema changes are not data migrations; they follow [pipeline-sqlite-migrations.mdc](pipeline-sqlite-migrations.mdc).
+
+## Agents
+
+- Agents add the file and its tags, then tell staff: open Settings → General → Migrations, use **Dry run**, then **Run** (on production for `@production-only`).
+- Agents never run a migration against production themselves.
+- Migrations already run by hand: tell staff to use **Mark as done** so the page records them.
+
+## Under the hood
+
+- Run history: `data_migration_runs` in `data/<site>/app.db` (per environment). Completed = a real run that exited 0, or Mark as done.
+- Code: `server/data-migrations/` (headers, ledger, service), routes in `server/routes/databases.ts`, UI in `client/src/components/settings/MigrationsTab.tsx`.
+- Live server = `NODE_ENV=production` and `SITE_URL` host is a `sites.yml` domain (`server/live-server.ts`).

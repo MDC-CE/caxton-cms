@@ -1,4 +1,5 @@
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
+import type { AdsIssue, UtmGrace } from "@shared/ads-diagnostics-rules";
+import type { UtmConvention, UtmConventionRejection } from "@shared/ads-settings";
 import type { AttributionModel } from "@shared/paid-attribution";
 import type { AdPlatform, GoogleNetworkRow, MetaPlacementRow } from "@shared/paid-traffic";
 import type { AdsRefreshStatus } from "@shared/ads-refresh-status";
@@ -9,6 +10,20 @@ export type { AdsIssueRow, AdsResolvedRow, AdsRunInfo };
 export type MoneyByCurrency = Record<string, number>;
 
 export type AdsWarning = { code: string; message: string };
+
+/** Read-only UTM convention (edited in ads-config.yml only). */
+export type AdsUtmConventionView = {
+  file: string;
+  config_error: string | null;
+  convention: UtmConvention;
+  rejected: UtmConventionRejection[];
+  meta_template: string;
+  google_template: string;
+  grace: UtmGrace & { accepted_old_values: string[] };
+  grace_days: number;
+  history_file: string;
+  standard: { paid_medium_regex: string; display_mediums: readonly string[]; doc_url: string };
+};
 
 export type AdsVersionRow = {
   variant: string;
@@ -23,8 +38,30 @@ export type AdsCampaignRef = {
   platform: AdPlatform | null;
   campaign_id: string | null;
   campaign_name: string;
+  /** Paid visits / site leads we couldn't tie to a known campaign id. Never carries spend. */
+  untagged?: true;
   paid_visits: number;
+  engaged_sessions: number;
   spend: MoneyByCurrency;
+  clicks: number;
+  impressions: number;
+  landing_page_views: number;
+  meta_leads: number;
+  /** Meta leads in the 7-day click window; the rest of `meta_leads` saw the ad only. */
+  pixel_leads_click: number;
+  google_leads: number;
+  unique_leads: number;
+  cost_per_visit: MoneyByCurrency;
+  ctr: number | null;
+  cpc: MoneyByCurrency;
+  conversion_rate: number | null;
+  cost_per_lead: MoneyByCurrency;
+  meta_conversion_rate: number | null;
+  meta_cost_per_lead: MoneyByCurrency;
+  bounce_rate: number | null;
+  low_sample: boolean;
+  tag_texts?: Array<{ text: string; visits: number }>;
+  visits_by_platform?: Partial<Record<AdPlatform, number>>;
 };
 
 /** Destinations with no page URL to show (their `title` is the label). */
@@ -92,9 +129,31 @@ export type AdsPageRow = {
   low_sample: boolean;
   meta_low_sample: boolean;
   platforms: AdPlatform[];
+  /** Every campaign on this row; the untagged row (if any) is last. */
   campaigns: AdsCampaignRef[];
+  /** Campaigns (untagged excluded) with enough paid visits for rates. */
+  comparable_campaigns?: number;
   versions?: AdsVersionRow[];
+  /** Days in the window when an ad moved to / from this page (that day's numbers are approximate). */
+  url_change_days?: number;
+  url_change_spend?: MoneyByCurrency;
+  url_changes?: AdsRowUrlChange[];
+  /** Older spend from untagged ads assumed to go to this page (before URL history started). */
+  unconfirmed_page_spend?: MoneyByCurrency;
 };
+
+export type AdsRowUrlChange = {
+  ad_id: string;
+  ad_name: string;
+  date: string;
+  from_url: string;
+  to_url: string;
+  /** `ga4`: split by where that day's visits landed; `whole_day_new`: no visits seen, all to the new page. */
+  basis: "ga4" | "whole_day_new";
+  inferred: boolean;
+};
+
+export type AdsUrlHistory = { since: string | null; recomputed_at: string | null };
 
 export type AdsCampaignGroup = {
   key: string;
@@ -161,7 +220,7 @@ export type AdsAttributedOnlyVisits = { total: number; by_host: Array<{ host: st
 export type AdsReport = {
   window: { start: string; end: string; days: number };
   platform: AdPlatform | "all";
-  attribution: { model: AttributionModel; lookback_days: 30; basis: "browser_observed" };
+  attribution: { model: AttributionModel; lookback_days: 30; basis: "browser_observed"; url_history?: AdsUrlHistory };
   meta: AdsMetaStatus;
   google?: AdsGoogleStatus;
   ga4: AdsGa4Status;
@@ -195,6 +254,7 @@ export type AdsReport = {
     test_submissions: number;
     /** Undefined on reports saved before this field existed; null = can't measure. */
     attributed_only_visits?: AdsAttributedOnlyVisits | null;
+    unconfirmed_page_spend?: MoneyByCurrency;
   };
   meta_split_days?: { covered: number; total: number };
   pages: AdsPageRow[];
@@ -286,12 +346,16 @@ export type AdsDiagnostics = {
     consent_accept_pct: number | null;
   };
   missing_floor_currencies: string[];
+  /** When Meta spend started following each ad's link history (drives the 14-day notice). */
+  url_history?: AdsUrlHistory | null;
   /** Missing on snapshots built before the placement split shipped. */
   meta_platforms?: AdsMetaPlatforms | null;
   /** From the last Run / Re-check (saved), not built on this read. */
   issues: AdsIssueRow[];
   resolved: AdsResolvedRow[];
   utm_template: string;
+  /** Missing on servers before the UTM validator shipped. */
+  utm_convention?: AdsUtmConventionView;
   warnings: AdsWarning[];
   run: AdsRunInfo;
 };
@@ -328,6 +392,7 @@ export type GoogleAdsDiagnostics = {
   issues: AdsIssueRow[];
   resolved: AdsResolvedRow[];
   url_suffix_template: string;
+  utm_convention?: AdsUtmConventionView;
   warnings: AdsWarning[];
   run: AdsRunInfo;
 };

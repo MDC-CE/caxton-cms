@@ -1,13 +1,18 @@
 /**
- * Plan and apply the staff "Fix via Meta" for `missing_tracking_params` issues:
- * add only the template parameters an ad lacks, reusing its page post.
+ * Plan and apply the staff "Fix via Meta": `missing_tracking_params` adds only the template
+ * parameters an ad lacks; Meta-evidence `utm_*` issues replace the flagged utm_source /
+ * utm_medium with the convention's values. Both reuse the ad's page post.
  */
 
-import { META_UTM_TEMPLATE } from "@shared/ads-settings";
+import { metaUtmTemplate } from "@shared/ads-settings";
 import { parseTrackingParams, type AdsIssue } from "@shared/ads-diagnostics-rules";
 import {
   TRACKING_FIX_MAX_ADS,
+  TRACKING_FIX_REPLACEABLE_PARAMS,
+  TRACKING_FIX_RE_REVIEW_WARNING,
+  trackingFixModeFor,
   type TrackingFixAdPlan,
+  type TrackingFixMode,
   type TrackingFixAdResult,
   type TrackingFixApplyResponse,
   type TrackingFixPreview,
@@ -24,11 +29,13 @@ export type TrackingFixDeps = {
   replace: (opts: { accountId: string; adId: string; storyId: string; urlTags: string; name: string }) => Promise<{ creative_id: string }>;
   /** Re-read ad setups so the issue clears; resolves true when a refresh was queued. */
   requestRefresh: () => Promise<boolean>;
+  /** Template generated from the site's UTM convention (defaults when omitted). */
+  template?: string;
   now?: () => Date;
 };
 
 /** `key=value` pairs from the template, values kept raw (`{{ad.id}}` must not be encoded). */
-export function templatePairs(template = META_UTM_TEMPLATE): Array<[string, string]> {
+export function templatePairs(template = metaUtmTemplate()): Array<[string, string]> {
   return template
     .split("&")
     .map((part) => {
@@ -45,7 +52,7 @@ export function templatePairs(template = META_UTM_TEMPLATE): Array<[string, stri
 export function mergeMissingTags(
   urlTags: string | null | undefined,
   link: string | undefined,
-  template = META_UTM_TEMPLATE,
+  template = metaUtmTemplate(),
 ): { tags: string; added: string[] } {
   const present = { ...parseTrackingParams(link), ...parseTrackingParams(urlTags) };
   const missing = templatePairs(template).filter(([k]) => !present[k]);
@@ -58,12 +65,53 @@ export function mergeMissingTags(
   return { tags: [...kept, ...missing.map(([k, v]) => `${k}=${v}`)].join("&"), added };
 }
 
+/**
+ * Replace only the flagged keys (utm_source / utm_medium) in the ad's URL parameters with the
+ * template value; every other param is kept as-is. Keys whose wrong value lives in the website
+ * link (not the URL parameters) are returned in `in_link` and left alone.
+ */
+export function replaceViolatingTags(
+  urlTags: string | null | undefined,
+  link: string | undefined,
+  keys: string[],
+  template = metaUtmTemplate(),
+): { tags: string; replaced: string[]; in_link: string[] } {
+  const target = new Map(templatePairs(template));
+  const tagParams = parseTrackingParams(urlTags);
+  const linkParams = parseTrackingParams(link);
+  const replaced: string[] = [];
+  const inLink: string[] = [];
+  for (const k of Array.from(new Set(keys.map((x) => x.toLowerCase())))) {
+    const want = target.get(k);
+    if (!want || !TRACKING_FIX_REPLACEABLE_PARAMS.includes(k)) continue;
+    if (tagParams[k] != null) {
+      if (tagParams[k] !== want) replaced.push(k);
+    } else if (linkParams[k] != null && linkParams[k] !== want) {
+      inLink.push(k);
+    }
+  }
+  const replacedSet = new Set(replaced);
+  const tags = (urlTags ?? "")
+    .split("&")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const k = p.split("=")[0]!.trim().toLowerCase();
+      return replacedSet.has(k) ? `${k}=${target.get(k)}` : p;
+    })
+    .join("&");
+  return { tags, replaced, in_link: inLink };
+}
+
 type IssueAdRef = { ad_id: string; ad_name: string; account_id: string };
+
+export type AdFixOptions = { mode: TrackingFixMode; keys?: string[]; template?: string };
 
 export function planAdFix(
   ref: IssueAdRef,
   live: MetaAdForFix | undefined,
   scope: { campaign_id?: string | null; account_id?: string | null },
+  opts: AdFixOptions = { mode: "add" },
 ): TrackingFixAdPlan {
   const before = live?.url_tags ?? null;
   const base = { ad_id: ref.ad_id, ad_name: live?.ad_name || ref.ad_name, account_id: live?.account_id || ref.account_id, before };
@@ -76,12 +124,29 @@ export function planAdFix(
     return skip("outside_issue");
   }
   if (live.instant_form) return skip("instant_form");
-  const { tags, added } = mergeMissingTags(live.url_tags, live.links[0]);
+  const template = opts.template ?? metaUtmTemplate();
+  if (opts.mode === "replace") {
+    const r = replaceViolatingTags(live.url_tags, live.links[0], opts.keys ?? [], template);
+    if (r.replaced.length === 0) return skip(r.in_link.length > 0 ? "value_in_link" : "already_correct");
+    if (live.dynamic_creative) return skip("dynamic_creative");
+    if (live.catalog) return skip("catalog");
+    if (!live.story_id) return skip("no_post");
+    return { ...base, status: "fixable", after: r.tags, added: [], replaced: r.replaced };
+  }
+  const { tags, added } = mergeMissingTags(live.url_tags, live.links[0], template);
   if (added.length === 0) return skip("already_tagged");
   if (live.dynamic_creative) return skip("dynamic_creative");
   if (live.catalog) return skip("catalog");
   if (!live.story_id) return skip("no_post");
   return { ...base, status: "fixable", after: tags, added };
+}
+
+/** Add vs replace from the issue code; replace keys come from the issue's UTM evidence. */
+export function fixOptionsFor(issue: AdsIssue, template?: string): AdFixOptions {
+  const mode = trackingFixModeFor(issue.code) ?? "add";
+  if (mode === "add") return { mode, template };
+  const keys = (issue.details?.utm?.params ?? []).filter((k) => TRACKING_FIX_REPLACEABLE_PARAMS.includes(k));
+  return { mode, keys, template };
 }
 
 function issueRefs(issue: AdsIssue): IssueAdRef[] {
@@ -103,12 +168,14 @@ export async function previewTrackingFix(issue: AdsIssue, deps: TrackingFixDeps)
     account_id: issue.scope.account_id ?? null,
     max_ads: TRACKING_FIX_MAX_ADS,
   };
-  if (!deps.writeConfigured()) return { write_configured: false, ...header, ads: [] };
+  const opts = fixOptionsFor(issue, deps.template);
+  const modeInfo = { mode: opts.mode, ...(opts.mode === "replace" ? { warning: TRACKING_FIX_RE_REVIEW_WARNING } : {}) };
+  if (!deps.writeConfigured()) return { write_configured: false, ...header, ...modeInfo, ads: [] };
   const refs = issueRefs(issue);
   const live = await deps.fetchAds(refs.map((r) => r.ad_id));
-  const ads = refs.map((r) => planAdFix(r, live.get(r.ad_id), issue.scope));
+  const ads = refs.map((r) => planAdFix(r, live.get(r.ad_id), issue.scope, opts));
   ads.sort((a, b) => (a.status === b.status ? 0 : a.status === "fixable" ? -1 : 1));
-  return { write_configured: true, ...header, ads };
+  return { write_configured: true, ...header, ...modeInfo, ads };
 }
 
 const STOP_KINDS = new Set<MetaApiError["kind"]>(["auth", "permission", "rate_limit"]);
@@ -140,9 +207,10 @@ export async function applyTrackingFix(
   }
   const live = inIssue.length > 0 ? await deps.fetchAds(inIssue) : new Map<string, MetaAdForFix>();
   const stamp = (deps.now?.() ?? new Date()).toISOString().slice(0, 10);
+  const opts = fixOptionsFor(input.issue, deps.template);
 
   for (let i = 0; i < inIssue.length; i++) {
-    const plan = planAdFix(refsById.get(inIssue[i])!, live.get(inIssue[i]), input.issue.scope);
+    const plan = planAdFix(refsById.get(inIssue[i])!, live.get(inIssue[i]), input.issue.scope, opts);
     if (out.stopped) {
       out.skipped.push(result({ ...plan, after: null }, { reason: "not_attempted" }));
       continue;

@@ -7,6 +7,7 @@ import { splitByFieldScope } from "@shared/field-scope";
 import { setAtPath, deleteAtPath, cloneJson } from "@shared/object-path";
 import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
+import { setLiveServerForTests } from "../live-server";
 import type { DraftProposalLink } from "../versioning/draft-meta";
 import type { FieldChange } from "../versioning/draft-base";
 import type { ProposalDraftRef, ProposalDraftStore } from "./draft-store";
@@ -1372,7 +1373,7 @@ describe("proposals v1.0 (draft-first)", () => {
   describe("phase 3: stale sweep, link check, revert", () => {
     const DAY = 24 * 60 * 60 * 1000;
 
-    it("marks drift, flags at 30 days and closes at 90 (created drafts deleted)", async () => {
+    it("marks drift, flags at 10 days and closes at 30 (created drafts deleted)", async () => {
       const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
       const { svc } = makeService({ store: fake.store });
       const created = await svc.create({ title: "Title fix", summary: SUMMARY, entries: [entry()] }, { username: "alice" });
@@ -1382,10 +1383,10 @@ describe("proposals v1.0 (draft-first)", () => {
       const t0 = Date.now();
       expect((await svc.staleSweep({ now: t0 })).marked).toEqual([id]);
       expect(toProposalSummary(svc.get(id)!).attention).toBe("needs_author");
-      expect((await svc.staleSweep({ now: t0 + 10 * DAY })).flagged).toEqual([]);
-      expect((await svc.staleSweep({ now: t0 + 31 * DAY })).flagged).toEqual([id]);
+      expect((await svc.staleSweep({ now: t0 + 9 * DAY })).flagged).toEqual([]);
+      expect((await svc.staleSweep({ now: t0 + 11 * DAY })).flagged).toEqual([id]);
       expect(svc.get(id)!.stale_flagged_at).toBeTruthy();
-      expect((await svc.staleSweep({ now: t0 + 91 * DAY })).closed).toEqual([id]);
+      expect((await svc.staleSweep({ now: t0 + 31 * DAY })).closed).toEqual([id]);
       const closed = svc.get(id)!;
       expect(closed.status).toBe("withdrawn");
       expect(closed.close_reason).toBe("abandoned_stale");
@@ -1404,25 +1405,39 @@ describe("proposals v1.0 (draft-first)", () => {
       expect(svc.get(created.proposal.id)!.stale_since).toBeNull();
     });
 
-    it("link check: orphan after the proposal is gone, cleanup after 7 days; unreachable production never cleans", async () => {
+    it("link check: a proposal missing from this database counts as closed, whatever the old env label", async () => {
       const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" }, "blog/other/es": { title: "O" } });
       const { svc } = makeService({ store: fake.store });
       const draftA = { contentType: "blog", slug: "hello", locale: "es", variant: "draft" };
       const draftB = { contentType: "blog", slug: "other", locale: "es", variant: "draft" };
       fake.store.create(draftA, { author: "x" });
       fake.store.create(draftB, { author: "x" });
-      fake.store.link(draftA, { id: "gone-local", env: "unknown", created_by_proposal: true, created_fingerprint: fake.store.fingerprint(draftA)! }, "x");
-      fake.store.link(draftB, { id: "prod-proposal", env: "production" }, "x");
+      fake.store.link(draftA, { id: "gone-a", env: "unknown", created_by_proposal: true, created_fingerprint: fake.store.fingerprint(draftA)! }, "x");
+      fake.store.link(draftB, { id: "gone-b", env: "laptop-alice" }, "x");
       const t0 = Date.now();
-      const first = await svc.verifyDraftLinks({ now: t0, remoteStatus: async (pid) => (pid === "gone-local" ? "closed" : "unknown") });
-      expect(first.orphaned).toHaveLength(1);
-      expect(first.unverified).toHaveLength(1);
-      expect(fake.drafts.get("blog/hello/es/draft")!.link?.orphan_since).toBeTruthy();
-      expect(fake.drafts.get("blog/other/es/draft")!.link?.unverified_since).toBeTruthy();
-      const later = await svc.verifyDraftLinks({ now: t0 + 8 * DAY, remoteStatus: async (pid) => (pid === "gone-local" ? "closed" : "unknown") });
-      expect(later.cleaned).toEqual([{ draft: "blog/hello draft.es", deleted: true }]);
+      const first = await svc.verifyDraftLinks({ now: t0 });
+      expect(first.orphaned).toHaveLength(2);
+      expect(first.unverified).toHaveLength(0);
+      const later = await svc.verifyDraftLinks({ now: t0 + 8 * DAY });
+      expect(later.cleaned).toEqual(
+        expect.arrayContaining([
+          { draft: "blog/hello draft.es", deleted: true },
+          { draft: "blog/other draft.es", deleted: false },
+        ]),
+      );
       expect(fake.drafts.has("blog/hello/es/draft")).toBe(false);
       expect(fake.drafts.has("blog/other/es/draft")).toBe(true);
+      expect(fake.drafts.get("blog/other/es/draft")!.link).toBeNull();
+    });
+
+    it("link check: a draft whose proposal is open here is left linked", async () => {
+      const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const { svc } = makeService({ store: fake.store });
+      const created = await svc.create({ title: "Title fix", summary: SUMMARY, entries: [entry()] }, { username: "alice" });
+      if (!created.ok) throw new Error(created.error);
+      const report = await svc.verifyDraftLinks();
+      expect(report.orphaned).toHaveLength(0);
+      expect(fake.drafts.get("blog/hello/es/draft")!.link?.id).toBe(created.proposal.id);
     });
 
     it("revert opens a proposal that puts back the old values and reports conflicts", async () => {
@@ -1451,14 +1466,51 @@ describe("proposals v1.0 (draft-first)", () => {
       expect(res.conflicting_fields?.map((c) => c.field_path)).toEqual(["description"]);
       expect(fake.drafts.get("blog/hello/es/draft")!.data).toEqual({ title: "Old", description: "Changed later" });
     });
+
+    it("reverting an accepted idea's applied edit leaves the page released and the idea not stalled", async () => {
+      const live: Record<string, Record<string, unknown>> = { "blog/hello/es": { title: "Old" } };
+      const fake = fakeDraftStore(live);
+      const { svc } = makeService({ store: fake.store });
+      const page = { contentType: "blog", slug: "hello", locale: "es" };
+      const fileIdea = async (title: string) => {
+        const res = await svc.create(
+          { kind: "idea", title, summary: `${title}. ${SUMMARY}`, related_entries: [page], confirm_distinct: true },
+          { username: "alice" },
+        );
+        if (!res.ok) throw new Error(res.error);
+        return res.proposal.id;
+      };
+      const accept = (id: string) =>
+        svc.update(id, "accept", {
+          username: "bob",
+          next_step: "Ship the title refresh in a follow-up edits proposal.",
+          accepted_entry: page,
+        });
+      const idea = await fileIdea("Title refresh idea");
+      expect((await accept(idea)).ok).toBe(true);
+      const edits = await svc.create(
+        { title: "Title refresh", summary: SUMMARY, implements_proposal_id: idea, entries: [entry()] },
+        { username: "alice" },
+      );
+      if (!edits.ok) throw new Error(edits.error);
+      expect((await svc.update(edits.proposal.id, "apply", { username: "bob" })).ok).toBe(true);
+      live["blog/hello/es"] = { title: "New" };
+      fake.drafts.clear();
+
+      const revert = await svc.update(edits.proposal.id, "revert", { username: "carol" });
+      expect(revert.ok ? "ok" : `${revert.code}: ${revert.error}`).toBe("ok");
+      if (!revert.ok) return;
+      expect((await svc.update(revert.proposal.id, "apply", { username: "bob" })).ok).toBe(true);
+      expect(svc.stats().stalled_ideas).toBe(0);
+
+      const next = await fileIdea("Second title idea");
+      expect((await accept(next)).ok).toBe(true);
+    });
   });
 
   describe("staff bulk delete", () => {
-    const prevEnv = process.env.PIPELINE_ENV;
-    afterEach(() => {
-      if (prevEnv === undefined) delete process.env.PIPELINE_ENV;
-      else process.env.PIPELINE_ENV = prevEnv;
-    });
+    beforeEach(() => setLiveServerForTests(true));
+    afterEach(() => setLiveServerForTests(null));
 
     const staff = { username: "steward" };
     const countRows = (id: string) => {
@@ -1532,30 +1584,29 @@ describe("proposals v1.0 (draft-first)", () => {
       expect(fake.drafts.get("blog/hello/es/draft")!.link).toBeNull();
     });
 
-    it("leaves drafts linked to another environment untouched", async () => {
+    it("off the live server drafts are left untouched (test copy)", async () => {
+      setLiveServerForTests(false);
       const fake = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
       const { svc, id } = await createOne(fake);
-      fake.drafts.get("blog/hello/es/draft")!.link!.env = "production";
       const { results } = await svc.deleteProposals([id], staff);
       expect(results[0]!.status).toBe("deleted");
+      expect(results[0]!.drafts_removed).toHaveLength(0);
       expect(fake.drafts.has("blog/hello/es/draft")).toBe(true);
-      expect(fake.drafts.get("blog/hello/es/draft")!.link?.env).toBe("production");
+      expect(fake.drafts.get("blog/hello/es/draft")!.link?.id).toBe(id);
     });
 
-    it("removes a created draft with no link only in production", async () => {
-      const local = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
-      const a = await createOne(local);
-      local.drafts.get("blog/hello/es/draft")!.link = null;
-      await a.svc.deleteProposals([a.id], staff);
-      expect(local.drafts.has("blog/hello/es/draft")).toBe(true);
+    it("on the live server a created draft is removed even with no link or an old env label", async () => {
+      const a = fakeDraftStore({ "blog/hello/es": { title: "Old" } });
+      const one = await createOne(a);
+      a.drafts.get("blog/hello/es/draft")!.link = null;
+      expect((await one.svc.deleteProposals([one.id], staff)).results[0]!.drafts_removed).toHaveLength(1);
+      expect(a.drafts.has("blog/hello/es/draft")).toBe(false);
 
-      const prod = fakeDraftStore({ "blog/other/es": { title: "O" } });
-      const b = await createOne(prod, entry({ slug: "other" }));
-      prod.drafts.get("blog/other/es/draft")!.link = null;
-      process.env.PIPELINE_ENV = "production";
-      const { results } = await b.svc.deleteProposals([b.id], staff);
-      expect(results[0]!.drafts_removed).toHaveLength(1);
-      expect(prod.drafts.has("blog/other/es/draft")).toBe(false);
+      const b = fakeDraftStore({ "blog/other/es": { title: "O" } });
+      const two = await createOne(b, entry({ slug: "other" }));
+      b.drafts.get("blog/other/es/draft")!.link!.env = "laptop-alice";
+      expect((await two.svc.deleteProposals([two.id], staff)).results[0]!.drafts_removed).toHaveLength(1);
+      expect(b.drafts.has("blog/other/es/draft")).toBe(false);
     });
 
     it("blocks an idea with an open implementing proposal unless both are selected", async () => {

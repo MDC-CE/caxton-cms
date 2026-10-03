@@ -8,10 +8,56 @@ import {
   parseCreative,
   parseCustomConversion,
   parseAdPlatformRow,
+  parseAdset,
+  parseCampaign,
   parseInsightRow,
   parsePixelEventStats,
   resetMetaAdAccountCache,
 } from "./meta-client";
+
+describe("parseCampaign / parseAdset", () => {
+  it("reads campaign delivery settings, empty values as null", () => {
+    expect(
+      parseCampaign({ id: "c1", name: "Brand", status: "ACTIVE", effective_status: "WITH_ISSUES", objective: "OUTCOME_LEADS", daily_budget: "5000", lifetime_budget: "" }, "111"),
+    ).toEqual({
+      id: "c1",
+      account_id: "111",
+      name: "Brand",
+      status: "ACTIVE",
+      effective_status: "WITH_ISSUES",
+      objective: "OUTCOME_LEADS",
+      daily_budget: "5000",
+      lifetime_budget: null,
+      bid_strategy: null,
+      spend_cap: null,
+    });
+    expect(parseCampaign({ name: "no id" }, "111")).toBeNull();
+  });
+
+  it("reads ad set settings including the optimization event and targeting", () => {
+    const a = parseAdset(
+      {
+        id: "s1",
+        campaign_id: "c1",
+        name: "US 25-45",
+        status: "PAUSED",
+        optimization_goal: "OFFSITE_CONVERSIONS",
+        promoted_object: { custom_event_type: "LEAD" },
+        targeting: { geo_locations: { countries: ["US"] }, age_min: 25 },
+        start_time: "2026-09-01T00:00:00-0400",
+      },
+      "111",
+    );
+    expect(a).toMatchObject({ id: "s1", campaign_id: "c1", status: "PAUSED", optimization_goal: "OFFSITE_CONVERSIONS", start_time: "2026-09-01T00:00:00-0400", end_time: null });
+    expect(a?.optimization_event).toBeTruthy();
+    expect(a?.targeting).toEqual({ geo_locations: { countries: ["US"] }, age_min: 25 });
+  });
+
+  it("keeps the creative id and staff-set status on ad reads", () => {
+    const c = parseCreative({ id: "a1", campaign_id: "c1", adset_id: "s1", status: "PAUSED", effective_status: "CAMPAIGN_PAUSED", creative: { id: "cr9" } });
+    expect(c).toMatchObject({ creative_id: "cr9", status: "PAUSED", effective_status: "CAMPAIGN_PAUSED" });
+  });
+});
 
 describe("parseAdPlatformRow", () => {
   it("maps the placement, spend and clicks per ad", () => {

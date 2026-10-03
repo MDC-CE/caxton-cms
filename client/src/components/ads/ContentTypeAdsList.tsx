@@ -12,6 +12,7 @@ import type { AttributionModel } from "@shared/paid-attribution";
 import { isRefreshActive } from "@shared/ads-refresh-status";
 import type { AdsEntriesResponse, AdsPageRow } from "./ads-types";
 import { AdsRefreshNotice } from "./AdsRefreshNotice";
+import { UrlChangedBadge } from "./UrlChangedBadge";
 import { formatMoney, formatNum, formatPct, formatWhen, moneyTotal, PLATFORM_LABELS } from "./ads-format";
 
 type SortField = "paid_visits" | "spend" | "unique_leads" | "conversion_rate" | "cost_per_lead" | "bounce_rate";
@@ -170,6 +171,7 @@ export function ContentTypeAdsList({ contentType, locale, q }: { contentType: st
                           not enough data
                         </Badge>
                       )}
+                      <UrlChangedBadge row={r} />
                       <a href={r.url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground" aria-label="Open page">
                         <ExternalLink className="h-3.5 w-3.5" />
                       </a>

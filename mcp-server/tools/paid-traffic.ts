@@ -114,6 +114,17 @@ const ADS_DIAGNOSTICS_MODEL: Warning = {
     "Issues on a platform the last Run skipped carry not_checked (not fixed, not re-evaluated).",
 };
 
+/**
+ * ads-config.yml / UTM convention warnings the server attaches to diagnostics reads
+ * (utm_convention_changed, utm_convention_invalid, ads_config_unreadable). Moved out of the
+ * payload so they appear once, in `warnings`, with their structured fields.
+ */
+export function takeUtmWarnings(data: Record<string, unknown>): Warning[] {
+  const list = (Array.isArray(data.utm_warnings) ? data.utm_warnings : []) as Warning[];
+  delete data.utm_warnings;
+  return list;
+}
+
 /** Run state → warnings (never-run, running, failed, skipped platforms). */
 export function adsRunWarnings(run: AdsRunInfo | undefined): Warning[] {
   if (!run) return [];
@@ -282,8 +293,13 @@ type Report = {
   campaigns: unknown[];
   thresholds: unknown;
   meta_platforms?: unknown;
+  url_changes?: unknown[];
+  url_changes_total?: number;
   warnings: Warning[];
 };
+
+/** Summary keeps the costliest ad link switches; entries rows carry their own `url_changes`. */
+const SUMMARY_URL_CHANGES = 10;
 
 function internalHeaders(mcpToken?: string): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -298,6 +314,36 @@ function moneyTotal(m: Money | undefined): number {
 }
 
 type SortKey = "spend" | "paid_visits" | "unique_leads" | "conversion_rate" | "cost_per_lead";
+
+const PAGE_CAMPAIGNS_TOP = 3;
+
+/** Top campaigns for `group: page`; the untagged row only fills a slot when fewer real campaigns exist. */
+function topCampaigns(campaigns: unknown[]): unknown[] {
+  const isUntagged = (c: unknown) => !!(c && typeof c === "object" && (c as { untagged?: boolean }).untagged);
+  const tagged = campaigns.filter((c) => !isUntagged(c));
+  const top = tagged.slice(0, PAGE_CAMPAIGNS_TOP);
+  if (top.length < PAGE_CAMPAIGNS_TOP) top.push(...campaigns.filter(isUntagged));
+  return top;
+}
+
+const CAMPAIGN_IDENTITY_KEYS = new Set(["platform", "campaign_id", "campaign_name"]);
+const CAMPAIGN_RATE_KEYS = new Set(["ctr", "conversion_rate", "meta_conversion_rate", "bounce_rate"]);
+
+/** Drop zero counts, null rates, empty money and false flags from a campaign ref. Absent count = 0; absent rate / money = no denominator; a computed 0 rate stays. */
+export function compactCampaignRef(c: unknown): unknown {
+  if (!c || typeof c !== "object") return c;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(c as Record<string, unknown>)) {
+    if (!CAMPAIGN_IDENTITY_KEYS.has(k)) {
+      if (v == null || v === false) continue;
+      if (v === 0 && !CAMPAIGN_RATE_KEYS.has(k)) continue;
+      if (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) continue;
+      if (Array.isArray(v) && v.length === 0) continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
 
 function sortPages(rows: PageRow[], sort: SortKey): PageRow[] {
   const val = (r: PageRow): number | null => {
@@ -388,7 +434,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
       group: z
         .enum(["page", "campaign"])
         .optional()
-        .describe("entries only: page (default, campaigns trimmed to top 3 per row) or campaign (full campaign list per row)"),
+        .describe("entries only: page (default, campaigns trimmed to top 3 by spend per row + campaigns_total) or campaign (full campaign list per row)"),
       split_by_version: z.boolean().optional().describe("entries only: include per-variant rows from experiment_exposure"),
       sort: z
         .enum(["spend", "paid_visits", "unique_leads", "conversion_rate", "cost_per_lead"])
@@ -555,6 +601,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               ...refreshWarningsOut,
               ADS_DIAGNOSTICS_MODEL,
               ...adsRunWarnings(run),
+              ...takeUtmWarnings(data),
               ...((Array.isArray(data.warnings) ? data.warnings : []) as Warning[]).filter(
                 (w) => REFRESH_WARNING_CODES.has(w.code) || GOOGLE_STATUS_WARNING_CODES.has(w.code),
               ),
@@ -602,6 +649,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
           const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/diagnostics/ads?${params}`, { headers: internalHeaders(mcpToken) });
           const data = (await res.json()) as Record<string, unknown>;
           if (!res.ok) return fail((data.error as string) || `Server error: ${res.status}`);
+          refreshWarningsOut.push(...takeUtmWarnings(data));
           if (since || until) {
             refreshWarningsOut.push({
               code: "range_ignored_in_diagnostics",
@@ -763,6 +811,7 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
               top_pages: top,
               ...(data.meta_platforms ? { meta_platforms: data.meta_platforms } : {}),
               ...(data.google_networks ? { google_networks: data.google_networks } : {}),
+              ...(data.url_changes?.length ? { url_changes: data.url_changes.slice(0, SUMMARY_URL_CHANGES), url_changes_total: data.url_changes_total ?? data.url_changes.length } : {}),
             },
             meta,
           );
@@ -784,9 +833,11 @@ export function registerPaidTrafficTools(mcp: McpServer, mcpToken?: string, gran
 
         const source = mode === "destinations" ? data.destinations : data.pages;
         const sorted = sortPages(source, sort ?? "spend");
-        const pageRows = sorted.slice(off, off + lim).map((r) =>
-          group === "campaign" || mode === "destinations" ? r : { ...r, campaigns: (r.campaigns ?? []).slice(0, 3) },
-        );
+        const pageRows = sorted.slice(off, off + lim).map((r) => {
+          const all = r.campaigns ?? [];
+          if (group === "campaign" || mode === "destinations") return { ...r, campaigns: all.map(compactCampaignRef) };
+          return { ...r, campaigns: topCampaigns(all).map(compactCampaignRef), campaigns_total: all.length };
+        });
         return ok(
           {
             message: mode === "destinations" ? "Paid traffic to other destinations" : "Paid traffic by landing page",

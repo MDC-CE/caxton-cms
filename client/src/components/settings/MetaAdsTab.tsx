@@ -44,7 +44,8 @@ import {
   type AdsSettings,
   type KnownExternalCampaign,
 } from "@shared/ads-settings";
-import type { MetaLeadConversionOptions } from "@/components/ads/ads-types";
+import type { AdsUtmConventionView, MetaLeadConversionOptions } from "@/components/ads/ads-types";
+import { AdsUtmConventionCard } from "@/components/ads/AdsUtmConvention";
 import {
   isRefreshActive,
   refreshProgressPercent,
@@ -57,6 +58,7 @@ type SettingsResponse = {
   token_configured: boolean;
   api_version: string;
   utm_template: string;
+  utm_convention?: AdsUtmConventionView;
   tracking_params: TrackingParamsCoverage | null;
   refreshing: boolean;
   refresh: AdsRefreshStatus;
@@ -72,6 +74,8 @@ type SettingsResponse = {
     pulled_from_production_at?: string | null;
     production_origin?: string | null;
     snapshot_last_date?: string | null;
+    backup_pushed_at?: string | null;
+    backup_error?: string | null;
   };
   ga4: { configured: boolean; last_success_at: string | null; last_export_date: string | null; last_error: string | null };
   policy: { refresh_days: number; backfill_days: number; retention_days: number; cache_dir: string };
@@ -501,7 +505,7 @@ export function MetaAdsTab() {
                   Only staff with the <code className="font-mono">ads_edit</code> permission can run them.
                 </p>
                 <p>
-                  Non-secret config: <code className="font-mono">settings.yml → ads.meta</code> (per site).
+                  Non-secret config: <code className="font-mono">ads-config.yml → meta</code> (per site).
                 </p>
                 <p>
                   Lead conversions: <code className="font-mono">ads.meta.lead_conversions</code> (max {MAX_META_LEAD_CONVERSIONS}) —{" "}
@@ -553,6 +557,16 @@ export function MetaAdsTab() {
               Last sync failed{data.sync.consecutive_failures > 1 ? ` (${data.sync.consecutive_failures} times in a row)` : ""}: {data.sync.last_error}
             </p>
           )}
+          <p
+            className={cn("text-xs", data.sync.backup_error ? "text-destructive" : "text-muted-foreground")}
+            data-testid="text-meta-history-backup"
+          >
+            {data.sync.backup_error
+              ? `History backup failed: ${data.sync.backup_error}${data.sync.backup_pushed_at ? ` (last pushed ${fmtWhen(data.sync.backup_pushed_at)})` : ""}`
+              : data.sync.backup_pushed_at
+                ? `History backup: last pushed ${fmtWhen(data.sync.backup_pushed_at)}`
+                : "History backup: not pushed yet. Only the live site saves a copy, after a sync."}
+          </p>
           {progressPct !== null && data.refresh.progress ? (
             <div className="space-y-1.5" data-testid="meta-refresh-progress">
               <Progress value={progressPct} className="h-2" aria-label="Sync progress" />
@@ -618,6 +632,12 @@ export function MetaAdsTab() {
             <p>
               State file: <code className="font-mono">.cache/&lt;site&gt;/ads-refresh-state.json</code>. Cached numbers stay visible in every state.
             </p>
+            <p>
+              History backup: after each sync in production, ad URL versions, campaign name history and the campaign change log are
+              pushed to the content repo under <code className="font-mono">&lt;site&gt;/ads-history/</code> (author{" "}
+              <code className="font-mono">ads-sync</code>), only when something changed. A server whose cache has no history restores
+              it from there before its next sync. Local machines and production downloads never push.
+            </p>
           </ReadMore>
         </CardContent>
       </Card>
@@ -674,6 +694,8 @@ export function MetaAdsTab() {
           </ReadMore>
         </CardContent>
       </Card>
+
+      <AdsUtmConventionCard view={data.utm_convention} platform="meta" />
 
       <AdsAlertThresholdsCard
         thresholds={thresholds}
@@ -771,7 +793,7 @@ export function MetaAdsTab() {
           )}
           <ReadMore testId="button-known-campaigns-advanced">
             <p>
-              Stored in <code className="font-mono">settings.yml → ads.meta.known_external_campaigns</code> (max {MAX_KNOWN_EXTERNAL_CAMPAIGNS}).
+              Stored in <code className="font-mono">ads-config.yml → meta.known_external_campaigns</code> (max {MAX_KNOWN_EXTERNAL_CAMPAIGNS}).
               Matching is by campaign id, or by campaign name ignoring case.
             </p>
             <p>Removing an entry flags the campaign again on the next Diagnostics load if it still sends visitors.</p>

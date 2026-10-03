@@ -6,8 +6,10 @@ import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { cn } from "@/lib/utils";
 import { isClicksVisitsMismatch, type AdsIssue } from "@shared/ads-diagnostics-rules";
 import { NO_URL_DESTINATION_KINDS, type AdsPageRow } from "./ads-types";
-import { formatMoney, formatNum, formatPct, formatSeconds, PLATFORM_LABELS } from "./ads-format";
+import { formatMoney, formatNum, formatPct, formatSeconds } from "./ads-format";
 import { PlatformTag } from "./PlatformTag";
+import { UrlChangedBadge } from "./UrlChangedBadge";
+import { conversionColumns, PaidCampaignRows } from "./PaidCampaignRows";
 
 export type PaidPerspective = "traffic" | "conversion" | "engagement" | "integrity";
 
@@ -55,14 +57,14 @@ function metricsFor(row: AdsPageRow, perspective: PaidPerspective, issues: AdsIs
         },
         { label: "Conv. rate", value: formatPct(row.conversion_rate), muted: grey, testId: "cr" },
         { label: "Cost / lead", value: formatMoney(row.cost_per_lead, { decimals: 2 }), muted: grey, testId: "cpl" },
-        ...(row.platforms.includes("google") && !row.platforms.includes("meta")
-          ? []
-          : [
+        ...(conversionColumns(row).meta
+          ? [
               { label: "Meta leads", value: formatNum(row.meta_leads), testId: "meta-leads" },
               { label: "Meta conv.", value: formatPct(row.meta_conversion_rate), muted: metaGrey, testId: "meta-cr" },
               { label: "Meta cost / lead", value: formatMoney(row.meta_cost_per_lead, { decimals: 2 }), muted: metaGrey, testId: "meta-cpl" },
-            ]),
-        ...(row.platforms.includes("google") ? [{ label: "Google leads", value: formatNum(row.google_leads ?? 0), testId: "google-leads" }] : []),
+            ]
+          : []),
+        ...(conversionColumns(row).google ? [{ label: "Google leads", value: formatNum(row.google_leads ?? 0), testId: "google-leads" }] : []),
         {
           label: "Organic rate",
           value: formatPct(row.organic?.lead_rate ?? null),
@@ -114,7 +116,9 @@ export function PaidPageRow({
   askRejectPct?: number | null;
   primaryHost?: string;
 }) {
-  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const hasVersions = !!row.versions && row.versions.length > 0;
+  const canExpand = row.campaigns.length > 0 || hasVersions;
   const metrics = metricsFor(row, perspective, issues);
   const showHost = row.host && primaryHost && row.host !== primaryHost;
   const clickLeads = row.pixel_leads_click ?? 0;
@@ -146,6 +150,7 @@ export function PaidPageRow({
                   not enough data
                 </Badge>
               )}
+              <UrlChangedBadge row={row} />
               {row.platforms.map((p) => (
                 <PlatformTag key={p} platform={p} row={row} />
               ))}
@@ -191,24 +196,7 @@ export function PaidPageRow({
                 </button>
               </PopoverTrigger>
               <PopoverContent className="w-80 space-y-2 text-xs" align="end">
-                {row.campaigns.length > 0 && (
-                  <div>
-                    <p className="font-medium text-foreground mb-1">Campaigns</p>
-                    <ul className="space-y-0.5">
-                      {row.campaigns.map((c) => (
-                        <li key={`${c.platform}-${c.campaign_id ?? c.campaign_name}`} className="flex justify-between gap-2">
-                          <span className="truncate">
-                            {c.platform ? `${PLATFORM_LABELS[c.platform] ?? c.platform} · ` : ""}
-                            {c.campaign_name}
-                          </span>
-                          <span className="shrink-0 tabular-nums text-muted-foreground">
-                            {formatNum(c.paid_visits)} · {formatMoney(c.spend)}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                {row.campaigns.length > 0 && <p className="text-muted-foreground">Expand the row to see how this page splits across campaigns.</p>}
                 {showMetaBlock && (
                   <div data-testid="paid-row-meta-block">
                     <p className="font-medium text-foreground mb-1">Meta's own count</p>
@@ -301,30 +289,37 @@ export function PaidPageRow({
                 <ExternalLink className="h-4 w-4" />
               </a>
             )}
-            {row.versions && row.versions.length > 0 && (
+            {canExpand && (
               <button
                 type="button"
-                onClick={() => setVersionsOpen((v) => !v)}
+                onClick={() => setExpanded((v) => !v)}
                 className="rounded p-1 text-muted-foreground hover:text-foreground"
-                aria-label="Versions"
-                data-testid="button-paid-row-versions"
+                aria-label={expanded ? "Hide campaigns" : "Show campaigns"}
+                aria-expanded={expanded}
+                data-testid="button-paid-row-expand"
               >
-                <ChevronDown className={cn("h-4 w-4 transition-transform", versionsOpen && "rotate-180")} />
+                <ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} />
               </button>
             )}
           </div>
         </div>
       </div>
-      {versionsOpen && row.versions && (
-        <div className="bg-muted/30 px-3 pb-2" data-testid="paid-row-versions">
-          {row.versions.map((v) => (
-            <div key={v.variant} className="flex items-center justify-between py-1 text-xs">
-              <span className="text-foreground">{v.variant}</span>
-              <span className={cn("tabular-nums", v.low_sample ? "text-muted-foreground" : "text-foreground")}>
-                {formatNum(v.paid_visits)} visits · {formatNum(v.unique_leads)} leads · {formatPct(v.conversion_rate)}
-              </span>
+      {expanded && (
+        <div className="bg-muted/30 px-3 pb-2" data-testid="paid-row-expanded">
+          <PaidCampaignRows row={row} perspective={perspective} metaSplitDays={metaSplitDays} />
+          {hasVersions && (
+            <div data-testid="paid-row-versions">
+              <p className="pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Versions</p>
+              {row.versions!.map((v) => (
+                <div key={v.variant} className="flex items-center justify-between py-1 text-xs">
+                  <span className="text-foreground">{v.variant}</span>
+                  <span className={cn("tabular-nums", v.low_sample ? "text-muted-foreground" : "text-foreground")}>
+                    {formatNum(v.paid_visits)} visits · {formatNum(v.unique_leads)} leads · {formatPct(v.conversion_rate)}
+                  </span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

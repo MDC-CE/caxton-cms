@@ -220,6 +220,8 @@ const fixture: {
   metaConnected?: boolean;
   metaSettings?: Partial<typeof DEFAULT_ADS_SETTINGS.meta>;
   metaSplitDays?: { covered: number; total: number };
+  /** Meta setup catalog (URL history); unset = empty catalog, ads fall back to their creative link. */
+  metaSetup?: import("./ads-setup").AdsSetupCatalog;
 } = {
   metaRows,
   creatives: BASE_CREATIVES,
@@ -227,6 +229,13 @@ const fixture: {
   ledgerRows,
   collectingSince: Date.parse("2026-08-01T00:00:00.000Z"),
 };
+vi.mock("./ads-setup", async (orig) => {
+  const actual = (await orig()) as typeof import("./ads-setup");
+  return {
+    ...actual,
+    loadAdsSetup: (_site: string, platform: "meta" | "google") => (platform === "meta" && fixture.metaSetup ? fixture.metaSetup : actual.emptyAdsSetup(platform)),
+  };
+});
 vi.mock("./paid-detection", async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   isGa4Configured: () => true,
@@ -1041,5 +1050,253 @@ describe("buildAdsReport lead_conversions", () => {
       { name: "request_more_info", count: 1 },
     ]);
     expect(r.lead_conversions.site.reduce((s, c) => s + c.count, 0)).toBe(r.totals.unique_leads);
+  });
+});
+
+describe("buildAdsReport campaign breakdown per page", () => {
+  const build = (model?: "last_paid" | "first_paid") =>
+    buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex, ...(model ? { model } : {}) });
+  const pageOf = (r: ReturnType<typeof build>) => r.pages.find((p) => p.slug === "coding-bootcamp")!;
+  const metaRow = (over: Partial<MetaAdDayRow>): MetaAdDayRow => ({ ...metaRows[0]!, ...over });
+
+  afterAll(() => {
+    fixture.metaRows = metaRows;
+    fixture.creatives = BASE_CREATIVES;
+    fixture.paidDays = [paidDay];
+    fixture.ledgerRows = ledgerRows;
+  });
+
+  it("splits spend, Meta numbers, visits and site leads per campaign and adds up to the page", () => {
+    const page = pageOf(build());
+    const c1 = page.campaigns.find((c) => c.campaign_id === "c1")!;
+    expect(c1).toMatchObject({
+      platform: "meta",
+      campaign_name: "Bootcamp prospecting",
+      spend: { USD: 100 },
+      clicks: 80,
+      impressions: 5000,
+      landing_page_views: 60,
+      meta_leads: 5,
+      pixel_leads_click: 3,
+      paid_visits: 50,
+      engaged_sessions: 30,
+      unique_leads: 2,
+      cost_per_visit: { USD: 2 },
+      cost_per_lead: { USD: 50 },
+      cpc: { USD: 1.25 },
+      low_sample: false,
+    });
+    expect(c1.conversion_rate).toBeCloseTo(2 / 50);
+    expect(c1.bounce_rate).toBeCloseTo(1 - 30 / 50);
+    expect(c1.ctr).toBeCloseTo(80 / 5000);
+    const sum = (k: "paid_visits" | "unique_leads" | "clicks" | "meta_leads") => page.campaigns.reduce((s, c) => s + c[k], 0);
+    expect(sum("paid_visits")).toBe(page.paid_visits);
+    expect(sum("unique_leads")).toBe(page.unique_leads);
+    expect(sum("clicks")).toBe(page.clicks);
+    expect(sum("meta_leads")).toBe(page.meta_leads);
+    for (const c of page.campaigns) expect(c.pixel_leads_click).toBeLessThanOrEqual(c.meta_leads);
+    expect(page.comparable_campaigns).toBe(1);
+  });
+
+  it("puts visits and leads without a known campaign id in one untagged row with no spend", () => {
+    fixture.paidDays = [
+      {
+        ...paidDay,
+        candidates: [
+          ...paidDay.candidates,
+          candidate({ utm_id: "999", utm_term: null, utm_content: null, campaign: "Partner push", sessions: 12, engaged_sessions: 3, sessions_with_lead: 0 }),
+          candidate({ utm_id: null, utm_term: null, utm_content: null, campaign: "old_naming", sessions: 4, engaged_sessions: 1, sessions_with_lead: 0 }),
+        ],
+      },
+    ];
+    fixture.ledgerRows = [...ledgerRows, lead({ submission_id: "u", browser_hash: "b9", campaign_id: null, adset_id: null, ad_id: null })];
+    try {
+      const page = pageOf(build());
+      const untagged = page.campaigns.at(-1)!;
+      expect(untagged).toMatchObject({ untagged: true, campaign_id: null, spend: {}, paid_visits: 16, engaged_sessions: 4, unique_leads: 1 });
+      expect(untagged.tag_texts).toEqual([
+        { text: "Partner push", visits: 12 },
+        { text: "old_naming", visits: 4 },
+      ]);
+      expect(untagged.visits_by_platform).toEqual({ meta: 16 });
+      expect(page.campaigns.reduce((s, c) => s + c.paid_visits, 0)).toBe(page.paid_visits);
+      expect(page.campaigns.reduce((s, c) => s + c.unique_leads, 0)).toBe(page.unique_leads);
+      expect(page.comparable_campaigns).toBe(1);
+    } finally {
+      fixture.paidDays = [paidDay];
+      fixture.ledgerRows = ledgerRows;
+    }
+  });
+
+  it("keeps a campaign with spend but no visits, with empty rates, sorted by spend", () => {
+    fixture.metaRows = [...metaRows, metaRow({ campaign_id: "c3", campaign_name: "Retargeting", adset_id: "s3", ad_id: "ad3", spend: 30, link_clicks: 10, landing_page_views: 8, pixel_leads: 1, pixel_leads_click: 1 })];
+    fixture.creatives = { ...BASE_CREATIVES, ad3: { links: [`https://${HOST}/en/coding-bootcamp`], instant_form: false } };
+    try {
+      const page = pageOf(build());
+      expect(page.campaigns.map((c) => c.campaign_id)).toEqual(["c1", "c3"]);
+      const c3 = page.campaigns[1]!;
+      expect(c3).toMatchObject({ spend: { USD: 30 }, paid_visits: 0, cost_per_visit: {}, conversion_rate: null, bounce_rate: null, low_sample: true });
+      expect(page.comparable_campaigns).toBe(1);
+    } finally {
+      fixture.metaRows = metaRows;
+      fixture.creatives = BASE_CREATIVES;
+    }
+  });
+
+  it("credits a site lead to the campaign of the first or last paid click, following the model", () => {
+    fixture.metaRows = [...metaRows, metaRow({ campaign_id: "c3", campaign_name: "Retargeting", adset_id: "s3", ad_id: "ad3", spend: 30 })];
+    fixture.creatives = { ...BASE_CREATIVES, ad3: { links: [`https://${HOST}/en/coding-bootcamp`], instant_form: false } };
+    fixture.ledgerRows = [
+      lead({
+        submission_id: "m",
+        first_paid_platform: "meta",
+        first_paid_campaign_id: "c3",
+        last_paid_platform: "meta",
+        last_paid_campaign_id: "c1",
+      } as Partial<LedgerRow>),
+    ];
+    try {
+      const last = pageOf(build("last_paid"));
+      expect(last.campaigns.find((c) => c.campaign_id === "c1")!.unique_leads).toBe(1);
+      expect(last.campaigns.find((c) => c.campaign_id === "c3")!.unique_leads).toBe(0);
+      const first = pageOf(build("first_paid"));
+      expect(first.campaigns.find((c) => c.campaign_id === "c3")!.unique_leads).toBe(1);
+      expect(first.campaigns.find((c) => c.campaign_id === "c1")!.unique_leads).toBe(0);
+    } finally {
+      fixture.metaRows = metaRows;
+      fixture.creatives = BASE_CREATIVES;
+      fixture.ledgerRows = ledgerRows;
+    }
+  });
+
+  it("returns every campaign on a page (no cap at 10)", () => {
+    const extra = Array.from({ length: 12 }, (_, i) =>
+      metaRow({ campaign_id: `cx${i}`, campaign_name: `Campaign ${i}`, adset_id: `sx${i}`, ad_id: `adx${i}`, spend: 5 + i }),
+    );
+    fixture.metaRows = [...metaRows, ...extra];
+    fixture.creatives = {
+      ...BASE_CREATIVES,
+      ...Object.fromEntries(extra.map((m) => [m.ad_id, { links: [`https://${HOST}/en/coding-bootcamp`], instant_form: false }])),
+    };
+    try {
+      const page = pageOf(build());
+      expect(page.campaigns).toHaveLength(13);
+      expect(page.campaigns[0]!.campaign_id).toBe("c1");
+    } finally {
+      fixture.metaRows = metaRows;
+      fixture.creatives = BASE_CREATIVES;
+    }
+  });
+});
+
+describe("buildAdsReport URL history (Meta)", () => {
+  const OLD = `https://${HOST}/en/coding-bootcamp`;
+  const NEW = `https://${HOST}/landing/ai-engineering-salaries`;
+  const NEXT_DAY = "2026-09-16";
+  const build = () => buildAdsReport({ site: "site_test", days: 28, now: NOW, noRefresh: true, contentIndex: fakeContentIndex });
+  const byKey = (r: ReturnType<typeof build>, key: string) => r.pages.find((p) => p.key === key);
+  const OLD_KEY = "entry:landing/coding-bootcamp/en";
+  const NEW_KEY = "entry:landing/ai-engineering-salaries/en";
+
+  function catalog(): import("./ads-setup").AdsSetupCatalog {
+    const v1 = { v: 1, landing_urls: [OLD], url_tags: null, destination: "website" as const, first_seen_at: null, seeded_at: "2026-08-01T00:00:00.000Z", last_seen_at: `${DAY}T08:00:00.000Z` };
+    const v2 = { v: 2, landing_urls: [NEW], url_tags: null, destination: "website" as const, first_seen_at: `${DAY}T12:00:00.000Z`, last_seen_at: "2026-09-19T08:00:00.000Z" };
+    return {
+      version: 2,
+      platform: "meta",
+      fetched_at: NOW.toISOString(),
+      accounts: { "111111": { id: "111111", name: null, currency: "USD", timezone: "UTC", last_seen_at: NOW.toISOString() } },
+      campaigns: {},
+      adsets: {},
+      ads: {
+        ad1: { id: "ad1", account_id: "111111", campaign_id: "c1", adset_id: "s1", name: "Ad 1", status: "ACTIVE", landing_urls: [NEW], url_tags: null, destination: "website", last_seen_at: v2.last_seen_at, versions: [v1, v2] },
+      },
+      extras: {},
+    };
+  }
+
+  afterAll(() => {
+    fixture.metaSetup = undefined;
+    fixture.metaRows = metaRows;
+    fixture.creatives = BASE_CREATIVES;
+    fixture.paidDays = [paidDay];
+  });
+
+  it("splits the changeover day by where that day's tagged visits landed and tags both pages", () => {
+    fixture.metaSetup = catalog();
+    fixture.creatives = { ...BASE_CREATIVES, ad1: { links: [NEW], instant_form: false } };
+    fixture.paidDays = [{ ...paidDay, candidates: [...paidDay.candidates, candidate({ path: "/landing/ai-engineering-salaries", sessions: 50 })] }];
+    const r = build();
+    const oldPage = byKey(r, OLD_KEY)!;
+    const newPage = byKey(r, NEW_KEY)!;
+    expect(oldPage.spend).toEqual({ USD: 50 });
+    expect(newPage.spend).toEqual({ USD: 50 });
+    expect(oldPage.clicks + newPage.clicks).toBe(80);
+    expect(oldPage.url_change_days).toBe(1);
+    expect(newPage.url_change_days).toBe(1);
+    expect(r.totals.spend).toEqual({ USD: 140 });
+    expect(r.url_changes).toEqual([
+      expect.objectContaining({ ad_id: "ad1", date: DAY, from_key: OLD_KEY, to_key: NEW_KEY, basis: "ga4", inferred: false, spend: { USD: 100 } }),
+    ]);
+    expect(newPage.url_changes?.[0]).toMatchObject({ ad_id: "ad1", date: DAY });
+    expect(r.warnings.map((w) => w.code)).toContain("ad_url_changed");
+    expect(r.attribution.url_history?.since).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  it("puts days after the change on the new page only, untagged", () => {
+    fixture.metaSetup = catalog();
+    fixture.creatives = { ...BASE_CREATIVES, ad1: { links: [NEW], instant_form: false } };
+    fixture.paidDays = [paidDay];
+    fixture.metaRows = [{ ...metaRows[0]!, date: NEXT_DAY, spend: 30, link_clicks: 10 }, metaRows[1]!];
+    const r = build();
+    expect(byKey(r, NEW_KEY)?.spend).toEqual({ USD: 30 });
+    expect(byKey(r, NEW_KEY)?.url_change_days ?? 0).toBe(0);
+    expect(byKey(r, OLD_KEY)?.spend ?? {}).toEqual({});
+    expect(r.url_changes).toEqual([]);
+    fixture.metaRows = metaRows;
+  });
+
+  it("without GA4 visits on the changeover day: whole day to the new page", () => {
+    fixture.metaSetup = catalog();
+    fixture.creatives = { ...BASE_CREATIVES, ad1: { links: [NEW], instant_form: false } };
+    fixture.paidDays = [{ ...paidDay, candidates: paidDay.candidates.filter((c) => c.utm_content !== "ad1") }];
+    const r = build();
+    expect(byKey(r, NEW_KEY)?.spend).toEqual({ USD: 100 });
+    expect(r.url_changes?.[0]).toMatchObject({ basis: "whole_day_new" });
+  });
+
+  it("ties visits with only a campaign name to the campaign that had that name that day", () => {
+    const c = catalog();
+    c.campaigns = {
+      c1: { id: "c1", account_id: "111111", name: "Bootcamp prospecting", status: null, last_seen_at: NOW.toISOString(), names: [{ name: "Bootcamp prospecting", first_seen: DAY, last_seen: DAY }] },
+    };
+    fixture.metaSetup = c;
+    const nameOnly = candidate({ utm_id: null, utm_term: null, utm_content: null, sessions: 20, sessions_with_lead: 0 });
+    fixture.paidDays = [{ ...paidDay, candidates: [...paidDay.candidates, nameOnly] }];
+    const base = build();
+    expect(base.totals.campaign_name_matched_visits).toBe(20);
+    expect(base.campaigns.find((g) => g.campaign_id === "c1")?.paid_visits).toBe(70);
+
+    c.campaigns.c9 = { ...c.campaigns.c1!, id: "c9" };
+    fixture.metaSetup = c;
+    const ambiguous = build();
+    expect(ambiguous.totals.campaign_name_matched_visits ?? 0).toBe(0);
+    expect(ambiguous.totals.campaign_name_ambiguous_visits).toBe(20);
+    expect(ambiguous.campaigns.find((g) => g.campaign_id === "c1")?.paid_visits).toBe(50);
+    fixture.paidDays = [paidDay];
+  });
+
+  it("counts older spend from untagged ads before history as unconfirmed (totals unchanged)", () => {
+    const c = catalog();
+    c.ads.ad1!.versions = [{ v: 1, landing_urls: [NEW], url_tags: null, destination: "website", first_seen_at: null, seeded_at: "2026-09-19T00:00:00.000Z", last_seen_at: "2026-09-19T08:00:00.000Z" }];
+    fixture.metaSetup = c;
+    fixture.creatives = { ...BASE_CREATIVES, ad1: { links: [NEW], instant_form: false } };
+    fixture.paidDays = [{ ...paidDay, candidates: paidDay.candidates.filter((x) => x.utm_content !== "ad1") }];
+    const r = build();
+    expect(byKey(r, NEW_KEY)?.spend).toEqual({ USD: 100 });
+    expect(r.totals.unconfirmed_page_spend).toEqual({ USD: 100 });
+    expect(byKey(r, NEW_KEY)?.unconfirmed_page_spend).toEqual({ USD: 100 });
+    expect(r.totals.spend).toEqual({ USD: 140 });
+    expect(r.warnings.map((w) => w.code)).toContain("ad_page_unconfirmed");
   });
 });

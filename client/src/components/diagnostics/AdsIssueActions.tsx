@@ -39,6 +39,17 @@ export function AdsIssueStateBadges({ issue }: { issue: AdsIssueRow }) {
           <CircleSlash className="h-3 w-3" /> Not checked
         </Badge>
       )}
+      {issue.in_grace && (
+        <Badge
+          variant="outline"
+          className="gap-1 border-sky-500/40 px-1.5 py-0 text-[10px] font-normal text-sky-600 dark:text-sky-400"
+          title="Uses a value from before the UTM convention changed. It's accepted until the grace period ends, then flagged normally."
+          data-testid={`ads-issue-grace-${issue.id}`}
+        >
+          <Clock className="h-3 w-3" />
+          Old convention{issue.grace_ends_at ? ` · until ${issue.grace_ends_at.slice(0, 10)}` : ""}
+        </Badge>
+      )}
       {issue.last_check?.outcome === "partly_fixed" && (
         <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal text-chart-3" data-testid={`ads-issue-partly-${issue.id}`}>
           Partly fixed
