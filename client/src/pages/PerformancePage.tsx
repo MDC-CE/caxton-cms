@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Braces, Check, ChevronDown, ChevronRight, Clock, Cpu, FileText, Info, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Braces, Check, ChevronDown, ChevronRight, Clock, CornerDownRight, Cpu, File, FileText, Info, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +32,7 @@ import {
   type ProcessName,
   type RangePreset,
 } from "@/lib/server-performance-url";
+import { formatCpuStackRaw, labelCpuSymbol } from "@/lib/cpu-stack-label";
 
 const P50_MIN = 5;
 const P95_MIN = 20;
@@ -149,6 +150,11 @@ type StatsWindow = {
   timestamp: number;
   intervalMs: number;
   cpuProcessPercent: number | null;
+  cpuUserPercent: number | null;
+  cpuSystemPercent: number | null;
+  cpuMainThreadPercent: number | null;
+  cpuOtherThreadsPercent: number | null;
+  cpuMachinePercent: number | null;
   heapUsedMb: number | null;
   rssMb: number | null;
   garbageCollectionPauseMs: number | null;
@@ -205,6 +211,13 @@ type DetailResponse = {
   ssrCounts?: Record<string, number>;
   mixedBounds: boolean;
   routes: DetailRoute[];
+  cpuStacks?: CpuProfileCapture[];
+  cpuCapture?: {
+    mode: "service" | "local";
+    active: boolean | null;
+    lastError: string | null;
+    notice: string | null;
+  };
   logs?: UniqueIssue[];
   logsCoverage?: "full" | "partial" | "none";
   logsSince?: number;
@@ -458,6 +471,11 @@ function emptyWindow(timestamp: number, stepMs: number): StatsWindow {
     timestamp,
     intervalMs: stepMs,
     cpuProcessPercent: null,
+    cpuUserPercent: null,
+    cpuSystemPercent: null,
+    cpuMainThreadPercent: null,
+    cpuOtherThreadsPercent: null,
+    cpuMachinePercent: null,
     heapUsedMb: null,
     rssMb: null,
     garbageCollectionPauseMs: null,
@@ -1285,7 +1303,12 @@ function PerformanceInner() {
                   info={
                     <ChartInfo label="CPU">
                       <p>CPU time this process used, as a share of one core. 100% means it kept one core busy for the whole sample. It can go above 100% because Node also runs work on other threads, such as file reads and compression: 200% is about two cores. Other processes on the machine are not included.</p>
+                      <p>The tooltip splits that time into your code and the kernel, and into the main thread and the other threads of this process. Machine is the whole computer: 100% means every core was busy.</p>
                       <p>Samples are taken every 30 seconds. When a point covers more than one sample, it shows the highest of those readings, not their average.</p>
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-foreground">Read more (advanced)</summary>
+                        <p className="mt-1">Your code and the kernel come from Node's cpuUsage. The thread split is read from /proc on Linux. When a point covers more than one sample, those splits are taken from the sample with the highest process CPU.</p>
+                      </details>
                     </ChartInfo>
                   }
                   rows={cpuRows}
@@ -1306,9 +1329,15 @@ function PerformanceInner() {
                   onDismissDetail={dismissCue}
                   tooltip={(row) => {
                     const text = (value: unknown) => (value == null ? "—" : String(value));
+                    const pct = (value: unknown) => (typeof value === "number" ? `${String(value)}%` : "—");
+                    const showSplit = row.cpuUserPercent != null || row.cpuSystemPercent != null;
+                    const showThreads = row.cpuMainThreadPercent != null || row.cpuOtherThreadsPercent != null;
                     return (
                       <div className="space-y-0.5">
                         <div>CPU {row.cpuProcessPercent == null ? "—" : `${String(row.cpuProcessPercent)}%`}</div>
+                        {showSplit && <div>Your code {pct(row.cpuUserPercent)} · kernel {pct(row.cpuSystemPercent)}</div>}
+                        {showThreads && <div>Main thread {pct(row.cpuMainThreadPercent)} · other threads {pct(row.cpuOtherThreadsPercent)}</div>}
+                        {row.cpuMachinePercent != null && <div>Machine {pct(row.cpuMachinePercent)} (100% means all cores)</div>}
                         <div>GC pause {text(row.garbageCollectionPauseMs)} ms (max {text(row.garbageCollectionMaxPauseMs)} ms)</div>
                         <div>In-flight requests {text(row.inFlightMaxRequests)}</div>
                         {row.openFds != null && (
@@ -1560,6 +1589,12 @@ function PerformanceInner() {
           }}
           openRows={openRows}
         />
+        {detail && ((detail.cpuStacks?.length ?? 0) > 0 || (parsed.process === "web" && detail.cpuCapture?.mode === "service")) && (
+          <CpuStackList
+            stacks={detail.cpuStacks ?? []}
+            capture={parsed.process === "web" ? detail.cpuCapture : undefined}
+          />
+        )}
         </div>
       )}
     </div>
@@ -1885,5 +1920,249 @@ function DetailBlock({
           )}
         </Card>
     </div>
+  );
+}
+
+type CpuProfileFrame = {
+  percent: number;
+  function: string;
+  file: string;
+  kind: "js" | "native" | "kernel";
+  callers?: Array<{ function: string; file: string }>;
+  /** Older recordings stored a single parent. */
+  caller?: { function: string; file: string };
+};
+
+type CpuProfileCapture =
+  | { timestamp: number; processName: string; ok: true; threads: Array<{ name: string; percent: number; frames: CpuProfileFrame[] }> }
+  | { timestamp: number; processName: string; ok: false; error: string };
+
+function callChain(frame: CpuProfileFrame): Array<{ function: string; file: string }> {
+  if (frame.callers && frame.callers.length > 0) return frame.callers;
+  if (frame.caller) return [frame.caller];
+  return [];
+}
+
+function kindLabel(kind: CpuProfileFrame["kind"]): string {
+  if (kind === "js") return "JavaScript";
+  if (kind === "kernel") return "Kernel";
+  return "Native";
+}
+
+function ArrowFnMark({ kind }: { kind: CpuProfileFrame["kind"] }) {
+  const label = kind === "js" ? "JavaScript" : kind === "kernel" ? "Kernel" : "Native";
+  return (
+    <span className="shrink-0 font-mono text-sm font-medium leading-none" title={label} aria-label={label}>
+      <span className="text-red-600 dark:text-red-400">(</span>
+      <span className="text-red-600 dark:text-red-400">)</span>
+      <span className="text-sky-600 dark:text-sky-400">{" => "}</span>
+      <span className="text-amber-600 dark:text-amber-400">{"{"}</span>
+      <span className="text-amber-600 dark:text-amber-400">{"}"}</span>
+    </span>
+  );
+}
+
+function CpuStackList({
+  stacks,
+  capture,
+}: {
+  stacks: CpuProfileCapture[];
+  capture?: DetailResponse["cpuCapture"];
+}) {
+  const [folded, setFolded] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
+  const [listOpen, setListOpen] = useState(false);
+  const [openThread, setOpenThread] = useState<string | null>(null);
+  const [openFrame, setOpenFrame] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const visible = listOpen ? stacks : stacks.slice(0, 3);
+  const hidden = stacks.length - visible.length;
+  const inactive = capture?.mode === "service" && capture.active === false;
+  return (
+    <Card className="mt-4">
+      <CardHeader className="pb-3">
+        <DetailCardTitle title="CPU stacks" folded={folded} onToggle={() => setFolded((value) => !value)} />
+        {inactive && (
+          <p className="mt-1 text-sm text-destructive">
+            Capture inactive. The recorder has not checked in for 2 minutes, so an empty list does not mean the CPU stayed under 120%.
+          </p>
+        )}
+        {!folded && capture?.notice && (
+          <p className="mt-1 text-sm text-muted-foreground">{capture.notice}</p>
+        )}
+        {!folded && capture?.lastError && (
+          <p className="mt-1 text-sm text-destructive">Last recording failed: {capture.lastError}</p>
+        )}
+        {!folded && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {`This list is a 20-second look at the threads of this process that were using the CPU, taken the first time this process went above 120% of one core.${capture?.mode === "service" ? " On the server, a separate recorder takes that sample. This page only stores the result." : ""} The threads are only this process: the main thread, worker threads, and Node's helper threads. Other processes on the machine are not included. Each function is classified as JavaScript, Native, or Kernel. JavaScript means a function from this project. Native means compiled code that is not JavaScript, such as Node, V8, or a library. Kernel means the operating system. A name map turns addresses into JavaScript function names. Names on screen leave out compiler marks and C++ argument types. Copy full stack keeps that text. One recording is saved per streak above 120%, and the list is kept for 7 days.`}
+          </p>
+        )}
+      </CardHeader>
+      {!folded && (
+      <CardContent className="space-y-4">
+      {stacks.length === 0 && (
+        <p className="text-sm text-muted-foreground">No recording in this range.</p>
+      )}
+      <div>
+        {visible.map((stack) => {
+          const open = !collapsed.has(stack.timestamp);
+          return (
+            <div key={stack.timestamp} className="border-b last:border-b-0">
+              <div className="flex items-center gap-2 py-2">
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-lg font-semibold hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                  onClick={() => setCollapsed((current) => {
+                    const next = new Set(current);
+                    if (next.has(stack.timestamp)) next.delete(stack.timestamp);
+                    else next.add(stack.timestamp);
+                    return next;
+                  })}
+                >
+                  {open ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
+                  <span>{formatClock(stack.timestamp, true)}</span>
+                  {!stack.ok && <span className="text-destructive">Recording failed</span>}
+                </button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 shrink-0 px-2 text-xs"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(formatCpuStackRaw(stack)).then(() => {
+                      setCopiedId(stack.timestamp);
+                      window.setTimeout(() => setCopiedId((current) => current === stack.timestamp ? null : current), 2000);
+                    });
+                  }}
+                >
+                  {copiedId === stack.timestamp ? <Check className="size-3.5" /> : null}
+                  {copiedId === stack.timestamp ? "Copied" : "Copy full stack"}
+                </Button>
+              </div>
+              {open && (
+                <div className="pb-3 pl-4 pr-1 text-sm">
+                  {!stack.ok ? (
+                    <p className="text-destructive">{stack.error}</p>
+                  ) : stack.threads.length === 0 ? (
+                    <p className="text-muted-foreground">No samples in this recording.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="h-8 w-8 px-3" aria-label="Expand" />
+                          <TableHead className="h-8 px-3">Thread</TableHead>
+                          <TableHead className="h-8 whitespace-nowrap px-3 text-right" title="Percent of samples in this 20-second recording">Execution %</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                      {stack.threads.map((thread) => {
+                    const threadKey = `${stack.timestamp}:${thread.name}`;
+                    const threadOpen = openThread === threadKey;
+                    return (
+                      <Fragment key={thread.name}>
+                        <TableRow
+                          className="cursor-pointer"
+                          aria-expanded={threadOpen}
+                          onClick={() => setOpenThread(threadOpen ? null : threadKey)}
+                        >
+                          <TableCell className="px-3 py-2.5">
+                            <ChevronRight className={cn("size-4 text-muted-foreground transition-transform", threadOpen && "rotate-90")} />
+                          </TableCell>
+                          <TableCell className="px-3 py-2.5 font-medium">{thread.name}</TableCell>
+                          <TableCell className="px-3 py-2.5 text-right tabular-nums">{thread.percent}%</TableCell>
+                        </TableRow>
+                        {threadOpen && (
+                          <TableRow className="hover:bg-transparent">
+                            <TableCell colSpan={3} className="bg-neutral-50 p-0 dark:bg-neutral-800/30">
+                          <div className="bg-neutral-50 p-4 dark:bg-neutral-800/30">
+                          <ul className="overflow-hidden rounded-md border bg-card">
+                            <li className="flex items-center gap-2 bg-muted/50 px-3 py-2 text-sm font-medium text-muted-foreground">
+                              <span className="size-4 shrink-0" aria-hidden />
+                              <span className="min-w-0 flex-1">Function</span>
+                              <span className="w-24 shrink-0" title="JavaScript, native code, or the kernel">Kind</span>
+                              <span className="w-36 shrink-0 text-right" title="Percent of samples in this 20-second recording where this function was running">Execution %</span>
+                            </li>
+                            {thread.frames.map((frame, index) => {
+                              const frameKey = `${threadKey}:${index}`;
+                              const frameOpen = openFrame === frameKey;
+                              const label = labelCpuSymbol(frame.function, frame.file, frame.kind);
+                              return (
+                                <li key={frameKey}>
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-neutral-100/70 dark:hover:bg-neutral-800/70"
+                                    aria-expanded={frameOpen}
+                                    onClick={() => setOpenFrame(frameOpen ? null : frameKey)}
+                                  >
+                                    <ChevronRight className={cn("size-4 shrink-0 text-muted-foreground transition-transform", frameOpen && "rotate-90")} />
+                                    <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                                      <span className="truncate">{label.name}</span>
+                                      <ArrowFnMark kind={frame.kind} />
+                                    </span>
+                                    <span className="w-24 shrink-0 text-xs">{kindLabel(frame.kind)}</span>
+                                    <span className="w-36 shrink-0 text-right tabular-nums">{frame.percent}%</span>
+                                  </button>
+                                  {frameOpen && (
+                                    <div className="space-y-2.5 py-2 pl-10 pr-3 text-xs text-muted-foreground">
+                                      {label.path && (
+                                        <div className="flex items-center gap-1.5 text-foreground">
+                                          <File className="size-3.5 shrink-0" aria-hidden />
+                                          <span className="min-w-0 break-all">{label.path}</span>
+                                        </div>
+                                      )}
+                                      {callChain(frame).map((step, stepIndex) => {
+                                        const caller = labelCpuSymbol(step.function, step.file, step.function.startsWith("JS:") ? "js" : "native");
+                                        return (
+                                          <div key={`${step.function}-${step.file}-${stepIndex}`} className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: stepIndex * 12 }}>
+                                            <CornerDownRight className="size-3.5 shrink-0" aria-hidden />
+                                            <span className="shrink-0">{caller.name}</span>
+                                            {caller.path && <File className="size-3.5 shrink-0" aria-hidden />}
+                                            {caller.path && <span className="min-w-0 truncate">{caller.path}</span>}
+                                          </div>
+                                        );
+                                      })}
+                                      <div>Up to 3 closest calls above. Only the first Node entry to the function is listed.</div>
+                                    </div>
+                                  )}
+                                </li>
+                              );
+                            })}
+                            <li className="px-3 py-1.5 text-xs text-muted-foreground">
+                              Up to 6 functions, the ones running for the largest share of the sample.
+                            </li>
+                          </ul>
+                          </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {(hidden > 0 || (listOpen && stacks.length > 3)) && (
+        <div className="flex justify-center">
+          {hidden > 0 ? (
+            <Button type="button" variant="outline" size="sm" onClick={() => setListOpen(true)}>
+              See more ({hidden})
+            </Button>
+          ) : (
+            <Button type="button" variant="outline" size="sm" onClick={() => setListOpen(false)}>
+              See less
+            </Button>
+          )}
+        </div>
+      )}
+      </CardContent>
+      )}
+    </Card>
   );
 }

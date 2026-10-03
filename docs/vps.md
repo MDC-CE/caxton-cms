@@ -401,3 +401,143 @@ Do **not** advance `PREVIEW_SERVER_URL` while metrics still points at Stape.
 | `scripts/deploy.sh` | Atomic release build / flip / prune |
 | `server/component-registry-persistent.ts` | Registry mirror release → persistent |
 | `docs/sgtm-prod-cutover.md` | sGTM cutover runbook |
+
+---
+
+## 11. CPU stack samples (perf)
+
+The performance page stores a 20-second stack sample the first time the **web** process goes above 120% of one core. One sample per streak. The list is kept for 7 days. Staff with `metrics_view` see it. The names are rendered as text.
+
+`kernel.perf_event_paranoid` stays at **4**. Do not set it to 2, 1, or 0. Do not `setcap` the `perf` binary. Do not run the recorder under PM2: every PM2 app runs as `website-runtime`, and this process must be a different user with capabilities the web app does not have.
+
+### What runs where
+
+| Piece | Where | Who |
+|---|---|---|
+| Recorder program | `scripts/cpu-capture/recorder.mjs`, copied to `/opt/cpu-capture/recorder.mjs` | root, mode `0755`. Not started from the release |
+| Unit | `/etc/systemd/system/cpu-capture.service` on the droplet | not in this repo |
+| Recordings | `/var/lib/cpu-capture/raw/<id>/` | owner `perf-capture`, group `website-runtime`, directory mode `2750` |
+| Heartbeat | `/run/cpu-capture/heartbeat` | mode `0644`, rewritten every 30s |
+| Last result | `/run/cpu-capture/status.json` | mode `0644` |
+| Name map | `/tmp/perf-<pid>.map` | `website-runtime`, written by Node |
+| Saved list | `data/process-stats.db` table `cpu_stacks` | web, on its 30s tick |
+
+The recorder finds the web pid itself (`website-runtime` and `dist/index.js` in `/proc`). If two processes match, it records nothing and says so in `status.json`. It samples CPU from `/proc/<pid>/stat` about every 5 seconds. The command is fixed: `perf record -q -B -N -e cpu-clock:u -p <pid> -F 99 -g --max-size=32M`. It does not read the name map and it does not parse the recording.
+
+The web process, on its tick, reads a finished directory, runs `perf script --force` as `website-runtime` (so it can read its own map), inserts the list, and deletes only its JSON. It does not delete `raw/`. The recorder deletes a recording after 15 minutes. Inserting again is ignored.
+
+The heartbeat is not a lock. The page reads it when someone opens the detail. If it is missing or older than 2 minutes, the page says **Capture inactive**. `status.json` carries the last recording's error and a notice (two web processes, or the daily cap of 48).
+
+The web app never launches `perf record`, including on a dev machine. Outside production the page does not look for the heartbeat.
+
+Web keeps `--perf-basic-prof-only-functions` in `ecosystem.config.cjs`. That flag only writes the name map. Without it the page shows addresses instead of JavaScript function names. The diagnostics worker passes the same flag when it forks; the recorder does not sample that worker.
+
+### Install (once, as root)
+
+Do this after the app deploy that contains `scripts/cpu-capture/` is live. `website-deployer` must not own `/opt/cpu-capture`. Updating the script later is another root copy, not a normal deploy.
+
+```bash
+uname -r
+sysctl kernel.perf_event_paranoid   # leave this at 4
+apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+
+# If an earlier experiment left a capability on a perf binary, remove it.
+# getcap prints nothing when the file is clean. /usr/bin/perf is a script;
+# the real binaries are under /usr/lib/linux-tools-*/perf.
+getcap /usr/lib/linux-tools-*/perf || true
+# setcap -r /usr/lib/linux-tools-<version>/perf
+
+id perf-capture >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin perf-capture
+install -d -o perf-capture -g website-runtime -m 2750 /var/lib/cpu-capture/raw
+install -d -o root -g root -m 0755 /opt/cpu-capture
+install -o root -g root -m 0755 /opt/website-v3/current/scripts/cpu-capture/recorder.mjs /opt/cpu-capture/recorder.mjs
+```
+
+The unit is not in the repo. Write it on the droplet, the same way as `website.service`:
+
+```ini
+# /etc/systemd/system/cpu-capture.service
+[Unit]
+Description=Record CPU stacks for the website process
+After=network.target
+
+[Service]
+User=perf-capture
+Group=perf-capture
+ExecStart=/usr/bin/node /opt/cpu-capture/recorder.mjs
+Restart=on-failure
+RestartSec=5
+UMask=0027
+AmbientCapabilities=CAP_PERFMON CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_PERFMON CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cpu-capture/raw
+RuntimeDirectory=cpu-capture
+RuntimeDirectoryMode=0755
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service perf_event_open
+LimitCORE=0
+MemoryMax=256M
+CPUQuota=20%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now cpu-capture.service
+```
+
+The unit gives `CAP_PERFMON` and `CAP_SYS_PTRACE` as ambient capabilities, so only this service has them. `/usr/bin/perf` stays a normal file. The script writes the heartbeat and the status file as mode `0644` on purpose: the service umask is `0027`, and without that chmod `website-runtime` could not read them.
+
+`PrivateTmp=yes` is set because the recorder never opens the name map. The web app reads `/tmp/perf-<pid>.map` in its own mount namespace. If the web service is later given `PrivateTmp`, the map will not be the host `/tmp` and JavaScript names will disappear; do not do that without moving the map.
+
+`SystemCallFilter` and `ProtectKernelModules` are the settings most likely to make `perf` fail. If the journal shows the recording failing immediately, remove `SystemCallFilter` first, reload, and try one capture. Do not fix that by lowering the sysctl or by `setcap`.
+
+### Check before leaving it on
+
+```bash
+# No file capabilities on perf.
+getcap /usr/lib/linux-tools-*/perf || true
+
+# The service holds only the two capabilities. CapEff is a bitmask:
+# CAP_PERFMON is bit 38, CAP_SYS_PTRACE is bit 19.
+pid=$(systemctl show -p MainPID --value cpu-capture.service)
+grep ^Cap /proc/$pid/status
+systemctl is-active cpu-capture.service
+
+# The web user cannot record, and cannot write a recording.
+sudo -u website-runtime /usr/bin/perf record -e cpu-clock:u -p $$ -o /tmp/cpu-capture-denied.data -- sleep 1
+sudo -u website-runtime touch /var/lib/cpu-capture/raw/denied
+
+# The web user can see the heartbeat.
+sudo -u website-runtime cat /run/cpu-capture/heartbeat
+```
+
+Then cause one real spike (or wait for one) and confirm the performance page shows a stack, not "Capture inactive". A capture from a `setcap` experiment does not count. The recording has to come from this unit.
+
+### When it looks idle
+
+- **Capture inactive** on the page: the service is stopped or stuck. `systemctl status cpu-capture.service` and `journalctl -u cpu-capture.service -n 50`.
+- Heartbeat is fresh and the list is empty: the web process has not gone above 120% since the service started. That is a quiet machine, not a failure.
+- **Last recording failed** on the page: read `status.json`. After a kernel upgrade, install `linux-tools-$(uname -r)` for the running kernel (`uname -r`, not the login banner). `/usr/bin/perf` picks the tool that matches the running kernel. A new kernel package does nothing until reboot, and after reboot the matching tools package has to be installed or every recording fails with the service still "active".
+
+### Name map
+
+Node rewrites `/tmp/perf-<pid>.map` for the life of the process. Restarting web starts a new file. Do not truncate the map while the process is running. On startup the app deletes maps whose pid is already gone.
+
+If `/tmp` is tmpfs, the live map is RAM. A few megabytes that then stop growing is expected. If it keeps growing, remove `--perf-basic-prof-only-functions` from the web app in `ecosystem.config.cjs` and from the diagnostics worker fork. Stacks still record; JavaScript names become addresses.
+
+```bash
+ls -lh /tmp/perf-*.map
+findmnt -T /tmp
+```

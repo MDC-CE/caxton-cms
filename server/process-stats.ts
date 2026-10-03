@@ -28,6 +28,9 @@
  *
  * The 720-object cap (6 hours) is a waiting room for when web is not reading.
  * Database retention is separate: 7 days, pruned on startup and every hour.
+ * A CPU capture is not a tick. A systemd service writes the recording. Web
+ * summarizes it, inserts the list, and does not delete the recording. The
+ * service's heartbeat is read with the performance page, not when a row is saved.
  *
  * Sections follow the data: collection, the window file, the database write,
  * the staff read, then test hooks.
@@ -40,6 +43,18 @@ import path from "node:path";
 import { monitorEventLoopDelay, PerformanceObserver, type PerformanceEntry } from "node:perf_hooks";
 import Database from "better-sqlite3";
 import { getProjectRoot } from "@shared/paths";
+import {
+  deleteOrphanPerfMaps,
+  importServiceCaptures,
+  noteServiceCapturesImported,
+  pendingCpuProfileFiles,
+  pruneCpuProfiles,
+  readCpuCaptureHealth,
+  cpuProfileDir,
+  type CpuCaptureHealth,
+  type CpuProfileCapture,
+  type CpuProfileThread,
+} from "./cpu-profile";
 import { getAllConfigs } from "./content-types";
 import { child } from "./logger";
 
@@ -94,6 +109,10 @@ const PROCESS_SHEET: SheetTable = {
     { name: "heapUsedMb", sql: "INTEGER NOT NULL" },
     { name: "rssMb", sql: "INTEGER NOT NULL" },
     { name: "cpuProcessPercent", sql: "REAL NOT NULL" },
+    { name: "cpuUserPercent", sql: "REAL" },
+    { name: "cpuSystemPercent", sql: "REAL" },
+    { name: "cpuMainThreadPercent", sql: "REAL" },
+    { name: "cpuOtherThreadsPercent", sql: "REAL" },
     { name: "cpuMachinePercent", sql: "REAL" },
     { name: "garbageCollectionPauseMs", sql: "REAL NOT NULL" },
     { name: "garbageCollectionMaxPauseMs", sql: "REAL NOT NULL" },
@@ -101,6 +120,18 @@ const PROCESS_SHEET: SheetTable = {
     { name: "openFds", sql: "INTEGER" },
     { name: "openFdsLimit", sql: "INTEGER" },
     { name: "openCalls", sql: "TEXT", json: "array" },
+  ],
+};
+
+const CPU_PROFILE_SHEET: SheetTable = {
+  name: "cpu_stacks",
+  primaryKey: ["timestamp", "processName"],
+  columns: [
+    { name: "timestamp", sql: "INTEGER NOT NULL" },
+    { name: "processName", sql: "TEXT NOT NULL" },
+    { name: "ok", sql: "INTEGER NOT NULL" },
+    { name: "threads", sql: "TEXT", json: "array" },
+    { name: "error", sql: "TEXT" },
   ],
 };
 
@@ -195,6 +226,14 @@ export type ProcessSample = {
   heapUsedMb: number;
   rssMb: number;
   cpuProcessPercent: number;
+  /** This process, user mode. Null on rows written before the split. */
+  cpuUserPercent: number | null;
+  /** This process, kernel mode. Null on rows written before the split. */
+  cpuSystemPercent: number | null;
+  /** JS thread (tid === pid). Null off Linux or when /proc cannot be read. */
+  cpuMainThreadPercent: number | null;
+  /** Every other thread of this process. Same null rules as the main thread. */
+  cpuOtherThreadsPercent: number | null;
   /** Whole machine. Null on every process except web. */
   cpuMachinePercent: number | null;
   garbageCollectionPauseMs: number;
@@ -394,6 +433,56 @@ function durationBuckets(): number[] | null {
   }
 }
 
+/** Linux USER_HZ. /proc stat counts are in these ticks. */
+const CLK_TCK = 100;
+
+export type ThreadTicks = { main: number; other: number };
+
+/** utime+stime from one /proc/pid/task/tid/stat line. The comm field may contain spaces. */
+export function parseStatCpuTicks(stat: string): number | null {
+  const end = stat.lastIndexOf(")");
+  if (end < 0) return null;
+  const rest = stat.slice(end + 2).trim().split(/\s+/);
+  const utime = Number(rest[11]);
+  const stime = Number(rest[12]);
+  if (!Number.isFinite(utime) || !Number.isFinite(stime)) return null;
+  return utime + stime;
+}
+
+/** Clock ticks since boot, split into the JS thread and the other threads of this process. */
+export function readThreadTicks(taskDir = "/proc/self/task"): ThreadTicks | null {
+  if (taskDir === "/proc/self/task" && process.platform !== "linux") return null;
+  try {
+    const tids = fs.readdirSync(taskDir);
+    let main = 0;
+    let other = 0;
+    let sawMain = false;
+    const pid = String(process.pid);
+    for (const tid of tids) {
+      const ticks = parseStatCpuTicks(fs.readFileSync(path.join(taskDir, tid, "stat"), "utf8"));
+      if (ticks == null) continue;
+      if (tid === pid) {
+        main += ticks;
+        sawMain = true;
+      } else {
+        other += ticks;
+      }
+    }
+    if (!sawMain) return null;
+    return { main, other };
+  } catch {
+    return null;
+  }
+}
+
+/** Share of one core. 100 ticks at 100 Hz over 1s is 100%. */
+export function ticksToCpuPercent(deltaTicks: number, intervalMs: number): number {
+  if (intervalMs <= 0 || deltaTicks <= 0) return 0;
+  const cpuSeconds = deltaTicks / CLK_TCK;
+  const wallSeconds = intervalMs / 1000;
+  return Math.round((cpuSeconds / wallSeconds) * 1000) / 10;
+}
+
 /**
  * Process sheet. enable() once at start. noteStart/noteFinish on each request.
  * take() is the tick: read the histogram, CPU, GC and in-flight peak, then reset
@@ -407,6 +496,7 @@ const processLive = {
   inFlight: 0,
   inFlightMax: 0,
   lastCpu: process.cpuUsage(),
+  lastThreads: null as ThreadTicks | null,
 
   noteStart(): void {
     this.inFlight += 1;
@@ -436,6 +526,7 @@ const processLive = {
     } catch {
       this.gcObserver = null;
     }
+    this.lastThreads = readThreadTicks();
   },
 
   /** Drop observers and zero the counters. Does not write a window. */
@@ -449,6 +540,7 @@ const processLive = {
     this.inFlight = 0;
     this.inFlightMax = 0;
     this.lastCpu = process.cpuUsage();
+    this.lastThreads = readThreadTicks();
   },
 
   /**
@@ -476,14 +568,18 @@ const processLive = {
     this.gcMax = 0;
     const peak = this.inFlightMax;
     this.inFlightMax = this.inFlight;
-    const cpuProcessPercent = this.readProcessCpuPercent(intervalMs);
+    const cpu = this.readProcessCpu(intervalMs);
     return {
       eventLoopP50Ms,
       eventLoopP99Ms,
       eventLoopMaxMs,
       heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       rssMb: Math.round(mem.rss / 1024 / 1024),
-      cpuProcessPercent,
+      cpuProcessPercent: cpu.cpuProcessPercent,
+      cpuUserPercent: cpu.cpuUserPercent,
+      cpuSystemPercent: cpu.cpuSystemPercent,
+      cpuMainThreadPercent: cpu.cpuMainThreadPercent,
+      cpuOtherThreadsPercent: cpu.cpuOtherThreadsPercent,
       garbageCollectionPauseMs: gcPause,
       garbageCollectionMaxPauseMs: gcPauseMax,
       inFlightMaxRequests: peak,
@@ -492,13 +588,39 @@ const processLive = {
     };
   },
 
-  /** This process since the previous reading, as a percent of one core. */
-  readProcessCpuPercent(intervalMs: number): number {
+  /**
+   * This process since the previous reading, as a percent of one core.
+   * User and system come from process.cpuUsage. The thread split comes from
+   * /proc and stays null when that file cannot be read.
+   */
+  readProcessCpu(intervalMs: number): {
+    cpuProcessPercent: number;
+    cpuUserPercent: number;
+    cpuSystemPercent: number;
+    cpuMainThreadPercent: number | null;
+    cpuOtherThreadsPercent: number | null;
+  } {
     const diff = process.cpuUsage(this.lastCpu);
     this.lastCpu = process.cpuUsage();
-    if (intervalMs <= 0) return 0;
-    const pct = (diff.user + diff.system) / 1000 / intervalMs * 100;
-    return Math.round(pct * 10) / 10;
+    const user = intervalMs <= 0 ? 0 : Math.round(diff.user / 1000 / intervalMs * 1000) / 10;
+    const system = intervalMs <= 0 ? 0 : Math.round(diff.system / 1000 / intervalMs * 1000) / 10;
+    const total = intervalMs <= 0 ? 0 : Math.round((diff.user + diff.system) / 1000 / intervalMs * 1000) / 10;
+    const nowThreads = readThreadTicks();
+    const prevThreads = this.lastThreads;
+    this.lastThreads = nowThreads ?? prevThreads;
+    let cpuMainThreadPercent: number | null = null;
+    let cpuOtherThreadsPercent: number | null = null;
+    if (nowThreads && prevThreads && intervalMs > 0) {
+      cpuMainThreadPercent = ticksToCpuPercent(nowThreads.main - prevThreads.main, intervalMs);
+      cpuOtherThreadsPercent = ticksToCpuPercent(nowThreads.other - prevThreads.other, intervalMs);
+    }
+    return {
+      cpuProcessPercent: total,
+      cpuUserPercent: user,
+      cpuSystemPercent: system,
+      cpuMainThreadPercent,
+      cpuOtherThreadsPercent,
+    };
   },
 };
 
@@ -785,7 +907,31 @@ function publishWindow(now = Date.now()): void {
 export function flushTick(now = Date.now()): void {
   if (!started) return;
   publishWindow(now);
-  if (ingestEnabled) ingestStatsFiles(statsDir);
+  if (ingestEnabled) {
+    ingestStatsFiles(statsDir);
+    ingestCpuProfileFiles();
+    queueServiceCaptureImport();
+  }
+}
+
+let serviceImportRunning = false;
+
+/** Production only. Summarize recordings the service left, then insert. */
+function queueServiceCaptureImport(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  if (serviceImportRunning) return;
+  serviceImportRunning = true;
+  void (async () => {
+    try {
+      const pending = await importServiceCaptures();
+      ingestCpuProfileFiles();
+      noteServiceCapturesImported(pending);
+    } catch (err) {
+      log.warn({ err }, "cpu capture import failed");
+    } finally {
+      serviceImportRunning = false;
+    }
+  })();
 }
 
 /**
@@ -805,6 +951,7 @@ export function startTick(opts: StartOpts): void {
   lastFlushAt = Date.now();
   ensureDir(statsDir);
   processLive.enable();
+  deleteOrphanPerfMaps();
   if (ingestEnabled) {
     prune(openDatabase());
   }
@@ -849,6 +996,7 @@ export function stopTick(): void {
   db = null;
   started = false;
   ingestEnabled = false;
+  serviceImportRunning = false;
   histogramResets = 0;
   ingestStatements = [];
 }
@@ -885,6 +1033,7 @@ function openDatabase(): Sqlite {
     ${createTableSql(PROCESS_SHEET)};
     ${createTableSql(API_SHEET)};
     ${createTableSql(PAGE_SHEET)};
+    ${createTableSql(CPU_PROFILE_SHEET)};
     CREATE TABLE IF NOT EXISTS duration_bounds (
       id TEXT PRIMARY KEY,
       boundsMs TEXT NOT NULL
@@ -896,6 +1045,7 @@ function openDatabase(): Sqlite {
   ensureColumns(opened, PROCESS_SHEET);
   ensureColumns(opened, API_SHEET);
   ensureColumns(opened, PAGE_SHEET);
+  ensureColumns(opened, CPU_PROFILE_SHEET);
   db = opened;
   const bounds = boundsMs && boundsMs.length > 0 ? boundsMs : null;
   if (bounds) {
@@ -953,8 +1103,14 @@ function prune(opened: Sqlite, now = Date.now()): void {
     opened.prepare(`DELETE FROM process_samples WHERE timestamp < ?`).run(cutoff);
     opened.prepare(`DELETE FROM api_samples WHERE timestamp < ?`).run(cutoff);
     opened.prepare(`DELETE FROM document_samples WHERE timestamp < ?`).run(cutoff);
+    opened.prepare(`DELETE FROM cpu_stacks WHERE timestamp < ?`).run(cutoff);
   });
   tx();
+  try {
+    pruneCpuProfiles(now);
+  } catch (err) {
+    log.warn({ err }, "cpu profile file prune failed");
+  }
 }
 
 /**
@@ -1159,6 +1315,58 @@ export function ingestStatsFiles(dir = statsDir): void {
   }
 }
 
+/**
+ * Insert finished stack files and delete them. A broken file is deleted too,
+ * so a bad write does not retry every tick. On insert failure the good files stay.
+ * No-op unless this process started with ingest.
+ */
+export function ingestCpuProfileFiles(dir = cpuProfileDir()): void {
+  if (!ingestEnabled) return;
+  const { ready, broken } = pendingCpuProfileFiles(dir);
+  for (const file of broken) fs.rmSync(file, { force: true });
+  if (ready.length === 0) return;
+  const opened = openDatabase();
+  const rows = ready.map(({ capture }) => ({
+    timestamp: capture.timestamp,
+    processName: capture.processName,
+    ok: capture.ok ? 1 : 0,
+    threads: capture.ok ? capture.threads : null,
+    error: capture.ok ? null : capture.error,
+  }));
+  try {
+    const tx = opened.transaction(() => {
+      insertRows(opened, CPU_PROFILE_SHEET.name, columnNames(CPU_PROFILE_SHEET), rows.map((row) => dbRow(CPU_PROFILE_SHEET, row)));
+    });
+    tx();
+  } catch (err) {
+    log.warn({ err }, "cpu profile ingest failed; files kept");
+    return;
+  }
+  for (const item of ready) fs.rmSync(item.file, { force: true });
+}
+
+function readCpuStacks(opened: Sqlite, processName: string, from: number, to: number): CpuProfileCapture[] {
+  const rows = opened.prepare(
+    `SELECT timestamp, processName, ok, threads, error FROM cpu_stacks WHERE processName = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC`,
+  ).all(processName, from, to) as Array<{ timestamp: number; processName: string; ok: number; threads: string | null; error: string | null }>;
+  const out: CpuProfileCapture[] = [];
+  for (const row of rows) {
+    if (row.ok) {
+      let threads: CpuProfileThread[] = [];
+      try {
+        const parsed = JSON.parse(row.threads ?? "[]") as unknown;
+        if (Array.isArray(parsed)) threads = parsed as CpuProfileThread[];
+      } catch {
+        threads = [];
+      }
+      out.push({ timestamp: row.timestamp, processName: row.processName, ok: true, threads });
+    } else {
+      out.push({ timestamp: row.timestamp, processName: row.processName, ok: false, error: row.error ?? "recording failed" });
+    }
+  }
+  return out;
+}
+
 // --- Staff read ---
 // One windows list per process name. Route rows stay on the detail read.
 
@@ -1182,6 +1390,12 @@ export type StatsWindow = {
   timestamp: number;
   intervalMs: number;
   cpuProcessPercent: number | null;
+  cpuUserPercent: number | null;
+  cpuSystemPercent: number | null;
+  cpuMainThreadPercent: number | null;
+  cpuOtherThreadsPercent: number | null;
+  /** Whole machine. Null except on web, and on rows from before this column. */
+  cpuMachinePercent: number | null;
   heapUsedMb: number | null;
   rssMb: number | null;
   garbageCollectionPauseMs: number | null;
@@ -1231,6 +1445,10 @@ export type DetailStats = {
   mixedBounds: boolean;
   peak: { method: string; route: string; maxMs: number; path?: string | null; kind: "api" | "pages" } | null;
   routes: DetailRoute[];
+  /** CPU stacks whose 20s recording falls in this slice. Empty when none did. */
+  cpuStacks: CpuProfileCapture[];
+  /** Web only. Whether the production recorder is checking in. */
+  cpuCapture?: CpuCaptureHealth;
 };
 
 /** Chart step for a range. Up to 2 hours stays on the 30s tick. Up to 6 hours is 90 seconds. A day is 5 minutes. A week is 30 minutes. */
@@ -1511,7 +1729,7 @@ export function readProcessStats(opts: {
       gauges.set(start, { ...sample, timestamp: start });
       continue;
     }
-    const incomingIsWorse = sample.eventLoopMaxMs > prev.eventLoopMaxMs;
+    const incomingCpu = sample.cpuProcessPercent > prev.cpuProcessPercent;
     gauges.set(start, {
       ...prev,
       intervalMs: Math.max(prev.intervalMs, sample.intervalMs),
@@ -1520,7 +1738,12 @@ export function readProcessStats(opts: {
       eventLoopMaxMs: Math.max(prev.eventLoopMaxMs, sample.eventLoopMaxMs),
       heapUsedMb: Math.max(prev.heapUsedMb, sample.heapUsedMb),
       rssMb: Math.max(prev.rssMb, sample.rssMb),
-      cpuProcessPercent: Math.max(prev.cpuProcessPercent, sample.cpuProcessPercent),
+      cpuProcessPercent: incomingCpu ? sample.cpuProcessPercent : prev.cpuProcessPercent,
+      cpuUserPercent: incomingCpu ? sample.cpuUserPercent : prev.cpuUserPercent,
+      cpuSystemPercent: incomingCpu ? sample.cpuSystemPercent : prev.cpuSystemPercent,
+      cpuMainThreadPercent: incomingCpu ? sample.cpuMainThreadPercent : prev.cpuMainThreadPercent,
+      cpuOtherThreadsPercent: incomingCpu ? sample.cpuOtherThreadsPercent : prev.cpuOtherThreadsPercent,
+      cpuMachinePercent: incomingCpu ? sample.cpuMachinePercent : prev.cpuMachinePercent,
       garbageCollectionPauseMs: Math.max(prev.garbageCollectionPauseMs, sample.garbageCollectionPauseMs),
       garbageCollectionMaxPauseMs: Math.max(prev.garbageCollectionMaxPauseMs, sample.garbageCollectionMaxPauseMs),
       inFlightMaxRequests: Math.max(prev.inFlightMaxRequests, sample.inFlightMaxRequests),
@@ -1567,6 +1790,11 @@ export function readProcessStats(opts: {
       timestamp,
       intervalMs: gauge?.intervalMs ?? stepMs,
       cpuProcessPercent: gauge?.cpuProcessPercent ?? null,
+      cpuUserPercent: gauge?.cpuUserPercent ?? null,
+      cpuSystemPercent: gauge?.cpuSystemPercent ?? null,
+      cpuMainThreadPercent: gauge?.cpuMainThreadPercent ?? null,
+      cpuOtherThreadsPercent: gauge?.cpuOtherThreadsPercent ?? null,
+      cpuMachinePercent: gauge?.cpuMachinePercent ?? null,
       heapUsedMb: gauge?.heapUsedMb ?? null,
       rssMb: gauge?.rssMb ?? null,
       garbageCollectionPauseMs: gauge?.garbageCollectionPauseMs ?? null,
@@ -1611,6 +1839,8 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
   ).all(from, to, opts.processName) as Array<{ processId: number }>;
   const pids = [...new Set(processes.map((row) => row.processId))];
   const filter = pidFilter(pids);
+  const cpuStacks = readCpuStacks(opened, opts.processName, from, to);
+  const cpuCapture = opts.processName === "web" ? readCpuCaptureHealth(opts.now) : undefined;
   const empty: DetailStats = {
     startingAt: from,
     endingAt: to,
@@ -1621,6 +1851,8 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
     mixedBounds: false,
     peak: null,
     routes: [],
+    cpuStacks,
+    cpuCapture,
   };
   if (opts.processName !== "web" || pids.length === 0) return empty;
 
@@ -1724,6 +1956,8 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
     mixedBounds,
     peak,
     routes,
+    cpuStacks,
+    cpuCapture,
   };
   if (pageRows.length > 0) detail.ssrCounts = ssrCounts;
   return detail;

@@ -21,8 +21,12 @@ import {
   noteApi,
   notePage,
   pageRouteForPath,
+  parseStatCpuTicks,
+  readThreadTicks,
+  ticksToCpuPercent,
   planInsertChunks,
   readProcessStats,
+  ingestCpuProfileFiles,
   readProcessStatsDetail,
   readRouteSeries,
   resolveProcessStatsDetailRequest,
@@ -78,11 +82,13 @@ function detail(from: number, to: number, processName: ProcessName = "web") {
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "process-stats-"));
   dbPath = path.join(dir, "stats.db");
+  process.env.CPU_PROFILE_DIR = path.join(dir, "cpu-profiles");
   boot();
 });
 
 afterEach(() => {
   stopTick();
+  delete process.env.CPU_PROFILE_DIR;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -575,6 +581,60 @@ describe("open calls at close", () => {
     }).windows[0];
     expect(win.openCalls).toBeNull();
     expect(win.cpuProcessPercent).toBe(0);
+    expect(win.cpuUserPercent).toBeNull();
+    expect(win.cpuMainThreadPercent).toBeNull();
+  });
+
+  it("puts a cpu stack on the detail of that span and deletes the waiting file", () => {
+    const profiles = process.env.CPU_PROFILE_DIR!;
+    fs.mkdirSync(profiles);
+    const ts = 1_700_000_100_000;
+    const stack = {
+      timestamp: ts,
+      processName: "web",
+      ok: true as const,
+      threads: [{ name: "node 1", percent: 80, frames: [] }],
+    };
+    fs.writeFileSync(path.join(profiles, `${ts}-web.json`), JSON.stringify(stack));
+    fs.writeFileSync(path.join(profiles, `${ts}-mcp.json`), JSON.stringify({
+      timestamp: ts, processName: "mcp", ok: false, error: "perf missing",
+    }));
+    fs.writeFileSync(path.join(profiles, "bad.json"), "{");
+    ingestCpuProfileFiles(profiles);
+    expect(fs.readdirSync(profiles)).toEqual([]);
+    expect(detail(ts - 1, ts + 1).cpuStacks).toEqual([stack]);
+    expect(detail(ts - 1, ts + 1, "mcp").cpuStacks).toEqual([
+      { timestamp: ts, processName: "mcp", ok: false, error: "perf missing" },
+    ]);
+    fs.writeFileSync(path.join(profiles, `${ts}-web.json`), JSON.stringify(stack));
+    ingestCpuProfileFiles(profiles);
+    expect(detail(ts - 1, ts + 1).cpuStacks).toHaveLength(1);
+  });
+});
+
+describe("cpu split", () => {
+  it("reads utime and stime after a comm that contains spaces", () => {
+    const stat = "12 (node worker) R 1 1 1 0 -1 0 0 0 0 0 40 10 0 0";
+    expect(parseStatCpuTicks(stat)).toBe(50);
+    expect(parseStatCpuTicks("no paren")).toBeNull();
+  });
+
+  it("turns 100 ticks in one second into 100 percent of one core", () => {
+    expect(ticksToCpuPercent(100, 1000)).toBe(100);
+    expect(ticksToCpuPercent(0, 1000)).toBe(0);
+    expect(ticksToCpuPercent(15, 30_000)).toBe(0.5);
+  });
+
+  it("counts the pid thread as main and the rest as other", () => {
+    const task = fs.mkdtempSync(path.join(os.tmpdir(), "proc-task-"));
+    const line = (utime: number, stime: number) =>
+      `1 (node) R 1 1 1 0 -1 0 0 0 0 0 ${utime} ${stime} 0 0`;
+    fs.mkdirSync(path.join(task, String(process.pid)));
+    fs.mkdirSync(path.join(task, "999001"));
+    fs.writeFileSync(path.join(task, String(process.pid), "stat"), line(100, 5));
+    fs.writeFileSync(path.join(task, "999001", "stat"), line(20, 7));
+    expect(readThreadTicks(task)).toEqual({ main: 105, other: 27 });
+    fs.rmSync(task, { recursive: true, force: true });
   });
 });
 
@@ -716,26 +776,36 @@ describe("readProcessStats", () => {
     const start = 1_000_000_000_000;
     const step = 5 * 60 * 1000;
     const bucket = Math.floor(start / step) * step;
-    const write = (timestamp: number, eventLoopMaxMs: number, cpuProcessPercent: number) => {
+    const write = (
+      timestamp: number,
+      eventLoopMaxMs: number,
+      cpuProcessPercent: number,
+      cpu: Record<string, number> = {},
+    ) => {
       fs.appendFileSync(path.join(dir, "web-4.jsonl"), `${JSON.stringify({
         timestamp,
         pid: 4,
         bootId: "p",
         processName: "web",
-        process: { ...sample(timestamp, 4), eventLoopMaxMs, cpuProcessPercent },
+        process: { ...sample(timestamp, 4), eventLoopMaxMs, cpuProcessPercent, ...cpu },
         api: [apiRow()],
         pages: [],
       })}\n`);
     };
-    write(bucket + 1_000, 10, 1);
-    write(bucket + 60_000, 80, 40);
-    write(bucket + step + 1_000, 12, 3);
+    write(bucket + 1_000, 90, 1, { cpuUserPercent: 1, cpuSystemPercent: 0, cpuMainThreadPercent: 1, cpuOtherThreadsPercent: 0, cpuMachinePercent: 10 });
+    write(bucket + 60_000, 10, 40, { cpuUserPercent: 30, cpuSystemPercent: 10, cpuMainThreadPercent: 22, cpuOtherThreadsPercent: 18, cpuMachinePercent: 55 });
+    write(bucket + step + 1_000, 12, 3, { cpuUserPercent: 2, cpuSystemPercent: 1, cpuMainThreadPercent: 3, cpuOtherThreadsPercent: 0, cpuMachinePercent: 8 });
     ingestStatsFiles(dir);
     const stats = readProcessStats({ from: bucket, to: bucket + 7 * 60 * 60 * 1000, now: bucket + 7 * 60 * 60 * 1000, processName: "web" });
     expect(stats.stepMs).toBe(step);
     expect(stats.windows.map((win) => win.timestamp)).toEqual([bucket, bucket + step]);
-    expect(stats.windows[0].eventLoop?.maxMs).toBe(80);
+    expect(stats.windows[0].eventLoop?.maxMs).toBe(90);
     expect(stats.windows[0].cpuProcessPercent).toBe(40);
+    expect(stats.windows[0].cpuUserPercent).toBe(30);
+    expect(stats.windows[0].cpuSystemPercent).toBe(10);
+    expect(stats.windows[0].cpuMainThreadPercent).toBe(22);
+    expect(stats.windows[0].cpuOtherThreadsPercent).toBe(18);
+    expect(stats.windows[0].cpuMachinePercent).toBe(55);
     expect(stats.windows[0].intervalMs).toBe(30_000);
     expect(stats.windows[0].api).toMatchObject({ count: 196, avgMs: 20, maxMs: 20 });
     expect(stats.windows[0].api?.p50Ms).not.toBeNull();

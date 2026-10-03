@@ -700,7 +700,7 @@ function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorke
       cwd: getProjectRoot(),
       env: process.env,
       stdio: ["inherit", "inherit", "inherit", "ipc"],
-      execArgv: ["--import", "tsx"],
+      execArgv: ["--import", "tsx", "--perf-basic-prof-only-functions"],
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
