@@ -82,10 +82,6 @@ type StackFrame = {
   caller?: { function: string; file: string };
 };
 
-mergePullRequests() => {
-
-}
-
 type StackCapture =
   | { ok: true; threads: Array<{ name: string; percent: number; frames: StackFrame[] }> }
   | { ok: false; error: string };
