@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Braces, Check, ChevronDown, ChevronRight, Clock, CornerDownRight, Cpu, File, FileText, Info, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Braces, Check, ChevronDown, ChevronRight, Clock, CornerDownRight, Cpu, Download, File, FileText, Info, Loader2, Pin, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,6 +33,7 @@ import {
   type RangePreset,
 } from "@/lib/server-performance-url";
 import { cpuThreadCoverage, formatCpuStackRaw, labelCpuSymbol } from "@/lib/cpu-stack-label";
+import { buildPerformanceDetailMarkdown, performanceDetailReportFilename } from "@/lib/performance-detail-report";
 
 const P50_MIN = 5;
 const P95_MIN = 20;
@@ -1170,6 +1171,102 @@ function PerformanceInner() {
     return { acc, ssr };
   }, [routes]);
 
+  const reportReady = !!detail && !detailQuery.isPlaceholderData && !detailQuery.isError;
+  const downloadDetailReport = () => {
+    if (!detail || !reportReady) return;
+    const reportRoutes = detail.routes
+      .slice()
+      .sort((a, b) => b.maxMs - a.maxMs || b.count - a.count);
+    const reportDuration = sumDuration(
+      reportRoutes,
+      Math.max(detail.boundsMs.length, reportRoutes[0]?.durationCounts.length ?? 0),
+    );
+    const reportCallTotal = reportRoutes.reduce((sum, row) => sum + row.count, 0);
+    const reportDurationTotal = reportDuration.reduce((sum, count) => sum + count, 0);
+    const reportSlowFrom = detail.boundsMs.indexOf(500) + 1;
+    const reportSlow = reportSlowFrom > 0
+      ? reportDuration.slice(reportSlowFrom).reduce((sum, count) => sum + count, 0)
+      : 0;
+    const reportSlowPct = reportDurationTotal > 0 ? Math.round((reportSlow / reportDurationTotal) * 100) : 0;
+    const reportStatus: Record<string, number> = {};
+    const reportSsr: Record<string, number> = {};
+    for (const row of reportRoutes) {
+      for (const [key, count] of Object.entries(row.statusCounts)) reportStatus[key] = (reportStatus[key] ?? 0) + count;
+      for (const [key, count] of Object.entries(row.ssrCounts ?? {})) reportSsr[key] = (reportSsr[key] ?? 0) + count;
+    }
+    const showSsr = reportRoutes.some((row) => row.kind === "pages");
+    const logRows = detail.logs ?? [];
+    const logNote = detail.logsCoverage === "none"
+      ? `No data before ${formatClock(detail.endingAt)}.`
+      : detail.logsCoverage === "partial" && detail.logsSince != null
+        ? `No data before ${formatClock(detail.logsSince)}.`
+        : null;
+    const showCpu = (detail.cpuStacks?.length ?? 0) > 0 || (parsed.process === "web" && detail.cpuCapture?.mode === "service");
+    const markdown = buildPerformanceDetailMarkdown({
+      process: parsed.process,
+      range: detailRange,
+      window: windowBadge?.label ?? null,
+      duration: detail.mixedBounds
+        ? null
+        : {
+          buckets: reportDuration.map((count, index) => ({
+            label: `${bucketLabel(index, detail.boundsMs)} ms`,
+            count,
+          })),
+          total: reportCallTotal,
+          slowPct: reportSlowPct,
+        },
+      routes: reportRoutes.length > 0
+        ? {
+          showKind: true,
+          showSsr,
+          statusLine: statusEntries(reportStatus).map(([code, count]) => `${count} × ${code}`).join(", "),
+          ssrLine: showSsr ? countLine(reportSsr, SSR_LABELS) : "",
+          rows: reportRoutes,
+        }
+        : null,
+      running: openRows.length > 0
+        ? openRows.map((row) => ({ method: row.method, route: row.route, count: row.count, maxMs: row.maxMs }))
+        : null,
+      logs: {
+        note: logNote,
+        empty: logRows.length === 0 && detail.logsCoverage !== "none" ? "No logs in this span." : null,
+        rows: logRows.map((row) => ({
+          level: row.level,
+          module: row.module,
+          message: row.message,
+          errName: row.err_name,
+          count: row.count,
+          lastSeen: formatClock(row.lastTs, true),
+        })),
+      },
+      cpu: showCpu
+        ? {
+          inactive: detail.cpuCapture?.mode === "service" && detail.cpuCapture.active === false
+            ? "Capture inactive. The recorder has not checked in for 2 minutes, so an empty list does not mean the CPU stayed under 120%."
+            : null,
+          notice: detail.cpuCapture?.notice ?? null,
+          lastError: detail.cpuCapture?.lastError ? `Last recording failed: ${detail.cpuCapture.lastError}` : null,
+          empty: (detail.cpuStacks?.length ?? 0) === 0 ? "No recording in this range." : null,
+          stacks: (detail.cpuStacks ?? []).map((stack) => (
+            stack.ok
+              ? { when: formatClock(stack.timestamp, true), ok: true as const, threads: stack.threads }
+              : { when: formatClock(stack.timestamp, true), ok: false as const, error: stack.error }
+          )),
+        }
+        : null,
+    });
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = performanceDetailReportFilename(parsed.process, detail.startingAt);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="p-6 space-y-4 max-w-6xl mx-auto" data-testid="page-performance">
       <ServerSectionHeader
@@ -1529,22 +1626,38 @@ function PerformanceInner() {
 
       {(wantDetail || (detailFrom != null && detailTo != null)) && (
         <div ref={detailRef} className="rounded-lg border bg-muted/40 p-4">
-          <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="mb-3 flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">
               Details <span className="font-semibold text-muted-foreground">({detailRange})</span>
             </h2>
-            {windowBadge && (
-              <div className="mt-1 flex shrink-0 items-center gap-0.5">
-                <Badge variant="secondary" className="shrink-0 gap-1 rounded-full font-normal">
-                  <Clock className="size-3.5" />
-                  {windowBadge.label}
-                </Badge>
-                <ChartInfo label="Window size">
-                  <p>{badgeCopy?.lead}</p>
-                  <p>{badgeCopy?.detail}</p>
-                </ChartInfo>
-              </div>
-            )}
+            <div className="flex shrink-0 items-center gap-1.5">
+              {windowBadge && (
+                <div className="flex items-center gap-0.5">
+                  <Badge variant="secondary" className="shrink-0 gap-1 rounded-full font-normal">
+                    <Clock className="size-3.5" />
+                    {windowBadge.label}
+                  </Badge>
+                  <ChartInfo label="Window size">
+                    <p>{badgeCopy?.lead}</p>
+                    <p>{badgeCopy?.detail}</p>
+                  </ChartInfo>
+                </div>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                disabled={!reportReady}
+                title="Download the full detail for this range as Markdown"
+                aria-label="Download detail report"
+                data-testid="button-download-performance-detail"
+                onClick={downloadDetailReport}
+              >
+                <Download className="size-3.5" />
+                Download
+              </Button>
+            </div>
           </div>
           <DetailBlock
           loading={detailQuery.isLoading}
