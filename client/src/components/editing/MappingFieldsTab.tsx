@@ -1602,6 +1602,40 @@ function SeoFieldsEditor({
         ) : null}
       </div>
       )}
+      <AlertDialog open={optOutConfirmOpen} onOpenChange={setOptOutConfirmOpen}>
+        <AlertDialogContent data-testid="dialog-idea-born-optout">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Take this page out of its topic cluster?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  This page came from a traffic idea
+                  {ideaOrigin ? (
+                    <>
+                      {" "}
+                      (<span className="font-medium text-foreground">{ideaOrigin.title}</span>)
+                    </>
+                  ) : null}
+                  . Turning monitoring off removes it from its topic cluster, so it stops supporting its hub.
+                </p>
+                <p>The keyword and page content stay as they are. You can turn monitoring back on later.</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep in cluster</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setOptOutConfirmOpen(false);
+                void handleClusterSeoToggle(false, true);
+              }}
+              data-testid="button-confirm-idea-born-optout"
+            >
+              Turn off anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -2302,41 +2336,6 @@ export function MappingFieldsTab({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <AlertDialog open={optOutConfirmOpen} onOpenChange={setOptOutConfirmOpen}>
-        <AlertDialogContent data-testid="dialog-idea-born-optout">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Take this page out of its topic cluster?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>
-                  This page came from a traffic idea
-                  {ideaOrigin ? (
-                    <>
-                      {" "}
-                      (<span className="font-medium text-foreground">{ideaOrigin.title}</span>)
-                    </>
-                  ) : null}
-                  . Turning monitoring off removes it from its topic cluster, so it stops supporting its hub.
-                </p>
-                <p>The keyword and page content stay as they are. You can turn monitoring back on later.</p>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep in cluster</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setOptOutConfirmOpen(false);
-                void handleClusterSeoToggle(false, true);
-              }}
-              data-testid="button-confirm-idea-born-optout"
-            >
-              Turn off anyway
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={!!resetTarget} onOpenChange={(v) => { if (!v) setResetTarget(null); }}>
         <AlertDialogContent data-testid="dialog-reset-field">
