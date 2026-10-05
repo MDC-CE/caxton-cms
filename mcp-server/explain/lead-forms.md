@@ -108,7 +108,7 @@ When `is_signup: true`:
 
 - If `allow_signup` is not `false`: site `field_map` must be non-empty; every `form.<name>` in the map must exist; required map rows need `fields.<name>.required: true`. Constant/global rows do not require form fields.
 - If `allow_signup: false`: login-only (no account create / no field_map requirement for enable).
-- `conversion_name` is **required** (catalog name or explicit `null` / Off) — the account gate does not waive it. Choosing the site signup/login event *is* the conversion. If `conversion_name` equals the auth event (canonical or alias), GTM fires once from the auth action — not again on lead submit.
+- `conversion_name` is **required** (catalog name or explicit `null` / Off) — the account gate does not waive it. Choosing the site signup/login event *is* the conversion. If `conversion_name` equals the auth event (canonical or alias), GTM fires once from the auth action — not again on lead submit. The signup push uses the same lead dataLayer body as any other form conversion (identity, consents, `submission_id`, ecommerce `item_id` when resolved, and other non-empty `fields.*` such as `utm_medium`). Login stays email-only.
 - Account gate is **form-level** (not per-route).
 - MCP edit-sections identity failures surface `action_required: fix_signup_field_map` + `next_actions`.
 - Does **not** write form YAML; field_map lives only in `settings.yml` → `auth`.

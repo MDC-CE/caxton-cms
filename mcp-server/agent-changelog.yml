@@ -6,6 +6,14 @@ window_days: 6
 
 entries:
   - date: "2026-10-02"
+    summary: "Signup GTM event uses the same lead dataLayer body as other form conversions"
+    agent_impact:
+      - "dataLayer sign_up on account create now matches other form conversions: identity, consents, submission_id, ecommerce item_id when resolved, and other non-empty fields.* values (hidden defaults such as utm_medium), plus email_hash. It still fires once — not again when conversion_name is the signup event. Login stays email-only. Webhook body unchanged."
+    tools_changed: false
+    paths:
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-02"
     summary: "Ads: UTM convention checks (utm_* issue codes) + Ads settings move to site_<name>/ads-config.yml"
     agent_impact:
       - "Ads settings now live in site_<name>/ads-config.yml (meta, google, alert_thresholds, test_email_patterns, utm_convention). settings.yml ads: is a fallback only while ads-config.yml is missing; staff move it with data migration 004_move_ads_settings_to_ads_config (both exist → ads-config.yml wins). Unparseable ads-config.yml → issue + warning ads_config_unreadable {error, file}; Meta / Google / GA4 syncs skip until fixed."

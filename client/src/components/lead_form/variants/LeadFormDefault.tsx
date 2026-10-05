@@ -25,7 +25,7 @@ import { apiRequest, apiRequestWithAuth, apiFetch, queryClient } from "@/lib/que
 import { buildLeadAdContext, newSubmissionId, staffLeadHeaders } from "@/lib/leadAdContext";
 import { getApiPath } from "@shared/api-paths";
 import type { Country } from "react-phone-number-input";
-import { trackFormSubmission, trackConversion, resolveWebhook, hashEmail, getEcommerceProductLookup, type ConversionName, type TrackingSettingsResponse } from "@/lib/tracking";
+import { trackFormSubmission, trackConversion, resolveWebhook, hashEmail, getEcommerceProductLookup, type ConversionName, type FormSubmissionTrackingData, type TrackingSettingsResponse } from "@/lib/tracking";
 import { ensureEcommerceProductLookup } from "@/lib/ecommerceProductMap";
 import { usePageFunnel } from "@/contexts/PageFunnelContext";
 import {
@@ -1524,6 +1524,72 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
     return resolved;
   };
 
+  /** Same dataLayer body for signup and every other form conversion. */
+  const trackLeadConversion = async (
+    eventName: ConversionName,
+    formValues: FormValues,
+    fields: Record<string, LeadFormFieldDefault>,
+    submissionId: string,
+  ) => {
+    await ensureEcommerceProductLookup();
+    const productField =
+      (typeof data.ecommerce_product_field === "string" && data.ecommerce_product_field.trim()) ||
+      DEFAULT_ECOMMERCE_PRODUCT_FIELD;
+    const fieldRaw = fields[productField];
+    const fieldValue =
+      typeof fieldRaw === "string"
+        ? fieldRaw
+        : typeof fields.program === "string"
+          ? fields.program
+          : "";
+    const resolvedProduct = resolveConversionProduct({
+      funnel: pageFunnel,
+      contentType,
+      contentSlug: slug,
+      fieldValue,
+      productLookup: getEcommerceProductLookup(),
+    });
+    if (!resolvedProduct.ok) {
+      console.warn(
+        `[LeadForm] ecommerce product not resolved for analytics (${resolvedProduct.reason}). CRM program unchanged.`,
+        { productField, fieldValue },
+      );
+    }
+    const tracking: FormSubmissionTrackingData = {
+      email: formValues.email,
+      first_name: formValues.first_name,
+      last_name: formValues.last_name,
+      phone: formValues.phone,
+      program: typeof fields.program === "string" ? fields.program : undefined,
+      ...(resolvedProduct.ok
+        ? { item_id: resolvedProduct.item_id, program_id: resolvedProduct.program_id }
+        : {}),
+      plan: typeof fields.plan === "string" ? fields.plan : undefined,
+      location: typeof fields.location === "string" ? fields.location : undefined,
+      region: typeof fields.region === "string" ? fields.region : undefined,
+      coupon: typeof fields.coupon === "string" ? fields.coupon : undefined,
+      referral_key: typeof fields.referral_key === "string" ? fields.referral_key : undefined,
+      client_comments: formValues.client_comments,
+      current_download:
+        typeof fields.current_download === "string" ? fields.current_download : undefined,
+      consent_email: formValues.consent_email,
+      consent_sms: formValues.consent_sms,
+      consent_whatsapp: formValues.consent_whatsapp,
+      consent_general: formValues.consent_general,
+      ...Object.fromEntries(
+        extraConsentFields.map((field) => [
+          `consent_${field}`,
+          Boolean(formValues[`consent_${field}`]),
+        ]),
+      ),
+      ...Object.fromEntries(
+        Object.entries(fields).filter(([, value]) => isNonEmptyLeadFormWireScalar(value)),
+      ),
+      submission_id: submissionId,
+    };
+    await trackFormSubmission(eventName, tracking);
+  };
+
   const submitMutation = useMutation({
     mutationFn: async (values: FormValues) => {
       // Map consent fields to backend field names
@@ -1656,19 +1722,20 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
             setConsumerToken(newToken);
             submitAuthToken = newToken;
           }
-          trackConversion(authConversionCfg.signup_event_name, {
-            email: typeof values.email === "string" ? values.email : undefined,
-            first_name: typeof values.first_name === "string" ? values.first_name : undefined,
-            last_name: typeof values.last_name === "string" ? values.last_name : undefined,
-            phone: typeof values.phone === "string" ? values.phone : undefined,
-            plan: typeof fields.plan === "string" ? fields.plan : undefined,
-            program: typeof fields.program === "string" ? fields.program : undefined,
-          });
+          await trackLeadConversion(
+            authConversionCfg.signup_event_name,
+            values,
+            fields,
+            submissionId,
+          );
         } catch {
           // Signup succeeded but response was not JSON — continue as guest
-          trackConversion(authConversionCfg.signup_event_name, {
-            email: typeof values.email === "string" ? values.email : undefined,
-          });
+          await trackLeadConversion(
+            authConversionCfg.signup_event_name,
+            values,
+            fields,
+            submissionId,
+          );
         }
       }
 
@@ -1762,70 +1829,7 @@ export default function LeadForm({ data, termsStyle }: LeadFormProps) {
         );
       }
       if (effective.conversion_name && !skipFormConversion) {
-        await ensureEcommerceProductLookup();
-        const productField =
-          (typeof data.ecommerce_product_field === "string" && data.ecommerce_product_field.trim()) ||
-          DEFAULT_ECOMMERCE_PRODUCT_FIELD;
-        const fieldRaw = (fields as Record<string, unknown>)[productField];
-        const fieldValue =
-          typeof fieldRaw === "string"
-            ? fieldRaw
-            : typeof fields.program === "string"
-              ? fields.program
-              : "";
-        const resolvedProduct = resolveConversionProduct({
-          funnel: pageFunnel,
-          contentType,
-          contentSlug: slug,
-          fieldValue,
-          productLookup: getEcommerceProductLookup(),
-        });
-        if (!resolvedProduct.ok) {
-          console.warn(
-            `[LeadForm] ecommerce product not resolved for analytics (${resolvedProduct.reason}). CRM program unchanged.`,
-            { productField, fieldValue },
-          );
-        }
-        await trackFormSubmission(
-          effective.conversion_name,
-          {
-            email: variables.email,
-            first_name: variables.first_name,
-            last_name: variables.last_name,
-            phone: variables.phone,
-            program: typeof fields.program === "string" ? fields.program : undefined,
-            ...(resolvedProduct.ok
-              ? { item_id: resolvedProduct.item_id, program_id: resolvedProduct.program_id }
-              : {}),
-            plan: typeof fields.plan === "string" ? fields.plan : undefined,
-            location: typeof fields.location === "string" ? fields.location : undefined,
-            region: typeof fields.region === "string" ? fields.region : undefined,
-            coupon: typeof fields.coupon === "string" ? fields.coupon : undefined,
-            referral_key:
-              typeof fields.referral_key === "string" ? fields.referral_key : undefined,
-            client_comments: variables.client_comments,
-            current_download:
-              typeof fields.current_download === "string"
-                ? fields.current_download
-                : undefined,
-            consent_email: variables.consent_email,
-            consent_sms: variables.consent_sms,
-            consent_whatsapp: variables.consent_whatsapp,
-            consent_general: variables.consent_general,
-            ...Object.fromEntries(
-              extraConsentFields.map((field) => [
-                `consent_${field}`,
-                Boolean(variables[`consent_${field}`]),
-              ]),
-            ),
-            ...Object.fromEntries(
-              Object.entries(fields).filter(([, value]) =>
-                isNonEmptyLeadFormWireScalar(value),
-              ),
-            ),
-            submission_id: submissionId,
-          }
-        );
+        await trackLeadConversion(effective.conversion_name, variables, fields, submissionId);
 
         // The secondary curated webhook is only fired when ALL three webhook levels
         // are unconfigured (i.e., primary submission went to Breathecode).
