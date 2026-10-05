@@ -18,7 +18,8 @@ const log = child({ component: "cpu-profile" });
 export const CPU_PROFILE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** The performance page treats a heartbeat older than this as a stopped recorder. */
 export const CPU_CAPTURE_STALE_MS = 2 * 60 * 1000;
-export const CPU_CAPTURE_JSON_MAX_BYTES = 512 * 1024;
+/** Thirty functions on eight threads, with long native names, still fit under this. */
+export const CPU_CAPTURE_JSON_MAX_BYTES = 1024 * 1024;
 const SERVICE_DATA_MAX_BYTES = 40 * 1024 * 1024;
 const META_MAX_BYTES = 8 * 1024;
 const NAME_MAX = 300;
@@ -26,7 +27,7 @@ const ERROR_MAX = 400;
 const SCRIPT_TIMEOUT_MS = 60_000;
 const MAX_SCRIPT_STDOUT = 20 * 1024 * 1024;
 const MAX_THREADS = 8;
-const MAX_FRAMES = 6;
+const MAX_FRAMES = 30;
 const MAX_CALLERS = 3;
 
 export type CpuFrameKind = "js" | "native" | "kernel";

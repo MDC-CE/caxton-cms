@@ -92,6 +92,19 @@ WorkerThread   93425
       { function: "handleRequest", file: "server/routes/index.ts:3" },
     ]);
   });
+
+  it("keeps the 30 functions that ran the most", () => {
+    const chunks: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const name = `fn${String(i).padStart(2, "0")}`;
+      chunks.push(`node 1\n\t${name} (server/a.ts:1)\n`);
+      chunks.push(`node 1\n\t${name} (server/a.ts:1)\n`);
+    }
+    chunks.push("node 1\n\tonce (server/a.ts:1)\n");
+    const threads = parsePerfScript(chunks.join("\n"));
+    expect(threads[0].frames).toHaveLength(30);
+    expect(threads[0].frames.some((frame) => frame.function === "once")).toBe(false);
+  });
 });
 
 describe("cpu profile files", () => {

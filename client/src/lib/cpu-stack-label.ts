@@ -86,6 +86,13 @@ type StackCapture =
   | { ok: true; threads: Array<{ name: string; percent: number; frames: StackFrame[] }> }
   | { ok: false; error: string };
 
+/** Share of this thread covered by the stored functions. Frame percents are shares of the whole recording. */
+export function cpuThreadCoverage(threadPercent: number, framePercents: number[]): number | null {
+  if (!(threadPercent > 0)) return null;
+  const covered = framePercents.reduce((sum, value) => sum + value, 0);
+  return Math.min(100, Math.round((covered / threadPercent) * 1000) / 10);
+}
+
 /** The unshortened stack, for pasting into an agent chat. */
 export function formatCpuStackRaw(stack: StackCapture): string {
   if (!stack.ok) return stack.error;

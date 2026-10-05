@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCpuStackRaw, labelCpuSymbol } from "./cpu-stack-label";
+import { cpuThreadCoverage, formatCpuStackRaw, labelCpuSymbol } from "./cpu-stack-label";
 
 const node = "/home/alejandro/.nvm/versions/node/v24.18.0/bin/node";
 
@@ -71,5 +71,15 @@ describe("cpu stack labels", () => {
     });
     expect(text).toContain("JS:*burnFromOurRoute file:///home/alejandro/wsl-projects/website/website-v3/server/dev-cpu-burn-route.ts:1:197 /tmp/perf-1773.map");
     expect(text).toContain(`called by Builtins_InterpreterEntryTrampoline ${node}`);
+  });
+});
+
+describe("cpu thread coverage", () => {
+  it("reports the stored functions as a share of the thread", () => {
+    expect(cpuThreadCoverage(97.7, [6.8, 6.6, 6.3, 3.3, 2.6, 2.5])).toBe(28.8);
+  });
+
+  it("stays blank when the thread has no samples", () => {
+    expect(cpuThreadCoverage(0, [1])).toBeNull();
   });
 });

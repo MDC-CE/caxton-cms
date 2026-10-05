@@ -32,7 +32,7 @@ import {
   type ProcessName,
   type RangePreset,
 } from "@/lib/server-performance-url";
-import { formatCpuStackRaw, labelCpuSymbol } from "@/lib/cpu-stack-label";
+import { cpuThreadCoverage, formatCpuStackRaw, labelCpuSymbol } from "@/lib/cpu-stack-label";
 
 const P50_MIN = 5;
 const P95_MIN = 20;
@@ -1962,6 +1962,8 @@ function ArrowFnMark({ kind }: { kind: CpuProfileFrame["kind"] }) {
   );
 }
 
+const VISIBLE_STACK_FRAMES = 6;
+
 function CpuStackList({
   stacks,
   capture,
@@ -1974,6 +1976,7 @@ function CpuStackList({
   const [listOpen, setListOpen] = useState(false);
   const [openThread, setOpenThread] = useState<string | null>(null);
   const [openFrame, setOpenFrame] = useState<string | null>(null);
+  const [framesOpen, setFramesOpen] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const visible = listOpen ? stacks : stacks.slice(0, 3);
   const hidden = stacks.length - visible.length;
@@ -2059,6 +2062,9 @@ function CpuStackList({
                       {stack.threads.map((thread) => {
                     const threadKey = `${stack.timestamp}:${thread.name}`;
                     const threadOpen = openThread === threadKey;
+                    const shownFrames = framesOpen.has(threadKey) ? thread.frames : thread.frames.slice(0, VISIBLE_STACK_FRAMES);
+                    const hiddenFrames = thread.frames.length - VISIBLE_STACK_FRAMES;
+                    const coverage = cpuThreadCoverage(thread.percent, thread.frames.map((frame) => frame.percent));
                     return (
                       <Fragment key={thread.name}>
                         <TableRow
@@ -2083,7 +2089,7 @@ function CpuStackList({
                               <span className="w-24 shrink-0" title="JavaScript, native code, or the kernel">Kind</span>
                               <span className="w-36 shrink-0 text-right" title="Percent of samples in this 20-second recording where this function was running">Execution %</span>
                             </li>
-                            {thread.frames.map((frame, index) => {
+                            {shownFrames.map((frame, index) => {
                               const frameKey = `${threadKey}:${index}`;
                               const frameOpen = openFrame === frameKey;
                               const label = labelCpuSymbol(frame.function, frame.file, frame.kind);
@@ -2128,9 +2134,28 @@ function CpuStackList({
                                 </li>
                               );
                             })}
-                            <li className="px-3 py-1.5 text-xs text-muted-foreground">
-                              Up to 6 functions, the ones running for the largest share of the sample.
-                            </li>
+                            {hiddenFrames > 0 && (
+                              <li className="flex justify-center px-3 py-1.5">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => setFramesOpen((current) => {
+                                    const next = new Set(current);
+                                    if (next.has(threadKey)) next.delete(threadKey);
+                                    else next.add(threadKey);
+                                    return next;
+                                  })}
+                                >
+                                  {framesOpen.has(threadKey) ? "See less" : `See more (${hiddenFrames})`}
+                                </Button>
+                              </li>
+                            )}
+                            {coverage != null && (
+                              <li className="px-3 py-1.5 text-xs text-muted-foreground">
+                                Listed functions cover {coverage}% of this thread.
+                              </li>
+                            )}
                           </ul>
                           </div>
                             </TableCell>
