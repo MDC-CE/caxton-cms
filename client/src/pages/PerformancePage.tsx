@@ -1195,6 +1195,44 @@ function PerformanceInner() {
       for (const [key, count] of Object.entries(row.ssrCounts ?? {})) reportSsr[key] = (reportSsr[key] ?? 0) + count;
     }
     const showSsr = reportRoutes.some((row) => row.kind === "pages");
+    const sampleFrom = detailFrom ?? detail.startingAt;
+    const sampleTo = detailTo ?? detail.endingAt;
+    const samples = windows.flatMap((row) => {
+      if (row.timestamp < sampleFrom || row.timestamp > sampleTo) return [];
+      const hasProcess = row.cpuProcessPercent != null
+        || row.eventLoop != null
+        || row.heapUsedMb != null
+        || row.rssMb != null
+        || row.cpuUserPercent != null
+        || row.cpuSystemPercent != null
+        || row.cpuMainThreadPercent != null
+        || row.cpuOtherThreadsPercent != null
+        || row.cpuMachinePercent != null
+        || row.garbageCollectionPauseMs != null
+        || row.garbageCollectionMaxPauseMs != null
+        || row.inFlightMaxRequests != null
+        || row.openFds != null;
+      if (!hasProcess) return [];
+      return [{
+        time: formatClock(row.timestamp, true),
+        cpu: row.cpuProcessPercent,
+        eventLoopP50Ms: row.eventLoop?.p50Ms ?? null,
+        eventLoopP99Ms: row.eventLoop?.p99Ms ?? null,
+        eventLoopMaxMs: row.eventLoop?.maxMs ?? null,
+        heapMb: row.heapUsedMb,
+        rssMb: row.rssMb,
+        userCpu: row.cpuUserPercent,
+        kernelCpu: row.cpuSystemPercent,
+        mainThreadCpu: row.cpuMainThreadPercent,
+        otherThreadsCpu: row.cpuOtherThreadsPercent,
+        machineCpu: row.cpuMachinePercent,
+        gcPauseMs: row.garbageCollectionPauseMs,
+        gcMaxPauseMs: row.garbageCollectionMaxPauseMs,
+        inFlight: row.inFlightMaxRequests,
+        openFds: row.openFds,
+        openFdsLimit: row.openFdsLimit,
+      }];
+    });
     const logRows = detail.logs ?? [];
     const logNote = detail.logsCoverage === "none"
       ? `No data before ${formatClock(detail.endingAt)}.`
@@ -1206,6 +1244,7 @@ function PerformanceInner() {
       process: parsed.process,
       range: detailRange,
       window: windowBadge?.label ?? null,
+      samples,
       duration: detail.mixedBounds
         ? null
         : {

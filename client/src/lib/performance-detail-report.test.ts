@@ -5,6 +5,7 @@ const base = {
   process: "web",
   range: "Oct 5, 14:16 – 14:46",
   window: "30 min",
+  samples: null,
   duration: null,
   routes: null,
   running: null,
@@ -20,6 +21,62 @@ describe("buildPerformanceDetailMarkdown", () => {
     expect(text).not.toContain("**View:**");
     expect(text).not.toContain("**Window:**");
     expect(text).toContain("No logs in this span.");
+    expect(text).not.toContain("## Process samples");
+  });
+
+  it("lists every process sample and adds a column only when some point has it", () => {
+    const blank = {
+      cpu: null,
+      eventLoopP50Ms: null,
+      eventLoopP99Ms: null,
+      eventLoopMaxMs: null,
+      heapMb: null,
+      rssMb: null,
+      userCpu: null,
+      kernelCpu: null,
+      mainThreadCpu: null,
+      otherThreadsCpu: null,
+      machineCpu: null,
+      gcPauseMs: null,
+      gcMaxPauseMs: null,
+      inFlight: null,
+      openFds: null,
+      openFdsLimit: null,
+    };
+    const text = buildPerformanceDetailMarkdown({
+      ...base,
+      samples: [
+        {
+          ...blank,
+          time: "Oct 5, 14:16:00",
+          cpu: 82,
+          eventLoopP50Ms: 4,
+          eventLoopP99Ms: 40,
+          eventLoopMaxMs: 120,
+          heapMb: 180,
+          rssMb: 420,
+          userCpu: 70,
+          openFds: 12,
+          openFdsLimit: 1024,
+        },
+        {
+          ...blank,
+          time: "Oct 5, 14:16:30",
+          cpu: 10,
+          eventLoopP50Ms: 2,
+          eventLoopP99Ms: 8,
+          eventLoopMaxMs: 15,
+          heapMb: null,
+          rssMb: 400,
+        },
+      ],
+    });
+    expect(text).toContain("## Process samples");
+    expect(text).toContain("| Time | CPU % | Event loop p50 ms | Event loop p99 ms | Event loop max ms | Heap MB | RSS MB | Your code % | File descriptors |");
+    expect(text).toContain("| Oct 5, 14:16:00 | 82 | 4 | 40 | 120 | 180 | 420 | 70 | 12 / 1024 |");
+    expect(text).toContain("| Oct 5, 14:16:30 | 10 | 2 | 8 | 15 | — | 400 | — | — |");
+    expect(text).not.toContain("Kernel %");
+    expect(text).not.toContain("GC pause");
   });
 
   it("lists duration buckets and the slow share", () => {

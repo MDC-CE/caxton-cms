@@ -22,10 +22,32 @@ export type PerformanceDetailStack =
   | { when: string; ok: true; threads: Array<{ name: string; percent: number; frames: StackFrame[] }> }
   | { when: string; ok: false; error: string };
 
+export type ProcessSample = {
+  time: string;
+  cpu: number | null;
+  eventLoopP50Ms: number | null;
+  eventLoopP99Ms: number | null;
+  eventLoopMaxMs: number | null;
+  heapMb: number | null;
+  rssMb: number | null;
+  userCpu: number | null;
+  kernelCpu: number | null;
+  mainThreadCpu: number | null;
+  otherThreadsCpu: number | null;
+  machineCpu: number | null;
+  gcPauseMs: number | null;
+  gcMaxPauseMs: number | null;
+  inFlight: number | null;
+  openFds: number | null;
+  openFdsLimit: number | null;
+};
+
 export type PerformanceDetailReportInput = {
   process: string;
   range: string;
   window: string | null;
+  /** One row per chart point in the range. Null skips the section. */
+  samples: ProcessSample[] | null;
   duration: {
     buckets: Array<{ label: string; count: number }>;
     total: number;
@@ -133,6 +155,46 @@ function countLine(counts: Record<string, number> | undefined, labels?: Record<s
     .join(", ");
 }
 
+function num(value: number | null): string {
+  return value == null ? "—" : String(value);
+}
+
+function fds(sample: ProcessSample): string {
+  if (sample.openFds == null) return "—";
+  return sample.openFdsLimit == null ? String(sample.openFds) : `${sample.openFds} / ${sample.openFdsLimit}`;
+}
+
+function processSampleTable(samples: ProcessSample[]): string {
+  const columns: Array<{ header: string; cell: (sample: ProcessSample) => string }> = [
+    { header: "Time", cell: (sample) => sample.time },
+    { header: "CPU %", cell: (sample) => num(sample.cpu) },
+    { header: "Event loop p50 ms", cell: (sample) => num(sample.eventLoopP50Ms) },
+    { header: "Event loop p99 ms", cell: (sample) => num(sample.eventLoopP99Ms) },
+    { header: "Event loop max ms", cell: (sample) => num(sample.eventLoopMaxMs) },
+    { header: "Heap MB", cell: (sample) => num(sample.heapMb) },
+    { header: "RSS MB", cell: (sample) => num(sample.rssMb) },
+  ];
+  const optional: Array<{ header: string; has: (sample: ProcessSample) => boolean; cell: (sample: ProcessSample) => string }> = [
+    { header: "Your code %", has: (sample) => sample.userCpu != null, cell: (sample) => num(sample.userCpu) },
+    { header: "Kernel %", has: (sample) => sample.kernelCpu != null, cell: (sample) => num(sample.kernelCpu) },
+    { header: "Main thread %", has: (sample) => sample.mainThreadCpu != null, cell: (sample) => num(sample.mainThreadCpu) },
+    { header: "Other threads %", has: (sample) => sample.otherThreadsCpu != null, cell: (sample) => num(sample.otherThreadsCpu) },
+    { header: "Machine %", has: (sample) => sample.machineCpu != null, cell: (sample) => num(sample.machineCpu) },
+    { header: "GC pause ms", has: (sample) => sample.gcPauseMs != null, cell: (sample) => num(sample.gcPauseMs) },
+    { header: "GC max pause ms", has: (sample) => sample.gcMaxPauseMs != null, cell: (sample) => num(sample.gcMaxPauseMs) },
+    { header: "In-flight", has: (sample) => sample.inFlight != null, cell: (sample) => num(sample.inFlight) },
+    { header: "File descriptors", has: (sample) => sample.openFds != null, cell: fds },
+  ];
+  for (const column of optional) {
+    if (samples.some(column.has)) columns.push(column);
+  }
+  return table(
+    columns.map((column) => column.header),
+    samples.map((sample) => columns.map((column) => column.cell(sample))),
+    columns.map((column) => column.header !== "Time"),
+  );
+}
+
 function kindLabel(kind: CpuStackSymbolKind): string {
   if (kind === "js") return "JavaScript";
   if (kind === "kernel") return "Kernel";
@@ -145,6 +207,10 @@ export function buildPerformanceDetailMarkdown(input: PerformanceDetailReportInp
   parts.push(`- **Process:** ${input.process}`);
   parts.push(`- **Range:** ${input.range}`);
   if (input.window) parts.push(`- **Window:** ${input.window}`);
+
+  if (input.samples && input.samples.length > 0) {
+    parts.push("", "## Process samples", "", processSampleTable(input.samples));
+  }
 
   if (input.duration && input.duration.buckets.some((bucket) => bucket.count > 0)) {
     parts.push(
