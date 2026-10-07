@@ -1,3 +1,5 @@
+import { isReservedContentSlug } from "@shared/safe-href";
+
 export function normalizeLocale(locale: string | undefined | null): string {
   if (!locale) return "en";
   const normalized = locale.toLowerCase().split("-")[0].split("_")[0];
@@ -28,12 +30,16 @@ export function buildContentUrlFromPattern(
   locale: string,
   extraParams?: Record<string, string>,
 ): string {
+  if (slug == null || isReservedContentSlug(String(slug))) {
+    return "";
+  }
   if (!urlPattern) return `/${locale}/${slug}`;
   const pattern = urlPattern[locale] || urlPattern["default"] || urlPattern["en"];
   if (!pattern) return `/${locale}/${slug}`;
   let result = pattern.replace(/:slug/g, slug).replace(/:locale/g, locale);
   if (extraParams) {
     for (const [key, value] of Object.entries(extraParams)) {
+      if (value == null || isReservedContentSlug(String(value))) continue;
       if (!value) continue;
       result = result.replace(new RegExp(`:${key}\\b`, "g"), value);
     }

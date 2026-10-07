@@ -31,6 +31,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { SectionRenderer } from "@/components/SectionRenderer";
+import { VariantGuidanceDialog } from "@/components/registry/VariantGuidanceDialog";
 import type { Section } from "@shared/schema";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
@@ -615,6 +616,11 @@ function ComponentCard({
             </div>
             {/* Desktop-only buttons */}
             <div className="hidden sm:flex items-center gap-2">
+            <VariantGuidanceDialog
+              componentType={componentType}
+              version={selectedVersion}
+              variant={examples.find(ex => ex.name === selectedExample)?.variant || examples[0]?.variant || 'default'}
+            />
             {(() => {
               const currentExample = examples.find(ex => ex.name === selectedExample);
               if (!currentExample?.description) return null;

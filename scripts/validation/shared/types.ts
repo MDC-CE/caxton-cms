@@ -7,6 +7,7 @@
 
 import type { ValidationScope, ValidatorRunClass } from "./runClass";
 import type { ContentIndex } from "../../../server/content-index";
+import type { AdsCompletionVerify, AdsIssueLevel, AdsStoredIssueData } from "../../../shared/ads-issues";
 
 export type { ValidationScope, ValidatorRunClass } from "./runClass";
 
@@ -32,6 +33,22 @@ export interface ValidationIssue {
   validator?: string;
   /** When the validation cache / run that produced this issue was built (ISO). */
   validationCacheBuiltAt?: string;
+  /** The page was checked against a database copy this old (ms); the source may already be fixed. */
+  staleSourceAgeMs?: number;
+  /** Database whose old copy the page was checked against. */
+  staleSourceDatabase?: string;
+  /** SOURCE_ITEM_REMOVED: suggested redirect for the removed page plus the old addresses that move with it. */
+  redirectSuggestion?: RemovedPageRedirectSuggestion;
+}
+
+export interface RemovedPageRedirectSuggestion {
+  content_type: string;
+  slug: string;
+  locale: string;
+  from: string;
+  to: string;
+  reason: "cluster_main_page" | "listing_page" | "home_page";
+  inbound: { from: string; status: number; source: string; all_languages: boolean }[];
 }
 
 export interface ValidatorResult {
@@ -75,7 +92,7 @@ export interface ValidatorMetadata {
   description: string;
   apiExposed: boolean;
   estimatedDuration: "fast" | "medium" | "slow";
-  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings";
+  category: "content" | "seo" | "integrity" | "components" | "performance" | "forms" | "bindings" | "ads" | "design";
   /** Execution / clear-scope class. Defaults via runClass.ts map when omitted. */
   runClass?: ValidatorRunClass;
   /** Optional catalog of codes this validator may emit. */
@@ -98,7 +115,9 @@ export type IssueTarget =
   | { type: "redirect"; from: string }
   | { type: "media"; imageId: string }
   | { type: "database"; dbSlug: string }
-  | { type: "file"; path: string };
+  | { type: "file"; path: string }
+  /** Ads ladder: account → campaign → ad set → ad (`none` = site-wide Ads check). */
+  | { type: "ads"; platform: "meta" | "google" | "shared"; level: AdsIssueLevel; id: string | null };
 
 export interface StoredValidationIssue {
   id: string;
@@ -114,6 +133,11 @@ export interface StoredValidationIssue {
   category?: ValidatorMetadata["category"];
   lastSeenAt: string;
   lastRunAt: string;
+  staleSourceAgeMs?: number;
+  staleSourceDatabase?: string;
+  redirectSuggestion?: RemovedPageRedirectSuggestion;
+  /** Ads diagnostics issues only (`scopes: ["ads"]`). */
+  ads?: AdsStoredIssueData;
 }
 
 /** Soft-complete overlay — keyed by StoredValidationIssue.id; not part of the issue row. */
@@ -133,6 +157,8 @@ export interface ValidationIssueCompletion {
   actor?: ValidationIssueActor;
   /** MCP agent summary: what was changed and how. */
   report?: string;
+  /** Ads only: marked fixed, waiting to confirm (pending verification) — not resolved yet. */
+  verify?: AdsCompletionVerify;
 }
 
 /** In-progress claim overlay — keyed by StoredValidationIssue.id; TTL-based. */
@@ -166,7 +192,8 @@ export interface ResolvedIssueArchiveRow {
   actor?: ValidationIssueActor;
   report?: string;
   agent_session_id?: string;
-  resolution: "verified_gone" | "soft_complete";
+  /** resource_gone / rule_retired: Ads issue that no longer applies (deleted in the platform / check removed). */
+  resolution: "verified_gone" | "soft_complete" | "resource_gone" | "rule_retired";
   reopenedAt?: string;
 }
 
@@ -211,6 +238,8 @@ export interface ValidationCacheIndexes {
   byMedia: Record<string, string[]>;
   byDatabase: Record<string, string[]>;
   byRedirect: Record<string, string[]>;
+  /** Ads ladder: `${platform}:${level}:${id}` and `${platform}:ad:${adId}` per affected ad → issue ids. */
+  byAds?: Record<string, string[]>;
   /** Secondary: public URL → entryKey */
   byUrl: Record<string, string>;
 }
@@ -293,6 +322,13 @@ export interface ContentFile {
   version?: number;
   /** Merged entry bag for required-field checks (subset of YAML). */
   entryFields?: Record<string, unknown>;
+  /** Mapped database item the template fills from (database-backed entries). */
+  singleEntry?: Record<string, unknown>;
+  /** Key shared by every language version of this page; defaults to `slug`. */
+  translationGroup?: string;
+  /** Loaded from a database copy older than its cache TTL (age in ms). */
+  staleSourceAgeMs?: number;
+  staleSourceDatabase?: string;
 }
 
 export interface RedirectEntry {
@@ -322,6 +358,12 @@ export interface ValidationContext {
    *  schema-org.yml) must use this instead of hardcoded folder names. */
   contentRoot?: string;
   scope?: { database?: string };
+  /** Databases with no cached items this run; their pages were not checked. */
+  skippedDatabases?: string[];
+  /** Content types whose pages were not loaded this run (existing issues must be kept). */
+  skippedContentTypes?: string[];
+  /** Databases whose pages were checked against a copy older than the cache TTL. */
+  staleDatabases?: Array<{ name: string; fetchedAt: string; ageMs: number; contentTypes: string[] }>;
 }
 
 export interface ValidationRunOptions {

@@ -1,0 +1,113 @@
+/**
+ * Dev-only: replace local lead-ledger rows and daily consent counters with production's.
+ * Never uploads. Local test leads (`is_test = 1`) are kept. The ledger stores no name,
+ * email or phone (personal data only goes to the CRM webhook), so the export is safe to copy.
+ */
+
+import {
+  fetchProductionAdmin,
+  resolveProductionOrigin,
+  type ProductionStaffTokenRequiredPayload,
+} from "../dev-production-fetch";
+import { getSiteSqlite } from "../db";
+import { ensurePipelineDb } from "../pipeline-db/runner";
+import { listLedgerRows, replaceLedgerFromSnapshot, type LedgerRow } from "./lead-ledger";
+import { listConsentDaily, replaceConsentFromSnapshot, utcDateKey, type ConsentDailyRow } from "./consent-store";
+
+export const LEADS_PULL_DEFAULT_DAYS = 90;
+const DAY_MS = 86_400_000;
+
+export type LeadsExportPayload = {
+  leads: LedgerRow[];
+  consent_daily: ConsentDailyRow[];
+  /** Epoch ms; consent rows start at this UTC day. */
+  since: number;
+};
+
+export function defaultLeadsSince(now = Date.now(), days = LEADS_PULL_DEFAULT_DAYS): number {
+  return Date.parse(`${utcDateKey(now - (days - 1) * DAY_MS)}T00:00:00.000Z`);
+}
+
+/** Production side: ledger rows and consent counters from `sinceMs` onward. */
+export function buildLeadsExport(site: string, sinceMs: number): LeadsExportPayload {
+  return {
+    leads: listLedgerRows(site, sinceMs),
+    consent_daily: listConsentDaily(site, utcDateKey(sinceMs)),
+    since: sinceMs,
+  };
+}
+
+export function parseLeadsExport(body: unknown): LeadsExportPayload | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (!Array.isArray(b.leads) || typeof b.since !== "number") return null;
+  return {
+    leads: b.leads.filter(
+      (r): r is LedgerRow => !!r && typeof r === "object" && typeof (r as LedgerRow).submission_id === "string" && typeof (r as LedgerRow).created_at === "number",
+    ),
+    consent_daily: Array.isArray(b.consent_daily)
+      ? b.consent_daily.filter((r): r is ConsentDailyRow => !!r && typeof r === "object" && typeof (r as ConsentDailyRow).date === "string")
+      : [],
+    since: b.since,
+  };
+}
+
+export type PullProductionLeadsResult = {
+  success: boolean;
+  pulled: boolean;
+  productionOrigin: string;
+  imported_leads: number;
+  imported_consent_days: number;
+  since: number;
+  reason?: string;
+  not_supported?: boolean;
+} & Partial<ProductionStaffTokenRequiredPayload>;
+
+export async function pullProductionLeads(
+  site: string,
+  opts: { sinceMs?: number; productionOrigin?: string } = {},
+  deps: { fetchAdmin?: typeof fetchProductionAdmin } = {},
+): Promise<PullProductionLeadsResult> {
+  const since = opts.sinceMs ?? defaultLeadsSince();
+  const productionOrigin = opts.productionOrigin?.replace(/\/$/, "") || resolveProductionOrigin(site);
+  const fail = (reason: string, extra: Partial<PullProductionLeadsResult> = {}): PullProductionLeadsResult => ({
+    success: false,
+    pulled: false,
+    productionOrigin: productionOrigin ?? "",
+    imported_leads: 0,
+    imported_consent_days: 0,
+    since,
+    reason,
+    ...extra,
+  });
+
+  if (!productionOrigin) {
+    return fail("Could not resolve production URL for this site. Set PRODUCTION_SITE_URL or configure the site domain in sites.yml.");
+  }
+
+  const url = new URL("/api/ads/leads/export", productionOrigin);
+  url.searchParams.set("since", String(since));
+  const result = await (deps.fetchAdmin ?? fetchProductionAdmin)(url, { method: "GET" }, productionOrigin);
+  if (!result.ok) {
+    if (result.kind === "token_required") return fail(result.payload.error, { ...result.payload });
+    if (result.kind === "network") return fail(result.error);
+    if (result.status === 404) {
+      return fail("Production doesn't support lead downloads yet. Deploy this change to production first.", { not_supported: true });
+    }
+    return fail(`Production returned HTTP ${result.status}${result.body ? `: ${result.body.slice(0, 200)}` : ""}`);
+  }
+
+  const snap = parseLeadsExport(await result.response.json().catch(() => null));
+  if (!snap) return fail("Production sent a lead export this server could not read.");
+
+  try {
+    ensurePipelineDb(site);
+    const { imported_leads, imported_consent_days } = getSiteSqlite(site).transaction(() => ({
+      imported_leads: replaceLedgerFromSnapshot(site, snap.leads, since),
+      imported_consent_days: replaceConsentFromSnapshot(site, snap.consent_daily, utcDateKey(since)),
+    }))();
+    return { success: true, pulled: true, productionOrigin, imported_leads, imported_consent_days, since };
+  } catch (err) {
+    return fail(`Could not save the lead download (${err instanceof Error ? err.message : String(err)}).`);
+  }
+}

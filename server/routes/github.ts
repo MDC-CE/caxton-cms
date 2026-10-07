@@ -166,7 +166,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -1518,7 +1517,7 @@ export function registerGithubRoutes(app: Express): void {
   // Commit and push pending changes to GitHub
   app.post("/api/github/commit", async (req, res) => {
     try {
-      const { message, force, author, files, queue } = req.body;
+      const { message, force, author, files, queue, confirm_proposal_drafts } = req.body;
       if (
         !message ||
         typeof message !== "string" ||
@@ -1553,6 +1552,30 @@ export function registerGithubRoutes(app: Express): void {
           const staff = await requireStaffSession(req, res);
           if (!staff.authorized) return;
           actingUsername = staff.username || authorName || null;
+        }
+      }
+
+      if (confirm_proposal_drafts !== true) {
+        const { proposalDraftsNeedingConfirm, CONFIRM_PROPOSAL_DRAFTS_MESSAGE } = await import(
+          "../proposal-draft-push-guard"
+        );
+        const contentRoot = (res.locals.site as { contentRootName?: string } | undefined)?.contentRootName;
+        let candidates: string[] = Array.isArray(files) ? files.filter((f: unknown): f is string => typeof f === "string") : [];
+        if (!Array.isArray(files)) {
+          const { detectPendingChanges } = await import("../sync-state");
+          candidates = detectPendingChanges(contentRoot)
+            .filter((c) => c.source === "local" && c.status !== "deleted")
+            .map((c) => c.file);
+        }
+        const drafts = proposalDraftsNeedingConfirm(candidates, contentRoot);
+        if (drafts.length) {
+          res.status(409).json({
+            success: false,
+            action_required: "confirm_proposal_drafts",
+            error: CONFIRM_PROPOSAL_DRAFTS_MESSAGE,
+            files: drafts,
+          });
+          return;
         }
       }
 
@@ -1753,7 +1776,7 @@ export function registerGithubRoutes(app: Express): void {
   // Commit a single file to remote
   app.post("/api/github/commit-file", async (req, res) => {
     try {
-      const { filePath, message, author } = req.body;
+      const { filePath, message, author, confirm_proposal_drafts } = req.body;
       if (!filePath || !message) {
         res.status(400).json({ error: "Missing filePath or message" });
         return;
@@ -1761,6 +1784,23 @@ export function registerGithubRoutes(app: Express): void {
 
       const staff = await requireStaffSession(req, res);
       if (!staff.authorized) return;
+
+      if (confirm_proposal_drafts !== true) {
+        const { proposalDraftsNeedingConfirm, CONFIRM_PROPOSAL_DRAFTS_MESSAGE } = await import(
+          "../proposal-draft-push-guard"
+        );
+        const contentRoot = (res.locals.site as { contentRootName?: string } | undefined)?.contentRootName;
+        const drafts = proposalDraftsNeedingConfirm([String(filePath)], contentRoot);
+        if (drafts.length) {
+          res.status(409).json({
+            success: false,
+            action_required: "confirm_proposal_drafts",
+            error: CONFIRM_PROPOSAL_DRAFTS_MESSAGE,
+            files: drafts,
+          });
+          return;
+        }
+      }
 
       const actingUsername =
         (author && typeof author === "string" && author.trim()) ||

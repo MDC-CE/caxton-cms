@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/sheet";
 import { useToast } from "@/hooks/use-toast";
 import { useDebugAuth, getDebugToken, getDebugUserName, resolveAuthorName } from "@/hooks/useDebugAuth";
+import { useSlugRenameCheck } from "@/hooks/useSlugRenameCheck";
 import { useSystemAlerts } from "@/hooks/useSystemAlerts";
 import { useGitHubUserConnection } from "@/hooks/useGitHubUserConnection";
 import { queryClient } from "@/lib/queryClient";
@@ -74,6 +75,7 @@ const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditor
 const ContentTypesYmlEditorPanel = lazy(() => import("@/components/editing/ContentTypesYmlEditorPanel"));
 import { SessionModal } from "./components/SessionModal";
 import { StaffLogoutConfirmDialog } from "./components/StaffLogoutConfirmDialog";
+import { useProposalDraftPushConfirm } from "./useProposalDraftPushConfirm";
 import { SyncModal } from "./components/SyncModal";
 import { PullConflictModal } from "./components/PullConflictModal";
 import { ConfirmPullFileModal } from "./components/ConfirmPullFileModal";
@@ -293,6 +295,7 @@ export function DebugBubble() {
   const [manualActionsOpen, setManualActionsOpen] = useState(false);
   const [isPushingAllLocal, setIsPushingAllLocal] = useState(false);
   const [pushAllLocalError, setPushAllLocalError] = useState<string | null>(null);
+  const { pushWithConfirm, dialog: proposalDraftPushDialog } = useProposalDraftPushConfirm();
   
   // Create content modal state
   const [createContentModalOpen, setCreateContentModalOpen] = useState(false);
@@ -382,8 +385,6 @@ export function DebugBubble() {
   
   // Slug rename state
   const [newSlugValue, setNewSlugValue] = useState("");
-  const [slugCheckStatus, setSlugCheckStatus] = useState<"idle" | "checking" | "available" | "taken">("idle");
-  const [slugCheckReason, setSlugCheckReason] = useState<string | null>(null);
   const [slugRenaming, setSlugRenaming] = useState(false);
   const [slugRedirectPrompt, setSlugRedirectPrompt] = useState(false);
   const [slugOldUrl, setSlugOldUrl] = useState("");
@@ -478,8 +479,6 @@ export function DebugBubble() {
 
   useEffect(() => {
     setNewSlugValue("");
-    setSlugCheckStatus("idle");
-    setSlugCheckReason(null);
     setSlugRenaming(false);
     setSlugRedirectPrompt(false);
     setSlugOldUrl("");
@@ -493,8 +492,6 @@ export function DebugBubble() {
       if (!prev || prev === contentInfo.slug) return localeSlug;
       return prev;
     });
-    setSlugCheckStatus("idle");
-    setSlugCheckReason(null);
     setSlugRedirectPrompt(false);
   }, [seoModalOpen, seoData?.slug, contentInfo.slug]);
 
@@ -1148,12 +1145,11 @@ export function DebugBubble() {
       const token = getDebugToken();
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Token ${token}`;
-      const res = await fetch('/api/github/commit', {
+      const { data } = await pushWithConfirm('/api/github/commit', {
         method: 'POST',
         headers,
         body: JSON.stringify({ message: commitMessage, files, force: true }),
       });
-      const data = await res.json();
       if (data.success) {
         fetchPendingChanges();
         refreshSyncStatus();
@@ -1268,21 +1264,17 @@ export function DebugBubble() {
 
   const currentLocaleSlug = (seoData?.slug as string) || contentInfo.slug || "";
 
-  useEffect(() => {
-    if (!newSlugValue || !contentInfo.type || newSlugValue === currentLocaleSlug) {
-      setSlugCheckStatus("idle");
-      setSlugCheckReason(null);
-      return;
-    }
-    const slugRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    if (!slugRegex.test(newSlugValue)) {
-      setSlugCheckStatus("taken");
-      setSlugCheckReason("Use only lowercase letters, numbers, and hyphens");
-      return;
-    }
-    setSlugCheckStatus("available");
-    setSlugCheckReason(null);
-  }, [newSlugValue, contentInfo.type, currentLocaleSlug]);
+  const {
+    status: slugCheckStatus,
+    reason: slugCheckReason,
+    retry: retrySlugCheck,
+  } = useSlugRenameCheck({
+    contentType: contentInfo.type,
+    folderSlug: contentInfo.slug,
+    locale: getEffectiveLocale(),
+    newSlug: newSlugValue,
+    currentSlug: currentLocaleSlug,
+  });
 
   const handleSlugRename = async (createRedirect: boolean) => {
     if (!contentInfo.type || !contentInfo.slug || !newSlugValue || slugCheckStatus !== "available") return;
@@ -1467,7 +1459,7 @@ export function DebugBubble() {
     try {
       const forceCommit = syncContext?.forceCommitEnabled || false;
       const author = await resolveAuthorName();
-      const res = await fetch("/api/github/commit", {
+      const { data } = await pushWithConfirm("/api/github/commit", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1481,8 +1473,7 @@ export function DebugBubble() {
         }),
       });
       
-      const data = await res.json();
-      
+      if (data.cancelled) return;
       if (data.success) {
         setCommitModalOpen(false);
         setCommitMessage("");
@@ -1515,7 +1506,7 @@ export function DebugBubble() {
     setFileCommitting(filePath);
     try {
       const author = await resolveAuthorName();
-      const res = await fetch("/api/github/commit-file", {
+      const { data } = await pushWithConfirm("/api/github/commit-file", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1529,8 +1520,7 @@ export function DebugBubble() {
         }),
       });
       
-      const data = await res.json();
-      
+      if (data.cancelled) return;
       if (data.success) {
         // Remove committed file from pending changes
         const remainingChanges = pendingChanges.filter(c => c.file !== filePath);
@@ -1650,9 +1640,12 @@ export function DebugBubble() {
     }
   };
 
-  // Handle popover open/close - reset search but preserve menu view
+  // Handle popover open/close - reset search; on entry pages the bug always opens the root menu
   const handleOpenChange = (newOpen: boolean) => {
     setOpen(newOpen);
+    if (newOpen && contentInfo.type) {
+      setMenuView("main");
+    }
     if (!newOpen) {
       setSitemapSearch("");
       setShowSitemapSearch(false);
@@ -2321,6 +2314,7 @@ export function DebugBubble() {
 
   return (
     <div className="fixed bottom-4 left-4 z-50 flex flex-col gap-2 items-start" data-testid="debug-bubble">
+      {proposalDraftPushDialog}
       {showForkBubble && (
         <div className="relative flex items-center">
           {pageIsSharedLayout && (
@@ -2342,10 +2336,10 @@ export function DebugBubble() {
             className="h-10 w-10 rounded-full shadow-lg flex-shrink-0"
             title={
               pageIsDetached
-                ? "Page versions (detached)"
+                ? "Page Info (detached)"
                 : pageIsSharedLayout
-                  ? "Page versions (linked)"
-                  : "Variant versions"
+                  ? "Page Info (linked)"
+                  : "Page Info"
             }
             data-testid="button-fork-bubble"
             onClick={() => {
@@ -2738,6 +2732,7 @@ export function DebugBubble() {
         handleSlugRename={handleSlugRename}
         currentLocaleSlug={currentLocaleSlug}
         slugCheckReason={slugCheckReason}
+        onRetrySlugCheck={retrySlugCheck}
         setSlugRedirectPrompt={setSlugRedirectPrompt}
         locale={getEffectiveLocale()}
         contentTypeLabel={contentInfo.type ? contentInfo.label : undefined}

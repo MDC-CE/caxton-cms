@@ -129,6 +129,7 @@ import {
   resolveEntryUpdatedAt,
 } from "../content-types";
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
+import { loadMergedSinglePage } from "../entry-delivery";
 import { resolveAllTemplateVars } from "../resolve-template-vars";
 import {
   normalizeLocale,
@@ -172,8 +173,7 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
-import { getBaseUrl } from "../hreflang";
+import { getSiteBaseUrl } from "../site-urls";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
 import type { CapabilityName } from "../user-store";
@@ -1183,8 +1183,15 @@ export function registerSeoRoutes(app: Express): void {
         stale: kwForSerp ? !serpEntryFresh(serpCached) : false,
       };
 
+      const { findOriginIdeaForEntry } = await import("../content-proposals/idea-origin");
+      const origin = findOriginIdeaForEntry(contentRootName, contentType, row?.slug || slug);
+      const idea_origin = origin
+        ? { id: origin.id, title: origin.title, demand_label: origin.demand_label }
+        : null;
+
       res.json({
         id,
+        idea_origin,
         contentType,
         slug: row?.slug || (typeof data.slug === "string" ? data.slug : slug),
         locale: row?.locale || locale,
@@ -1345,7 +1352,7 @@ export function registerSeoRoutes(app: Express): void {
       }
 
       if (hasDatabaseSingle(contentType, getContentRoot(res))) {
-        const page = await loadDatabaseSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+        const page = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
         if (!page) {
           res.status(404).json({ error: "Content not found" });
           return;
@@ -1379,7 +1386,7 @@ export function registerSeoRoutes(app: Express): void {
           const collected = collectSectionSchemasDetailed(withDynamic, {
             locale,
             contentRoot: getContentRoot(res),
-            baseUrl: getBaseUrl(),
+            baseUrl: getSiteBaseUrl(getContentRoot(res)),
             contentType,
             pageUrl: typeof resolvedMeta.canonical_url === "string" ? resolvedMeta.canonical_url : undefined,
             title: typeof resolvedMeta.page_title === "string" ? resolvedMeta.page_title : undefined,
@@ -1519,14 +1526,17 @@ export function registerSeoRoutes(app: Express): void {
         const collected = collectSectionSchemasDetailed(withDynamic, {
           locale,
           contentRoot,
-          baseUrl: getBaseUrl(),
+          baseUrl: getSiteBaseUrl(contentRoot),
           contentType,
           locationSlug: getType(contentType) === "location" ? slug : undefined,
           programSlug: getType(contentType) === "program" ? slug : undefined,
           pageUrl:
             typeof displayMeta.canonical_url === "string"
               ? displayMeta.canonical_url
-              : undefined,
+              : (() => {
+                  const path = ci.getLocaleUrls(slug, contentType)[locale];
+                  return path ? `${getSiteBaseUrl(contentRoot)}${path}` : undefined;
+                })(),
           title:
             typeof displayMeta.page_title === "string"
               ? displayMeta.page_title

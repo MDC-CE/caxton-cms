@@ -163,7 +163,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -206,6 +205,7 @@ import {
 } from "./_helpers";
 import { getTrackingSettings } from "../settings";
 import { buildLeadPayload } from "../utils/buildLeadPayload";
+import { recordLeadSubmission } from "../ads/lead-ledger";
 import { isPrivateDestination } from "../../shared/ssrf";
 import { sanitizeWebhookHeaders } from "../../shared/webhookHeaders";
 import { DatabaseManager } from "../database";
@@ -498,7 +498,8 @@ export function registerFormsRoutes(app: Express): void {
         return;
       }
 
-      const cleanPayload = buildLeadPayload(leadData as Record<string, unknown>);
+      const enriched = await recordLeadSubmission(req, res, leadData as Record<string, unknown>);
+      const cleanPayload = buildLeadPayload(enriched);
 
       // Resolve webhook destination: global settings → DEFAULT_WEBHOOK_URL env var
       const globalWebhook = getTrackingSettings().webhook;

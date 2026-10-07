@@ -62,6 +62,8 @@ CMS redirects are a separate first-match layer on top of URL patterns. Two store
 
 For **database-backed** types (`database.slug` set), the slug comes from the database record via `field_mapping._slug`. For **static** types (including `single_template` types such as `blog`), the slug is the entry folder name / YAML identity (`_slug` → `slug`). The URL pattern still applies; `:slug` and other params (e.g. `:category`) resolve from mapped fields or folder data.
 
+Both are just entries for MCP reads and listings: `get_entry_content`, `get_entry_seo`, `get_entry_fields`, `list_entries`, sitemap and entry lists resolve a database slug from the stored copy (with `field_overrides` applied) the same way they read a folder. A database page exists only in its item's language, and an entry folder is not required. Slug lookup reads one type's copy; a typo is not found, and the not-found text names `empty_databases` (never copied) / `stale_databases` (old copy). When the item is gone upstream the page 404s and validation raises `SOURCE_ITEM_REMOVED` with a suggested redirect (see topic `redirects`).
+
 ## Canonical URLs and Open Graph
 
 Each page's `meta.canonical_url` field should match its resolved URL pattern. If omitted, the system auto-computes the canonical URL from the pattern. The `og:url` tag is injected alongside it.

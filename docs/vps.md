@@ -140,75 +140,59 @@ Keep `ReadWritePaths=/opt/website-v3` so `persistent/` remains writable.
 `UMask=0002` lets `website-runtime` create group-writable `site_*/.cache` so
 `website-deployer` (in group `website-runtime`) can prune old releases.
 
-**Sidequest (required for background jobs):** Express only enqueues; a separate unit runs the engine.
+### Process supervisor (pm2-runtime)
 
-```bash
-# /etc/systemd/system/website-sidequest.service
-[Unit]
-Description=Website Sidequest job engine
-After=network.target
+`scripts/start-production.sh` ends with `exec npx pm2-runtime start ecosystem.config.cjs`.
+pm2 supervises **web**, **MCP**, **Sidequest**, and **Qdrant** (MCP/Qdrant only if their binaries exist). One `systemctl restart website` relaunches all of them.
 
+Recommended drop-in (root, once):
+
+```ini
+# /etc/systemd/system/website.service.d/supervisor.conf
 [Service]
-Type=simple
-WorkingDirectory=/opt/website-v3/current
-EnvironmentFile=/opt/website-v3/current/.env
-ExecStart=/opt/website-v3/current/scripts/start-sidequest.sh
-UMask=0002
 Restart=always
 RestartSec=5
-# Same writable root as website.service so data/sidequest.sqlite is shared
-ReadWritePaths=/opt/website-v3
-
-[Install]
-WantedBy=multi-user.target
+OOMPolicy=continue
+TimeoutStopSec=60
+MemoryMax=6G
 ```
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now website-sidequest
 sudo systemctl restart website
 curl -fsS http://127.0.0.1:5000/health
-sudo systemctl is-active website-sidequest
-# Optional: cat /opt/website-v3/current/data/sidequest.pid  (web probes this PID)
+# Sidequest PID (web probes this):
+cat /opt/website-v3/current/data/sidequest.pid
 ```
 
-Until the Sidequest unit is enabled, saves still succeed but index/validation jobs queue and never run. `deploy.sh` restarts **both** `website` and `website-sidequest` when each unit exists.
+MCP memory guards (per process, not the unit cage):
 
-### Remote Sidequest restart (staff UI → systemd)
+- pm2 `max_memory_restart: 1G` on the mcp app
+- `--max-old-space-size=1024` (fixed in `ecosystem.config.cjs`)
+- In-process heap watchdog (~85% of heap limit → clean `shutdown("MEMORY")`)
 
-The web process runs as `website-runtime` (no sudo). Webmasters can restart Sidequest from **Agent Pipeline** or the system alert panel; the API touches a flag file only — it never runs `systemctl` from Node.
+`MemoryMax=6G` is a hard ceiling for the **whole** website cgroup (web+mcp+sidequest+qdrant). It does not reserve RAM. Leaves headroom on an ~8G droplet for nginx, OS, and sGTM Docker.
 
-**Security:** The path unit watches **one file** and runs **fixed** commands (no shell, no flag contents in `ExecStart`). Same trust bar as other webmaster actions (Sidequest dashboard, sites.yml). See `docs/vps-deployment.md` for the runtime hardening context.
+### Cutover from legacy Sidequest systemd units
 
-One-time install (root):
-
-```bash
-# /etc/systemd/system/website-sidequest-restart.path
-[Unit]
-Description=Watch for Sidequest restart flag (webmaster API only)
-
-[Path]
-PathModified=/opt/website-v3/current/data/sidequest.restart-requested
-
-[Install]
-WantedBy=multi-user.target
-
-# /etc/systemd/system/website-sidequest-restart.service
-[Unit]
-Description=Restart Sidequest when flag file is touched
-
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl restart website-sidequest
-ExecStartPost=/bin/rm -f /opt/website-v3/current/data/sidequest.restart-requested
-```
+**Before** deploying a SHA that uses pm2 Sidequest, disable and remove the old units (otherwise two workers can fight):
 
 ```bash
+sudo systemctl disable --now website-sidequest website-sidequest-restart.path 2>/dev/null || true
+sudo rm -f /etc/systemd/system/website-sidequest.service \
+           /etc/systemd/system/website-sidequest-restart.path \
+           /etc/systemd/system/website-sidequest-restart.service
+sudo rm -rf /etc/systemd/system/website-sidequest.service.d
 sudo systemctl daemon-reload
-sudo systemctl enable --now website-sidequest-restart.path
 ```
 
-Optional in release `.env` when the path unit is enabled: `SIDEQUEST_SYSTEMD_RESTART_ENABLED=true` (lets diagnostics report path unit as available).
+Install `supervisor.conf` (above), then deploy. `deploy.sh` only restarts `website` (Sidequest rides with pm2).
+
+**Rollback note:** reverting to a pre-pm2 SHA leaves Sidequest off unless you reinstall the old units — prefer revert-forward on `main`.
+
+### Remote Sidequest restart (staff UI → signal)
+
+The web process runs as `website-runtime` (no sudo). Webmasters restart Sidequest from **Background pipeline** or system alerts: the API sends **SIGTERM** to the PID in `data/sidequest.pid`; pm2 relaunches the worker. The flag file `data/sidequest.restart-requested` is audit/debounce only (not a systemd path-unit bridge).
 
 Staff diagnostics: `GET /api/admin/sidequest/diagnostics`, log tail `GET /api/admin/sidequest/logs` (from `data/logs/sidequest.log`). Worker also writes `data/sidequest.heartbeat` (stale threshold `SIDEQUEST_HEARTBEAT_STALE_MS`, default 120000).
 
@@ -366,10 +350,9 @@ Rate limit APIs/forms/`/mcp`, not a blunt global RPS on all static assets.
 |------|----------|
 | OS | Ubuntu 24.04 |
 | App root | `/opt/website-v3` |
-| Process | `website.service` → `current/scripts/start-production.sh` |
-| Sidequest | `website-sidequest.service` → `current/scripts/start-sidequest.sh` |
+| Process | `website.service` → `start-production.sh` → pm2-runtime (`web`, `mcp`, `sidequest`, `qdrant`) |
 | Reverse proxy | Nginx 80/443 |
-| Health | `http://127.0.0.1:5000/health` (web); Sidequest liveness via `data/sidequest.pid` / `systemctl is-active website-sidequest` |
+| Health | web `:5000/health`; MCP `:3001/health`; Sidequest liveness `data/sidequest.pid` |
 | sGTM | `/opt/sgtm` Docker compose |
 
 IP, hostname, and which DNS records already point here: check DigitalOcean + Cloudflare, not this file.
@@ -418,3 +401,145 @@ Do **not** advance `PREVIEW_SERVER_URL` while metrics still points at Stape.
 | `scripts/deploy.sh` | Atomic release build / flip / prune |
 | `server/component-registry-persistent.ts` | Registry mirror release → persistent |
 | `docs/sgtm-prod-cutover.md` | sGTM cutover runbook |
+
+---
+
+## 11. CPU stack samples (perf)
+
+The performance page stores a 20-second stack sample the first time the **web** process goes above 120% of one core. One sample per streak. The list is kept for 7 days. Staff with `metrics_view` see it. The names are rendered as text.
+
+`kernel.perf_event_paranoid` stays at **4**. Do not set it to 2, 1, or 0. Do not `setcap` the `perf` binary. Do not run the recorder under PM2: every PM2 app runs as `website-runtime`, and this process must be a different user with capabilities the web app does not have.
+
+### What runs where
+
+| Piece | Where | Who |
+|---|---|---|
+| Recorder program | `scripts/cpu-capture/recorder.mjs`, copied to `/opt/cpu-capture/recorder.mjs` | root, mode `0755`. Not started from the release |
+| Unit | `/etc/systemd/system/cpu-capture.service` on the droplet | not in this repo |
+| Recordings | `/var/lib/cpu-capture/raw/<id>/` | owner `perf-capture`, group `website-runtime`, directory mode `2750` |
+| Heartbeat | `/run/cpu-capture/heartbeat` | mode `0644`, rewritten every 30s |
+| Last result | `/run/cpu-capture/status.json` | mode `0644` |
+| Name map | `/tmp/perf-<pid>.map` | `website-runtime`, written by Node |
+| Saved list | `data/process-stats.db` table `cpu_stacks` | web, on its 30s tick |
+
+The recorder finds the web pid itself (`website-runtime` and `dist/index.js` in `/proc`). If two processes match, it records nothing and says so in `status.json`. It samples CPU from `/proc/<pid>/stat` about every 5 seconds. The command is fixed: `perf record -q -B -N -e cpu-clock:u -p <pid> -F 99 -g --max-size=32M`. It does not read the name map and it does not parse the recording.
+
+The web process, on its tick, reads a finished directory, runs `perf script --force` as `website-runtime` (so it can read its own map), inserts the list, and deletes only its JSON. It does not delete `raw/`. The recorder deletes a recording after 15 minutes. Inserting again is ignored.
+
+The heartbeat is not a lock. The page reads it when someone opens the detail. If it is missing or older than 2 minutes, the page says **Capture inactive**. `status.json` carries the last recording's error and a notice (two web processes, or the daily cap of 48).
+
+The web app never launches `perf record`, including on a dev machine. Outside production the page does not look for the heartbeat.
+
+Web keeps `--perf-basic-prof-only-functions` in `ecosystem.config.cjs`. That flag only writes the name map. Without it the page shows addresses instead of JavaScript function names. The diagnostics worker passes the same flag when it forks; the recorder does not sample that worker.
+
+### Install (once, as root)
+
+Do this after the app deploy that contains `scripts/cpu-capture/` is live. `website-deployer` must not own `/opt/cpu-capture`. Updating the script later is another root copy, not a normal deploy.
+
+```bash
+uname -r
+sysctl kernel.perf_event_paranoid   # leave this at 4
+apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+
+# If an earlier experiment left a capability on a perf binary, remove it.
+# getcap prints nothing when the file is clean. /usr/bin/perf is a script;
+# the real binaries are under /usr/lib/linux-tools-*/perf.
+getcap /usr/lib/linux-tools-*/perf || true
+# setcap -r /usr/lib/linux-tools-<version>/perf
+
+id perf-capture >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin perf-capture
+install -d -o perf-capture -g website-runtime -m 2750 /var/lib/cpu-capture/raw
+install -d -o root -g root -m 0755 /opt/cpu-capture
+install -o root -g root -m 0755 /opt/website-v3/current/scripts/cpu-capture/recorder.mjs /opt/cpu-capture/recorder.mjs
+```
+
+The unit is not in the repo. Write it on the droplet, the same way as `website.service`:
+
+```ini
+# /etc/systemd/system/cpu-capture.service
+[Unit]
+Description=Record CPU stacks for the website process
+After=network.target
+
+[Service]
+User=perf-capture
+Group=perf-capture
+ExecStart=/usr/bin/node /opt/cpu-capture/recorder.mjs
+Restart=on-failure
+RestartSec=5
+UMask=0027
+AmbientCapabilities=CAP_PERFMON CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_PERFMON CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cpu-capture/raw
+RuntimeDirectory=cpu-capture
+RuntimeDirectoryMode=0755
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service perf_event_open
+LimitCORE=0
+MemoryMax=256M
+CPUQuota=20%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now cpu-capture.service
+```
+
+The unit gives `CAP_PERFMON` and `CAP_SYS_PTRACE` as ambient capabilities, so only this service has them. `/usr/bin/perf` stays a normal file. The script writes the heartbeat and the status file as mode `0644` on purpose: the service umask is `0027`, and without that chmod `website-runtime` could not read them. `perf record` creates `perf.data` as mode `0600`. The recorder then chmods it to `0640` so the web user can run `perf script`. Without that chmod the page stores "Permission denied".
+
+The running program is `/opt/cpu-capture/recorder.mjs`, not the file in the release. A deploy does not replace it. After this script changes, copy it again as root and restart the unit.
+
+`PrivateTmp=yes` is set because the recorder never opens the name map. The web app reads `/tmp/perf-<pid>.map` in its own mount namespace. If the web service is later given `PrivateTmp`, the map will not be the host `/tmp` and JavaScript names will disappear; do not do that without moving the map.
+
+`SystemCallFilter` and `ProtectKernelModules` are the settings most likely to make `perf` fail. If the journal shows the recording failing immediately, remove `SystemCallFilter` first, reload, and try one capture. Do not fix that by lowering the sysctl or by `setcap`.
+
+### Check before leaving it on
+
+```bash
+# No file capabilities on perf.
+getcap /usr/lib/linux-tools-*/perf || true
+
+# The service holds only the two capabilities. CapEff is a bitmask:
+# CAP_PERFMON is bit 38, CAP_SYS_PTRACE is bit 19.
+pid=$(systemctl show -p MainPID --value cpu-capture.service)
+grep ^Cap /proc/$pid/status
+systemctl is-active cpu-capture.service
+
+# The web user cannot record, and cannot write a recording.
+sudo -u website-runtime /usr/bin/perf record -e cpu-clock:u -p $$ -o /tmp/cpu-capture-denied.data -- sleep 1
+sudo -u website-runtime touch /var/lib/cpu-capture/raw/denied
+
+# The web user can see the heartbeat.
+sudo -u website-runtime cat /run/cpu-capture/heartbeat
+```
+
+Then cause one real spike (or wait for one) and confirm the performance page shows a stack, not "Capture inactive". A capture from a `setcap` experiment does not count. The recording has to come from this unit.
+
+### When it looks idle
+
+- **Capture inactive** on the page: the service is stopped or stuck. `systemctl status cpu-capture.service` and `journalctl -u cpu-capture.service -n 50`.
+- Heartbeat is fresh and the list is empty: the web process has not gone above 120% since the service started. That is a quiet machine, not a failure.
+- **Last recording failed** on the page: read `status.json`. After a kernel upgrade, install `linux-tools-$(uname -r)` for the running kernel (`uname -r`, not the login banner). `/usr/bin/perf` picks the tool that matches the running kernel. A new kernel package does nothing until reboot, and after reboot the matching tools package has to be installed or every recording fails with the service still "active".
+
+### Name map
+
+Node rewrites `/tmp/perf-<pid>.map` for the life of the process. Restarting web starts a new file. Do not truncate the map while the process is running. On startup the app deletes maps whose pid is already gone.
+
+If `/tmp` is tmpfs, the live map is RAM. A few megabytes that then stop growing is expected. If it keeps growing, remove `--perf-basic-prof-only-functions` from the web app in `ecosystem.config.cjs` and from the diagnostics worker fork. Stacks still record; JavaScript names become addresses.
+
+```bash
+ls -lh /tmp/perf-*.map
+findmnt -T /tmp
+```

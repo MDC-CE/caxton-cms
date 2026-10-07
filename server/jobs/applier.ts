@@ -28,6 +28,9 @@ import {
   entryIdFromContentFile,
 } from "../link-extract";
 import { createPublicUrlResolver } from "../redirects";
+import { processPendingAdsResults } from "../ads/diagnostics/save";
+import { recoverInterruptedAdsRuns } from "../ads/diagnostics/fork-service";
+import { removeLegacyAdsDiagnosticsFiles } from "../ads/diagnostics/jobs";
 
 const log = child({ module: "job-applier" });
 
@@ -105,8 +108,19 @@ function maybeEnqueueIndexRefresh(site: string, contentRoot: string, generation:
 
 export function startJobApplier(): void {
   if (timer) return;
+  for (const ctx of Array.from(getSiteContextMap().values())) {
+    try {
+      recoverInterruptedAdsRuns(ctx.contentRootName);
+      removeLegacyAdsDiagnosticsFiles(ctx.contentRootName);
+    } catch (err) {
+      log.warn({ err, site: ctx.contentRootName }, "[Applier] Ads Run recovery failed");
+    }
+  }
   const tick = () => {
-    for (const ctx of getSiteContextMap().values()) {
+    for (const ctx of Array.from(getSiteContextMap().values())) {
+      void processPendingAdsResults(ctx.contentRootName).catch((err) =>
+        log.warn({ err, site: ctx.contentRootName }, "[Applier] Ads results save failed"),
+      );
       try {
         hydrateLastApplied(ctx.contentRootName);
         hydrateLastAppliedSeo(ctx.contentRootName);

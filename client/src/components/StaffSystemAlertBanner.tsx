@@ -55,6 +55,9 @@ export function SystemAlertItem({
   onRecheckSidequest,
   recheckingSidequest = false,
   sidequestRecheckMessage,
+  onRecheckDecisionModel,
+  recheckingDecisionModel = false,
+  decisionModelRecheckMessage,
 }: {
   alert: SystemAlert;
   compact?: boolean;
@@ -68,8 +71,14 @@ export function SystemAlertItem({
   onRecheckSidequest?: () => void;
   recheckingSidequest?: boolean;
   sidequestRecheckMessage?: string | null;
+  onRecheckDecisionModel?: () => void;
+  recheckingDecisionModel?: boolean;
+  decisionModelRecheckMessage?: string | null;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [decisionAdvanced, setDecisionAdvanced] = useState(false);
+  const isDecisionModelAlert = alert.code === "decision_model_unavailable";
+  const showDecisionRecheck = isDecisionModelAlert && !!onRecheckDecisionModel;
   const showGcsRecheck = alert.code === "gcs_migration_required" && onRecheckGcs;
   const showDbRecheck = DATABASE_ALERT_CODES.has(alert.code) && !!onRecheckDatabase;
   const showSidequestPanel = SIDEQUEST_ALERT_CODES.has(alert.code) && !!onRecheckSidequest;
@@ -132,6 +141,44 @@ export function SystemAlertItem({
                 {databaseRecheckMessage}
               </p>
             ) : null}
+            {decisionModelRecheckMessage && showDecisionRecheck ? (
+              <p className={cn(compact ? "text-[11px]" : "text-xs", "mt-1", alertMessageClasses(alert.severity))}>
+                {decisionModelRecheckMessage}
+              </p>
+            ) : null}
+            {isDecisionModelAlert ? (
+              <div className="mt-1">
+                <button
+                  type="button"
+                  className={cn(
+                    compact ? "text-[11px]" : "text-xs",
+                    "text-muted-foreground underline-offset-2 hover:underline",
+                  )}
+                  onClick={() => setDecisionAdvanced((v) => !v)}
+                  data-testid="button-decision-model-alert-advanced"
+                >
+                  {decisionAdvanced ? "Hide advanced" : "Read more (advanced)"}
+                </button>
+                {decisionAdvanced ? (
+                  <div
+                    className={cn(compact ? "text-[11px]" : "text-xs", "mt-1 space-y-1 text-muted-foreground")}
+                    data-testid="panel-decision-model-alert-advanced"
+                  >
+                    <p>
+                      Proposal reviews ask the decision model (Jev via OpenRouter) whether an edit touches outcome
+                      figures or site facts. While it is down, reviews carry a <code>jev_unavailable</code> warning and
+                      the discovery path lists every site fact (<code>list_variables facts_only</code>).
+                    </p>
+                    <p>
+                      Critical right away when <code>OPENROUTER_API_KEY</code> is missing; otherwise after 3 failed calls
+                      in a row. Clears on the next successful call or Re-check. Health lives in the site pipeline DB
+                      (<code>pipeline_state.decision_model_health</code>); model choice in LLM settings (
+                      <code>llm.yml model.decision</code>).
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {showSidequestPanel ? (
               <div className="mt-2">
                 <SidequestDiagnosticsPanel
@@ -181,6 +228,25 @@ export function SystemAlertItem({
                   )}
                 </Button>
               ) : null}
+              {showDecisionRecheck ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn("h-7", compact ? "text-[11px]" : "text-xs")}
+                  onClick={onRecheckDecisionModel}
+                  disabled={recheckingDecisionModel}
+                  data-testid="button-recheck-decision-model"
+                >
+                  {recheckingDecisionModel ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                      Checking…
+                    </>
+                  ) : (
+                    "Re-check"
+                  )}
+                </Button>
+              ) : null}
               {alert.actionHref ? (
                 <Link href={alert.actionHref}>
                   <Button
@@ -214,6 +280,9 @@ export function SystemAlertsPanel({ compact = false }: { compact?: boolean }) {
     recheckSidequest,
     recheckingSidequest,
     sidequestRecheckMessage,
+    recheckDecisionModel,
+    recheckingDecisionModel,
+    decisionModelRecheckMessage,
   } = useSystemAlerts();
   if (!hasAlerts) return null;
 
@@ -238,6 +307,11 @@ export function SystemAlertsPanel({ compact = false }: { compact?: boolean }) {
             }
             recheckingSidequest={recheckingSidequest}
             sidequestRecheckMessage={sidequestRecheckMessage}
+            onRecheckDecisionModel={
+              alert.code === "decision_model_unavailable" ? () => void recheckDecisionModel() : undefined
+            }
+            recheckingDecisionModel={recheckingDecisionModel}
+            decisionModelRecheckMessage={decisionModelRecheckMessage}
           />
         </div>
       ))}

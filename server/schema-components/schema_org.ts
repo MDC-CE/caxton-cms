@@ -3,6 +3,7 @@ import {
   getOrganizationId,
   transformToJsonLd,
 } from "../schema-org";
+import { isPageIdentitySchemaType } from "@shared/schema-org-page-url";
 import type { SchemaComponentContributor, SchemaContribution } from "./types";
 
 /**
@@ -10,8 +11,8 @@ import type { SchemaComponentContributor, SchemaContribution } from "./types";
  * Marks `needsStandaloneOrganization` when `@organization` refs are expanded
  * so collectSectionSchemas can dual-emit the site Organization once.
  *
- * For Person, fills `url` / `@id` from `context.pageUrl` when missing so author
- * hubs match BlogPosting.author Person entity ids.
+ * For Person and page-identity types (WebPage, AboutPage, …), fills `url` / `@id`
+ * from `context.pageUrl` when missing. Typed values are emitted as-is.
  */
 export const contributeSchemaOrg: SchemaComponentContributor = (section, context) => {
   const schemaType = typeof section.schema_type === "string" ? section.schema_type.trim() : "";
@@ -26,7 +27,7 @@ export const contributeSchemaOrg: SchemaComponentContributor = (section, context
   // Prefer explicit schema_type over nested `type` in properties.
   transformed["@type"] = schemaType;
 
-  if (schemaType === "Person" && context.pageUrl) {
+  if ((schemaType === "Person" || isPageIdentitySchemaType(schemaType)) && context.pageUrl) {
     if (typeof transformed.url !== "string" || !transformed.url.trim()) {
       transformed.url = context.pageUrl;
     }

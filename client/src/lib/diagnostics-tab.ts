@@ -4,7 +4,9 @@ export type DiagnosticsTabId =
   | "runtime-issues"
   | "seo"
   | "geo"
-  | "funnel";
+  | "funnel"
+  | "ads"
+  | "legal";
 
 export function resolveDiagnosticsTab(pathname: string): DiagnosticsTabId {
   if (pathname.endsWith("/leads")) return "leads";
@@ -12,6 +14,8 @@ export function resolveDiagnosticsTab(pathname: string): DiagnosticsTabId {
   if (pathname.includes("/diagnostics/seo")) return "seo";
   if (pathname.endsWith("/geo")) return "geo";
   if (pathname.endsWith("/funnel")) return "funnel";
+  if (/\/diagnostics\/ads(\/|$)/.test(pathname)) return "ads";
+  if (pathname.endsWith("/diagnostics/legal")) return "legal";
   if (pathname.endsWith("/global-health")) return "global-health";
   return "global-health";
 }

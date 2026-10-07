@@ -8,7 +8,7 @@ export {
   listOpenProposalsForVariant,
   listOpenProposalsForEntry,
   findOpenProposalLinkForDraft,
-  pipelineEnv,
+  DRAFT_LINK_ENV,
   type OpenProposalForEntry,
   deriveReviewMode,
   exportAllProposals,

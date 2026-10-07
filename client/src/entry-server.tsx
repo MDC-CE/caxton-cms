@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import App from "./App";
 import { preloadSectionsFromInitialData } from "./components/sectionRegistry";
 import { preloadPublicPageChunks } from "./lib/preloadPublicPageChunk";
+import { setThemePaint, type ThemePaint } from "@shared/theme-palette";
 
 interface SingleQuery {
   queryKey: unknown[];
@@ -14,16 +15,6 @@ interface SingleQuery {
 type InitialDataPayload =
   | { queries: SingleQuery[]; queryKey?: never; data?: never }
   | { queryKey: unknown[]; data: unknown; queries?: never };
-
-function ssrDiagEnabled(): boolean {
-  return process.env.SSR_DIAG === "1" || process.env.NODE_ENV !== "production";
-}
-
-function ssrDiag(fields: Record<string, unknown>, message: string): void {
-  if (!ssrDiagEnabled()) return;
-  // entry-server runs in Vite SSR / Node — console goes to the same terminal as Express.
-  console.info(`[SSR-diag] ${message}`, fields);
-}
 
 function suppressLayoutEffectWarnings(): () => void {
   const original = console.error;
@@ -103,29 +94,12 @@ function seedQueryClient(
   }
 }
 
-function summarizePayload(payload: InitialDataPayload | null): Record<string, unknown> {
-  if (!payload) return { hasPayload: false };
-  if (payload.queries && Array.isArray(payload.queries)) {
-    return {
-      hasPayload: true,
-      queryCount: payload.queries.length,
-      queryKeys: payload.queries.map((q) =>
-        Array.isArray(q.queryKey) ? q.queryKey.slice(0, 3) : q.queryKey,
-      ),
-    };
-  }
-  return {
-    hasPayload: true,
-    queryKey: Array.isArray(payload.queryKey)
-      ? payload.queryKey.slice(0, 3)
-      : payload.queryKey,
-  };
-}
-
 export async function render(
   url: string,
   initialDataPayload: InitialDataPayload | null,
 ): Promise<string> {
+  const themePaint = (initialDataPayload as { themePaint?: ThemePaint } | null)?.themePaint ?? null;
+  setThemePaint(themePaint);
   const restoreLocation = installSsrLocation(url);
   const ssrQueryClient = new QueryClient({
     defaultOptions: {
@@ -145,41 +119,16 @@ export async function render(
   // Non-empty string so wouter's `props.ssrSearch || parent` does not drop it
   // (empty string is falsy and falls through to undefined).
   const ssrSearch = qIdx >= 0 ? withoutHash.slice(qIdx + 1) : "";
-  const cleanUrl = ssrPath;
-  const t0 = Date.now();
 
   const restore = suppressLayoutEffectWarnings();
 
   try {
     // Preload lazy route page + section chunks before streaming so Suspense
     // fallback={null} does not produce an empty #root.
-    ssrDiag(
-      { url: cleanUrl, ...summarizePayload(initialDataPayload) },
-      "preload starting",
-    );
-
-    try {
-      await Promise.all([
-        preloadPublicPageChunks(cleanUrl, initialDataPayload),
-        preloadSectionsFromInitialData(initialDataPayload),
-      ]);
-      ssrDiag({ url: cleanUrl, ms: Date.now() - t0 }, "preload ok");
-    } catch (preloadErr) {
-      ssrDiag(
-        {
-          url: cleanUrl,
-          ms: Date.now() - t0,
-          errMessage:
-            preloadErr instanceof Error ? preloadErr.message : String(preloadErr),
-          stack:
-            preloadErr instanceof Error
-              ? preloadErr.stack?.split("\n").slice(0, 8)
-              : undefined,
-        },
-        "preload FAILED (will rethrow — Suspense may blank #root)",
-      );
-      throw preloadErr;
-    }
+    await Promise.all([
+      preloadPublicPageChunks(ssrPath, initialDataPayload),
+      preloadSectionsFromInitialData(initialDataPayload),
+    ]);
 
     const html = await new Promise<string>((resolve, reject) => {
       let chunks = "";
@@ -202,33 +151,11 @@ export async function render(
             pipe(passthrough);
           },
           onError(error: unknown) {
-            ssrDiag(
-              {
-                url: cleanUrl,
-                errMessage: error instanceof Error ? error.message : String(error),
-                stack: error instanceof Error ? error.stack?.split("\n").slice(0, 8) : undefined,
-              },
-              "renderToPipeableStream onError",
-            );
             reject(error);
           },
         },
       );
     });
-
-    const trimmed = html.replace(/<!--[\s\S]*?-->/g, "").trim();
-    const hasTag = /<[a-zA-Z]/.test(trimmed);
-    ssrDiag(
-      {
-        url: cleanUrl,
-        htmlLength: html.length,
-        trimmedLength: trimmed.length,
-        hasTag,
-        ms: Date.now() - t0,
-        preview: trimmed.slice(0, 160),
-      },
-      !hasTag ? "render finished EMPTY" : "render finished OK",
-    );
 
     return html;
   } finally {

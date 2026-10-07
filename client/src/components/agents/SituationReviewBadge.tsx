@@ -54,6 +54,7 @@ export type ReviewContextPayload = {
     damage_class: string;
     target_missing?: boolean;
   }>;
+  figure_variables?: Array<{ name: string; category: string; default?: string | null; deprecated?: boolean }>;
 };
 
 /** Mirrors server DAMAGE_CLASS_META for snapshot-only fallbacks. */
@@ -371,6 +372,25 @@ function SituationDialogBody({
           <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
             {reviewContext.agent_preview.think_items.map((t) => (
               <li key={t.id}>{t.title}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {reviewContext.figure_variables?.length ? (
+        <div className="space-y-1" data-testid="list-figure-variables">
+          <p className="font-medium text-foreground">Outcome figures turned on by these variables</p>
+          <p className="text-xs text-muted-foreground">
+            The edit uses these price, outcome or social-proof values. Check each is the right one
+            for the claim.
+          </p>
+          <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+            {reviewContext.figure_variables.map((f) => (
+              <li key={f.name}>
+                <span className="font-mono text-xs text-foreground">{f.name}</span>
+                {f.default ? ` · ${f.default}` : ""}
+                {f.deprecated ? " · deprecated" : ""}
+              </li>
             ))}
           </ul>
         </div>

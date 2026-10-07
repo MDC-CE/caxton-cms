@@ -15,6 +15,50 @@
       window.dataLayer = window.dataLayer || [];
     </script>
 
+    <!-- Google Consent Mode v2 (advanced): everything denied until the visitor's
+         choice in the 4g_consent cookie (set by POST /api/consent) says otherwise.
+         Must run before GTM loads. See docs/cookies.md. -->
+    <script>
+      (function () {
+        window.gtag =
+          window.gtag ||
+          function () {
+            window.dataLayer.push(arguments);
+          };
+        var denied = {
+          ad_storage: "denied",
+          analytics_storage: "denied",
+          ad_user_data: "denied",
+          ad_personalization: "denied",
+        };
+        window.gtag("consent", "default", Object.assign({ wait_for_update: 500 }, denied));
+        window.gtag("set", "ads_data_redaction", true);
+        var state = { decision: null, mode: null, granted: false };
+        try {
+          var m = document.cookie.match(/(?:^|;\s*)4g_consent=([^;]+)/);
+          var parts = m ? decodeURIComponent(m[1]).split(".") : [];
+          if (parts.length === 4 && parts[0] === "v1") {
+            state.decision = parts[1];
+            state.mode = parts[2];
+            state.granted = parts[1] === "granted_explicit" || parts[1] === "granted_implied";
+          }
+        } catch (e) {}
+        window.__4G_CONSENT__ = state;
+        if (state.granted) {
+          window.gtag("consent", "update", {
+            ad_storage: "granted",
+            analytics_storage: "granted",
+            ad_user_data: "granted",
+            ad_personalization: "granted",
+          });
+        }
+        window.dataLayer.push({
+          event: "consent_state",
+          consent_state: state.granted ? "granted" : state.decision === "denied" ? "denied" : "unset",
+        });
+      })();
+    </script>
+
     <!-- Preconnect to Google Cloud Storage to warm connection before hero images are fetched -->
     <link rel="preconnect" href="https://storage.googleapis.com" crossorigin />
     <link rel="dns-prefetch" href="https://storage.googleapis.com" />

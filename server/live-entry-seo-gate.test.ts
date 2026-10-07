@@ -15,6 +15,8 @@ vi.mock("./content-types", () => ({
     },
   }),
   getFolder: () => "blog",
+  resolveContentTypeUrl: (type: string, record: { slug?: string }) =>
+    type === "landing" ? `/landing/${record.slug}` : null,
 }));
 vi.mock("./draft-entry", () => ({
   isDraftEntry: () => false,
@@ -32,10 +34,12 @@ vi.mock("./utils/deepMerge", () => ({
 vi.mock("./site-config", () => ({
   getDefaultContentRoot: () => "/tmp",
   getDefaultContentFolder: () => "site_test",
+  getSiteConfigs: () => [{ domain: "4geeks.com", contentFolder: "site_test" }],
 }));
 vi.mock("./content-index", () => ({
   contentIndex: {
     loadMergedContent: () => ({ data: null }),
+    getLocaleUrls: () => ({}),
     getRedirects: () => [],
     refreshCustomRedirects: () => [],
   },
@@ -311,6 +315,88 @@ describe("evaluateLiveEntrySeoAndRequiredFields", () => {
       isDraftWrite: false,
     });
     expect(failure).toBeNull();
+  });
+
+  describe("schema_org page url", () => {
+    const landingPage = (url: string, extraMeta: Record<string, unknown> = {}) => ({
+      slug: "foo",
+      title: "Foo",
+      description: "Landing description for the gate.",
+      meta: {
+        page_title: "Foo | 4Geeks",
+        description: "Landing description long enough for the gate.",
+        ...extraMeta,
+      },
+      sections: [
+        {
+          type: "schema_org",
+          section_id: "schema_org-1",
+          schema_type: "WebPage",
+          properties: { name: "Foo", url },
+        },
+        { type: "hero" },
+      ],
+    });
+
+    it("publish blocks a WebPage url built from the wrong pattern", () => {
+      const failure = evaluateLiveEntrySeoAndRequiredFields({
+        contentType: "landing",
+        slug: "foo",
+        locale: "en",
+        pageData: landingPage("https://4geeks.com/en/landing/foo"),
+        intent: "publish",
+        isDraftWrite: false,
+      });
+      expect(failure?.code).toBe("schema_org_page_url_mismatch");
+      expect(failure?.message).toContain("/landing/foo");
+      expect(failure?.schema_org_page_url_mismatches?.[0]).toMatchObject({
+        section_id: "schema_org-1",
+        field: "url",
+        key_path: "properties.url",
+      });
+    });
+
+    it("publish passes own address with www / trailing slash, and the canonical address", () => {
+      for (const pageData of [
+        landingPage("http://www.4geeks.com/landing/foo/"),
+        landingPage("https://4geeks.com/en/main", { canonical_url: "https://4geeks.com/en/main" }),
+      ]) {
+        const failure = evaluateLiveEntrySeoAndRequiredFields({
+          contentType: "landing",
+          slug: "foo",
+          locale: "en",
+          pageData,
+          intent: "publish",
+          isDraftWrite: false,
+        });
+        expect(failure).toBeNull();
+      }
+    });
+
+    it("micro live save and draft write are not blocked", () => {
+      const pageData = landingPage("https://4geeks.com/en/landing/foo");
+      expect(
+        evaluateLiveEntrySeoAndRequiredFields({
+          contentType: "landing",
+          slug: "foo",
+          locale: "en",
+          pageData,
+          intent: "micro",
+          touchedPaths: ["sections[0].properties.url"],
+          isDraftWrite: false,
+        })?.code,
+      ).not.toBe("schema_org_page_url_mismatch");
+      expect(
+        evaluateLiveEntrySeoAndRequiredFields({
+          contentType: "landing",
+          slug: "foo",
+          locale: "en",
+          pageData,
+          intent: "publish",
+          isDraftWrite: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   it("publish fails when full meta replace drops title and description", () => {

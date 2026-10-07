@@ -1,0 +1,1025 @@
+import { useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
+import { AlertTriangle, BadgeCheck, CheckCircle2, ChevronDown, CircleAlert, Copy, Info, Loader2, Megaphone, Scale, Settings, Wand2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
+import { useToast } from "@/hooks/use-toast";
+import { useDebugAuth } from "@/hooks/useDebugAuth";
+import { apiFetch, apiRequest } from "@/lib/queryClient";
+import { cn } from "@/lib/utils";
+import type { AdsIssue } from "@shared/ads-diagnostics-rules";
+import type { AdsDiagnostics, AdsIssueRow } from "@/components/ads/ads-types";
+import { formatMoney, formatNum, formatWhen } from "@/components/ads/ads-format";
+import { PaidPagesCard } from "@/components/ads/PaidPagesCard";
+import { AdsRefreshNotice } from "@/components/ads/AdsRefreshNotice";
+import { UrlHistoryNotice } from "@/components/ads/UrlHistoryNotice";
+import { AdsResyncButton } from "@/components/ads/AdsResyncButton";
+import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
+import { AdsIssueEvidence } from "@/components/diagnostics/AdsIssueEvidence";
+import { AdsTrackingFixDialog } from "@/components/diagnostics/AdsTrackingFixDialog";
+import { AdsMetaPlatformsCard } from "@/components/diagnostics/AdsMetaPlatformsCard";
+import {
+  AdsRunStatus,
+  RunAdvancedCollapsible,
+  RunChecksButton,
+  RunNotes,
+  RUN_CHECKS_INTRO,
+  adsIssuesValue,
+  adsRunPollMs,
+} from "@/components/diagnostics/AdsRunBar";
+import { AdsIssueStateBadges, AdsIssueVerifyPanel } from "@/components/diagnostics/AdsIssueActions";
+import {
+  IssueConversionEvidence,
+  IssueSettingsAction,
+  LeadConversionBadges,
+  LeadConversionNotes,
+} from "@/components/diagnostics/AdsLeadConversions";
+import { TabCountBadge } from "@/components/DebugBubble/components/PageErrorsModal";
+import { isRefreshActive, type AdsRefreshStatus } from "@shared/ads-refresh-status";
+import { trackingFixModeFor } from "@shared/ads-tracking-fix";
+import { AdsUtmConventionBanner } from "@/components/ads/AdsUtmConvention";
+
+const SEVERITY_STYLE: Record<AdsIssue["severity"], { Icon: typeof AlertTriangle; className: string; label: string }> = {
+  error: { Icon: CircleAlert, className: "text-destructive", label: "Error" },
+  warning: { Icon: AlertTriangle, className: "text-amber-500", label: "Warning" },
+  info: { Icon: Info, className: "text-muted-foreground", label: "Info" },
+};
+
+function clicksVisitsHint(k: AdsDiagnostics["kpis"]): string | undefined {
+  if (k.clicks_to_visits_mismatch) return "GA4 sees more ad visits than Meta clicks";
+  if (k.untagged_clicks > 0) return `excludes ${formatNum(k.untagged_clicks)} clicks from ads without tracking parameters`;
+  if (k.unmatched_meta_visits > 0) return `${formatNum(k.unmatched_meta_visits)} Meta visits not from connected ads`;
+  return k.clicks_to_visits_pct != null ? "of Meta clicks reach the site" : undefined;
+}
+
+function ClicksVisitsInfo() {
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-foreground">Clicks → visits</p>
+      <p>
+        Out of every 100 people who click one of your Meta ads, how many show up as a visit on the site that we can match back to that ad.
+        Below 100% is normal — some people leave before the page loads or reject cookies.
+      </p>
+      <p>
+        A sudden drop usually means slow pages, fewer visitors accepting cookies, or ads missing the tracking URL template.
+      </p>
+      <p>
+        <span className="font-medium text-foreground">Mismatch</span> (above 110%) means Meta and Google Analytics are counting differently,
+        not that you gained visits.
+      </p>
+      <Collapsible>
+        <CollapsibleTrigger className="group flex items-center gap-1 text-xs font-medium text-foreground" data-testid="button-kpi-clicks-visits-advanced">
+          Read more (advanced)
+          <ChevronDown className="h-3 w-3 transition-transform group-data-[state=open]:rotate-180" />
+        </CollapsibleTrigger>
+        <CollapsibleContent className="mt-2 space-y-2">
+          <p>
+            Visits: paid Meta visits whose <code className="font-mono">utm_id</code> / <code className="font-mono">utm_term</code> /{" "}
+            <code className="font-mono">utm_content</code> match a campaign, ad set or ad synced from the connected ad accounts. Other paid Meta
+            visits are counted separately as “not from connected ads”.
+          </p>
+          <p>
+            Clicks: Meta link clicks (not landing page views) from ads landing on this site, only on days Google Analytics has already exported
+            (about 2 days behind). Instant forms, ads pointing to other sites, and ads without the tracking template are left out.
+          </p>
+          <p>
+            Warns when the ratio falls under the floor or drops against the previous 28 days (thresholds in Settings → Ads). Never warns on a
+            mismatch.
+          </p>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  );
+}
+
+type KpiReading = { reading: string; meaning: string };
+
+const CLICKS_VISITS_READINGS: KpiReading[] = [
+  { reading: "Steady, roughly 50–80%", meaning: "Healthy. Some people leave before the page loads or reject cookies." },
+  { reading: "Sudden drop", meaning: "Something broke between the ad and the page: slow or broken landing page, a redirect losing the tags, a cookie banner change, or a new ad without tags." },
+  { reading: "Very low", meaning: "Most paid clicks are lost or can't be traced. Urgent when spend is high." },
+  { reading: "Mismatch", meaning: "Meta and Google Analytics count differently. You did not gain visits — usually safe to ignore." },
+  { reading: "—", meaning: "Not enough traceable clicks yet. The line under the number says why." },
+];
+
+function clicksVisitsRightNow(k: AdsDiagnostics["kpis"]): string {
+  if (k.clicks_to_visits_mismatch) return "Meta and Google Analytics disagree on this window. Watch the trend instead of the number.";
+  if (k.clicks_to_visits_pct == null && k.untagged_clicks > 0) {
+    return `All ${formatNum(k.untagged_clicks)} clicks came from ads without the tracking template, so there is nothing to compare yet. Add the template to your Meta ads, then check back in about 2 days.`;
+  }
+  if (k.clicks_to_visits_pct == null) return "No traceable Meta clicks yet in this window, or Google Analytics is not connected.";
+  if (k.untagged_clicks > 0) {
+    return `${k.clicks_to_visits_pct}% of traceable clicks reach the site. ${formatNum(k.untagged_clicks)} clicks from untagged ads are not counted — tag them to get the full picture.`;
+  }
+  return `${k.clicks_to_visits_pct}% of clicks reach the site. Compare it with last week rather than judging the number alone.`;
+}
+
+const SPEND_READINGS: KpiReading[] = [
+  { reading: "The amount", meaning: "What Meta charged for this window, per currency, as in Ads Manager. Updates each time Meta syncs." },
+  { reading: "All lands on our pages", meaning: "Every ad sends people to a page on this site, so all of the spend can be checked here." },
+  { reading: "Under 100%", meaning: "Some spend goes to Instant Forms, other websites, or pages that don't exist here. This page can't check that part — fine if it's on purpose." },
+];
+
+function spendRightNow(spend: Record<string, number>, trackedShare: number | null): string {
+  const currencies = Object.keys(spend).filter((c) => (spend[c] ?? 0) > 0);
+  if (currencies.length === 0) return "No Meta spend in this window.";
+  if (currencies.length > 1) return `Spend runs in ${currencies.join(" and ")}. Amounts are shown per currency and never converted.`;
+  if (trackedShare == null) return `You spent ${formatMoney(spend)}.`;
+  if (trackedShare >= 100) return `All ${formatMoney(spend)} went to ads that land on this site, so everything else on this page covers all of it.`;
+  return `${trackedShare}% of ${formatMoney(spend)} went to ads that land on this site. The rest isn't covered by the other numbers here.`;
+}
+
+const ISSUES_READINGS: KpiReading[] = [
+  { reading: "—", meaning: "No check has run yet. It doesn't mean healthy — press Run checks." },
+  { reading: "0", meaning: "Nothing to fix. Ads and tracking look healthy." },
+  { reading: "Warnings", meaning: "Mostly measurement gaps: ads still run, but some numbers here are incomplete or can't be tied to an ad." },
+  { reading: "Errors", meaning: "Fix first: Meta can't sync, or enough spend goes through a broken setup (for example ads sending people to a broken page)." },
+  { reading: "$ affected", meaning: "Spend that ran through ads with an open issue. Not all of it is wasted — for tracking gaps it just can't be traced." },
+];
+
+function issuesRightNow(k: AdsDiagnostics["kpis"], affected: string | null, windowDays: number, run: AdsDiagnostics["run"]): string {
+  if (run.active.some((j) => j.kind === "run")) return "A check is running. The count updates when it finishes.";
+  if (run.never_run) return "No checks have run yet, so nothing is counted. Press Run checks on this card to look for problems.";
+  const spendNote = affected ? ` ${affected} ran through ads with a problem.` : "";
+  if (k.open_errors > 0) {
+    return `${k.open_errors} error${k.open_errors === 1 ? "" : "s"} and ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Start with the errors — open the issues badge on the Ads tracking card.`;
+  }
+  if (k.open_warnings > 0) {
+    return `No errors, ${k.open_warnings} warning${k.open_warnings === 1 ? "" : "s"}.${spendNote} Open the issues badge on the Ads tracking card — each issue says what to fix.`;
+  }
+  return `No open issues in the last ${windowDays} days.`;
+}
+
+const LEADS_READINGS: KpiReading[] = [
+  { reading: "Meta (left)", meaning: "Leads Meta's pixel says its ads produced, counted Meta's way (it can include people who saw an ad and converted later)." },
+  { reading: "Which Meta leads", meaning: "Only the conversions picked in Settings → Ads → Meta, added together. With none picked, the standard Lead event. The badges list what was counted." },
+  { reading: "Site (right)", meaning: "Form submissions this site recorded from people who came from a paid ad in the last 30 days. Staff tests are left out." },
+  { reading: "Close together", meaning: "Both sides agree. Healthy." },
+  { reading: "Meta much higher", meaning: "Some gap is normal. A big one can mean forms aren't recording on the site." },
+  { reading: "Site much higher", meaning: "Meta's pixel may not be sending the picked conversions, or the wrong ones are picked." },
+  { reading: "+ repeats", meaning: "The same person sent the same form again within 24 hours. Not counted as new leads." },
+];
+
+/** Clear gap only (≥2× or one side empty). No highlight for 0/0 or close pairs. */
+function leadsActiveReading(meta: number, site: number): string | undefined {
+  if (meta === 0 && site === 0) return undefined;
+  if (meta === 0) return "Site much higher";
+  if (site === 0) return "Meta much higher";
+  if (meta >= site * 2) return "Meta much higher";
+  if (site >= meta * 2) return "Site much higher";
+  return undefined;
+}
+
+function leadsRightNow(k: AdsDiagnostics["kpis"], collectingSince: string | null): string {
+  const since = collectingSince ? ` Site leads are only recorded since ${collectingSince.slice(0, 10)}.` : "";
+  if (k.meta_leads === 0 && k.site_leads === 0) {
+    return `No leads on either side in this window. If these ads should bring form fills, check Open issues for pixel or form problems.${since}`;
+  }
+  if (k.meta_leads === 0) {
+    const picked = k.meta_lead_conversions_picked;
+    return picked && picked.length === 0
+      ? `The site recorded ${formatNum(k.site_leads)} but Meta reported no standard Lead events. Pick the conversions your forms fire in Settings → Ads → Meta.`
+      : `The site recorded ${formatNum(k.site_leads)} but Meta reported none for the picked conversions. Check the pixel tags in Tag Manager, or pick the conversions your forms fire.`;
+  }
+  if (k.site_leads === 0) return `Meta reported ${formatNum(k.meta_leads)} but the site recorded none. Check Open issues — forms may not be recording.${since}`;
+  return `Meta reports ${formatNum(k.meta_leads)}, the site recorded ${formatNum(k.site_leads)}. Compare the trend over time; never add them together.`;
+}
+
+const UNCLEAR_READINGS: KpiReading[] = [
+  { reading: "What it counts", meaning: "Visits from Meta that carry only Meta's click id and no campaign tags. We can't tell if they came from a paid ad or an organic post or shared link." },
+  { reading: "Low", meaning: "Normal. Organic posts and shared links always add a few." },
+  { reading: "High or rising", meaning: "Usually ads without the tracking template. You get a tracking issue warning when it gets too high." },
+  { reading: "—", meaning: "No Meta visits in this window yet." },
+];
+
+function unclearRightNow(k: AdsDiagnostics["kpis"]): string {
+  if (k.meta_unclear_pct == null) return "No Meta visits in this window yet.";
+  const base = `${k.meta_unclear_pct}% of Meta visits can't be tied to a campaign.`;
+  if (k.untagged_clicks > 0) {
+    return `${base} ${formatNum(k.untagged_clicks)} clicks came from ads without the tracking template — adding it usually brings this down.`;
+  }
+  return base;
+}
+
+function KpiReadGuide({
+  title,
+  intro,
+  readings,
+  rightNow,
+  activeReading,
+  template,
+  footer,
+  advanced,
+  testId,
+}: {
+  title: string;
+  intro: string;
+  readings: KpiReading[];
+  rightNow: string;
+  /** Situation row that matches the current KPI (e.g. "Site much higher"). */
+  activeReading?: string;
+  /** Shows a copy button for the tracking template in the "Right now" box. */
+  template?: string;
+  footer?: ReactNode;
+  /** Opt-in block at the bottom (e.g. a "Read more (advanced)" collapsible). */
+  advanced?: ReactNode;
+  testId: string;
+}) {
+  const { toast } = useToast();
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          className="whitespace-nowrap text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid={`button-kpi-${testId}-guide`}
+        >
+          How to read this
+        </button>
+      </DialogTrigger>
+      <DialogContent
+        className="max-w-md space-y-3 text-xs leading-relaxed text-muted-foreground sm:max-w-md"
+        data-testid={`dialog-kpi-${testId}-guide`}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-base">How to read {title}</DialogTitle>
+          <DialogDescription className="text-xs leading-relaxed">{intro}</DialogDescription>
+        </DialogHeader>
+        <dl className="space-y-1.5">
+          {readings.map((r) => {
+            const active = activeReading != null && r.reading === activeReading;
+            return (
+              <div
+                key={r.reading}
+                className={cn(
+                  "grid grid-cols-[7.5rem_1fr] gap-2 rounded-md px-2 py-1.5 -mx-2",
+                  active && "bg-amber-500/10 ring-1 ring-amber-500/30",
+                )}
+                data-testid={active ? `kpi-${testId}-guide-active` : undefined}
+                data-active={active ? "true" : undefined}
+              >
+                <dt className="font-medium text-foreground">
+                  {r.reading}
+                  {active && (
+                    <span className="mt-0.5 block text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                      Matches now
+                    </span>
+                  )}
+                </dt>
+                <dd>{r.meaning}</dd>
+              </div>
+            );
+          })}
+        </dl>
+        <div className="space-y-2 rounded-md border bg-muted/40 p-2" data-testid={`kpi-${testId}-guide-now`}>
+          <p>
+            <span className="font-medium text-foreground">Right now: </span>
+            {rightNow}
+          </p>
+          {template && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-7 text-xs"
+              onClick={() => {
+                void navigator.clipboard?.writeText(template);
+                toast({ title: "Template copied", description: "Paste it into each Meta ad's URL parameters field." });
+              }}
+              data-testid={`button-kpi-${testId}-copy-template`}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              Copy tracking template
+            </Button>
+          )}
+        </div>
+        {footer && <p>{footer}</p>}
+        {advanced}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AdsSettingsLink({ children }: { children: ReactNode }) {
+  return (
+    <Link href="/private/settings/ads/meta" className="underline underline-offset-2">
+      {children}
+    </Link>
+  );
+}
+
+function Kpi({
+  label,
+  value,
+  hint,
+  info,
+  tone,
+  aside,
+  corner,
+  footer,
+  testId,
+}: {
+  label: string;
+  value: string;
+  hint?: ReactNode;
+  /** Opens from an ⓘ button next to the label. */
+  info?: ReactNode;
+  tone?: "error" | "warning" | "ok";
+  aside?: ReactNode;
+  /** Bottom-right of the card, under `aside`. */
+  corner?: ReactNode;
+  /** Full-width notes under the number. */
+  footer?: ReactNode;
+  testId: string;
+}) {
+  return (
+    <Card className="min-w-0" data-testid={`kpi-${testId}`}>
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p
+              className={cn(
+                "truncate text-2xl font-bold tabular-nums",
+                tone === "error" ? "text-destructive" : tone === "warning" ? "text-amber-500" : tone === "ok" ? "text-chart-3" : "text-foreground",
+              )}
+            >
+              {value}
+            </p>
+            <div className="mt-0.5 flex items-center gap-1">
+              <p className="text-xs text-muted-foreground">{label}</p>
+              {info && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={`What is ${label}?`}
+                      data-testid={`button-kpi-${testId}-info`}
+                    >
+                      <Info className="h-3.5 w-3.5" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-80 text-xs leading-relaxed text-muted-foreground">
+                    {info}
+                  </PopoverContent>
+                </Popover>
+              )}
+            </div>
+            {hint && <p className="mt-1 truncate text-[11px] leading-snug text-muted-foreground">{hint}</p>}
+          </div>
+          {(aside || corner) && (
+            <div className="flex shrink-0 flex-col items-end justify-between gap-1 self-stretch">
+              {aside ?? <span />}
+              {corner && <div className="text-right text-[11px] leading-snug text-muted-foreground">{corner}</div>}
+            </div>
+          )}
+        </div>
+        {footer}
+      </CardContent>
+    </Card>
+  );
+}
+
+function IssueCountChips({ errors, warnings }: { errors: number; warnings: number }) {
+  return (
+    <div className="flex items-center gap-0.5" data-testid="kpi-issues-breakdown">
+      <span className="inline-flex items-center gap-0.5 p-0.5" aria-label={`${errors} errors`}>
+        <span className={cn("text-[10px] font-semibold leading-none", errors > 0 ? "text-destructive" : "text-muted-foreground")}>Err</span>
+        <TabCountBadge count={errors} variant="error" testId="kpi-issues-errors" zeroAsCount />
+      </span>
+      <span className="inline-flex items-center gap-0.5 p-0.5" aria-label={`${warnings} warnings`}>
+        <span
+          className={cn(
+            "text-[10px] font-semibold leading-none",
+            warnings > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
+          )}
+        >
+          Warn
+        </span>
+        <TabCountBadge count={warnings} variant="warning" testId="kpi-issues-warnings" zeroAsCount />
+      </span>
+    </div>
+  );
+}
+
+/** Adds an unrecognized campaign to Settings → Ads → Known external campaigns (ads_settings only). */
+function MarkCampaignKnown({ issue, onDone }: { issue: AdsIssueRow; onDone: () => void }) {
+  const { hasCapability } = useDebugAuth();
+  const canEdit = hasCapability("ads_settings");
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const key = issue.check_key.slice("unrecognized_campaign:".length);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const res = await apiRequest("POST", "/api/settings/ads/meta/known-campaigns", { key, ...(note.trim() ? { note: note.trim() } : {}) });
+      const body = (await res.json()) as { already_known?: boolean };
+      toast({ title: body.already_known ? "Already marked as known" : "Marked as known", description: "It stays listed as info and no longer counts as a problem." });
+      setOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["/api/settings/ads/meta"] });
+      onDone();
+    } catch (err) {
+      toast({ title: "Couldn't mark as known", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!canEdit) {
+    return (
+      <div className="flex flex-wrap items-center gap-2" data-testid={`ads-issue-mark-known-${issue.id}`}>
+        <Button size="sm" variant="outline" className="h-7 text-xs" disabled data-testid="button-mark-campaign-known">
+          <BadgeCheck className="h-3.5 w-3.5" />
+          Mark as known
+        </Button>
+        <span className="text-xs text-muted-foreground">Ask someone with Ads settings access to mark this as known.</span>
+      </div>
+    );
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button size="sm" variant="outline" className="h-7 text-xs" data-testid="button-mark-campaign-known">
+          <BadgeCheck className="h-3.5 w-3.5" />
+          Mark as known
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 space-y-2 text-xs" data-testid="popover-mark-campaign-known">
+        <p className="font-medium text-foreground">Mark this campaign as known?</p>
+        <p className="text-muted-foreground">
+          Stops flagging this campaign. Its visits are still counted as paid, and its spend still isn&apos;t included.
+        </p>
+        <Input
+          value={note}
+          maxLength={200}
+          placeholder="Note (optional), e.g. Run by our agency"
+          className="h-8 text-xs"
+          onChange={(e) => setNote(e.target.value)}
+          data-testid="input-mark-campaign-known-note"
+        />
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button size="sm" className="h-7 text-xs" disabled={saving} onClick={save} data-testid="button-mark-campaign-known-confirm">
+            {saving && <Loader2 className="h-3 w-3 animate-spin" />}
+            Mark as known
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function IssueRow({
+  issue,
+  template,
+  issueWindowDays,
+  refresh,
+  onReload,
+}: {
+  issue: AdsIssueRow;
+  template: string;
+  issueWindowDays: number;
+  refresh: AdsRefreshStatus | undefined;
+  onReload: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [fixOpen, setFixOpen] = useState(false);
+  const { toast } = useToast();
+  const { hasCapability } = useDebugAuth();
+  const fixMode = trackingFixModeFor(issue.code);
+  const canFixInMeta =
+    hasCapability("ads_edit") &&
+    (fixMode === "add" || (fixMode === "replace" && issue.platform === "meta" && (issue.details?.ads?.length ?? 0) > 0));
+  const style = SEVERITY_STYLE[issue.severity];
+  const hasSpend = Object.keys(issue.spend_affected).length > 0;
+  const ga4Seen = issue.details?.ga4_seen ?? [];
+  const ga4Totals =
+    !hasSpend && issue.details?.ga4_totals
+      ? issue.details.ga4_totals
+      : !hasSpend && ga4Seen.length > 0
+        ? ga4Seen.reduce((t, r) => ({ visits: t.visits + r.visits, leads: t.leads + r.leads }), { visits: 0, leads: 0 })
+        : null;
+  const showTemplate =
+    issue.code === "missing_tracking_params" ||
+    issue.code === "non_paid_medium" ||
+    issue.code === "unclear_share_high" ||
+    issue.code === "spend_zero_visits" ||
+    (fixMode === "replace" && canFixInMeta);
+  const unrecognized = issue.code === "unrecognized_campaign";
+  const settingsFix = issue.code === "lead_conversions_overlap";
+  const showFixedElsewhere = !issue.site_fixable && issue.severity !== "info" && !unrecognized && !settingsFix;
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border last:border-b-0">
+      <CollapsibleTrigger asChild>
+        <button type="button" className="flex w-full items-center gap-3 px-3 py-2.5 text-left" data-testid={`ads-issue-${issue.id}`}>
+          <div className="flex w-28 shrink-0 flex-col" data-testid={`ads-issue-spend-${issue.id}`}>
+            <div className="flex items-center gap-1.5">
+              <style.Icon className={cn("h-4 w-4 shrink-0", style.className)} aria-label={style.label} />
+              {hasSpend ? (
+                <span className={cn("text-base font-semibold leading-tight tabular-nums", style.className)}>
+                  {formatMoney(issue.spend_affected)}
+                </span>
+              ) : ga4Totals ? (
+                <span className="text-base font-semibold leading-tight tabular-nums text-foreground">{formatNum(ga4Totals.visits)} visits</span>
+              ) : (
+                <span className="text-base font-semibold leading-tight text-muted-foreground">Unknown</span>
+              )}
+            </div>
+            <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
+              {ga4Totals ? `${formatNum(ga4Totals.leads)} leads · GA4` : "spend affected"}
+            </span>
+          </div>
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <p className="text-sm text-foreground">{issue.title}</p>
+            <AdsIssueStateBadges issue={issue} />
+          </div>
+          <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-2 pb-3 pl-[8.5rem] pr-10 text-sm" data-testid={`ads-issue-drawer-${issue.id}`}>
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Why it matters</p>
+          <p className="text-foreground/90">{issue.why}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">How to fix</p>
+          <p className="text-foreground/90">{issue.how_to_fix}</p>
+        </div>
+        <AdsIssueVerifyPanel issue={issue} onChanged={onReload} />
+        <AdsIssueEvidence issue={issue} issueWindowDays={issueWindowDays} refresh={refresh} onResyncStarted={onReload} />
+        {showTemplate && (
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">{template}</code>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                void navigator.clipboard?.writeText(template);
+                toast({ title: "Template copied" });
+              }}
+              data-testid="button-copy-issue-template"
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+            {canFixInMeta && (
+              <Button size="sm" onClick={() => setFixOpen(true)} data-testid={`button-tracking-fix-${issue.id}`}>
+                <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+                Fix via Meta
+              </Button>
+            )}
+          </div>
+        )}
+        {canFixInMeta && (
+          <AdsTrackingFixDialog open={fixOpen} onOpenChange={setFixOpen} issue={issue} onApplied={onReload} />
+        )}
+        {issue.scope.url && (
+          <a href={issue.scope.url} target="_blank" rel="noreferrer" className="text-xs underline underline-offset-2 text-muted-foreground hover:text-foreground">
+            {issue.scope.url}
+          </a>
+        )}
+        <IssueConversionEvidence issue={issue} />
+        {issue.action && <IssueSettingsAction issue={issue} onDone={onReload} />}
+        {unrecognized && issue.severity !== "info" && <MarkCampaignKnown issue={issue} onDone={onReload} />}
+        {showFixedElsewhere && <p className="text-xs text-muted-foreground">This is fixed in Meta Ads Manager or Tag Manager, not on the site.</p>}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function TrackingIssuesBadge({
+  data,
+  issues,
+  infos,
+  openCount,
+  affectedSpend,
+  onReload,
+}: {
+  data: AdsDiagnostics;
+  issues: AdsIssueRow[];
+  infos: AdsIssueRow[];
+  openCount: number;
+  affectedSpend: Record<string, number> | null;
+  onReload: () => void;
+}) {
+  const [list, setList] = useState<"issues" | "resolved">("issues");
+  const neverRun = data.run.never_run;
+  const hasErrors = data.kpis.open_errors > 0;
+  const tone = neverRun ? "muted" : hasErrors ? "error" : openCount > 0 ? "warning" : "ok";
+  const Icon = tone === "ok" ? CheckCircle2 : tone === "muted" ? Info : AlertTriangle;
+  const label = neverRun ? "Not checked" : openCount === 0 ? "All good" : `${openCount} issue${openCount === 1 ? "" : "s"}`;
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            tone === "error" && "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20",
+            tone === "warning" && "border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-400",
+            tone === "ok" && "border-green-600/40 bg-green-600/10 text-green-700 hover:bg-green-600/20 dark:text-green-400",
+            tone === "muted" && "border-border bg-muted/40 text-muted-foreground hover:text-foreground",
+          )}
+          aria-label={`Tracking issues: ${label}`}
+          data-testid="badge-ads-issues"
+          data-tone={tone}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          {label}
+        </button>
+      </DialogTrigger>
+      <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-3 sm:max-w-3xl" data-testid="dialog-ads-issues">
+        <DialogHeader className="space-y-1.5">
+          <DialogTitle className="text-base" data-testid="text-ads-issues-title">
+            Tracking issues
+            <span
+              className={cn("ml-1 tabular-nums", hasErrors ? "text-destructive" : openCount > 0 ? "text-amber-500" : "text-muted-foreground")}
+              data-testid="text-ads-issues-count"
+            >
+              ({openCount})
+            </span>
+            {affectedSpend && (
+              <span className="font-normal text-muted-foreground">
+                {" "}affecting <span className="font-semibold tabular-nums text-foreground">{formatMoney(affectedSpend)}</span> in spend
+              </span>
+            )}
+          </DialogTitle>
+          <DialogDescription className="text-sm">
+            Problems found by the last check over the last {data.issue_window_days} days. Changing the window doesn&apos;t hide or resolve them;
+            issues you marked as fixed stay listed as pending until they&apos;re confirmed.
+          </DialogDescription>
+        </DialogHeader>
+        <ToggleButtonBar value={list} onValueChange={(v) => setList(v as "issues" | "resolved")} listTestId="ads-issue-list" listClassName="flex w-fit">
+          <ToggleButtonBarTrigger value="issues">Issues ({openCount})</ToggleButtonBarTrigger>
+          <ToggleButtonBarTrigger value="resolved">Resolved ({data.resolved.length})</ToggleButtonBarTrigger>
+        </ToggleButtonBar>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border">
+          {list === "issues" ? (
+            issues.length === 0 && infos.length === 0 ? (
+              <p className="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground" data-testid="ads-no-issues">
+                <CheckCircle2 className="h-4 w-4 text-chart-3" />{" "}
+                {neverRun ? "No checks have run yet. Press Run checks on the Open issues card to look for problems." : "No tracking issues found in the last check."}
+              </p>
+            ) : (
+              [...issues, ...infos].map((i) => (
+                <IssueRow
+                  key={i.id}
+                  issue={i}
+                  template={data.utm_template}
+                  issueWindowDays={data.issue_window_days}
+                  refresh={data.refresh}
+                  onReload={onReload}
+                />
+              ))
+            )
+          ) : data.resolved.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-muted-foreground">Nothing resolved yet.</p>
+          ) : (
+            data.resolved.map((r) => (
+              <div key={`${r.id}-${r.resolved_at}`} className="flex items-center justify-between border-b border-border px-3 py-2 text-sm last:border-b-0">
+                <span className="flex items-center gap-2 text-foreground">
+                  <CheckCircle2 className="h-4 w-4 text-chart-3" /> {r.title}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {RESOLUTION_LABEL[r.resolution]} · {formatWhen(r.resolved_at)}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export const RESOLUTION_LABEL: Record<AdsDiagnostics["resolved"][number]["resolution"], string> = {
+  verified_gone: "Confirmed fixed",
+  soft_complete: "Marked fixed",
+  resource_gone: "Ad removed",
+  rule_retired: "Check retired",
+};
+
+export function trackingStatusValue(status: AdsDiagnostics["status"], neverRun: boolean): string {
+  if (status === "not_connected") return "Not connected";
+  if (neverRun) return "Not checked yet";
+  if (status === "ok") return "Healthy";
+  return status === "errors" ? "Has errors" : "Has warnings";
+}
+
+export function DiagnosticsAdsPanel() {
+  const [days, setDays] = useState<7 | 28 | 90>(28);
+
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
+    queryKey: ["/api/diagnostics/ads", "meta", days],
+    queryFn: async () => {
+      const res = await apiFetch(`/api/diagnostics/ads?platform=meta&days=${days}`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to load Ads diagnostics");
+      return res.json() as Promise<AdsDiagnostics>;
+    },
+    placeholderData: (prev) => prev,
+    refetchInterval: (q) => {
+      const d = q.state.data as AdsDiagnostics | undefined;
+      const state = d?.refresh?.state;
+      return state === "running" ? 3000 : adsRunPollMs(d?.run) || (state === "queued" ? 8000 : false);
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading Ads diagnostics…
+      </div>
+    );
+  }
+  if (error || !data) {
+    return <p className="py-8 text-sm text-destructive">{error instanceof Error ? error.message : "Failed to load Ads diagnostics"}</p>;
+  }
+
+  const k = data.kpis;
+  const trackedShare =
+    Object.keys(k.spend).length === 1 && Object.values(k.spend)[0]! > 0
+      ? Math.round(((Object.values(k.tracked_spend)[0] ?? 0) / Object.values(k.spend)[0]!) * 100)
+      : null;
+  const spendHint: ReactNode =
+    trackedShare != null
+      ? trackedShare >= 100
+        ? (
+            <span className="inline-flex items-center gap-1 font-medium text-green-700 dark:text-green-400" data-testid="kpi-spend-all-tracked">
+              <CheckCircle2 className="h-3 w-3 shrink-0 text-green-600 dark:text-green-500" />
+              all lands on our pages
+            </span>
+          )
+        : `${trackedShare}% lands on our pages`
+      : Object.keys(k.tracked_spend).length > 0
+        ? `${formatMoney(k.tracked_spend)} lands on our pages`
+        : undefined;
+  const issues = data.issues.filter((i) => i.severity !== "info");
+  const openIssues = issues.filter((i) => i.verify.state === "open");
+  const consentDrop = data.issues.find((i) => i.code === "consent_rate_drop" && i.verify.state === "open");
+  const infos = data.issues.filter((i) => i.severity === "info" && i.code !== "consent_rate_drop");
+  const affectedSpend: Record<string, number> = {};
+  for (const i of [...openIssues, ...infos]) {
+    for (const [cur, v] of Object.entries(i.spend_affected)) affectedSpend[cur] = (affectedSpend[cur] ?? 0) + v;
+  }
+  for (const cur of Object.keys(affectedSpend)) {
+    const cap = k.spend[cur];
+    if (cap != null) affectedSpend[cur] = Math.min(affectedSpend[cur]!, cap);
+  }
+  const hasAffectedSpend = Object.values(affectedSpend).some((v) => v > 0);
+
+  return (
+    <div className="space-y-4" data-testid="diagnostics-ads-panel">
+      <AdsRefreshNotice refresh={data.refresh} testId="ads-diagnostics-refresh-notice" />
+      <UrlHistoryNotice urlHistory={data.url_history} />
+      <AdsUtmConventionBanner view={data.utm_convention} />
+
+      {data.missing_floor_currencies.length > 0 && (
+        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs" data-testid="ads-missing-floor">
+          Set an urgent-spend amount for {data.missing_floor_currencies.join(", ")} in Settings → Ads → Alert thresholds.
+        </p>
+      )}
+
+      {consentDrop && (
+        <Link
+          href="/private/diagnostics/legal"
+          className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+          data-testid="ads-consent-warning"
+        >
+          <span className="flex items-center gap-2">
+            <Scale className="h-4 w-4 shrink-0" />
+            Fewer visitors accept tracking. Measured visits may look lower than real traffic.
+          </span>
+          <span className="shrink-0 underline underline-offset-2">Open Legal</span>
+        </Link>
+      )}
+
+      <div className="flex flex-wrap items-center justify-end gap-2" data-testid="ads-window-row">
+        {isFetching && !isRefreshActive(data.refresh) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+        {data.status !== "not_connected" && (
+          <AdsResyncButton
+            refresh={data.refresh}
+            onStarted={() => void refetch()}
+            testIdPrefix="ads-diagnostics"
+            snapshotPulledAt={data.meta.source === "production_snapshot" ? (data.meta.pulled_at ?? null) : undefined}
+          />
+        )}
+        <AdsPullProductionButton onDone={() => void refetch()} testIdPrefix="ads-diagnostics" />
+        <span className="text-sm text-muted-foreground">Numbers for</span>
+        <ToggleButtonBar
+          value={String(days)}
+          onValueChange={(v) => setDays(v === "7" ? 7 : v === "90" ? 90 : 28)}
+          listTestId="ads-window"
+          listClassName="flex"
+        >
+          <ToggleButtonBarTrigger value="7">7 days</ToggleButtonBarTrigger>
+          <ToggleButtonBarTrigger value="28">28 days</ToggleButtonBarTrigger>
+          <ToggleButtonBarTrigger value="90">90 days</ToggleButtonBarTrigger>
+        </ToggleButtonBar>
+        <Button asChild size="sm" variant="ghost">
+          <Link href="/private/settings/ads/meta" data-testid="link-ads-settings">
+            <Settings className="h-4 w-4" />
+          </Link>
+        </Button>
+      </div>
+
+      <div className="grid w-full grid-cols-2 gap-3 lg:grid-cols-3" data-testid="ads-kpis">
+        <Kpi
+          label="Ads tracking"
+          value={trackingStatusValue(data.status, data.run.never_run)}
+          tone={data.status === "not_connected" || data.run.never_run ? undefined : data.status === "ok" ? "ok" : data.status === "errors" ? "error" : "warning"}
+          hint={
+            data.status === "not_connected" ? (
+              <Link href="/private/settings/ads/meta" className="underline underline-offset-2 hover:text-foreground">
+                Connect it in Settings → Ads
+              </Link>
+            ) : (
+              `Meta synced ${formatWhen(data.meta.last_synced_at)}${isRefreshActive(data.refresh) ? " · refreshing…" : ""}`
+            )
+          }
+          aside={
+            data.status !== "not_connected" ? (
+              <TrackingIssuesBadge
+                data={data}
+                issues={issues}
+                infos={infos}
+                openCount={openIssues.length}
+                affectedSpend={hasAffectedSpend ? affectedSpend : null}
+                onReload={() => void refetch()}
+              />
+            ) : undefined
+          }
+          footer={
+            data.status !== "not_connected" && data.collecting_since ? (
+              <p className="mt-1 text-[11px] leading-snug text-muted-foreground">Site leads since {data.collecting_since.slice(0, 10)}</p>
+            ) : undefined
+          }
+          testId="status"
+        />
+        <Kpi
+          label="Spend"
+          value={formatMoney(k.spend)}
+          hint={spendHint}
+          aside={
+            <KpiReadGuide
+              title="Spend"
+              intro="How much Meta charged, and how much of it this page can check because the ads land on this site."
+              readings={SPEND_READINGS}
+              rightNow={spendRightNow(k.spend, trackedShare)}
+              testId="spend"
+            />
+          }
+          testId="spend"
+        />
+        <Kpi
+          label="Open issues"
+          value={adsIssuesValue(data.run, k.open_errors + k.open_warnings)}
+          tone={data.run.never_run ? undefined : k.open_errors > 0 ? "error" : k.open_warnings > 0 ? "warning" : undefined}
+          hint={<AdsRunStatus run={data.run} windowDays={data.issue_window_days} testIdPrefix="ads-meta" />}
+          aside={
+            <KpiReadGuide
+              title="Open issues"
+              intro={`Problems found in your ads or tracking over the last ${data.issue_window_days} days. Changing the window above doesn't hide or resolve them. ${RUN_CHECKS_INTRO}`}
+              readings={ISSUES_READINGS}
+              rightNow={issuesRightNow(k, hasAffectedSpend ? formatMoney(affectedSpend) : null, data.issue_window_days, data.run)}
+              footer={
+                <>
+                  An issue becomes an error when enough spend is involved.{" "}
+                  <AdsSettingsLink>Change that limit in Settings → Ads</AdsSettingsLink>.
+                </>
+              }
+              advanced={<RunAdvancedCollapsible testIdPrefix="ads-meta" />}
+              testId="issues"
+            />
+          }
+          corner={
+            <div className="flex flex-col items-end gap-1">
+              {hasAffectedSpend && (
+                <span data-testid="kpi-issues-affected-spend">
+                  <span className="font-semibold tabular-nums text-amber-500">{formatMoney(affectedSpend)}</span> affected
+                </span>
+              )}
+              {!data.run.never_run && <IssueCountChips errors={k.open_errors} warnings={k.open_warnings} />}
+              {data.status !== "not_connected" && (
+                <RunChecksButton
+                  run={data.run}
+                  onChanged={() => void refetch()}
+                  testIdPrefix="ads-meta"
+                  variant={data.run.never_run ? "button" : "link"}
+                />
+              )}
+            </div>
+          }
+          footer={<RunNotes run={data.run} testIdPrefix="ads-meta" className="mt-2" />}
+          testId="issues"
+        />
+        <Kpi
+          label="Leads: Meta vs site"
+          value={`${formatNum(k.meta_leads)} / ${formatNum(k.site_leads)}`}
+          hint={k.repeat_submissions > 0 ? `+${k.repeat_submissions} repeats` : "never added together"}
+          aside={
+            <KpiReadGuide
+              title="Leads: Meta vs site"
+              intro="Two independent counts of the same leads. They never match exactly — compare them to spot a broken pixel or form, never add them."
+              readings={LEADS_READINGS}
+              rightNow={leadsRightNow(k, data.collecting_since)}
+              activeReading={leadsActiveReading(k.meta_leads, k.site_leads)}
+              testId="leads"
+            />
+          }
+          corner={<LeadConversionBadges k={k} />}
+          footer={<LeadConversionNotes k={k} />}
+          testId="leads"
+        />
+        <Kpi
+          label="Clicks → visits"
+          value={k.clicks_to_visits_mismatch ? "Mismatch" : k.clicks_to_visits_pct != null ? `${k.clicks_to_visits_pct}%` : "—"}
+          tone={k.clicks_to_visits_mismatch ? "warning" : undefined}
+          hint={clicksVisitsHint(k)}
+          info={<ClicksVisitsInfo />}
+          aside={
+            <KpiReadGuide
+              title="Clicks → visits"
+              intro="Of the people Meta says clicked your ads, how many we saw arrive on the site. Watch for changes, not a perfect score."
+              readings={CLICKS_VISITS_READINGS}
+              rightNow={clicksVisitsRightNow(k)}
+              template={k.untagged_clicks > 0 ? data.utm_template : undefined}
+              footer={
+                <>
+                  You get a tracking issue warning when it drops sharply or falls too low.{" "}
+                  <AdsSettingsLink>Change the limits in Settings → Ads</AdsSettingsLink>.
+                </>
+              }
+              testId="clicks-visits"
+            />
+          }
+          testId="clicks-visits"
+        />
+        <Kpi
+          label="Meta: unclear"
+          value={k.meta_unclear_pct != null ? `${k.meta_unclear_pct}%` : "—"}
+          hint="visits without campaign tags"
+          aside={
+            <KpiReadGuide
+              title="Meta: unclear"
+              intro="Of all visits from Meta, the share we can't tie to a campaign. Lower is better."
+              readings={UNCLEAR_READINGS}
+              rightNow={unclearRightNow(k)}
+              template={k.untagged_clicks > 0 ? data.utm_template : undefined}
+              testId="unclear"
+            />
+          }
+          testId="unclear"
+        />
+      </div>
+
+      {data.status !== "not_connected" && data.meta_platforms && <AdsMetaPlatformsCard data={data.meta_platforms} days={data.window_days} />}
+
+      <PaidPagesCard days={days} issues={data.issues.filter((i) => i.verify.state === "open")} />
+    </div>
+  );
+}
+
+export function AdsGlobalRollupCard() {
+  const { data } = useQuery({
+    queryKey: ["/api/diagnostics/ads", "summary"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/diagnostics/ads?summary=1");
+      if (!res.ok) return null;
+      return res.json() as Promise<{ status: AdsDiagnostics["status"]; open_errors: number; open_warnings: number; never_run?: boolean }>;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+  if (!data || data.status === "not_connected" || data.open_errors === 0) return null;
+  return (
+    <Link
+      href="/private/diagnostics/ads"
+      className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2.5 text-sm"
+      data-testid="ads-global-rollup"
+    >
+      <span className="flex items-center gap-2">
+        <Megaphone className="h-4 w-4" />
+        Ads (Meta + Google): {data.open_errors} tracking error(s){data.open_warnings > 0 ? `, ${data.open_warnings} warning(s)` : ""}
+      </span>
+      <span className="text-xs underline underline-offset-2">Open Ads overview</span>
+    </Link>
+  );
+}

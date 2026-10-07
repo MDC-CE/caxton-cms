@@ -12,6 +12,7 @@ import * as path from "path";
 import * as jsYaml from "js-yaml";
 import type { Fixer, FixerContext, FixerResult } from "./types";
 import { getAllConfigs } from "../../../server/content-types";
+import { typeUsesSharedTemplate } from "../../../shared/sharedLayoutPaths";
 import { getDefaultContentRoot } from "../../../server/site-config";
 import {
   findBestSingleMirrorSource,
@@ -56,7 +57,7 @@ export const sharedLayoutSinglesFixer: Fixer = {
 
     const configs = getAllConfigs(root);
     for (const [contentType, config] of Object.entries(configs)) {
-      const isShared = !!(config.database?.slug || config.single_template);
+      const isShared = typeUsesSharedTemplate(config);
       if (!isShared) continue;
 
       const folder = config.directory || contentType;

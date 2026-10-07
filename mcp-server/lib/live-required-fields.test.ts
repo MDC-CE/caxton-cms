@@ -101,4 +101,22 @@ describe("MCP live required fields guidance", () => {
     expect(payload.code).toBe("seo_keyword_taken");
     expect(payload.warnings.some((w) => w.code === "seo_keyword_taken")).toBe(true);
   });
+
+  it("surfaces schema_org_page_url_mismatch with property paths and an update_fields reset hint", () => {
+    const result = editApiErrorResult(
+      'SCHEMA_ORG_PAGE_URL_MISMATCH: this page\'s structured data points to a different address (WebPage section schema_org-1 (sections[0].properties.url) has url "https://4geeks.com/en/landing/foo" but this page is at /landing/foo). Remove the url…',
+      { code: "schema_org_page_url_mismatch" },
+      { slug: "foo", locale: "en", contentType: "landing" },
+    );
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text) as {
+      code: string;
+      property_paths: string[];
+      next_actions: Array<{ tool: string; args_hint?: { updates?: Array<{ field_path: string; reset: boolean }> } }>;
+    };
+    expect(payload.code).toBe("schema_org_page_url_mismatch");
+    expect(payload.property_paths).toEqual(["sections[0].properties.url"]);
+    const update = payload.next_actions.find((a) => a.tool === "update_fields");
+    expect(update?.args_hint?.updates).toEqual([{ field_path: "sections.0.properties.url", reset: true }]);
+  });
 });

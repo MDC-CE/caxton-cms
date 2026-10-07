@@ -9,13 +9,11 @@ import { getAllJobStates, type DbJobState } from "../db-job-state";
 import { countDatabaseCacheErrors } from "../../scripts/validation/shared/databaseHealthChecks";
 import { getValidationCacheService } from "../services/validationCacheService";
 import { getDatabaseUsage } from "../database-usage";
-import { getPackageRoot, getProjectRoot } from "@shared/paths";
-
 
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import { execSync as _execSync, execFile } from "child_process";
+import { execSync as _execSync } from "child_process";
 import {
   versioningUpdateSchema,
   type CareerProgram,
@@ -178,7 +176,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { isEntryDetached, resolvePreviewBaseSlug } from "../shared-layout-entry";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
@@ -223,6 +220,13 @@ import {
   FixerItemStatus,
 } from "./_helpers";
 import { child } from "../logger";
+import { api } from "../rate-limit/api";
+import {
+  defaultMigrationDeps,
+  listMigrations,
+  markMigrationDone,
+  startMigration,
+} from "../data-migrations/service";
 const log = child({ module: "routes/databases" });
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
@@ -247,191 +251,64 @@ function getValidationCache(res: Response) {
 }
 
 export function registerDatabasesRoutes(app: Express): void {
-  app.get("/api/database-single/:contentType/:slug", async (req, res) => {
-    try {
-      const { contentType, slug: requestSlug } = req.params;
-      const locale = normalizeLocale(req.query.locale as string);
-      const forceVariant = req.query.force_variant as string | undefined;
-
-      if (!hasDatabaseSingle(contentType, getContentRoot(res))) {
-        res
-          .status(400)
-          .json({
-            error: `Content type "${contentType}" is not database-backed`,
-          });
-        return;
-      }
-
-      const root = getContentRoot(res);
-      const slug = resolvePreviewBaseSlug(requestSlug, contentType, getCI(res));
-      const {
-        buildLocaleUnavailablePayload,
-        isEmptyDetachedLocaleEntry,
-        skipEmptyLocaleGateForForceVariant,
-      } = await import("../empty-locale");
-      if (
-        !skipEmptyLocaleGateForForceVariant(forceVariant) &&
-        isEmptyDetachedLocaleEntry({
-          contentType,
-          slug,
-          locale,
-          contentRoot: root,
-          ci: getCI(res),
-        })
-      ) {
-        const availableUrls = getCI(res).getAlternateUrls(slug, contentType);
-        res.status(404).json(
-          buildLocaleUnavailablePayload({
-            contentType,
-            slug,
-            locale,
-            availableUrls,
-          }),
-        );
-        return;
-      }
-
-      const detached = isEntryDetached(contentType, slug, root);
-      let templateVariant: string | undefined;
-      if (!detached) {
-        const { resolveAssignedVariantSlug } = await import("./_helpers");
-        templateVariant =
-          forceVariant ||
-          resolveAssignedVariantSlug(req, res, contentType, slug, locale) ||
-          undefined;
-      } else if (forceVariant) {
-        templateVariant = forceVariant;
-      }
-
-      const page = await loadDatabaseSinglePage(
-        contentType,
-        slug,
-        locale,
-        root,
-        getDB(res),
-        templateVariant,
-      );
-      if (!page) {
-        res
-          .status(404)
-          .json({ error: `Item not found: ${contentType}/${slug}` });
-        return;
-      }
-
-      const dbSingleData = page as unknown as Record<string, unknown>;
-      const dbSingleEntry = (dbSingleData.singleEntry as Record<string, unknown>) || {};
-      if (page.sections && Array.isArray(page.sections)) {
-        page.sections = (await resolveDynamicEntries(page.sections, locale, {
-          db: getDB(res),
-          contentRoot: getContentRoot(res),
-          contentIndex: getCI(res),
-          singleEntry: dbSingleEntry,
-        })) as any;
-      }
-      if (Object.keys(dbSingleEntry).length > 0) {
-        try {
-          const site = res.locals.site as import("../site-manager").SiteContext | undefined;
-          if (site?.entryPreviewManager) {
-            const { applyEntryPreviewOgImage } = await import("../entry-preview-manager");
-            const { getPreviewConfig } = await import("../content-types");
-            await applyEntryPreviewOgImage(site.entryPreviewManager, {
-              contentType,
-              entry: dbSingleEntry,
-              previewConfig: getPreviewConfig(contentType, getContentRoot(res)),
-              pageData: dbSingleData,
-            });
-          }
-        } catch {
-          /* non-fatal */
-        }
-        const resolved = resolveAllTemplateVars(dbSingleData, {
-          singleEntry: dbSingleEntry,
-          contentRoot: getContentRoot(res),
-          context: { locale },
-        }) as Record<string, unknown>;
-        Object.assign(dbSingleData, resolved);
-      } else {
-        const resolved = resolveAllTemplateVars(dbSingleData, {
-          contentRoot: getContentRoot(res),
-          context: { locale },
-        }) as Record<string, unknown>;
-        Object.assign(dbSingleData, resolved);
-      }
-
-      const { enhanceArticleSectionsInPage } = await import("../markdown-enhance");
-      await enhanceArticleSectionsInPage(dbSingleData);
-
-      const dbSingleRaw = getCI(res).loadMergedContent(contentType, slug, locale);
-      const dbSingleLayout = resolveLayout(contentType, dbSingleRaw.data || dbSingleData, getContentRoot(res));
-      injectCanonicalIfMissing(dbSingleData, contentType, locale);
-      const { layout: _dbSingleStripLayout, ...dbSingleRest } = dbSingleData;
-      res.json({
-        ...dbSingleRest,
-        layout: dbSingleLayout,
-        detached,
-      });
-    } catch (error) {
-      log.error({ err: error }, "[DatabaseSingle] Error:");
-      res.status(500).json({ error: "Failed to load database single page" });
-    }
+  /** Legacy alias kept for cached clients: entry pages are served by /api/content-pages. */
+  app.get("/api/database-single/:contentType/:slug", (req, res) => {
+    const { contentType, slug } = req.params;
+    const qIndex = req.originalUrl.indexOf("?");
+    const query = qIndex >= 0 ? req.originalUrl.slice(qIndex) : "";
+    res.redirect(307, `/api/content-pages/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}${query}`);
   });
-  app.get("/api/migrations", (_req, res) => {
-    try {
-      const migrationsDir = path.join(getPackageRoot(), "scripts", "migrations");
-      if (!fs.existsSync(migrationsDir)) {
-        res.json([]);
-        return;
-      }
-      const files = fs.readdirSync(migrationsDir)
-        .filter(f => /^\d{3}_[\w]+\.ts$/.test(f))
-        .sort();
-      const result = files.map(filename => {
-        const fullPath = path.join(migrationsDir, filename);
-        const content = fs.readFileSync(fullPath, "utf-8");
-        const nameMatch = content.match(/@migration\s+([^\n*]+)/);
-        const descMatch = content.match(/@description\s+([^\n*]+(?:\n\s*\*\s+[^\n*@]+)*)/);
-        const name = nameMatch ? nameMatch[1].trim() : filename.replace(/\.ts$/, "");
-        const description = descMatch
-          ? descMatch[1].replace(/\n\s*\*\s*/g, " ").trim()
-          : "No description provided.";
-        return { filename, name, description };
-      });
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || String(err) });
-    }
-  });
-
-  app.post("/api/migrations/run", async (req, res) => {
+  api.get(app, "/api/migrations", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireCapability(req, res, "migrations_run");
     if (!auth.authorized) return;
+    try {
+      res.json(listMigrations(defaultMigrationDeps(), getContentRootName(res)));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
-    const { filename } = req.body || {};
-    if (!filename || !/^\d{3}_[\w]+\.ts$/.test(filename)) {
-      res.status(400).json({ error: "Invalid migration filename." });
-      return;
+  api.post(app, "/api/migrations/run", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "migrations_run");
+    if (!auth.authorized) return;
+    const { filename, mode, confirm_rerun } = req.body || {};
+    try {
+      const result = startMigration(defaultMigrationDeps(), {
+        filename,
+        mode: mode === "dry_run" ? "dry_run" : "run",
+        confirmRerun: confirm_rerun,
+        actor: auth.author ?? auth.username ?? null,
+        currentSite: getContentRootName(res),
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ success: false, code: result.code, error: result.error });
+        return;
+      }
+      res.status(202).json({ success: true, run_id: result.run_id, recorded_in: result.recorded_in });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
     }
-    const migrationsDir = path.join(getPackageRoot(), "scripts", "migrations");
-    const fullPath = path.join(migrationsDir, filename);
-    if (!fs.existsSync(fullPath)) {
-      res.status(404).json({ error: "Migration script not found." });
-      return;
+  });
+
+  api.post(app, "/api/migrations/mark-done", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "migrations_run");
+    if (!auth.authorized) return;
+    const { filename, note } = req.body || {};
+    try {
+      const result = markMigrationDone(defaultMigrationDeps(), {
+        filename,
+        note,
+        actor: auth.author ?? auth.username ?? null,
+        currentSite: getContentRootName(res),
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ success: false, code: result.code, error: result.error });
+        return;
+      }
+      res.json({ success: true, run: result.run, recorded_in: result.recorded_in });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
     }
-    execFile(
-      "npx",
-      ["tsx", fullPath],
-      { cwd: getProjectRoot(), timeout: 120000 },
-      (err, stdout, stderr) => {
-        const output = [stdout, stderr].filter(Boolean).join("\n").trim();
-        if (err && err.killed) {
-          res.json({ success: false, output: `Timed out after 120s.\n${output}` });
-        } else if (err && err.code !== 0) {
-          res.json({ success: false, output: output || err.message });
-        } else {
-          res.json({ success: true, output });
-        }
-      },
-    );
   });
   // ── Database routes ──────────────────────────────────────────
   app.get("/api/databases", async (req, res) => {

@@ -29,6 +29,8 @@ export interface CacheStats {
 export interface IDatabaseCache {
   /** @param ttlMinutes Max age in minutes; 0 ≈ always stale on next read. */
   read(dbName: string, ttlMinutes: number, raw?: boolean): CacheEntry | null;
+  /** `fetched_at` of the stored copy regardless of age, without parsing the payload. */
+  readFetchedAt(dbName: string, raw?: boolean): string | null;
   write(dbName: string, entry: CacheEntry, raw?: boolean): void;
   clear(dbName: string): void;
   has(dbName: string, ttlMinutes: number): boolean;
@@ -59,6 +61,10 @@ export class JsonFileCache implements IDatabaseCache {
     } catch {
       return null;
     }
+  }
+
+  readFetchedAt(dbName: string, raw = false): string | null {
+    return this.read(dbName, Infinity, raw)?.fetched_at ?? null;
   }
 
   write(dbName: string, entry: CacheEntry, raw = false): void {
@@ -167,6 +173,13 @@ export class SqliteCache implements IDatabaseCache {
     } catch {
       return null;
     }
+  }
+
+  readFetchedAt(dbName: string, raw = false): string | null {
+    const row = this.db
+      .prepare("SELECT fetched_at FROM cache_entries WHERE db_name = ? AND variant = ?")
+      .get(dbName, raw ? "raw" : "") as { fetched_at: string } | undefined;
+    return row?.fetched_at ?? null;
   }
 
   write(dbName: string, entry: CacheEntry, raw = false): void {

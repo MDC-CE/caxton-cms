@@ -163,7 +163,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -260,6 +259,9 @@ import { registerFunnelRoutes } from "./funnel";
 import { registerProductRoutes } from "./product";
 import { registerWebhooksRoutes } from "./webhooks";
 import { registerOverlaysRoutes } from "./overlays";
+import { registerConsentRoutes } from "./consent";
+import { registerAdsRoutes } from "./ads";
+import { attachPageVersionToJson } from "./_helpers";
 import { setWorkerRunNow } from "./_worker-state";
 import { getSiteInfo, getSiteContextMap, writeDevSiteFile, clearDevSiteFile } from "../site-manager";
 import { getSiteConfigs, getDefaultContentFolder } from "../site-config";
@@ -318,11 +320,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Apply redirect middleware for 301 redirects from YAML content
   app.use(redirectMiddleware);
 
+  app.use("/api", (req, res, next) => (req.method === "GET" ? attachPageVersionToJson(req, res, next) : next()));
+
 
   registerGeoRoutes(app);
   registerAuthRoutes(app);
   registerStaffAuthRoutes(app);
   registerFormsRoutes(app);
+  registerConsentRoutes(app);
+  registerAdsRoutes(app);
   registerSettingsRoutes(app);
   registerContentRoutes(app);
   registerDatabasesRoutes(app);

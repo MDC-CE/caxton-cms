@@ -108,7 +108,7 @@ When `is_signup: true`:
 
 - If `allow_signup` is not `false`: site `field_map` must be non-empty; every `form.<name>` in the map must exist; required map rows need `fields.<name>.required: true`. Constant/global rows do not require form fields.
 - If `allow_signup: false`: login-only (no account create / no field_map requirement for enable).
-- `conversion_name` is **required** (catalog name or explicit `null` / Off) — the account gate does not waive it. Choosing the site signup/login event *is* the conversion. If `conversion_name` equals the auth event (canonical or alias), GTM fires once from the auth action — not again on lead submit.
+- `conversion_name` is **required** (catalog name or explicit `null` / Off) — the account gate does not waive it. Choosing the site signup/login event *is* the conversion. If `conversion_name` equals the auth event (canonical or alias), GTM fires once from the auth action — not again on lead submit. The signup push uses the same lead dataLayer body as any other form conversion (identity, consents, `submission_id`, ecommerce `item_id` when resolved, and other non-empty `fields.*` such as `utm_medium`). Login stays email-only.
 - Account gate is **form-level** (not per-route).
 - MCP edit-sections identity failures surface `action_required: fix_signup_field_map` + `next_actions`.
 - Does **not** write form YAML; field_map lives only in `settings.yml` → `auth`.
@@ -187,8 +187,35 @@ conversion_name: event_order
 - Extra keys are **not** rendered yet (UI slots stay hardcoded). Use `visible: false` + `default` for Learn-style `event_*` payload keys. `{{ entry.* }}` is resolved by section `resolveDeep` before the form mounts — submit copies those values onto the lead body and dataLayer. Resolved defaults may be **string, number, or boolean** (e.g. numeric `entry.id` → `event_id`); empty strings are skipped.
 - Do **not** put `fields` on `form_overrides` for phase differences — change `conversion_name` / webhook / success instead.
 
+## Campaign context + ledger fields (added by code, not YAML)
+
+Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server-side before `buildLeadPayload`:
+
+| Key | When | Meaning |
+|---|---|---|
+| `submission_id` | always | Per-submit id (client UUID, server fallback). Not the authored `event_id`. Also on the GTM conversion push. |
+| `is_test` | always (boolean) | Staff session (`X-Debug-Token`) or email matching `ads-config.yml` → `test_email_patterns` (legacy `settings.yml` → `ads.test_email_patterns` until migration 004 runs). Still delivered; excluded from Ads reports. |
+| `test_reason` | only when `is_test` | `staff_session` \| `email_pattern` |
+| `is_repeat` | always (boolean) | Same browser + same `conversion_name` within 24h. Still delivered; counted as a submission, not a lead. |
+| `repeat_of_submission_id` | only when `is_repeat` | First submission in the window. |
+| `gclid` `fbclid` `msclkid` `ttclid` `li_fat_id` … | when present | Per-platform click ids (`ppc_tracking_id` kept for back-compat). |
+| `utm_id` `fbp` `fbc` | when present | Meta campaign id (URL template), Meta browser / click ids. |
+| `first_utm_*` | when present | Write-once first campaign set in this browser. |
+| `landing_url` / `conversion_url` | always | First page in this browser / page where the form was sent. |
+| `first_paid_landing_*` / `last_paid_landing_*` | when a paid visit was seen (≤30 days) | URL + ISO time. |
+| `ad_platform` | paid/unclear visits | `meta` \| `google` \| … |
+| `page_experiment_id` / `page_variant` | page has an active version test | Variant from the versioning cookie. |
+| `consent_state` | always | `granted` \| `denied` \| `unset` (tracking banner). |
+
+- Source precedence: HttpOnly `4g_ads` cookie (only after tracking consent) → in-memory session in the request body (same-visit leads before consent).
+- The server ledger (`lead_submissions` in pipeline SQLite) stores **no** name / email / phone; 25-month retention. CRM owns personal data.
+- Non-effects: YAML `fields.*` defaults with the same key win only when enrichment has no value (enrichment keys override raw body keys).
+- UTM checks: the latest `utm_*` per non-test ledger row (with an `ad_platform`) feed the Ads UTM checks as observed evidence (topic `ads` → UTM convention and checks). Values are never rewritten on the lead or in the CRM.
+- Same-site links with `utm_*` in content YAML raise `INTERNAL_LINK_HAS_UTM` (validator `internal-link-utm`, warning): they restart the GA4 session and overwrite the visitor's real source, so paid visits and leads can be credited to the wrong source. Links to other domains (including the org's other sites) are not flagged.
+
 ## Paths
 
+- Ledger / enrichment: `server/ads/lead-ledger.ts`, `server/ads/ad-context.ts`, client `client/src/lib/leadAdContext.ts`
 - Parse: `shared/parseFormFieldSource.ts`
 - Catalog API: `server/query-options.ts`
 - Index: `server/ecommerce/ecommerce-index.ts`

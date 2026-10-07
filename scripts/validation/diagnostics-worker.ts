@@ -9,6 +9,8 @@ import { ContentIndex } from "../../server/content-index";
 import { MediaGallery } from "../../server/media-gallery";
 import { DatabaseManager } from "../../server/database";
 import { ValidationCacheService } from "../../server/services/validationCacheService";
+import { randomUUID } from "node:crypto";
+import { flushTick, startTick } from "../../server/process-stats";
 import { runDiagnosticsJob } from "./runDiagnosticsJob";
 import type {
   DiagnosticsWorkerInboundMessage,
@@ -103,9 +105,29 @@ async function handleStart(msg: DiagnosticsWorkerStartMessage): Promise<void> {
   }
 }
 
+function flushStats(): void {
+  try {
+    flushTick();
+  } catch (err) {
+    console.error("[diagnostics-worker] process stats flush failed", err);
+  }
+}
+
+process.on("SIGTERM", () => {
+  flushStats();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  flushStats();
+  process.exit(0);
+});
+
 process.on("message", (raw: DiagnosticsWorkerInboundMessage) => {
   if (!raw || typeof raw !== "object" || raw.type !== "start") return;
   void handleStart(raw).finally(() => {
+    flushStats();
     setTimeout(() => process.exit(process.exitCode ?? 0), 50);
   });
 });
+
+startTick({ processName: "diagnostics-worker", processStartId: randomUUID() });

@@ -37,6 +37,7 @@ import {
   buildEntryKey,
   entryKeyFromContentFile,
   isLegacySyntheticEntryKey,
+  parseEntryKey,
 } from "../../scripts/validation/shared/entryKey";
 import { getCanonicalUrl } from "../../scripts/validation/shared/canonicalUrls";
 import { isIssueCodeCodingAgentOnly } from "../../scripts/validation/shared/issueCodeRegistry";
@@ -108,6 +109,7 @@ function emptyIndexes(): ValidationCacheIndexes {
     byMedia: {},
     byDatabase: {},
     byRedirect: {},
+    byAds: {},
     byUrl: {},
   };
 }
@@ -153,7 +155,12 @@ function rebuildIndexes(
         push(indexes.byDatabase, t.dbSlug);
       } else if (t.type === "redirect") {
         push(indexes.byRedirect, t.from);
+      } else if (t.type === "ads") {
+        push(indexes.byAds!, `${t.platform}:${t.level}:${t.id ?? "none"}`);
       }
+    }
+    if (issue.ads) {
+      for (const adId of issue.ads.affected_ads) push(indexes.byAds!, `${issue.ads.platform}:ad:${adId}`);
     }
   }
   return indexes;
@@ -354,11 +361,46 @@ function issueScopesForValidatorName(name: string): ValidationScope[] {
   return ["site"];
 }
 
+export type AdsRemovalResolution = "verified_gone" | "resource_gone" | "rule_retired";
+
+const ADS_RESOLUTION_REPORT: Record<AdsRemovalResolution, string> = {
+  verified_gone: "Ads diagnostics checked again and the problem was gone.",
+  resource_gone: "No longer applies: the ad, ad set or campaign was deleted in the ad platform.",
+  rule_retired: "No longer checked: this Ads check was removed.",
+};
+
+export type AdsCacheChanges = {
+  upserts: StoredValidationIssue[];
+  /** Drop the pending overlay (verification failed / early fail); attempt recorded when given. */
+  reopen: Array<{ id: string; attempt?: { by: string; report?: string } }>;
+  removals: Array<{ id: string; resolution: AdsRemovalResolution; resolvedBy: string }>;
+  /** Superseded by a group issue — removed without an archive row. */
+  drops: string[];
+  /** Stamp `runMeta.byScope.ads` (full Runs / Re-checks). */
+  runAt?: string;
+  validators?: string[];
+};
+
 export type ApplyValidatorResultsOptions = {
   contentFiles: ContentFile[];
   entryKeys?: string[];
   markSiteWide?: boolean;
+  /** Content types whose pages were not loaded this run (empty database cache); their issues are kept as-is. */
+  skippedContentTypes?: string[];
 };
+
+function issueOnlyTargetsSkippedTypes(
+  issue: StoredValidationIssue,
+  skippedTypes: Set<string>,
+): boolean {
+  if (skippedTypes.size === 0) return false;
+  const entryTargets = issue.targets.filter((t) => t.type === "entry");
+  if (entryTargets.length === 0) return false;
+  return entryTargets.every((t) => {
+    const parsed = parseEntryKey(t.entryKey);
+    return parsed != null && skippedTypes.has(parsed.contentType);
+  });
+}
 
 export class ValidationCacheService {
   private issues: Record<string, StoredValidationIssue> = {};
@@ -1125,6 +1167,108 @@ export class ValidationCacheService {
     this.runMetaByScope[scope] = { ...existing, dirty: true };
   }
 
+  /** Ads diagnostics issues (scope `ads`), including pending-verification ones. */
+  getAdsIssues(): StoredValidationIssue[] {
+    return this.getIssuesByScope("ads");
+  }
+
+  /** Issue ids indexed under an Ads ladder key (`meta:campaign:123`, `meta:ad:456`). */
+  getAdsIssueIdsByKey(key: string): string[] {
+    return [...(this.indexes.byAds?.[key] ?? [])];
+  }
+
+  getAdsRunAt(): string | null {
+    return this.runMetaByScope.ads?.lastRunAt ?? null;
+  }
+
+  /**
+   * Single write path for Ads diagnostics results (web process only). Upserts keep any
+   * pending-verification overlay unless the id is listed in `reopen`; removals are archived with
+   * their resolution; `drops` disappear silently (merged into a group issue).
+   */
+  applyAdsChanges(changes: AdsCacheChanges): void {
+    const archived: Record<AdsRemovalResolution, StoredValidationIssue[]> = {
+      verified_gone: [],
+      resource_gone: [],
+      rule_retired: [],
+    };
+    const resolvedBy: Record<AdsRemovalResolution, string> = {
+      verified_gone: "ads-diagnostics",
+      resource_gone: "ads-diagnostics",
+      rule_retired: "ads-diagnostics",
+    };
+    const forget = (id: string) => {
+      delete this.issues[id];
+      delete this.completions[id];
+      delete this.claims[id];
+      delete this.attempts[id];
+    };
+    for (const r of changes.removals) {
+      const issue = this.issues[r.id];
+      if (!issue) continue;
+      archived[r.resolution].push(issue);
+      resolvedBy[r.resolution] = r.resolvedBy;
+      forget(r.id);
+    }
+    for (const id of changes.drops) forget(id);
+    for (const r of changes.reopen) {
+      if (!this.issues[r.id]) continue;
+      const prior = this.completions[r.id];
+      delete this.completions[r.id];
+      if (r.attempt) {
+        this.recordCompleteRejectedAttempt(r.id, {
+          by: r.attempt.by,
+          ...(r.attempt.report ? { report: r.attempt.report } : {}),
+          ...(prior?.actor ? { actor: prior.actor } : {}),
+        });
+      }
+      if (this.archive) {
+        void this.archive.markReopened(r.id).catch((err) => {
+          log.warn({ err, issueId: r.id }, "[ValidationCache] Archive reopen failed");
+        });
+      }
+    }
+    for (const row of changes.upserts) {
+      const isNew = !this.issues[row.id];
+      this.issues[row.id] = row;
+      if (isNew && this.archive) this.archive.onOpenIssueInserted(row.id);
+    }
+    if (changes.runAt) {
+      const prev = this.runMetaByScope.ads ?? { lastRunAt: changes.runAt, byValidator: {} };
+      const byValidator = { ...prev.byValidator };
+      for (const v of changes.validators ?? []) byValidator[v] = changes.runAt;
+      this.runMetaByScope.ads = { lastRunAt: changes.runAt, byValidator, dirty: false };
+    }
+    this.indexes = rebuildIndexes(this.issues, this.indexes.byUrl);
+    if (this.archive) {
+      for (const [resolution, issues] of Object.entries(archived) as Array<[AdsRemovalResolution, StoredValidationIssue[]]>) {
+        if (issues.length === 0) continue;
+        void this.archive
+          .appendResolvedBatch(issues, { resolvedBy: resolvedBy[resolution], resolution, report: ADS_RESOLUTION_REPORT[resolution] })
+          .catch((err) => log.warn({ err, resolution }, "[ValidationCache] Ads archive failed"));
+      }
+    }
+  }
+
+  /** Mark fixed → pending verification (not resolved; no archive row until verified). */
+  setAdsPending(issueId: string, completion: ValidationIssueCompletion): boolean {
+    const issue = this.issues[issueId];
+    if (!issue?.ads) return false;
+    this.completions[issueId] = completion;
+    delete this.claims[issueId];
+    this.issues[issueId] = { ...issue, ads: { ...issue.ads, last_action_at: completion.completedAt } };
+    return true;
+  }
+
+  /** Undo a mark fixed → open again immediately. */
+  clearAdsPending(issueId: string, atIso: string): boolean {
+    const issue = this.issues[issueId];
+    if (!issue?.ads) return false;
+    delete this.completions[issueId];
+    this.issues[issueId] = { ...issue, ads: { ...issue.ads, last_action_at: atIso } };
+    return true;
+  }
+
   applyValidatorResults(
     validators: ValidatorResult[],
     options: ApplyValidatorResultsOptions,
@@ -1135,6 +1279,7 @@ export class ValidationCacheService {
       options.entryKeys && options.entryKeys.length > 0
         ? new Set(options.entryKeys)
         : null;
+    const skippedTypes = new Set(options.skippedContentTypes ?? []);
 
     for (const file of contentFiles) {
       // Shared public URLs: only live (non-variant) rows own byUrl → entryKey.
@@ -1146,7 +1291,7 @@ export class ValidationCacheService {
 
     for (const v of validators) {
       const runClass = getValidatorRunClass(v.name);
-      this.clearValidatorSlice(v.name, runClass, entryKeySet);
+      this.clearValidatorSlice(v.name, runClass, entryKeySet, skippedTypes);
 
       const stampedErrors = v.errors.map((i) => ({
         ...i,
@@ -1197,6 +1342,7 @@ export class ValidationCacheService {
       } else if (isCrossEntryValidator(v.name) || isMediaValidator(v.name)) {
         for (const issue of Object.values(this.issues)) {
           if (issue.validator !== v.name) continue;
+          if (issueOnlyTargetsSkippedTypes(issue, skippedTypes)) continue;
           for (const t of issue.targets) {
             if (t.type !== "entry") continue;
             const prev = this.runMetaByEntry[t.entryKey] ?? {
@@ -1258,10 +1404,12 @@ export class ValidationCacheService {
     validatorName: string,
     runClass: ReturnType<typeof getValidatorRunClass>,
     entryKeySet: Set<string> | null,
+    skippedTypes: Set<string>,
   ): void {
     const toDelete: string[] = [];
     for (const [id, issue] of Object.entries(this.issues)) {
       if (issue.validator !== validatorName) continue;
+      if (issueOnlyTargetsSkippedTypes(issue, skippedTypes)) continue;
 
       if (runClass === "cross-entry" || runClass === "media" || runClass === "database") {
         toDelete.push(id);
@@ -1762,6 +1910,9 @@ function buildCacheIssueRowsFromIssues(
         lastFullRunAt: issue.lastRunAt,
         suggestion: issue.suggestion,
         file: issue.file,
+        ...(issue.staleSourceAgeMs != null ? { staleSourceAgeMs: issue.staleSourceAgeMs } : {}),
+        ...(issue.staleSourceDatabase ? { staleSourceDatabase: issue.staleSourceDatabase } : {}),
+        ...(issue.redirectSuggestion ? { redirectSuggestion: issue.redirectSuggestion } : {}),
         completed,
         claimed,
         attempts,
@@ -1781,6 +1932,9 @@ function buildCacheIssueRowsFromIssues(
         lastFullRunAt: issue.lastRunAt,
         suggestion: issue.suggestion,
         file: issue.file,
+        ...(issue.staleSourceAgeMs != null ? { staleSourceAgeMs: issue.staleSourceAgeMs } : {}),
+        ...(issue.staleSourceDatabase ? { staleSourceDatabase: issue.staleSourceDatabase } : {}),
+        ...(issue.redirectSuggestion ? { redirectSuggestion: issue.redirectSuggestion } : {}),
         completed,
         claimed,
         attempts,
@@ -1918,6 +2072,8 @@ export function listCacheIssuesFromStore(
   } else if (filters?.file) {
     issues = cache.getAllIssues().filter((i) => i.file === filters.file);
   }
+  // Ads issues live on Diagnostics → Ads (own verify model); only an explicit `scope: "ads"` lists them here.
+  if (filters?.scope !== "ads") issues = issues.filter((i) => !i.scopes.includes("ads"));
 
   if (!filters?.includeCompleted) {
     issues = issues.filter((i) => !cache.isIssueCompleted(i.id));

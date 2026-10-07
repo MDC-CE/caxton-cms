@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 26;
+export const PIPELINE_SCHEMA_VERSION = 32;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -552,6 +552,131 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_bases_draft
           ON draft_bases (content_type, slug, locale, variant);
+      `);
+    },
+  },
+  {
+    version: 27,
+    name: "content_proposals_idea_seo_target",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      for (const name of ["idea_seo_target_json", "seo_target_override_json"]) {
+        if (!tableHasColumn(db, "content_proposals", name)) {
+          db.exec(`ALTER TABLE content_proposals ADD COLUMN ${name} TEXT`);
+        }
+      }
+    },
+  },
+  {
+    version: 28,
+    name: "lead_submissions_and_consent_daily",
+    up(db) {
+      // No name / email / phone columns: personal data only goes to the CRM webhook.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lead_submissions (
+          submission_id TEXT PRIMARY KEY,
+          created_at INTEGER NOT NULL,
+          form TEXT,
+          browser_hash TEXT,
+          host TEXT,
+          locale TEXT,
+          utm_source TEXT,
+          utm_medium TEXT,
+          utm_campaign TEXT,
+          utm_content TEXT,
+          utm_term TEXT,
+          platform TEXT,
+          campaign_id TEXT,
+          adset_id TEXT,
+          ad_id TEXT,
+          click_id_type TEXT,
+          landing_path TEXT,
+          conversion_path TEXT,
+          first_paid_host TEXT,
+          first_paid_path TEXT,
+          first_paid_at INTEGER,
+          last_paid_host TEXT,
+          last_paid_path TEXT,
+          last_paid_at INTEGER,
+          experiment_id TEXT,
+          variant TEXT,
+          is_test INTEGER NOT NULL DEFAULT 0,
+          test_reason TEXT,
+          is_repeat INTEGER NOT NULL DEFAULT 0,
+          repeat_of TEXT,
+          consent_state TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_submissions_created ON lead_submissions (created_at);
+        CREATE INDEX IF NOT EXISTS idx_lead_submissions_repeat
+          ON lead_submissions (browser_hash, form, created_at);
+        CREATE TABLE IF NOT EXISTS consent_daily (
+          date TEXT NOT NULL,
+          country TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          shown INTEGER NOT NULL DEFAULT 0,
+          granted_explicit INTEGER NOT NULL DEFAULT 0,
+          granted_implied INTEGER NOT NULL DEFAULT 0,
+          denied INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (date, country, mode)
+        );
+      `);
+    },
+  },
+  {
+    version: 29,
+    name: "content_proposals_site_facts_check",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "site_facts_check_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN site_facts_check_json TEXT");
+      }
+    },
+  },
+  {
+    version: 30,
+    name: "lead_submissions_paid_landing_platform",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      for (const prefix of ["first_paid", "last_paid"]) {
+        for (const field of ["platform", "campaign_id", "adset_id", "ad_id"]) {
+          const name = `${prefix}_${field}`;
+          if (!tableHasColumn(db, "lead_submissions", name)) {
+            db.exec(`ALTER TABLE lead_submissions ADD COLUMN ${name} TEXT`);
+          }
+        }
+      }
+    },
+  },
+  {
+    version: 31,
+    name: "content_proposals_blocked_flagged_at",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "blocked_flagged_at")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN blocked_flagged_at TEXT");
+      }
+    },
+  },
+  {
+    version: 32,
+    name: "data_migration_runs",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS data_migration_runs (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL,
+          actor TEXT,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          exit_code INTEGER,
+          output TEXT,
+          note TEXT,
+          file_sha TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_migration_runs_file
+          ON data_migration_runs (filename, started_at);
       `);
     },
   },

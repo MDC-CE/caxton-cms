@@ -56,13 +56,10 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
   const typeLabel = contentTypeInfo?.label || contentType.charAt(0).toUpperCase() + contentType.slice(1);
   const editMode = useEditModeOptional();
   const isStaff = !!editMode?.isEditMode;
-  // Default to database-backed until content types load (matches historical behavior);
-  // once loaded, static types are fetched from the content-pages endpoint instead.
-  const isDbBacked = contentTypeInfo ? contentTypeInfo.has_database : true;
   const isSharedLayout = contentTypeInfo
     ? !!(contentTypeInfo.has_database || contentTypeInfo.single_template)
     : true;
-  const staticApiPath = getApiPath(contentType);
+  const entryApiPath = getApiPath(contentType);
 
   const {
     data: page,
@@ -72,13 +69,12 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
     refetch,
     failureReason,
   } = useQuery<TemplatePage>({
-    queryKey: isDbBacked
-      ? ["/api/database-single", contentType, slug, locale]
-      : [staticApiPath, slug, locale],
+    queryKey: variantFromUrl
+      ? [entryApiPath, slug, locale, variantFromUrl]
+      : [entryApiPath, slug, locale],
     queryFn: async () => {
-      const url = isDbBacked
-        ? `/api/database-single/${contentType}/${slug}?locale=${locale}`
-        : `${staticApiPath}/${slug}?locale=${locale}`;
+      const variantQuery = variantFromUrl ? `&force_variant=${encodeURIComponent(variantFromUrl)}` : "";
+      const url = `${entryApiPath}/${slug}?locale=${locale}${variantQuery}`;
       const response = await apiFetch(url);
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -93,7 +89,7 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
       }
       return response.json();
     },
-    enabled: !!slug && contentTypesData !== undefined,
+    enabled: !!slug,
   });
 
   const localeUnavailable =

@@ -50,9 +50,11 @@ Locale-agnostic offer + personas (avatar = buyer depth) live on each product’s
 | `redirects` | CMS 301/302: two stores, first-match, `test_redirect` (`read_redirects`) + `update_redirect` (`edit_redirects`) |
 | `proposals` | **Hub** — omit `subtopic` for index; playbooks: `overview`, `reading`, `situations`, `internal-links`, `serp-title-description`, `funnel-classification`, `idea-opportunity-harm`, `existing-demand`, `broken-url`, `translations` |
 | `analytics` | GA4 BigQuery `get_analytics_report`; vs GSC (`get_organic_traffic`) and journey (`get_product_funnel_analytics`) |
+| `ads` | Paid traffic `get_paid_traffic`: Meta spend, paid landing pages, lead credit, consent limits, ad tracking diagnostics |
+| `design` | Designing a page: `get_page_recipe` → `get_component_variant` → `create_page_demo` → `review_page_render`; theme IDs, layout traits, learned rules, render-review publish gate |
 
 Legacy flat proposal topics (`reading-proposals`, `review-situations`, `*-proposals`) still resolve as aliases with a deprecation warning — prefer `topic: "proposals"` + `subtopic`.
 
-**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for measured GSC clicks, `get_or_refresh_seo_research` for planning keyword/SERP research (not GSC), and `get_analytics_report` for GA4 behavioral reports. Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see organic + research tools. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
+**Metrics Viewer:** use `get_validation_issues` for open/resolved KPI stats (and scoped rows with `set`), `get_organic_traffic` for measured GSC clicks, `get_or_refresh_seo_research` for planning keyword/SERP research (not GSC), `get_analytics_report` for GA4 behavioral reports, and `get_paid_traffic` for ad spend / paid landing pages / ad tracking issues (topic `ads`). Content agents keep `run_entry_diagnostics` to refresh/fix issues; SEO agents with `seo_edit` also see organic + research tools. Journey page KPIs use `get_product_funnel_analytics` (`content_view`).
 
 **Before making any structural change to this codebase, call `explain_site` with the relevant topic.**

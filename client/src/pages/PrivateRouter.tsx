@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation, useParams } from "wouter";
+import { Switch, Route, useLocation, useParams, useSearch } from "wouter";
 import { lazy, Suspense, type ReactNode } from "react";
 import NotFound from "@/pages/not-found";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
@@ -9,6 +9,7 @@ const ComponentGallery = lazy(() => import("@/pages/ComponentGallery"));
 const ComponentPreview = lazy(() => import("@/pages/ComponentPreview"));
 const ComponentSectionDemoPage = lazy(() => import("@/pages/ComponentSectionDemoPage"));
 const EntryPreviewFrame = lazy(() => import("@/pages/EntryPreviewFrame"));
+const PagePreviewPage = lazy(() => import("@/pages/PagePreviewPage"));
 const MediaGallery = lazy(() => import("@/pages/MediaGallery"));
 const MenuEditor = lazy(() => import("@/pages/MenuEditor"));
 const MoleculesShowcase = lazy(() => import("@/pages/MoleculesShowcase"));
@@ -21,6 +22,7 @@ const CloudSyncPage = lazy(() => import("@/pages/CloudSyncPage"));
 const PrivateDatabases = lazy(() => import("@/pages/PrivateDatabases"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 const SeoGeoSettingsPage = lazy(() => import("@/pages/SeoGeoSettingsPage"));
+const AdsSettingsPage = lazy(() => import("@/pages/AdsSettingsPage"));
 const AIKnowledge = lazy(() => import("@/pages/AIKnowledge"));
 const AIConversations = lazy(() => import("@/pages/AIConversations"));
 const AIKnowledgeBlocks = lazy(() => import("@/pages/AIKnowledgeBlocks"));
@@ -36,6 +38,7 @@ const ConversionsPage = lazy(() => import("@/pages/ConversionsPage"));
 const McpServerPage = lazy(() => import("@/pages/McpServerPage"));
 const AgentsOrgChartPage = lazy(() => import("@/pages/AgentsOrgChartPage"));
 const ErrorLogPage = lazy(() => import("@/pages/ErrorLogPage"));
+const PerformancePage = lazy(() => import("@/pages/PerformancePage"));
 const BackgroundPipelinePage = lazy(() => import("@/pages/BackgroundPipelinePage"));
 const EventWebhooksPage = lazy(() => import("@/pages/EventWebhooksPage"));
 const PrivateOverlays = lazy(() => import("@/pages/PrivateOverlays"));
@@ -88,6 +91,15 @@ function AgentsRedirect() {
   return null;
 }
 
+function ServerLogsRedirect() {
+  const search = useSearch();
+  if (typeof window !== "undefined") {
+    const qs = search.replace(/^\?/, "");
+    window.location.replace(qs ? `/private/server/error-log?${qs}` : "/private/server/error-log");
+  }
+  return null;
+}
+
 function ProposalsRedirect() {
   const params = useParams<{ id?: string }>();
   if (typeof window !== "undefined") {
@@ -125,12 +137,14 @@ export default function PrivateRouter() {
           <Route path="/private/component-showcase/:componentType/preview" component={ComponentPreview} />
           <Route path="/private/demo/:hash" component={ComponentSectionDemoPage} />
           <Route path="/private/entry-preview-frame/:contentType/:slug" component={EntryPreviewFrame} />
+          <Route path="/private/page-preview" component={PagePreviewPage} />
           <Route path="/private/blog" component={BlogManageRedirect} />
           <Route path="/private/type/:contentType" component={ContentTypeManagePage} />
           <Route path="/private/databases" component={PrivateDatabases} />
           <Route path="/private/databases/:name" component={PrivateDatabases} />
           <Route path="/private/diagnostics/seo/organic" component={DiagnosticsPage} />
           <Route path="/private/diagnostics/seo-geo" component={SeoGeoRedirect} />
+          <Route path="/private/diagnostics/ads/:platform" component={DiagnosticsPage} />
           <Route path="/private/diagnostics/:tab" component={DiagnosticsPage} />
           <Route path="/private/diagnostics" component={DiagnosticsPage} />
           <Route path="/private/redirects" component={PrivateRedirects} />
@@ -151,6 +165,15 @@ export default function PrivateRouter() {
           <Route path="/private/settings/seo/search-console" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/openrush" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo" component={SeoGeoSettingsPage} />
+          <Route path="/private/settings/ads/meta" component={AdsSettingsPage} />
+          <Route path="/private/settings/ads/google" component={AdsSettingsPage} />
+          <Route path="/private/settings/ads" component={AdsSettingsPage} />
+          <Route path="/private/settings/locales" component={SettingsPage} />
+          <Route path="/private/settings/migrations" component={SettingsPage} />
+          <Route path="/private/settings/brand" component={SettingsPage} />
+          <Route path="/private/settings/robots" component={SettingsPage} />
+          <Route path="/private/settings/legal" component={SettingsPage} />
+          <Route path="/private/settings/server" component={SettingsPage} />
           <Route path="/private/settings" component={SettingsPage} />
           <Route path="/private/sync-log" component={SyncLogRedirect} />
           <Route path="/private/repository-sync" component={SyncLogPage} />
@@ -176,10 +199,14 @@ export default function PrivateRouter() {
           <Route path="/private/mcp-server" component={McpServerPage} />
           <Route path="/private/agents/orgchart" component={AgentsOrgChartPage} />
           <Route path="/private/agents/rules" component={AgentsOrgChartPage} />
+          <Route path="/private/agents/outcomes" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals/:id" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals" component={AgentsOrgChartPage} />
           <Route path="/private/agents" component={AgentsRedirect} />
-          <Route path="/private/error-log" component={ErrorLogPage} />
+          <Route path="/private/server/error-log" component={ErrorLogPage} />
+          <Route path="/private/server/performance" component={PerformancePage} />
+          <Route path="/private/server" component={ServerLogsRedirect} />
+          <Route path="/private/error-log" component={ServerLogsRedirect} />
           <Route path="/private/background-pipeline" component={BackgroundPipelinePage} />
           <Route path="/private/webhooks/hooks" component={EventWebhooksPage} />
           <Route path="/private/webhooks/logs" component={EventWebhooksPage} />

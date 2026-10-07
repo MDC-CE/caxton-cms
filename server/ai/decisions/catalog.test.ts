@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   askTouchesOutcomeFigures,
+  askTouchesSiteFacts,
+  SITE_FACT_QUESTION_CATEGORIES,
+  TOUCHES_SITE_FACTS_NOUL_THRESHOLD,
   TOUCHES_OUTCOME_FIGURES_NOUL_THRESHOLD,
   type DecisionClient,
 } from "./index";
@@ -89,5 +92,38 @@ describe("probeDecisionModel", () => {
       if (prev === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = prev;
     }
+  });
+});
+
+describe("askTouchesSiteFacts", () => {
+  it("asks one noul per fact category and returns categories at/above threshold", async () => {
+    const client: DecisionClient = {
+      async decide(req) {
+        expect(Object.keys(req.questions).sort()).toEqual([...SITE_FACT_QUESTION_CATEGORIES].sort());
+        expect(Object.values(req.questions).every((q) => q.type === "noul")).toBe(true);
+        return {
+          status: "ok",
+          model: "test",
+          answers: {
+            price: { noul: TOUCHES_SITE_FACTS_NOUL_THRESHOLD },
+            contact: { noul: 0.9 },
+            outcome_claim: { noul: 0.2 },
+          },
+        };
+      },
+    };
+    const r = await askTouchesSiteFacts(client, "Call (305) 555-0100 — tuition $9,999");
+    expect(r.outcome).toBe("ok");
+    expect(r.categories).toEqual(["price", "contact"]);
+  });
+
+  it("returns unavailable with no categories on client failure", async () => {
+    const client: DecisionClient = {
+      async decide() {
+        return { status: "unavailable", reason: "timeout" };
+      },
+    };
+    const r = await askTouchesSiteFacts(client, "x");
+    expect(r).toMatchObject({ outcome: "unavailable", categories: [] });
   });
 });

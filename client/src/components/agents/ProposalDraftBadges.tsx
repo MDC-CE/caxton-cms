@@ -78,7 +78,7 @@ export type ProposalV1BadgeData = {
   co_authors?: Array<{ username: string }>;
 };
 
-const STALE_CLOSE_AFTER_FLAG_DAYS = 60;
+const STALE_CLOSE_AFTER_FLAG_DAYS = 20;
 
 function shortDate(iso: string): string {
   const d = new Date(iso);
@@ -137,7 +137,7 @@ export function ProposalV1Badges({
         title="The live page changed after this draft was made"
         body={
           p.stale_flagged_at
-            ? "Nobody has updated this proposal for 30 days since the live page moved on. It will close automatically if nobody updates it. Drafts it created are deleted then; drafts that existed before are kept."
+            ? "Nobody has updated this proposal for 10 days since the live page moved on. It will close automatically if nobody updates it. Drafts it created are deleted then; drafts that existed before are kept."
             : "Someone published a newer version of the page, or the language it was translated from changed. It waits for the author to update it — reviewers do not need to act yet."
         }
         advanced={[`stale_since ${p.stale_since}. Attention bucket: needs_author. Cleared when the author revises or the draft is rebuilt.`]}
@@ -152,9 +152,25 @@ export function ProposalV1Badges({
       <ExplainBadge
         key="abandoned"
         label="Closed for inactivity"
-        title="Closed automatically"
-        body="The draft was out of date for 90 days without activity, so the proposal was closed. Drafts it created were deleted; drafts that existed before were kept."
+        title="Closed automatically: draft out of date"
+        body="The draft was out of date for 30 days without activity, so the proposal was closed. Drafts it created were deleted; drafts that existed before were kept. Pages already published stay live."
         testId={`badge-proposal-abandoned${suffix}`}
+        stopLinkNavigation={stopLinkNavigation}
+      />,
+    );
+  }
+  if (p.close_reason === "abandoned_blocked") {
+    badges.push(
+      <ExplainBadge
+        key="abandoned-blocked"
+        label="Closed for inactivity"
+        title="Closed automatically: change requests not addressed"
+        body="Change requests on this proposal stayed open for 30 days and nobody worked on them, so it was closed. Pages already published stay live. Drafts it created were deleted; drafts that existed before were kept."
+        advanced={[
+          "close_reason abandoned_blocked. Activity = draft rewrite, adding / resolving / reopening a change request, or a reviewer action — claiming or releasing does not count.",
+          "To continue, file a new proposal (optionally with supersedes_proposal_id pointing here).",
+        ]}
+        testId={`badge-proposal-abandoned-blocked${suffix}`}
         stopLinkNavigation={stopLinkNavigation}
       />,
     );

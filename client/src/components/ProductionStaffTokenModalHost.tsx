@@ -173,7 +173,7 @@ export function ProductionStaffTokenModalHost() {
             </li>
             <li>Process memory only for pastes; cleared if production returns 401 again.</li>
             <li>
-              Used for Node → live HTTP pulls (e.g. pipeline event history). GCS “pull from
+              Used for Node → live HTTP pulls (e.g. pipeline event history, error log download). GCS “pull from
               production” actions do not use this token.
             </li>
           </ul>

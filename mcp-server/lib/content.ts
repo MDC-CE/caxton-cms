@@ -11,6 +11,15 @@ import {
   type ComponentBehaviors,
 } from "../../shared/component-behaviors.js";
 import { getProjectRoot } from "../../shared/paths.js";
+import { typeUsesSharedTemplate } from "../../shared/sharedLayoutPaths.js";
+import {
+  resolveLayoutTraits,
+  type ComponentLayoutBlock,
+  type ResolvedLayoutTraits,
+  type VariantContentShape,
+} from "../../shared/component-layout-traits.js";
+import { entryItemLayer, entryItemLocales, entrySourceStatus, listTypePages } from "../../server/entry-layer.js";
+import { entrySourceRoot } from "./entry-source.js";
 
 // ─── Multi-site helpers ───────────────────────────────────────────────────────
 
@@ -314,18 +323,28 @@ export function loadContentTypes(contentPath?: string): Record<string, ContentTy
   return (safeLoad(raw) as Record<string, ContentTypeConfig>) || {};
 }
 
+/** Informational (`db_backed` on type listings) and the create_entry block only — not for entry reads. */
 export function isDbBacked(config: ContentTypeConfig): boolean {
   return !!config?.database?.slug;
 }
 
 export function isSharedLayoutConfig(config: ContentTypeConfig): boolean {
-  return !!(config?.database?.slug || config?.single_template);
+  return typeUsesSharedTemplate(config);
 }
 
 export function getDirectory(contentType: string, config: ContentTypeConfig): string {
   return config.directory || contentType;
 }
 
+/** Languages the slug has a source item in, looked up within one type (never a site-wide list). */
+function sourceItemLocales(contentType: string, slug: string, basePath: string): string[] {
+  return entryItemLocales(entrySourceRoot(basePath), contentType, slug);
+}
+
+/**
+ * Content type of an entry slug: an entry folder, or a source item of that type
+ * (same lookup the entry list uses). Typos resolve to null.
+ */
 export function resolveContentType(
   slug: string,
   hintContentType?: string,
@@ -335,44 +354,137 @@ export function resolveContentType(
   const basePath = contentPath || getDefaultContentPath();
   const configs = loadContentTypes(contentPath);
   const allowShared = opts?.allowSharedLayout === true;
+  const folderExists = (ct: string, config: ContentTypeConfig) =>
+    fs.existsSync(path.join(basePath, getDirectory(ct, config), slug));
 
   if (hintContentType) {
     const config = configs[hintContentType];
     if (!config) return null;
-    if (isDbBacked(config) && !allowShared) return null;
-    if (allowShared && isSharedLayoutConfig(config)) {
-      // DB-backed / single_template: slug may be an entry or the sentinel template|single
-      if (slug === "single" || slug === "template") {
-        const typeDir = path.join(basePath, getDirectory(hintContentType, config));
-        const candidates = [
-          "template.en.yml",
-          "template.es.yml",
-          "single.en.yml",
-          "single.es.yml",
-        ];
-        if (candidates.some((n) => fs.existsSync(path.join(typeDir, n)))) {
-          return { contentType: hintContentType, config };
-        }
-      }
-      const dir = path.join(basePath, getDirectory(hintContentType, config), slug);
-      if (fs.existsSync(dir) || isDbBacked(config)) {
+    if (allowShared && isSharedLayoutConfig(config) && (slug === "single" || slug === "template")) {
+      const typeDir = path.join(basePath, getDirectory(hintContentType, config));
+      const candidates = [
+        "template.en.yml",
+        "template.es.yml",
+        "single.en.yml",
+        "single.es.yml",
+      ];
+      if (candidates.some((n) => fs.existsSync(path.join(typeDir, n)))) {
         return { contentType: hintContentType, config };
       }
-      return null;
     }
-    const dir = path.join(basePath, getDirectory(hintContentType, config), slug);
-    if (fs.existsSync(dir)) return { contentType: hintContentType, config };
+    if (folderExists(hintContentType, config) || sourceItemLocales(hintContentType, slug, basePath).length > 0) {
+      return { contentType: hintContentType, config };
+    }
     return null;
   }
   for (const [ct, config] of Object.entries(configs)) {
-    if (isDbBacked(config) && !allowShared) continue;
     if (allowShared && (slug === "single" || slug === "template") && isSharedLayoutConfig(config)) {
       return { contentType: ct, config };
     }
-    const dir = path.join(basePath, getDirectory(ct, config), slug);
-    if (fs.existsSync(dir)) return { contentType: ct, config };
+    if (folderExists(ct, config)) return { contentType: ct, config };
+  }
+  for (const [ct, config] of Object.entries(configs)) {
+    if (sourceItemLocales(ct, slug, basePath).length > 0) return { contentType: ct, config };
   }
   return null;
+}
+
+/**
+ * Extra not-found context (same facts diagnostics report): databases that never had
+ * a stored copy, so their pages cannot be found yet, and databases on an old copy.
+ */
+export function entryNotFoundNote(hintContentType: string | undefined, contentPath?: string): string {
+  const basePath = contentPath || getDefaultContentPath();
+  const root = entrySourceRoot(basePath);
+  const types = hintContentType ? [hintContentType] : Object.keys(loadContentTypes(contentPath));
+  const empty = new Set<string>();
+  const stale = new Set<string>();
+  for (const ct of types) {
+    const status = entrySourceStatus(root, ct);
+    if (status.kind === "never_copied") empty.add(status.database);
+    else if (status.kind === "copy" && status.stale) stale.add(status.database);
+  }
+  const parts: string[] = [];
+  if (empty.size) parts.push(`empty_databases: ${[...empty].join(", ")} (never copied — their pages cannot be found until a refresh)`);
+  if (stale.size) parts.push(`stale_databases: ${[...stale].join(", ")} (old copy — a new item may not be there yet)`);
+  return parts.length ? ` ${parts.join("; ")}.` : "";
+}
+
+/**
+ * translate_entry writes root keys into a draft file; when the entry comes from a
+ * source item, item fields would mask them. A language version is a source item
+ * in that language; existing ones take field overrides via update_fields.
+ */
+export function translateSourceItemGate(
+  contentType: string,
+  slug: string,
+  targetLocale: string,
+  contentPath: string,
+  site?: string,
+): { message: string; details: Record<string, unknown> } | null {
+  const status = entrySourceStatus(entrySourceRoot(contentPath), contentType);
+  if (status.kind === "files") return null;
+  const siteHint = site ? { site } : {};
+  const hasTarget = sourceItemLocales(contentType, slug, contentPath).includes(targetLocale);
+  return {
+    message: hasTarget
+      ? `'${slug}' comes from database "${status.database}" and already has a ${targetLocale} item. Translate its fields with update_fields on locale ${targetLocale} (saved as field_overrides); translate_entry does not write database entries.`
+      : `'${slug}' comes from database "${status.database}". A ${targetLocale} version is a ${targetLocale} item in that database — add it there; translate_entry does not write database entries.`,
+    details: {
+      code: "translate_source_item_entry",
+      database: status.database,
+      target_locale_item_exists: hasTarget,
+      warnings: [
+        {
+          code: "no_write",
+          message: "Nothing was written. Draft files would be masked by the item's fields.",
+        },
+      ],
+      next_actions: hasTarget
+        ? [
+            {
+              tool: "update_fields",
+              priority: "recommended",
+              reason: `Write translated field values as ${targetLocale} field_overrides.`,
+              args_hint: { slug, contentType, locale: targetLocale, ...siteHint },
+            },
+          ]
+        : [
+            {
+              tool: "add_database_item",
+              priority: "recommended",
+              reason: `Add the ${targetLocale} item to "${status.database}" (needs databases_manage), then refresh.`,
+              args_hint: { database: status.database, ...siteHint },
+            },
+          ],
+    },
+  };
+}
+
+export function staleSourceWarning(ageMs: number): { code: string; message: string } {
+  const days = Math.floor(ageMs / 86_400_000);
+  const hours = Math.floor(ageMs / 3_600_000);
+  const age = days >= 1 ? `${days} day${days === 1 ? "" : "s"}` : `${Math.max(1, hours)} hour${hours === 1 ? "" : "s"}`;
+  return {
+    code: "stale_source_data",
+    message: `This entry's source item comes from a database copy ${age} old; the source may have changed. Refresh the database (list_database_items refresh: true) before adding an override.`,
+  };
+}
+
+/** Languages an entry exists in: its language files plus its source items' languages. */
+export function entryLocales(contentType: string, slug: string, contentPath?: string): string[] {
+  const basePath = contentPath || getDefaultContentPath();
+  const configs = loadContentTypes(contentPath);
+  const config = configs[contentType];
+  if (!config) return [];
+  const dir = path.join(basePath, getDirectory(contentType, config), slug);
+  const fromFiles = fs.existsSync(dir)
+    ? fs
+        .readdirSync(dir)
+        .map((f) => f.replace(/\.(yml|yaml)$/, ""))
+        .filter((n) => /^[a-z]{2}(-[a-z]{2})?$/.test(n))
+    : [];
+  return [...new Set([...fromFiles, ...sourceItemLocales(contentType, slug, basePath)])];
 }
 
 // ─── Page helpers ─────────────────────────────────────────────────────────────
@@ -392,13 +504,45 @@ export function loadVersioning(contentType: string, slug: string, contentPath?: 
   const basePath = contentPath || getDefaultContentPath();
   const configs = loadContentTypes(contentPath);
   const config = configs[contentType];
-  if (!config || isDbBacked(config)) return null;
+  if (!config) return null;
   const dir = path.join(basePath, getDirectory(contentType, config), slug);
   const versioningPath = path.join(dir, "versioning.yml");
   if (!fs.existsSync(versioningPath)) return null;
   const parsed = safeLoad(fs.readFileSync(versioningPath, "utf-8"));
   if (!parsed) return null;
   return parsed as VersioningData;
+}
+
+/**
+ * Entry layer for one slug + locale from a set of entry files: the source item's
+ * fields (with `field_overrides` applied) under `_common.yml` + the given file.
+ * Static entries have no item, so this is just the files.
+ */
+function entryLayerFromFiles(
+  contentType: string,
+  slug: string,
+  locale: string,
+  basePath: string,
+  dir: string,
+  fileName: string,
+): { data: Record<string, unknown>; filePath: string; staleSourceAgeMs?: number } | null {
+  const commonPath = path.join(dir, "_common.yml");
+  const filePath = path.join(dir, fileName);
+  const fileExists = fs.existsSync(filePath);
+  const layer = entryItemLayer(entrySourceRoot(basePath), contentType, slug, locale);
+  if (!fileExists && !layer) return null;
+
+  const commonData = fs.existsSync(commonPath) ? safeLoad(fs.readFileSync(commonPath, "utf-8")) || {} : {};
+  const ownData = fileExists ? safeLoad(fs.readFileSync(filePath, "utf-8")) || {} : {};
+  const fileData = deepMerge(commonData, ownData);
+  if (!layer) return { data: fileData, filePath };
+
+  const { field_overrides: _applied, ...fileRest } = fileData;
+  return {
+    data: deepMerge(layer.fields, fileRest),
+    filePath,
+    ...(layer.staleSourceAgeMs !== undefined ? { staleSourceAgeMs: layer.staleSourceAgeMs } : {}),
+  };
 }
 
 export function loadVariantPage(
@@ -411,26 +555,12 @@ export function loadVariantPage(
   const basePath = contentPath || getDefaultContentPath();
   const configs = loadContentTypes(contentPath);
   const config = configs[contentType];
-  if (!config || isDbBacked(config)) return null;
+  if (!config) return null;
 
   const dir = path.join(basePath, getDirectory(contentType, config), slug);
-  if (!fs.existsSync(dir)) return null;
-
-  const commonPath = path.join(dir, "_common.yml");
-  const variantPath = path.join(dir, `${variantSlug}.${locale}.yml`);
-
-  let commonData: Record<string, unknown> = {};
-  if (fs.existsSync(commonPath)) {
-    commonData = safeLoad(fs.readFileSync(commonPath, "utf-8")) || {};
-  }
-
-  if (!fs.existsSync(variantPath)) return null;
-  const variantData = safeLoad(fs.readFileSync(variantPath, "utf-8")) || {};
-
-  return {
-    data: deepMerge(commonData, variantData),
-    filePath: variantPath,
-  };
+  const variantFile = `${variantSlug}.${locale}.yml`;
+  if (!fs.existsSync(path.join(dir, variantFile))) return null;
+  return entryLayerFromFiles(contentType, slug, locale, basePath, dir, variantFile);
 }
 
 export interface PageEntry {
@@ -443,6 +573,57 @@ export interface PageEntry {
   variants?: Array<{ locale: string; slug: string; allocation: number }>;
 }
 
+function versioningVariants(
+  contentType: string,
+  slug: string,
+  contentPath: string,
+): Array<{ locale: string; slug: string; allocation: number }> | undefined {
+  const versioning = loadVersioning(contentType, slug, contentPath);
+  if (!versioning) return undefined;
+  const list: Array<{ locale: string; slug: string; allocation: number }> = [];
+  for (const [locale, localeData] of Object.entries(versioning)) {
+    for (const v of localeData.variants || []) list.push({ locale, slug: v.slug, allocation: v.allocation });
+  }
+  return list.length > 0 ? list : undefined;
+}
+
+/**
+ * Pages of a type whose entries come from source items (item × language, with
+ * `field_overrides` applied), or null when the type has no stored items.
+ */
+function scanItemPages(
+  contentType: string,
+  config: ContentTypeConfig,
+  basePath: string,
+  contentFolder: string,
+): PageEntry[] | null {
+  const listed = listTypePages(entrySourceRoot(basePath), contentType);
+  if (!listed) return null;
+  const bySlug = new Map<string, PageEntry>();
+  for (const { slug, locale, item } of listed.pages) {
+    let page = bySlug.get(slug);
+    if (!page) {
+      const title = typeof item.title === "string" ? item.title : typeof item.name === "string" ? item.name : undefined;
+      page = {
+        slug,
+        contentType,
+        directory: `${contentFolder}/${getDirectory(contentType, config)}/${slug}`,
+        locales: [],
+        ...(title ? { title } : {}),
+      };
+      bySlug.set(slug, page);
+    }
+    if (!page.locales.includes(locale)) page.locales.push(locale);
+    const pattern = config.url_pattern?.[locale] || config.url_pattern?.["default"];
+    if (pattern) page.urls = { ...(page.urls || {}), [locale]: pattern.replace(":slug", slug) };
+  }
+  for (const page of bySlug.values()) {
+    const variants = versioningVariants(contentType, page.slug, basePath);
+    if (variants) page.variants = variants;
+  }
+  return [...bySlug.values()];
+}
+
 export function scanPages(contentPath?: string): PageEntry[] {
   const basePath = contentPath || getDefaultContentPath();
   const contentFolder = path.basename(basePath);
@@ -450,7 +631,11 @@ export function scanPages(contentPath?: string): PageEntry[] {
   const pages: PageEntry[] = [];
 
   for (const [contentType, config] of Object.entries(configs)) {
-    if (isDbBacked(config)) continue;
+    const itemPages = scanItemPages(contentType, config, basePath, contentFolder);
+    if (itemPages) {
+      pages.push(...itemPages);
+      continue;
+    }
 
     const dir = path.join(basePath, getDirectory(contentType, config));
     if (!fs.existsSync(dir)) continue;
@@ -513,17 +698,7 @@ export function scanPages(contentPath?: string): PageEntry[] {
         if (Object.keys(resolved).length > 0) urls = resolved;
       }
 
-      const versioning = loadVersioning(contentType, entry.name, contentPath);
-      let variants: Array<{ locale: string; slug: string; allocation: number }> | undefined;
-      if (versioning) {
-        const variantList: Array<{ locale: string; slug: string; allocation: number }> = [];
-        for (const [locale, localeData] of Object.entries(versioning)) {
-          for (const v of localeData.variants || []) {
-            variantList.push({ locale, slug: v.slug, allocation: v.allocation });
-          }
-        }
-        if (variantList.length > 0) variants = variantList;
-      }
+      const variants = versioningVariants(contentType, entry.name, basePath);
 
       pages.push({
         slug: entry.name,
@@ -544,30 +719,14 @@ export function loadPage(
   slug: string,
   locale: string,
   contentPath?: string,
-): { data: Record<string, unknown>; filePath: string } | null {
+): { data: Record<string, unknown>; filePath: string; staleSourceAgeMs?: number } | null {
   const basePath = contentPath || getDefaultContentPath();
   const configs = loadContentTypes(contentPath);
   const config = configs[contentType];
-  if (!config || isDbBacked(config)) return null;
+  if (!config) return null;
 
   const dir = path.join(basePath, getDirectory(contentType, config), slug);
-  if (!fs.existsSync(dir)) return null;
-
-  const commonPath = path.join(dir, "_common.yml");
-  const localePath = path.join(dir, `${locale}.yml`);
-
-  let commonData: Record<string, unknown> = {};
-  if (fs.existsSync(commonPath)) {
-    commonData = safeLoad(fs.readFileSync(commonPath, "utf-8")) || {};
-  }
-
-  if (!fs.existsSync(localePath)) return null;
-  const localeData = safeLoad(fs.readFileSync(localePath, "utf-8")) || {};
-
-  return {
-    data: deepMerge(commonData, localeData),
-    filePath: localePath,
-  };
+  return entryLayerFromFiles(contentType, slug, locale, basePath, dir, `${locale}.yml`);
 }
 
 export function getValueAtPath(obj: Record<string, unknown>, pathStr: string): unknown {
@@ -682,6 +841,9 @@ export interface ComponentVariantSummary {
   name: string;
   description?: string;
   best_for?: string;
+  avoid_when?: string;
+  content_shape?: VariantContentShape;
+  metadata_status?: "draft" | "approved";
 }
 
 export interface ComponentSchemaSlim {
@@ -690,6 +852,34 @@ export interface ComponentSchemaSlim {
   when_to_use: string | null;
   variants: ComponentVariantSummary[];
   behaviors?: ComponentBehaviors;
+  layout?: ComponentLayoutBlock;
+}
+
+function variantSummaryFromDef(name: string, def: Record<string, unknown> | null): ComponentVariantSummary {
+  const entry: ComponentVariantSummary = { name };
+  if (!def) return entry;
+  if (typeof def.description === "string") entry.description = def.description;
+  if (typeof def.best_for === "string") entry.best_for = def.best_for;
+  if (typeof def.avoid_when === "string") entry.avoid_when = def.avoid_when;
+  if (def.content_shape && typeof def.content_shape === "object" && !Array.isArray(def.content_shape)) {
+    entry.content_shape = def.content_shape as VariantContentShape;
+  }
+  if (def.metadata_status === "draft" || def.metadata_status === "approved") {
+    entry.metadata_status = def.metadata_status;
+  }
+  return entry;
+}
+
+function layoutBlockFrom(parsed: Record<string, unknown>): ComponentLayoutBlock | undefined {
+  const raw = parsed.layout;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: ComponentLayoutBlock = {};
+  if (r.flow === "in" || r.flow === "out") out.flow = r.flow;
+  if (typeof r.self_padded === "boolean") out.self_padded = r.self_padded;
+  else if (Array.isArray(r.self_padded)) out.self_padded = r.self_padded.filter((v): v is string => typeof v === "string");
+  if (r.edge === "top_of_page") out.edge = "top_of_page";
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function getComponentSchema(componentType: string, contentPath?: string): ComponentSchemaSlim | null {
@@ -720,11 +910,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
   const variants: ComponentVariantSummary[] = [];
   if (parsed.variants && typeof parsed.variants === "object" && !Array.isArray(parsed.variants)) {
     for (const [variantName, variantDef] of Object.entries(parsed.variants as Record<string, unknown>)) {
-      const def = variantDef as Record<string, unknown> | null;
-      const entry: ComponentVariantSummary = { name: variantName };
-      if (def && typeof def.description === "string") entry.description = def.description;
-      if (def && typeof def.best_for === "string") entry.best_for = def.best_for;
-      variants.push(entry);
+      variants.push(variantSummaryFromDef(variantName, variantDef as Record<string, unknown> | null));
     }
   } else if (Array.isArray(parsed.variants)) {
     for (const v of parsed.variants) {
@@ -733,10 +919,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
       } else if (v && typeof v === "object") {
         const def = v as Record<string, unknown>;
         if (typeof def.name !== "string") continue;
-        const entry: ComponentVariantSummary = { name: def.name };
-        if (typeof def.description === "string") entry.description = def.description;
-        if (typeof def.best_for === "string") entry.best_for = def.best_for;
-        variants.push(entry);
+        variants.push(variantSummaryFromDef(def.name, def));
       }
     }
   }
@@ -747,6 +930,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
 
   const behaviors = resolveComponentBehaviors(parsed as Record<string, unknown>);
   const hasBehaviors = Object.keys(behaviors).length > 0;
+  const layout = layoutBlockFrom(parsed as Record<string, unknown>);
 
   return {
     name,
@@ -754,6 +938,7 @@ export function getComponentSchema(componentType: string, contentPath?: string):
     when_to_use,
     variants,
     ...(hasBehaviors ? { behaviors } : {}),
+    ...(layout ? { layout } : {}),
   };
 }
 
@@ -762,6 +947,8 @@ export interface ComponentVariantDetail {
   variant: string;
   variant_props: Record<string, unknown> | null;
   example: string | null;
+  metadata?: ComponentVariantSummary;
+  layout?: ResolvedLayoutTraits;
 }
 
 export function getComponentVariant(
@@ -862,5 +1049,12 @@ export function getComponentVariant(
     }
   }
 
-  return { componentType, variant, variant_props, example };
+  let metadata: ComponentVariantSummary | undefined;
+  if (variantsDef && typeof variantsDef === "object" && !Array.isArray(variantsDef)) {
+    const def = (variantsDef as Record<string, unknown>)[variant];
+    metadata = variantSummaryFromDef(variant, (def && typeof def === "object" ? def : null) as Record<string, unknown> | null);
+  }
+  const layout = resolveLayoutTraits(layoutBlockFrom(parsed as Record<string, unknown>), variant);
+
+  return { componentType, variant, variant_props, example, ...(metadata ? { metadata } : {}), layout };
 }

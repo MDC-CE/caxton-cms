@@ -133,6 +133,36 @@ Every integration below uses the same four blocks:
 
 ---
 
+### Meta Marketing API (Meta Ads)
+
+**What it does:** Pulls daily Meta ad spend, clicks, landing page views, Meta-reported leads, and each ad's destination link. Caxton joins it with GA4 paid visits and the site's own lead log so you can see what each landing page cost and what it produced (Diagnostics → Ads, the Ads view on each content type list, and agents via `get_paid_traffic`).
+
+**When you need it:** Only if you run Meta ads and want spend next to site results. Without it, paid visits and site leads still show (from GA4 and the lead log), but no spend or cost per lead.
+
+**How to connect:**
+1. A Meta admin creates a **system user** in Business Settings with `ads_read` on each ad account, and generates a long-lived token.
+2. Ops sets it as the `META_ADS_ACCESS_TOKEN` environment variable on the server (never pasted into the CMS).
+3. Staff with Ads settings permission open **Settings → Ads**, add the ad account IDs, turn Meta on, and click **Test connection**.
+4. Paste the UTM template shown there into **every** Meta ad's URL parameters. Without it, visits show as "Meta: unclear" and cannot be matched to spend.
+
+**Tag Manager (one-time, required for honest numbers):**
+- GA4 and Meta pixel tags use **consent checks** (Consent Mode v2, advanced mode) — they respect the site's cookie banner.
+- A GA4 event tag forwards `experiment_exposure` with `experiment_id` and `variant`, so ad results can be split by page version.
+- The Meta pixel listens to the `consent_update` dataLayer event and calls `fbq('consent', 'grant'|'revoke')`.
+- The Meta pixel fires `Lead` on the site's lead event (so Meta-reported leads exist to compare against).
+
+**What to monitor:** Diagnostics → Ads status bar (sync failures, "spend with zero visits", ads missing tracking parameters, landing pages that redirect or break). Token expiry shows as an access error there.
+
+**Limits to keep in mind:**
+- Meta leads and site leads are **two different counts** — never add them.
+- In regions that must opt in (EU/EEA, UK, Switzerland), some visitors reject tracking. GA4 fills part of that gap with estimates; fewer accepts means fewer **measured** visits, not fewer real ones.
+- Journeys are per browser: someone who clicks an ad on their phone and signs up on a laptop is not connected.
+- Spend is shown per currency and never converted.
+
+**Cost notes:** The Meta Marketing API is **$0**. Sync refreshes the last 10 days once a day and keeps 13 months; the only cost is a small extra GA4 BigQuery query per day for paid landing pages (a few cents at this scale).
+
+---
+
 ### Report usage pattern (people and agents)
 
 **What it does:** Not a vendor — it is *how* you use analytics. Every Caxton report ask can trigger warehouse reads when caches miss.

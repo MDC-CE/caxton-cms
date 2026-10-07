@@ -13,6 +13,8 @@ import {
   IconArrowUp,
   IconArrowDown,
   IconArrowsSort,
+  IconCloudDownload,
+  IconLoader2,
 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,8 +28,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { MetricsAccessGate } from "@/components/MetricsAccessGate";
+import { ServerSectionHeader } from "@/components/process-stats/ServerSectionHeader";
 import { useToast } from "@/hooks/use-toast";
-import { apiFetch } from "@/lib/queryClient";
+import { apiFetch, apiRequestWithAuth } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import {
   nextErrorLogSort,
@@ -49,7 +52,7 @@ interface ErrorLogEntry {
   err_name: string | null;
 }
 
-interface UniqueIssue {
+export interface UniqueIssue {
   fingerprint: string;
   module: string;
   level: "error" | "warn";
@@ -311,6 +314,97 @@ function SortableHead({
   );
 }
 
+export function ErrorLogIssueTable({ issues, bare = false }: { issues: UniqueIssue[]; bare?: boolean }) {
+  const [openIssue, setOpenIssue] = useState<string | null>(null);
+  const [pathname, setLocation] = useLocation();
+  const searchString = useSearch();
+  const sort = useMemo(() => parseErrorLogSort(searchString), [searchString]);
+  const handleSort = useCallback(
+    (col: ErrorLogSortKey) => {
+      const qs = serializeErrorLogSort(nextErrorLogSort(sort, col), searchString);
+      const pathOnly = pathname.split("?")[0];
+      setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
+    },
+    [sort, searchString, pathname, setLocation],
+  );
+  const sortedIssues = useMemo(() => sortErrorLogIssues(issues, sort), [issues, sort]);
+  if (issues.length === 0) return null;
+  const table = (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-8" aria-label="Expand" />
+              <TableHead className="w-20">Level</TableHead>
+              <TableHead className="w-44">Module</TableHead>
+              <TableHead>Message</TableHead>
+              <SortableHead col="count" label="Count" sort={sort} onSort={handleSort} className="text-right w-24" align="right" />
+              <SortableHead col="lastSeen" label="Last seen" sort={sort} onSort={handleSort} className="w-40" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sortedIssues.map((row, idx) => {
+              const open = openIssue === row.fingerprint;
+              const toggle = () => setOpenIssue(open ? null : row.fingerprint);
+              return (
+                <Fragment key={row.fingerprint}>
+                  <TableRow
+                    data-testid={`row-unique-issue-${idx}`}
+                    className="cursor-pointer"
+                    onClick={toggle}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggle();
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-expanded={open}
+                  >
+                    <TableCell className="pr-0">
+                      <ExpandChevron open={open} />
+                    </TableCell>
+                    <TableCell>
+                      <LevelBadge level={row.level} />
+                    </TableCell>
+                    <TableCell className="font-mono text-sm">{row.module}</TableCell>
+                    <TableCell className="text-sm text-foreground max-w-md">
+                      <MessageWithErrorType message={row.message} errName={row.err_name} />
+                    </TableCell>
+                    <TableCell className="text-right font-medium tabular-nums">{row.count}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
+                      {formatTs(row.lastTs)}
+                    </TableCell>
+                  </TableRow>
+                  {open && (
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell colSpan={6} className="bg-muted/40 p-4">
+                        <ErrorLogDetail id={row.lastId} count={row.count} sampleTs={row.sampleTs} />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              );
+            })}
+          </TableBody>
+        </Table>
+  );
+  if (bare) return table;
+  return (
+    <Card data-testid="card-unique-issues">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Top unique issues</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
+          (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        {table}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ErrorLogPage() {
   return (
     <MetricsAccessGate>
@@ -319,10 +413,55 @@ export default function ErrorLogPage() {
   );
 }
 
+function productionErrorLogFilename(productionOrigin: string | undefined): string {
+  let host = "production";
+  if (productionOrigin) {
+    try {
+      host = new URL(productionOrigin).host;
+    } catch {
+      /* keep default */
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `error-log-${host}-${stamp}.json`;
+}
+
 function ErrorLogPageInner() {
+  const { toast } = useToast();
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
-  const [openIssue, setOpenIssue] = useState<string | null>(null);
   const [openEventId, setOpenEventId] = useState<number | null>(null);
+  const [downloadingProduction, setDownloadingProduction] = useState(false);
+
+  const downloadProduction = async () => {
+    if (!import.meta.env.DEV) return;
+    setDownloadingProduction(true);
+    try {
+      const res = await apiRequestWithAuth("POST", "/api/admin/error-log/pull-production", {});
+      const body = (await res.json()) as { productionOrigin?: string; total?: number };
+      const filename = productionErrorLogFilename(body.productionOrigin);
+      const blob = new Blob([JSON.stringify(body, null, 2)], { type: "application/json" });
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(href);
+      toast({
+        title: "Production log downloaded",
+        description: `${body.total ?? 0} entries from ${body.productionOrigin ?? "production"} saved as ${filename}.`,
+      });
+    } catch (err) {
+      toast({
+        title: "Could not download production log",
+        description: err instanceof Error ? err.message : "Download failed.",
+        variant: "destructive",
+      });
+    } finally {
+      setDownloadingProduction(false);
+    }
+  };
 
   const { data, isLoading, refetch, isFetching, isError } = useQuery<ErrorLogResponse>({
     queryKey: ["/api/admin/error-log", levelFilter],
@@ -335,41 +474,44 @@ function ErrorLogPageInner() {
     refetchInterval: 30000,
   });
 
-  const [pathname, setLocation] = useLocation();
-  const searchString = useSearch();
-  const sort = useMemo(() => parseErrorLogSort(searchString), [searchString]);
-  const handleSort = useCallback(
-    (col: ErrorLogSortKey) => {
-      const qs = serializeErrorLogSort(nextErrorLogSort(sort, col), searchString);
-      const pathOnly = pathname.split("?")[0];
-      setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
-    },
-    [sort, searchString, pathname, setLocation],
-  );
-  const sortedIssues = useMemo(
-    () => sortErrorLogIssues(data?.uniqueIssues ?? [], sort),
-    [data?.uniqueIssues, sort],
-  );
-
   const topIssueModule = data?.uniqueIssues?.[0]?.module ?? "—";
 
   return (
     <div className="p-6 space-y-6 max-w-6xl mx-auto">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Error &amp; Warning Log</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Server-side warn/error events — last 48 hours</p>
+      <ServerSectionHeader
+        section="logs"
+        title="Logs"
+        description="Warnings and errors from the whole server, for every site, kept for the last 48 hours. The table groups the same message into one issue. Repeated warnings are rate-limited when they are stored, so the totals stay usable."
+      />
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <div className="flex flex-wrap gap-2">
+          {import.meta.env.DEV ? (
+            <Button
+              variant="outline"
+              size="default"
+              onClick={() => void downloadProduction()}
+              disabled={downloadingProduction}
+              data-testid="button-download-production-error-log"
+            >
+              {downloadingProduction ? (
+                <IconLoader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <IconCloudDownload className="w-4 h-4 mr-2" />
+              )}
+              {downloadingProduction ? "Downloading…" : "Download from production"}
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            size="default"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            data-testid="button-refresh-error-log"
+          >
+            <IconRefresh className={`w-4 h-4 mr-2 ${isFetching ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
         </div>
-        <Button
-          variant="outline"
-          size="default"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          data-testid="button-refresh-error-log"
-        >
-          <IconRefresh className={`w-4 h-4 mr-2 ${isFetching ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
       </div>
 
       <div className="flex items-start gap-3 rounded-md border bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
@@ -394,6 +536,11 @@ function ErrorLogPageInner() {
               <li>server/utils/error-log-fingerprint.ts — message normalize</li>
               <li>server/utils/error-log-context.ts — what is saved in Context, sensitive keys redacted, 4 KB cap</li>
               <li>server/routes/admin.ts — GET /api/admin/error-log, GET /api/admin/error-log/:id</li>
+              <li>server/routes/admin.ts — GET /api/admin/error-log/export (full 48h dump incl. stack + context)</li>
+              <li>
+                server/error-log/pull-production.ts — POST /api/admin/error-log/pull-production (dev only:
+                saves production&apos;s log as a JSON file; local log unchanged)
+              </li>
             </ul>
           </details>
         </div>
@@ -453,91 +600,7 @@ function ErrorLogPageInner() {
         </Card>
       </div>
 
-      {data?.uniqueIssues && data.uniqueIssues.length > 0 && (
-        <Card data-testid="card-unique-issues">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Top unique issues</CardTitle>
-            <p className="text-xs text-muted-foreground mt-1">
-              Same message shape collapsed. Errors first, then by count, unless you sort by Count or Last seen
-              (click again to flip, a third time to reset). Last seen shows the most recent occurrence.
-            </p>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-8" aria-label="Expand" />
-                  <TableHead className="w-20">Level</TableHead>
-                  <TableHead className="w-44">Module</TableHead>
-                  <TableHead>Message</TableHead>
-                  <SortableHead
-                    col="count"
-                    label="Count"
-                    sort={sort}
-                    onSort={handleSort}
-                    className="text-right w-24"
-                    align="right"
-                  />
-                  <SortableHead
-                    col="lastSeen"
-                    label="Last seen"
-                    sort={sort}
-                    onSort={handleSort}
-                    className="w-40"
-                  />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sortedIssues.map((row, idx) => {
-                  const open = openIssue === row.fingerprint;
-                  const toggle = () => setOpenIssue(open ? null : row.fingerprint);
-                  return (
-                    <Fragment key={row.fingerprint}>
-                      <TableRow
-                        data-testid={`row-unique-issue-${idx}`}
-                        className="cursor-pointer"
-                        onClick={toggle}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            toggle();
-                          }
-                        }}
-                        tabIndex={0}
-                        aria-expanded={open}
-                      >
-                        <TableCell className="pr-0">
-                          <ExpandChevron open={open} />
-                        </TableCell>
-                        <TableCell>
-                          <LevelBadge level={row.level} />
-                        </TableCell>
-                        <TableCell className="font-mono text-sm">{row.module}</TableCell>
-                        <TableCell className="text-sm text-foreground max-w-md">
-                          <MessageWithErrorType message={row.message} errName={row.err_name} />
-                        </TableCell>
-                        <TableCell className="text-right font-medium tabular-nums">
-                          {row.count}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
-                          {formatTs(row.lastTs)}
-                        </TableCell>
-                      </TableRow>
-                      {open && (
-                        <TableRow className="hover:bg-transparent">
-                          <TableCell colSpan={6} className="bg-muted/40 p-4">
-                            <ErrorLogDetail id={row.lastId} count={row.count} sampleTs={row.sampleTs} />
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
+      <ErrorLogIssueTable issues={data?.uniqueIssues ?? []} />
 
       <Card data-testid="card-recent-events">
         <CardHeader className="pb-3">

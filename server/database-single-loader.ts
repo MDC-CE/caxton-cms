@@ -3,17 +3,13 @@ import { getDefaultContentRoot } from "./site-config";
 import * as path from "path";
 import { contentIndex } from "./content-index";
 import { deepMerge } from "./utils/deepMerge";
-import { databaseManager, type DatabaseManager } from "./database";
 import {
-  getDatabaseName,
   getFolder,
   getLookupKey,
   getFieldMapping,
   getFullFieldMapping,
   getLocaleKey,
   getLocaleSource,
-  hasDatabaseSingle,
-  getContentTypeConfig,
   RESERVED_IMAGE_FIELD,
   RESERVED_SLUG_FIELD,
   RESERVED_LOCALE_FIELD,
@@ -22,12 +18,9 @@ import {
   applySlugAliasToEntry,
   applyLocaleAliasToEntry,
   applyUpdatedAtAliasToEntry,
-  finalizeSingleEntryForTemplates,
   resolveEntryUpdatedAt,
 } from "./content-types";
 import { resolveFieldValue, applyTransformIfNeeded } from "./transform";
-import { fetchMarkdownContent } from "./markdown";
-import { applyComponentSectionDefaults, applyComponentImageSizes } from "./component-registry";
 import { readSectionAnchors, writeSectionAnchors } from "./utils/sectionAnchors";
 import { canonicalSectionId, sectionIdCandidates } from "./utils/sectionIdentity";
 import { applyPerEntryLayer, type PerEntryAccum } from "./section-merge";
@@ -38,9 +31,6 @@ import {
   resolveCommonTemplatePath,
   resolveTemplateLocalePath,
 } from "./shared-layout-paths";
-import { applyFieldOverridesToItem, readFieldOverrides } from "./field-overrides";
-import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
-import type { TemplatePage } from "@shared/schema";
 import { ENTRY_OR_SINGLE_KEY_RE } from "@shared/entryTemplateVars";
 import { child } from "./logger";
 const log = child({ module: "database-single-loader" });
@@ -204,12 +194,9 @@ export function mergeSingleTemplate(
               )
             : [],
         );
-        const staleKeys = Object.keys(anchors.aliases).filter((k) => baseSectionIds.has(k));
-        if (staleKeys.length > 0) {
-          for (const k of staleKeys) delete anchors.aliases[k];
-          try {
-            writeSectionAnchors(contentType, anchors);
-          } catch { /* non-fatal */ }
+        // Read-only: stale aliases are ignored here and pruned on template edits (pruneStaleSectionAliases).
+        for (const k of Object.keys(anchors.aliases)) {
+          if (baseSectionIds.has(k)) delete anchors.aliases[k];
         }
         if (Object.keys(anchors.aliases).length > 0) {
           aliases = anchors.aliases;
@@ -251,20 +238,54 @@ export function mergeSingleTemplate(
 }
 
 /**
- * Live `{locale}.yml`, or `{variant}.{locale}.yml` when previewing a named variant.
- * Used by detached shared-layout entries (draft-only has no live locale file).
+ * Drop `_section_anchors.json` aliases whose section id is back in the shared template.
+ * Called after template section edits; delivery merges never write.
  */
-export function resolveDetachedEntryLocalePath(
-  entryDir: string,
+export function pruneStaleSectionAliases(contentType: string, locale: string, contentRoot?: string): void {
+  const anchors = readSectionAnchors(contentType);
+  if (Object.keys(anchors.aliases).length === 0) return;
+  const template = mergeSingleTemplate(contentType, locale, undefined, undefined, contentRoot);
+  const ids = new Set<string>(
+    Array.isArray(template?.sections)
+      ? (template!.sections as Record<string, unknown>[]).flatMap((s) => sectionIdCandidates(s))
+      : [],
+  );
+  const stale = Object.keys(anchors.aliases).filter((k) => ids.has(k));
+  if (stale.length === 0) return;
+  for (const k of stale) delete anchors.aliases[k];
+  writeSectionAnchors(contentType, anchors);
+}
+
+/**
+ * Whole page for an entry that owns its layout (no shared template, or detached):
+ * type layout defaults + entry `_common.yml` + `{locale}.yml`, or `{variant}.{locale}.yml`
+ * when a variant is requested (the variant is the whole page; missing → null, never live).
+ */
+export function mergeEntryOwnedPage(
+  contentType: string,
+  slug: string,
   locale: string,
+  contentRoot?: string,
   entryVariant?: string,
-): string | null {
-  if (entryVariant) {
-    const variantPath = path.join(entryDir, `${entryVariant}.${locale}.yml`);
-    if (fs.existsSync(variantPath)) return variantPath;
+): Record<string, unknown> | null {
+  const resolvedRoot = contentRoot ?? getDefaultContentRoot();
+  const typeDir = path.join(resolvedRoot, getFolder(contentType, resolvedRoot));
+  const entryDir = path.join(typeDir, slug);
+  const localePath = path.join(entryDir, entryVariant ? `${entryVariant}.${locale}.yml` : `${locale}.yml`);
+  if (!fs.existsSync(localePath)) return null;
+  const localeData = contentIndex.safeYamlLoad(fs.readFileSync(localePath, "utf-8"));
+  if (!localeData) return null;
+
+  let base: Record<string, unknown> = {};
+  for (const layerPath of [resolveCommonTemplatePath(typeDir), path.join(entryDir, "_common.yml")]) {
+    if (!fs.existsSync(layerPath)) continue;
+    const parsed = contentIndex.safeYamlLoad(fs.readFileSync(layerPath, "utf-8"));
+    if (parsed) base = Object.keys(base).length > 0 ? deepMerge(base, parsed) : parsed;
   }
-  const livePath = path.join(entryDir, `${locale}.yml`);
-  return fs.existsSync(livePath) ? livePath : null;
+  const merged: Record<string, unknown> =
+    Object.keys(base).length > 0 ? deepMerge(base, stripDraftMeta(localeData)) : { ...stripDraftMeta(localeData) };
+  delete merged.detached;
+  return applySectionLayoutDefaults(merged);
 }
 
 /**
@@ -285,292 +306,114 @@ export function hasStaticSharedLayoutEntryLocale(
 }
 
 /**
- * Load a merged single-entry page for per-entry section ops.
- * Works for both DB-backed types and static types with `single_template: true`
- * (e.g. blog after convert-to-static). Prefer this over `loadDatabaseSinglePage`
- * in edit/delete routes that must support both.
+ * Apply the content type's field mapping and reserved aliases (slug, locale,
+ * image, updated_at) to database items that already went through the
+ * database-level mapping. Pure: no network, no writes.
  */
-export async function loadMergedSinglePage(
+export function mapDatabaseItemsForEntry(
+  items: Record<string, unknown>[],
   contentType: string,
-  slug: string,
-  locale: string,
-  contentRoot?: string,
-  db: DatabaseManager = databaseManager,
-): Promise<TemplatePage | null> {
-  const resolvedRoot = contentRoot ?? getDefaultContentRoot();
+  contentRoot: string,
+): Record<string, unknown>[] {
+  const lookupKey = getLookupKey(contentType, contentRoot) || "slug";
+  const fieldMapping = getFieldMapping(contentType, contentRoot);
+  const fullMapping = getFullFieldMapping(contentType, contentRoot);
 
-  if (hasDatabaseSingle(contentType, resolvedRoot)) {
-    return loadDatabaseSinglePage(contentType, slug, locale, resolvedRoot, db);
+  if (
+    !fieldMapping &&
+    !fullMapping?.[RESERVED_IMAGE_FIELD] &&
+    !fullMapping?.[RESERVED_SLUG_FIELD] &&
+    !fullMapping?.[RESERVED_UPDATED_AT_FIELD]
+  ) {
+    return items;
   }
 
-  const config = getContentTypeConfig(contentType, resolvedRoot);
-  if (!config?.single_template) return null;
-
-  if (!hasStaticSharedLayoutEntryLocale(contentType, slug, locale, resolvedRoot)) {
-    log.info(
-      `[MergedSingle] Static entry not found: ${contentType}/${slug}/${locale}.yml`,
-    );
-    return null;
-  }
-
-  const accum: PerEntryAccum = { removedSections: [] };
-  const merged = mergeSingleTemplate(contentType, locale, slug, accum, resolvedRoot);
-  if (!merged) {
-    log.error(
-      `[MergedSingle] Template not found for static single_template type: ${contentType}`,
-    );
-    return null;
-  }
-
-  const sections = (merged.sections as TemplatePage["sections"]) || [];
-  attachVariableFieldsToSections(sections as unknown[]);
-  applyComponentSectionDefaults(sections as unknown[]);
-  applyComponentImageSizes(sections as unknown[]);
-
-  return {
-    slug: (merged.slug as string) || slug,
-    title: (merged.title as string) || slug,
-    meta: (merged.meta as TemplatePage["meta"]) || {},
-    sections,
-    settings: (merged.settings as TemplatePage["settings"]) || undefined,
-    schema: (merged.schema as TemplatePage["schema"]) || undefined,
-    perEntryRemovedSections:
-      accum.removedSections.length > 0 ? accum.removedSections : undefined,
-  };
-}
-
-export async function loadDatabaseSinglePage(
-  contentType: string,
-  slug: string,
-  locale: string,
-  contentRoot?: string,
-  db: DatabaseManager = databaseManager,
-  /**
-   * Attached: `single.{variant}.{locale}.yml` (template A/B).
-   * Detached: `{variant}.{locale}.yml` (entry preview, e.g. draft).
-   */
-  templateVariant?: string,
-): Promise<TemplatePage | null> {
-  const resolvedRoot = contentRoot ?? getDefaultContentRoot();
-  const dbName = getDatabaseName(contentType, resolvedRoot);
-  if (!dbName) return null;
-
-  const detached = isEntryDetached(contentType, slug, resolvedRoot);
-
-  // Detached: structure from entry YAML (classic page), not shared template
-  let merged: Record<string, unknown> | null = null;
-  let perEntryRemovedSections: Array<{ section: Record<string, unknown>; originalIndex: number }> = [];
-
-  if (detached) {
-    const folder = getFolder(contentType, resolvedRoot);
-    const entryDir = path.join(resolvedRoot, folder, slug);
-    const commonPath = path.join(entryDir, "_common.yml");
-    const localePath = resolveDetachedEntryLocalePath(entryDir, locale, templateVariant);
-    if (!localePath) {
-      log.info(
-        `[DatabaseSingle] Detached entry locale not found: ${contentType}/${slug}/${templateVariant ? `${templateVariant}.` : ""}${locale}.yml`,
-      );
-      return null;
-    }
-    let base: Record<string, unknown> = {};
-    if (fs.existsSync(commonPath)) {
-      const parsed = contentIndex.safeYamlLoad(fs.readFileSync(commonPath, "utf-8"));
-      if (parsed) base = parsed;
-    }
-    const localeData = contentIndex.safeYamlLoad(fs.readFileSync(localePath, "utf-8"));
-    if (!localeData) return null;
-    merged = Object.keys(base).length > 0 ? deepMerge(base, localeData) : { ...localeData };
-    // Strip detach bookkeeping from render payload
-    delete (merged as Record<string, unknown>).detached;
-    merged = applySectionLayoutDefaults(merged);
-  } else {
-    const accum: PerEntryAccum = { removedSections: [] };
-    merged = mergeSingleTemplate(
-      contentType,
-      locale,
-      slug,
-      accum,
-      resolvedRoot,
-      templateVariant,
-    );
-
-    if (!merged) {
-      log.error(
-        `[DatabaseSingle] Template not found: single.${templateVariant ? `${templateVariant}.` : ""}${locale}.yml for ${contentType}`,
-      );
-      return null;
-    }
-
-    if (accum.removedSections.length > 0) {
-      perEntryRemovedSections = accum.removedSections;
-    }
-  }
-
-  if (!db.exists(dbName)) {
-    log.error(`[DatabaseSingle] Database "${dbName}" not found`);
-    return null;
-  }
-
-  try {
-    const result = await db.fetchItems(dbName);
-    const lookupKey = getLookupKey(contentType, resolvedRoot) || "slug";
-    const fieldMapping = getFieldMapping(contentType, resolvedRoot);
-    const fullMapping = getFullFieldMapping(contentType, resolvedRoot);
-
-    let items = result.items as Record<string, unknown>[];
-
-    if (fieldMapping || fullMapping?.[RESERVED_IMAGE_FIELD] || fullMapping?.[RESERVED_SLUG_FIELD] || fullMapping?.[RESERVED_UPDATED_AT_FIELD]) {
-      items = items.map((item) => {
-        const mapped: Record<string, unknown> = { ...item };
-        const itemSlug = String(item[lookupKey] ?? item.slug ?? "unknown");
-        if (fieldMapping) {
-          for (const [targetField, sourcePath] of Object.entries(fieldMapping)) {
-            const value = resolveFieldValue(sourcePath, item, targetField, {
-              contentType,
-              slug: itemSlug,
-              fieldPath: targetField,
-            });
-            if (value !== undefined) mapped[targetField] = value;
-          }
-        }
-        const slugMapSource = fullMapping?.[RESERVED_SLUG_FIELD];
-        if (slugMapSource) {
-          const slugValue = resolveFieldValue(slugMapSource, item, RESERVED_SLUG_FIELD, {
-            contentType,
-            slug: itemSlug,
-            fieldPath: RESERVED_SLUG_FIELD,
-          });
-          applySlugAliasToEntry(mapped, slugValue);
-        }
-        const localeMapSource = fullMapping?.[RESERVED_LOCALE_FIELD];
-        if (localeMapSource) {
-          const localeValue = resolveFieldValue(localeMapSource, item, RESERVED_LOCALE_FIELD, {
-            contentType,
-            slug: itemSlug,
-            fieldPath: RESERVED_LOCALE_FIELD,
-          });
-          applyLocaleAliasToEntry(mapped, localeValue);
-        }
-        const imageSource = fullMapping?.[RESERVED_IMAGE_FIELD];
-        if (imageSource) {
-          const imageValue = resolveFieldValue(imageSource, item, RESERVED_IMAGE_FIELD, {
-            contentType,
-            slug: itemSlug,
-            fieldPath: RESERVED_IMAGE_FIELD,
-          });
-          applyImageAliasToEntry(mapped, imageValue);
-        }
-        const updatedAtSource = fullMapping?.[RESERVED_UPDATED_AT_FIELD];
-        if (updatedAtSource) {
-          const updatedAtValue = resolveFieldValue(updatedAtSource, item, RESERVED_UPDATED_AT_FIELD, {
-            contentType,
-            slug: itemSlug,
-            fieldPath: RESERVED_UPDATED_AT_FIELD,
-          });
-          applyUpdatedAtAliasToEntry(mapped, updatedAtValue);
-        }
-        const iso = resolveEntryUpdatedAt({
+  return items.map((item) => {
+    const mapped: Record<string, unknown> = { ...item };
+    const itemSlug = String(item[lookupKey] ?? item.slug ?? "unknown");
+    if (fieldMapping) {
+      for (const [targetField, sourcePath] of Object.entries(fieldMapping)) {
+        const value = resolveFieldValue(sourcePath, item, targetField, {
           contentType,
           slug: itemSlug,
-          locale: String(mapped.locale || item.locale || ""),
-          record: mapped,
-          contentRoot: resolvedRoot,
-          isDb: true,
+          fieldPath: targetField,
         });
-        applyUpdatedAtAliasToEntry(mapped, iso);
-        return mapped;
-      });
-    }
-
-    const localeKey = getLocaleKey(contentType, resolvedRoot);
-    const localeSource = getLocaleSource(contentType, resolvedRoot);
-    let matchItem: Record<string, unknown> | undefined;
-
-    if (localeKey) {
-      const normalizedLocale = localeSource
-        ? applyTransformIfNeeded(localeSource, locale)
-        : locale;
-      matchItem = items.find((item) => {
-        const itemLocale = String(item[localeKey] || "");
-        const normalizedItemLocale = localeSource
-          ? applyTransformIfNeeded(localeSource, itemLocale)
-          : itemLocale;
-        return (
-          item[lookupKey] === slug && normalizedItemLocale === normalizedLocale
-        );
-      });
-      if (!matchItem) {
-        matchItem = items.find((item) => item[lookupKey] === slug);
+        if (value !== undefined) mapped[targetField] = value;
       }
-    } else {
-      matchItem = items.find((item) => item[lookupKey] === slug);
     }
-
-    if (!matchItem) {
-      log.info(
-        `[DatabaseSingle] Item not found: ${lookupKey}=${slug} in ${dbName}`,
-      );
-      return null;
-    }
-
-    let content = (matchItem as any).content || "";
-    if (!content && (matchItem as any).content_url) {
-      content = await fetchMarkdownContent(
-        (matchItem as any).content_url as string,
-      );
-    }
-    if (!content && (matchItem as any).readme_url) {
-      content = await fetchMarkdownContent(
-        (matchItem as any).readme_url as string,
-      );
-    }
-    const singleItemBase = { ...matchItem, content };
-    const ctOverrides = readFieldOverrides(contentType, slug, locale, resolvedRoot);
-    const singleItem = applyFieldOverridesToItem(singleItemBase, ctOverrides);
-    applyUpdatedAtAliasToEntry(
-      singleItem,
-      resolveEntryUpdatedAt({
+    const slugMapSource = fullMapping?.[RESERVED_SLUG_FIELD];
+    if (slugMapSource) {
+      const slugValue = resolveFieldValue(slugMapSource, item, RESERVED_SLUG_FIELD, {
         contentType,
-        slug,
-        locale,
-        record: singleItem,
-        contentRoot: resolvedRoot,
-        isDb: true,
-      }),
-    );
-
-    const sections = (merged.sections as TemplatePage["sections"]) || [];
-    attachVariableFieldsToSections(sections as unknown[]);
-    applyComponentSectionDefaults(sections as unknown[]);
-    applyComponentImageSizes(sections as unknown[]);
-
-    const finalized =
-      finalizeSingleEntryForTemplates(singleItem as Record<string, unknown>, {
-        slug,
-        locale,
-      }) || {};
-    // Live_request + relation hydrate for DB singles (SSR, API, seo-preview).
-    const singleEntry = await hydrateEntryForDelivery(contentType, finalized, {
-      contentRoot: resolvedRoot,
-      locale,
-      db,
-      contentIndex,
+        slug: itemSlug,
+        fieldPath: RESERVED_SLUG_FIELD,
+      });
+      applySlugAliasToEntry(mapped, slugValue);
+    }
+    const localeMapSource = fullMapping?.[RESERVED_LOCALE_FIELD];
+    if (localeMapSource) {
+      const localeValue = resolveFieldValue(localeMapSource, item, RESERVED_LOCALE_FIELD, {
+        contentType,
+        slug: itemSlug,
+        fieldPath: RESERVED_LOCALE_FIELD,
+      });
+      applyLocaleAliasToEntry(mapped, localeValue);
+    }
+    const imageSource = fullMapping?.[RESERVED_IMAGE_FIELD];
+    if (imageSource) {
+      const imageValue = resolveFieldValue(imageSource, item, RESERVED_IMAGE_FIELD, {
+        contentType,
+        slug: itemSlug,
+        fieldPath: RESERVED_IMAGE_FIELD,
+      });
+      applyImageAliasToEntry(mapped, imageValue);
+    }
+    const updatedAtSource = fullMapping?.[RESERVED_UPDATED_AT_FIELD];
+    if (updatedAtSource) {
+      const updatedAtValue = resolveFieldValue(updatedAtSource, item, RESERVED_UPDATED_AT_FIELD, {
+        contentType,
+        slug: itemSlug,
+        fieldPath: RESERVED_UPDATED_AT_FIELD,
+      });
+      applyUpdatedAtAliasToEntry(mapped, updatedAtValue);
+    }
+    const iso = resolveEntryUpdatedAt({
+      contentType,
+      slug: itemSlug,
+      locale: String(mapped.locale || item.locale || ""),
+      record: mapped,
+      contentRoot,
+      isDb: true,
     });
+    applyUpdatedAtAliasToEntry(mapped, iso);
+    return mapped;
+  });
+}
 
-    const page: TemplatePage = {
-      slug: (merged.slug as string) || slug,
-      title: (merged.title as string) || (singleItem.title as string) || slug,
-      meta: (merged.meta as TemplatePage["meta"]) || {},
-      sections,
-      settings: (merged.settings as TemplatePage["settings"]) || undefined,
-      schema: (merged.schema as TemplatePage["schema"]) || undefined,
-      singleEntry,
-      perEntryRemovedSections: perEntryRemovedSections.length > 0 ? perEntryRemovedSections : undefined,
-    };
+/** Item for `slug` in `locale`; falls back to any item with that slug. */
+export function findDatabaseItemForEntry(
+  items: Record<string, unknown>[],
+  contentType: string,
+  slug: string,
+  locale: string,
+  contentRoot: string,
+): Record<string, unknown> | undefined {
+  const lookupKey = getLookupKey(contentType, contentRoot) || "slug";
+  const localeKey = getLocaleKey(contentType, contentRoot);
+  const localeSource = getLocaleSource(contentType, contentRoot);
 
-    return page;
-  } catch (err) {
-    log.error({ err, contentType, slug }, `[DatabaseSingle] Error loading ${contentType}/${slug}`);
-    return null;
+  if (localeKey) {
+    const normalizedLocale = localeSource
+      ? applyTransformIfNeeded(localeSource, locale)
+      : locale;
+    const exact = items.find((item) => {
+      const itemLocale = String(item[localeKey] || "");
+      const normalizedItemLocale = localeSource
+        ? applyTransformIfNeeded(localeSource, itemLocale)
+        : itemLocale;
+      return item[lookupKey] === slug && normalizedItemLocale === normalizedLocale;
+    });
+    if (exact) return exact;
   }
+  return items.find((item) => item[lookupKey] === slug);
 }

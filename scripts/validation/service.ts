@@ -12,7 +12,8 @@ import type {
   ValidatorResult,
   SitemapEntry,
 } from "./shared/types";
-import { loadAllContent } from "./shared/contentLoader";
+import path from "path";
+import { loadContent } from "./shared/contentLoader";
 import { contentIndex as defaultContentIndex, type ContentIndex } from "../../server/content-index";
 import { getAvailableSchemaKeys } from "./shared/schemaRegistry";
 import { validators, allValidators, getValidator, listValidators, ensureValidatorRegistered } from "./validators";
@@ -95,6 +96,40 @@ export function resolveValidationSitemapCtx(options: {
   return undefined;
 }
 
+function formatAge(ms: number): string {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function normalizeIssuePath(p: string): string {
+  const rel = path.isAbsolute(p) ? path.relative(process.cwd(), p) : p;
+  return rel.split(path.sep).join("/");
+}
+
+/** Issues on pages checked against an old database copy say so (the source may already be fixed). */
+export function annotateStaleSourceIssues(result: ValidatorResult, context: ValidationContext): void {
+  const staleByFile = new Map<string, { ageMs: number; database?: string }>();
+  for (const f of context.contentFiles) {
+    if (f.staleSourceAgeMs !== undefined) {
+      staleByFile.set(normalizeIssuePath(f.filePath), { ageMs: f.staleSourceAgeMs, database: f.staleSourceDatabase });
+    }
+  }
+  if (staleByFile.size === 0) return;
+  for (const issue of [...result.errors, ...result.warnings]) {
+    if (!issue.file) continue;
+    const stale = staleByFile.get(normalizeIssuePath(issue.file));
+    if (!stale) continue;
+    const note = `Checked against data from ${formatAge(stale.ageMs)} ago; the source may already be fixed.`;
+    if (!issue.message.includes(note)) issue.message = `${issue.message} ${note}`;
+    issue.staleSourceAgeMs = stale.ageMs;
+    if (stale.database) issue.staleSourceDatabase = stale.database;
+  }
+}
+
 export class ValidationService {
   private context: ValidationContext | null = null;
   private sitemapCtx: ActiveSiteCtx | undefined;
@@ -104,7 +139,12 @@ export class ValidationService {
     ci?: typeof defaultContentIndex;
     scope?: { database?: string };
   } = {}): Promise<ValidationContext> {
-    const contentFiles = loadAllContent(options.ci);
+    const {
+      files: contentFiles,
+      skippedDatabases,
+      skippedContentTypes,
+      staleDatabases,
+    } = loadContent(options.ci);
     const availableSchemas = getAvailableSchemaKeys();
 
     this.sitemapCtx = resolveValidationSitemapCtx({
@@ -135,6 +175,9 @@ export class ValidationService {
       sitemapXml,
       contentRoot: options.contentRoot,
       scope: options.scope,
+      skippedDatabases,
+      skippedContentTypes,
+      staleDatabases,
     };
 
     return this.context;
@@ -185,6 +228,7 @@ export class ValidationService {
         }
 
         result.category = validator.category;
+        annotateStaleSourceIssues(result, this.context!);
         results.push(result);
       } catch (err) {
         results.push({

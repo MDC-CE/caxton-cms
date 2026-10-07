@@ -85,6 +85,7 @@ import {
   type AuthSignupFieldMapEntry,
 } from "@shared/authSignupFieldMap";
 import { useVariableDefinitions } from "@/hooks/useVariables";
+import { useSettingsDirty } from "@/components/settings/SettingsShell";
 
 type AuthHttpMethod = "GET" | "POST" | "PUT";
 
@@ -577,6 +578,7 @@ export function AuthTab() {
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [dirty, setDirty] = useState(false);
+  useSettingsDirty(dirty);
 
   const [testTarget, setTestTarget] = useState<TestTarget | null>(null);
   const [testEmail, setTestEmail] = useState("");

@@ -5,6 +5,20 @@ import path from "path";
 import yaml from "js-yaml";
 import { child } from "./logger";
 import { normalizeConsentFallbackKey } from "@shared/consent-settings";
+import {
+  DEFAULT_CONSENT_WINDOW,
+  parseConsentWindowSettings,
+  type ConsentWindowSettings,
+} from "@shared/consent";
+import { parseAdsSettings, type AdsSettings, type GoogleAdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
+import {
+  ADS_CONFIG_FILENAME,
+  loadAdsConfig,
+  readAdsConfigRaw,
+  writeAdsConfigRaw,
+  type AdsConfigLoad,
+  type AdsConfigStatus,
+} from "./ads-config";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
 import {
   type AuthSignupFieldMapEntry,
@@ -860,7 +874,7 @@ export interface EntryPreviewSettings {
 export const DEFAULT_ENTRY_PREVIEW_SETTINGS: EntryPreviewSettings = {
   min_interval_ms: 10_000,
   max_concurrency: 1,
-  max_retries: 5,
+  max_retries: 3,
 };
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
@@ -899,6 +913,8 @@ export function parseEntryPreviewSettings(raw: unknown): EntryPreviewSettings {
 /** Lead-form consent pointer in settings.yml (`consent.fallback`). */
 export interface SiteConsentSettings {
   fallback: string | null;
+  /** Cookie banner rules (`consent.window`). */
+  window: ConsentWindowSettings;
 }
 
 interface SiteSettings {
@@ -914,12 +930,18 @@ interface SiteSettings {
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
+  /** Legacy `ads:` block; ads-config.yml wins when it exists (read through getAdsSettings). */
+  ads: AdsSettings;
+  ads_legacy_present: boolean;
 }
 
 function parseSiteConsentSettings(raw: unknown): SiteConsentSettings {
-  if (!raw || typeof raw !== "object") return { fallback: null };
+  if (!raw || typeof raw !== "object") return { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } };
   const rec = raw as Record<string, unknown>;
-  return { fallback: normalizeConsentFallbackKey(rec.fallback) };
+  return {
+    fallback: normalizeConsentFallbackKey(rec.fallback),
+    window: parseConsentWindowSettings(rec.window),
+  };
 }
 
 /** Build robots.txt body from settings. `baseUrl` is used for the Sitemap line when included. */
@@ -962,14 +984,43 @@ Disallow: /
   return lines.join("\n");
 }
 
-const settingsCache = new Map<string, SiteSettings>();
+/**
+ * Keyed by settings root. `stamp` is the file's mtime+size when it was read, so every
+ * process (web + job worker) picks up writes made by another process.
+ */
+const settingsCache = new Map<string, { settings: SiteSettings; stamp: string }>();
+/** Stamp of the last unparseable read per root, so a broken file is not re-parsed on every call. */
+const failedSettingsStamp = new Map<string, string>();
+
+function settingsFileStamp(settingsPath: string): string {
+  try {
+    const s = fs.statSync(settingsPath);
+    return `${s.mtimeMs}:${s.size}`;
+  } catch {
+    return "missing";
+  }
+}
 
 function loadSettings(contentRoot?: string): SiteSettings {
   const key = resolveSettingsRoot(contentRoot);
-  if (settingsCache.has(key)) return settingsCache.get(key)!;
-
   const settingsPath = getSettingsPath(key);
+  const stamp = settingsFileStamp(settingsPath);
+  const cached = settingsCache.get(key);
+  if (cached && cached.stamp === stamp) return cached.settings;
+  if (failedSettingsStamp.get(key) === stamp) return cached?.settings ?? readSettingsFile(settingsPath, true).settings;
 
+  const read = readSettingsFile(settingsPath);
+  if (read.ok) {
+    failedSettingsStamp.delete(key);
+    settingsCache.set(key, { settings: read.settings, stamp });
+    return read.settings;
+  }
+  // Unparseable (e.g. read mid-write): keep the last good settings; the next stamp change retries.
+  failedSettingsStamp.set(key, stamp);
+  return cached?.settings ?? read.settings;
+}
+
+function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; settings: SiteSettings } {
   const defaults: SiteSettings = {
     i18n: {
       default_locale: "en",
@@ -1013,21 +1064,21 @@ function loadSettings(contentRoot?: string): SiteSettings {
     },
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
-    consent: { fallback: null },
+    consent: { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } },
+    ads: parseAdsSettings(undefined),
+    ads_legacy_present: false,
   };
 
   if (!fs.existsSync(settingsPath)) {
     log.warn("[Settings] settings.yml not found, using defaults");
-    settingsCache.set(key, defaults);
-    return defaults;
+    return { ok: true, settings: defaults };
   }
 
   try {
     const raw = fs.readFileSync(settingsPath, "utf-8");
     const parsed = yaml.load(raw) as Record<string, unknown> | null;
     if (!parsed) {
-      settingsCache.set(key, defaults);
-      return defaults;
+      return { ok: true, settings: defaults };
     }
 
     const i18nRaw = parsed.i18n as Record<string, unknown> | undefined;
@@ -1234,16 +1285,16 @@ function loadSettings(contentRoot?: string): SiteSettings {
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
+      ads: parseAdsSettings(parsed.ads),
+      ads_legacy_present: parsed.ads != null && typeof parsed.ads === "object",
     };
-    settingsCache.set(key, result);
     log.info(
       `[Settings] Loaded: ${i18n.supported_locales.length} locale(s), default="${i18n.default_locale}", home_page="${home_page.slug}", conversion_events=${tracking.conversion_events.length}, block_indexing=${robots.block_indexing}`
     );
-    return result;
+    return { ok: true, settings: result };
   } catch (err) {
-    log.error({ err: err }, "[Settings] Failed to parse settings.yml, using defaults:");
-    settingsCache.set(key, defaults);
-    return defaults;
+    if (!quiet) log.error({ err: err }, "[Settings] Failed to parse settings.yml; keeping last good settings (or defaults):");
+    return { ok: false, settings: defaults };
   }
 }
 
@@ -1312,6 +1363,47 @@ export function updateConsentFallback(fallback: string | null, contentRoot?: str
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(`[Settings] Updated consent.fallback=${normalized ?? "(none)"}`);
   return normalized;
+}
+
+export function getConsentWindowSettings(contentRoot?: string): ConsentWindowSettings {
+  return loadSettings(contentRoot).consent.window;
+}
+
+/** Persist `consent.window` by patching settings.yml (preserves `consent.fallback` and unrelated keys). */
+export function updateConsentWindowSettings(
+  input: Partial<ConsentWindowSettings>,
+  contentRoot?: string,
+): ConsentWindowSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      existing = (yaml.load(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>) || {};
+    } catch {}
+  }
+  const prev =
+    existing.consent && typeof existing.consent === "object"
+      ? { ...(existing.consent as Record<string, unknown>) }
+      : {};
+  const current = parseConsentWindowSettings(prev.window);
+  const merged = parseConsentWindowSettings({ ...current, ...input });
+  existing.consent = {
+    ...prev,
+    window: {
+      ask_countries: merged.ask_countries,
+      unknown_country_mode: merged.unknown_country_mode,
+      accept_days: merged.accept_days,
+      reject_days: merged.reject_days,
+    },
+  };
+  fs.writeFileSync(settingsPath, yaml.dump(existing, { lineWidth: 120, noRefs: true }), "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(
+    `[Settings] Updated consent.window ask=${
+      merged.ask_countries === "default" ? "default" : merged.ask_countries.length
+    } unknown=${merged.unknown_country_mode} accept=${merged.accept_days}d reject=${merged.reject_days}d`,
+  );
+  return merged;
 }
 
 export function normalizeLocale(locale: string | undefined | null, contentRoot?: string): string {
@@ -1391,8 +1483,10 @@ export function updateLocaleSettings(input: {
 export function resetSettings(contentRoot?: string): void {
   if (contentRoot) {
     settingsCache.delete(contentRoot);
+    failedSettingsStamp.delete(contentRoot);
   } else {
     settingsCache.clear();
+    failedSettingsStamp.clear();
   }
 }
 
@@ -2019,6 +2113,117 @@ export function updateSearchConsoleOrganicMarkets(
     `[Settings] Updated search_console.organic_markets count=${organic_markets.length}`,
   );
   return updated;
+}
+
+/** Raw legacy `ads:` block from settings.yml (pre-migration sites), or null. */
+function readLegacyAdsBlock(contentRoot?: string): Record<string, unknown> | null {
+  const settingsPath = getSettingsPath(contentRoot);
+  if (!fs.existsSync(settingsPath)) return null;
+  try {
+    const parsed = yaml.load(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown> | null;
+    const ads = parsed?.ads;
+    return ads && typeof ads === "object" && !Array.isArray(ads) ? { ...(ads as Record<string, unknown>) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadAds(contentRoot?: string): AdsConfigLoad {
+  return loadAdsConfig(contentRoot, () => {
+    const s = loadSettings(contentRoot);
+    return { present: s.ads_legacy_present, settings: s.ads };
+  });
+}
+
+export function getAdsSettings(contentRoot?: string): AdsSettings {
+  return loadAds(contentRoot).settings;
+}
+
+/** Whether ads-config.yml is readable; syncs skip with `ads_config_unreadable` when it isn't. */
+export function getAdsConfigStatus(contentRoot?: string): AdsConfigStatus {
+  return loadAds(contentRoot).status;
+}
+
+export class AdsConfigUnreadableError extends Error {
+  readonly code = "ads_config_unreadable";
+  constructor(detail?: string) {
+    super(`${ADS_CONFIG_FILENAME} can't be read${detail ? ` (${detail})` : ""}. Fix the file before saving Ads settings.`);
+  }
+}
+
+export type AdsSettingsUpdate = {
+  meta?: Partial<Omit<MetaAdsSettings, "alert_thresholds" | "lead_conversions_changed_at">> & {
+    /** Legacy location; merged into `ads.alert_thresholds`. */
+    alert_thresholds?: Partial<AdsSettings["alert_thresholds"]>;
+  };
+  google?: Partial<Omit<GoogleAdsSettings, "bigquery">> & { bigquery?: Partial<GoogleAdsSettings["bigquery"]> };
+  alert_thresholds?: Partial<AdsSettings["alert_thresholds"]>;
+  test_email_patterns?: string[];
+};
+
+/**
+ * Patch the Ads settings in ads-config.yml (created from the legacy settings.yml block on first save).
+ * Keys staff edit by hand (utm_convention, unknown keys) are kept as written.
+ */
+export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string): AdsSettings {
+  const raw = readAdsConfigRaw(contentRoot);
+  if (!raw.ok) throw new AdsConfigUnreadableError(raw.error);
+  const existing: Record<string, unknown> = raw.exists ? { ...raw.data } : {};
+  if (!raw.exists) {
+    const legacy = readLegacyAdsBlock(contentRoot);
+    if (legacy) Object.assign(existing, legacy);
+  }
+
+  const current = parseAdsSettings(existing);
+  const { alert_thresholds: legacyThresholds, ...metaInput } = input.meta ?? {};
+  const merged = parseAdsSettings({
+    utm_convention: existing.utm_convention,
+    meta: { ...current.meta, ...metaInput },
+    google: {
+      ...current.google,
+      ...(input.google ?? {}),
+      bigquery: { ...current.google.bigquery, ...(input.google?.bigquery ?? {}) },
+    },
+    alert_thresholds: { ...current.alert_thresholds, ...(legacyThresholds ?? {}), ...(input.alert_thresholds ?? {}) },
+    test_email_patterns: input.test_email_patterns ?? current.test_email_patterns,
+  });
+  const g = merged.google;
+  const m = merged.meta;
+  const picksChanged = m.lead_conversions.join(",") !== current.meta.lead_conversions.join(",");
+  if (picksChanged) m.lead_conversions_changed_at = new Date().toISOString();
+  const googleConfigured = g.enabled || g.customer_ids.length > 0 || !!g.bigquery.project || !!g.bigquery.dataset;
+  const { meta: _m, google: _g, alert_thresholds: _t, test_email_patterns: _p, ...handEdited } = existing;
+  const next: Record<string, unknown> = {
+    meta: {
+      enabled: m.enabled,
+      ad_account_ids: m.ad_account_ids,
+      ...(m.known_external_campaigns.length > 0 ? { known_external_campaigns: m.known_external_campaigns } : {}),
+      ...(m.lead_conversions.length > 0 ? { lead_conversions: m.lead_conversions } : {}),
+      ...(m.lead_conversions_changed_at ? { lead_conversions_changed_at: m.lead_conversions_changed_at } : {}),
+      ...(m.expected_event_pairs.length > 0 ? { expected_event_pairs: m.expected_event_pairs } : {}),
+    },
+    ...(googleConfigured
+      ? {
+          google: {
+            enabled: g.enabled,
+            customer_ids: g.customer_ids,
+            bigquery: g.bigquery,
+            ...(g.lead_conversion_actions.length > 0 ? { lead_conversion_actions: g.lead_conversion_actions } : {}),
+            ...(g.known_external_campaigns.length > 0 ? { known_external_campaigns: g.known_external_campaigns } : {}),
+          },
+        }
+      : {}),
+    alert_thresholds: merged.alert_thresholds,
+    test_email_patterns: merged.test_email_patterns,
+    ...handEdited,
+  };
+
+  writeAdsConfigRaw(next, contentRoot);
+  log.info(
+    `[Settings] Updated ${ADS_CONFIG_FILENAME} meta_enabled=${merged.meta.enabled} meta_accounts=${merged.meta.ad_account_ids.length} ` +
+      `google_enabled=${g.enabled} google_accounts=${g.customer_ids.length} test_patterns=${merged.test_email_patterns.length}`,
+  );
+  return merged;
 }
 
 export function updateOpenRushSettings(

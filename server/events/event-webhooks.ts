@@ -33,6 +33,8 @@ export const EVENT_WEBHOOK_ALLOWLIST = [
   "proposal_idea_funnel_set",
   "proposal_stale_flagged",
   "proposal_closed_abandoned_stale",
+  "proposal_blocked_flagged",
+  "proposal_closed_abandoned_blocked",
   "proposal_needs_author",
   "proposal_reverted",
 ] as const;

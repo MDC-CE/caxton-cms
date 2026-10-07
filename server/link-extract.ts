@@ -3,6 +3,7 @@
  */
 
 import { createPublicUrlResolver, type PublicUrlResolver } from "./redirects";
+import { listTypePages } from "./entry-layer";
 import { contentIndex } from "./content-index";
 import { seoEntryId } from "./seo-index";
 import { getAllConfigs, getFullFieldMapping } from "./content-types";
@@ -151,16 +152,10 @@ export function collectDbBackedOutboundByEntry(
   const publicUrls = resolver ?? createPublicUrlResolver(contentIndex);
   const configs = getAllConfigs(contentRoot);
   const out: Record<string, string[]> = {};
-  const dbm = contentRoot ? databaseManager : databaseManager;
 
-  for (const [contentType, config] of Object.entries(configs)) {
-    if (!config?.database?.slug) continue;
-    const items = (dbm.getMappedItems(config.database.slug) || []) as Record<string, unknown>[];
-    for (const item of items) {
-      const slug = String(item.slug || "").trim();
-      if (!slug) continue;
-      const itemLocale = String(item.language || item.lang || item.locale || "en");
-      const loc = itemLocale === "_common" ? "en" : itemLocale;
+  for (const contentType of Object.keys(configs)) {
+    const listed = listTypePages(contentIndex, contentType);
+    for (const { slug, locale: loc, item } of listed?.pages ?? []) {
       const paths = collectOutboundPathsFromDbItem(
         contentType,
         item,

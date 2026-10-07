@@ -16,6 +16,7 @@ import {
   isValidConsentKey,
   localesToConsentDefinition,
 } from "@shared/consent-settings";
+import { COOKIE_BANNER_KEYS, type CookieBannerKey } from "@shared/consent";
 const log = child({ module: "variable-manager" });
 
 export const BRAND_VAR_KEYS = ["brand.title", "brand.logo", "brand.logo_dark"] as const;
@@ -34,12 +35,25 @@ export interface VariableCondition {
 }
 
 export interface VariableDefinition {
+  description?: string;
+  category?: string;
+  unit?: string;
+  deprecated?: boolean;
+  replaced_by?: string;
   default?: string;
   conditions?: VariableCondition[];
   by_locale?: Record<string, string>;
   by_region?: Record<string, string>;
   by_location?: Record<string, string>;
   isReserved?: boolean;
+}
+
+export interface VariableMetadataPatch {
+  description?: string;
+  category?: string;
+  unit?: string | null;
+  deprecated?: boolean;
+  replaced_by?: string | null;
 }
 
 export interface VariableContext {
@@ -367,6 +381,36 @@ export class VariableManager {
     this.save();
   }
 
+  /** Merge metadata fields into a definition (creates it when missing). Does not save. */
+  applyMetadata(name: string, patch: VariableMetadataPatch): void {
+    this.ensureInitialized();
+    const existing = this.variables[name] ?? {};
+    const next: VariableDefinition = { ...existing };
+    if (patch.description !== undefined) next.description = patch.description.trim();
+    if (patch.category !== undefined) next.category = patch.category.trim();
+    if (patch.unit !== undefined) {
+      if (patch.unit) next.unit = patch.unit;
+      else delete next.unit;
+    }
+    if (patch.deprecated !== undefined) {
+      if (patch.deprecated) next.deprecated = true;
+      else {
+        delete next.deprecated;
+        delete next.replaced_by;
+      }
+    }
+    if (patch.replaced_by !== undefined) {
+      if (patch.replaced_by && next.deprecated) next.replaced_by = patch.replaced_by.trim();
+      else delete next.replaced_by;
+    }
+    this.variables[name] = orderDefinitionKeys(next);
+  }
+
+  updateMetadata(name: string, patch: VariableMetadataPatch): void {
+    this.applyMetadata(name, patch);
+    this.save();
+  }
+
   addCondition(name: string, condition: VariableCondition): void {
     this.ensureInitialized();
     if (!this.variables[name]) {
@@ -569,6 +613,31 @@ export class VariableManager {
     this.save();
   }
 
+  /** Cookie banner copy per key → locale → text (empty locale = not set; resolver falls back to defaults). */
+  getCookieBannerSettings(defaultLocale: string): Record<string, Record<string, string>> {
+    this.ensureInitialized();
+    const result: Record<string, Record<string, string>> = {};
+    for (const key of COOKIE_BANNER_KEYS) {
+      result[key] = consentDefinitionToLocales(this.variables[`reserved.${key}`], defaultLocale);
+    }
+    return result;
+  }
+
+  updateCookieBannerSetting(
+    key: CookieBannerKey,
+    locales: Record<string, string>,
+    defaultLocale: string,
+  ): void {
+    this.ensureInitialized();
+    if (!(COOKIE_BANNER_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`Invalid cookie banner key "${key}"`);
+    }
+    const shape = localesToConsentDefinition(locales, defaultLocale);
+    this.variables[`reserved.${key}`] = { ...shape, isReserved: true };
+    this.variables[`global.${key}`] = { ...shape, isReserved: true };
+    this.save();
+  }
+
   updateLegalSetting(key: "legal_terms_url" | "legal_privacy_url", value: string): void {
     this.ensureInitialized();
     const reservedKey = `reserved.${key}`;
@@ -618,6 +687,20 @@ export class VariableManager {
   refresh(): void {
     this.load();
   }
+}
+
+const METADATA_KEY_ORDER = ["description", "category", "unit", "deprecated", "replaced_by"] as const;
+
+/** Metadata first in YAML so staff read what a fact is before its values. */
+function orderDefinitionKeys(def: VariableDefinition): VariableDefinition {
+  const ordered: Record<string, unknown> = {};
+  for (const key of METADATA_KEY_ORDER) {
+    if (def[key] !== undefined) ordered[key] = def[key];
+  }
+  for (const [key, value] of Object.entries(def)) {
+    if (!(key in ordered)) ordered[key] = value;
+  }
+  return ordered as VariableDefinition;
 }
 
 const _managerCache = new Map<string, VariableManager>();

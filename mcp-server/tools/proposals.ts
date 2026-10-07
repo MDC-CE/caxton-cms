@@ -84,6 +84,225 @@ function draftsWritten(proposal: unknown): Array<Record<string, unknown>> {
     }));
 }
 
+const IDEA_SEO_TARGET_SCHEMA = z.object({
+  main_keyword: z.string().describe("Exact search phrase this new page should win (one keyword, not a list)."),
+  cluster: z.discriminatedUnion("mode", [
+    z.object({
+      mode: z.literal("join"),
+      pillar_path: z.string().describe("Public path of a live, same-locale hub (e.g. /en/blog/ai-engineer)."),
+    }),
+    z.object({
+      mode: z.literal("hub"),
+      members: z
+        .array(z.object({ contentType: z.string(), slug: z.string() }))
+        .min(1)
+        .describe("Live, monitored, same-locale pages that will join the new hub after it goes live."),
+    }),
+    z.object({
+      mode: z.literal("standalone"),
+      reason: z.string().describe("Min 40 chars. Only for fast_decay_news / broken_url ideas."),
+    }),
+  ]),
+});
+
+const SEO_TARGET_OVERRIDE_SCHEMA = z.object({
+  reason: z.string().describe("Min 40 chars: why seo.main_keyword / seo.pillar_path differ from the idea's locked target."),
+});
+
+const IDEA_SEO_TARGET_CODES = new Set([
+  "idea_seo_target_required",
+  "idea_seo_target_incomplete",
+  "idea_seo_target_frozen",
+  "idea_seo_target_standalone_not_allowed",
+  "idea_seo_target_hub_not_live",
+  "idea_seo_target_hub_members_required",
+  "idea_seo_target_keyword_taken",
+  "idea_seo_target_conflict",
+  "idea_seo_target_hub_gone",
+  "seo_target_override_invalid",
+  "seo_optout_idea_born",
+  "seo_index_unavailable",
+]);
+
+/** Keyword + cluster refusals (idea create / accept / set_idea_seo_target; implementing edits). */
+function ideaSeoTargetFailure(
+  data: Record<string, unknown>,
+  ctx: { tool: "propose_change" | "update_proposal"; proposal_id?: string; site?: string },
+) {
+  const code = String(data.code ?? "");
+  if (!IDEA_SEO_TARGET_CODES.has(code)) return null;
+  const details = (data.details ?? {}) as Record<string, unknown>;
+  const siteArg = ctx.site ? { site: ctx.site } : {};
+  const ideaId =
+    (typeof details.origin_idea_id === "string" && details.origin_idea_id) ||
+    (typeof details.idea_id === "string" && details.idea_id) ||
+    ctx.proposal_id;
+  const exampleTarget = {
+    main_keyword: "(exact phrase)",
+    cluster: { mode: "join", pillar_path: "/en/blog/<hub>" },
+  };
+  const setTarget = ideaId
+    ? {
+        tool: "update_proposal",
+        reason:
+          "Set idea_seo_target { main_keyword, cluster } on the open idea (proposer or staff), then retry accept.",
+        priority: "required" as const,
+        args_hint: { proposal_id: ideaId, action: "set_idea_seo_target", idea_seo_target: exampleTarget, ...siteArg },
+      }
+    : {
+        tool: "propose_change",
+        reason: "Retry the idea with a valid idea_seo_target (nothing was filed).",
+        priority: "required" as const,
+        args_hint: { kind: "idea", idea_seo_target: exampleTarget, ...siteArg },
+      };
+  const clusters = {
+    tool: "list_seo_clusters",
+    reason: "Find a live same-locale hub that owns this topic.",
+    priority: "recommended" as const,
+    args_hint: { ...siteArg },
+  };
+  const research = {
+    tool: "get_or_refresh_seo_research",
+    reason: "Check the keyword's demand and who already ranks before choosing it.",
+    priority: "optional" as const,
+    args_hint: { action: "keyword_ideas", ...siteArg },
+  };
+  const warnings: Array<{ code: string; message: string }> = [];
+  let next: Array<Record<string, unknown>> = [setTarget, clusters, research];
+  switch (code) {
+    case "idea_seo_target_frozen":
+      warnings.push({
+        code,
+        message:
+          "The target locked at accept and cannot change on the idea. Implementing edits may differ only with seo_target_override.reason (min 40); reviewers see locked vs proposed.",
+      });
+      next = [];
+      break;
+    case "idea_seo_target_standalone_not_allowed":
+      warnings.push({
+        code,
+        message:
+          "Standalone (no hub) is only for fast_decay_news or broken_url ideas. Pick a live hub (join) or make this page a hub with named members.",
+      });
+      break;
+    case "idea_seo_target_keyword_taken":
+      warnings.push({
+        code,
+        message:
+          "Another live page or accepted-but-unpublished idea already targets this exact keyword. Choose a different phrase or refresh that page instead. Nothing was written.",
+      });
+      next = [
+        {
+          tool: "get_entry_seo",
+          reason: "Inspect the page that owns the keyword (details.owner_path) — maybe refresh it instead of a new URL.",
+          priority: "recommended",
+          args_hint: { ...siteArg },
+        },
+        setTarget,
+      ];
+      break;
+    case "idea_seo_target_hub_not_live":
+    case "idea_seo_target_hub_gone":
+      warnings.push({
+        code,
+        message:
+          code === "idea_seo_target_hub_gone"
+            ? "The idea's hub was deleted after accept. Nothing was published. Revise with seo.pillar_path pointing to a live hub plus seo_target_override.reason."
+            : "The hub must be live, in the same locale, and actually a hub (is_pillar). See details.",
+      });
+      next =
+        code === "idea_seo_target_hub_gone"
+          ? [
+              clusters,
+              {
+                tool: "update_proposal",
+                reason: "revise_entries with a new seo.pillar_path + seo_target_override.reason.",
+                priority: "required",
+                args_hint: { proposal_id: ctx.proposal_id, action: "revise_entries", ...siteArg },
+              },
+            ]
+          : [clusters, setTarget];
+      break;
+    case "idea_seo_target_hub_members_required":
+      next = [
+        {
+          tool: "list_seo_cluster_entries",
+          reason: "Pick live, monitored, same-locale pages that will join the new hub.",
+          priority: "recommended",
+          args_hint: { ...siteArg },
+        },
+        setTarget,
+      ];
+      break;
+    case "idea_seo_target_conflict":
+    case "seo_target_override_invalid":
+      warnings.push({
+        code,
+        message:
+          "seo.main_keyword / seo.pillar_path differ from the idea's locked target. Match the lock, or pass seo_target_override { reason } (min 40 chars). Standalone overrides still need a news / broken-URL idea.",
+      });
+      next = [
+        {
+          tool: ctx.tool,
+          reason: "Retry with ops matching the locked target, or add seo_target_override.reason.",
+          priority: "required",
+          args_hint: {
+            ...(ctx.proposal_id ? { proposal_id: ctx.proposal_id, action: "revise_entries" } : {}),
+            seo_target_override: { reason: "(why the lock no longer fits — min 40)" },
+            ...siteArg,
+          },
+        },
+      ];
+      break;
+    case "seo_optout_idea_born":
+      warnings.push({
+        code,
+        message:
+          "This page came from a traffic idea. Agents cannot set seo.pillar_path: null (leave clustering) unless the idea is fast_decay_news / broken_url and a reason (min 40) is given via seo_target_override.reason. Staff can still do it in the UI.",
+      });
+      next = [clusters];
+      break;
+    case "seo_index_unavailable":
+      warnings.push({
+        code,
+        message: "The SEO index could not be read, so keyword ownership is unknown. Fail-closed: retry later; nothing was written.",
+      });
+      next = [];
+      break;
+  }
+  return fail(String(data.error ?? code), {
+    code,
+    details,
+    warnings,
+    next_actions: next,
+  });
+}
+
+const APPLY_FOLLOW_UP_CODES = new Set(["idea_seo_hub_members_follow_up", "idea_page_released_waiting_ideas"]);
+
+/** Apply follow-ups carried in warnings: hub members (propose_change) and ideas waiting on a released page (list_proposals). */
+function followUpActionsFromWarnings(warnings: unknown): Array<{
+  tool: string;
+  reason: string;
+  priority: "required" | "recommended" | "optional";
+  args_hint: Record<string, unknown>;
+}> {
+  if (!Array.isArray(warnings)) return [];
+  const out: ReturnType<typeof followUpActionsFromWarnings> = [];
+  for (const w of warnings as Array<{ code?: string; details?: { next_actions?: unknown } }>) {
+    if (!w?.code || !APPLY_FOLLOW_UP_CODES.has(w.code) || !Array.isArray(w.details?.next_actions)) continue;
+    for (const a of w.details.next_actions as Array<Record<string, unknown>>) {
+      out.push({
+        tool: String(a.tool ?? "propose_change"),
+        reason: String(a.reason ?? ""),
+        priority: "recommended",
+        args_hint: (a.args_hint as Record<string, unknown>) ?? {},
+      });
+    }
+  }
+  return out;
+}
+
 /** Shared error mapping for v1.0 draft-first codes (create + update). */
 function draftFirstFailure(
   data: Record<string, unknown>,
@@ -375,6 +594,8 @@ export const PROPOSAL_AUTHOR_ACTIONS = [
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "set_related_entries",
+  "set_idea_seo_target",
   "revert",
 ] as const;
 
@@ -395,6 +616,8 @@ export const PROPOSAL_ALL_UPDATE_ACTIONS = [
   "revise_entries",
   "set_review_situations",
   "set_idea_funnel",
+  "set_related_entries",
+  "set_idea_seo_target",
   "revert",
 ] as const;
 
@@ -493,12 +716,13 @@ export function registerProposalTools(
       "Pass kind:\"idea\" for a pre-work brief (new page, update, or config pitch) — no YAML until a later edits proposal. " +
       "Omit kind with no entries → notes (wall handoff; default no_auto_retry). " +
       "Do not use notes for new-spoke pitches — use kind idea. " +
-      "Optional related_entries for idea context (slug need not exist yet). " +
+      "Ideas: name the target page type in related_entries [{contentType, slug, locale}] — contentType is a content-types.yml key (not a folder name, not tags like surface:*); slug need not exist yet. Read get_content_type_info(contentType).strategy (purpose + constraints) before writing the brief. Unknown types refuse (unknown_content_type); fix later with update_proposal set_related_entries. " +
       "Edits: optional implements_proposal_id to link an accepted idea; required when that idea reserved the same type+slug+locale. " +
       "Edits: optional review_situations[] (catalog ids — explain_site topic proposals subtopic situations). Empty → reviewer infers from ops. " +
       "Ideas: optional one demand label — anticipated_demand (launch → lasting queries; empty volume OK), existing_demand (current search rank/cite; author documents SERP maturity/weight class/asset in brief), fast_decay_news (announcement only → expect reject), broken_url (missing address; call get_runtime_issues first and paste path/count/sources/referrer/queryAttribution; only roles with that tool). " +
       "idea_opportunity_harm is always on for ideas — do not file it. Omit review_situations on ideas that are not those three. " +
       "New-URL ideas: optional idea_funnel { stage, products } (products \"all\" only with stage awareness). Soft warning idea_funnel_missing when omitted; accept refuses until set (set_idea_funnel). " +
+      "New-URL ideas on SEO-monitored types: idea_seo_target { main_keyword, cluster: join|hub|standalone } — soft warning idea_seo_target_missing; accept refuses until set (set_idea_seo_target); locks at accept and seeds the new draft's seo block. Implementing edits whose seo ops differ from the lock need seo_target_override.reason. " +
       "Hub/internal links → prefer review_situations:[\"internal_links\"] (subtopic internal-links). " +
       "SERP title/description → prefer review_situations:[\"serp_title_description\"] (subtopic serp-title-description). " +
       "Funnel stage/products → prefer review_situations:[\"funnel_classification\"] (subtopic funnel-classification; persona → product → stage). " +
@@ -533,7 +757,9 @@ export function registerProposalTools(
           }),
         )
         .optional()
-        .describe("Optional context targets for ideas (may not exist yet)."),
+        .describe(
+          "Ideas: target page type + slug (slug may not exist yet). contentType must be a content-types.yml key; unknown types refuse (unknown_content_type). Soft warning idea_content_type_missing when omitted.",
+        ),
       tags: z.array(z.string()).optional(),
       confirm_distinct: z.boolean().optional(),
       confirm_recent_activity: z
@@ -609,6 +835,12 @@ export function registerProposalTools(
         .describe(
           'Ideas (new-URL): structured funnel. products "all" only when stage is awareness. Soft warning if missing; accept refuses until set.',
         ),
+      idea_seo_target: IDEA_SEO_TARGET_SCHEMA.optional().describe(
+        "Ideas (new-URL, SEO-monitored type): keyword + cluster the new page targets. join = live same-locale hub; hub = this page becomes a hub (named live members); standalone = fast_decay_news / broken_url only, reason min 40. Soft warning if missing; accept refuses until set. Locks at accept and is seeded into the new page's draft seo block.",
+      ),
+      seo_target_override: SEO_TARGET_OVERRIDE_SCHEMA.optional().describe(
+        "Edits implementing an idea: required when seo.main_keyword / seo.pillar_path differ from the idea's locked target (reason min 40). Also the reason channel when an agent sets seo.pillar_path: null on an idea-born page (news / broken-URL ideas only).",
+      ),
       entries: z.array(ENTRY_INPUT_SCHEMA).optional(),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
@@ -642,10 +874,14 @@ export function registerProposalTools(
             supersedes_proposal_id: args.supersedes_proposal_id,
             implements_proposal_id: args.implements_proposal_id,
             idea_funnel: args.idea_funnel,
+            idea_seo_target: args.idea_seo_target,
+            seo_target_override: args.seo_target_override,
           }),
         });
         const data = (await res.json()) as Record<string, unknown>;
         if (!res.ok) {
+          const seoTarget = ideaSeoTargetFailure(data, { tool: "propose_change", site: args.site });
+          if (seoTarget) return seoTarget;
           if (data.code === "similar_proposals") {
             return actionRequired(
               {
@@ -939,6 +1175,37 @@ export function registerProposalTools(
               ],
             });
           }
+          if (data.code === "unknown_content_type") {
+            const details = (data.details ?? {}) as { unknown?: string[]; valid_types?: string[] };
+            return fail(String(data.error ?? "unknown content type"), {
+              code: "unknown_content_type",
+              details,
+              warnings: [
+                {
+                  code: "nothing_saved",
+                  message:
+                    "No idea was created. related_entries[].contentType must be a content type key from content-types.yml (e.g. landing), not a folder name (e.g. landings) or a tag.",
+                },
+              ],
+              next_actions: [
+                {
+                  tool: "get_content_type_info",
+                  reason:
+                    "Pick the target content type from details.valid_types and read its strategy (purpose + constraints) before rewriting the brief.",
+                  priority: "recommended",
+                  args_hint: {
+                    contentType: details.valid_types?.[0],
+                    ...(args.site ? { site: args.site } : {}),
+                  },
+                },
+                {
+                  tool: "propose_change",
+                  reason: "Retry with related_entries[].contentType set to a valid type key.",
+                  priority: "required",
+                },
+              ],
+            });
+          }
           if (data.code === "competing_entry_edits") {
             const existing = data.existing_proposal as { id?: string } | undefined;
             return fail(String(data.error ?? "competing edits"), {
@@ -1114,7 +1381,9 @@ export function registerProposalTools(
       "needs_review:true → open|partial edits whose attention is awaiting_rereview or no_feedback (author rewrite or cleared blockers, nothing still waiting on the author). Excludes blocked and escalated. Forces that queue even if status/kind differ. " +
       "Scoped lists default to sort=attention (role-aware: reviewers see rereview before blocked; create-only see blocked first) and open+partial when status is omitted (unless stalled). " +
       "Pass sort created_at|updated_at for chronology. Filter attention: escalated|awaiting_rereview|no_feedback|blocked|needs_author. " +
-      "needs_author = 1.0 draft went stale (live or translation source moved, conflict, or draft missing) — out of the reviewer queue until the author revises; stale_flagged_at set after 30 idle days, closes as abandoned_stale after 90. " +
+      "needs_author = 1.0 draft went stale (live or translation source moved, conflict, or draft missing) — out of the reviewer queue until the author revises; stale_flagged_at set after 10 idle days, closes as abandoned_stale after 30. " +
+      "blocked = open blockers. Daily sweep (any kind, open|partial, not escalated): 10 days with no real work → blocked_flagged_at (event proposal_blocked_flagged); 30 → withdrawn close_reason abandoned_blocked (no prior flag required; partial: published entries stay live; drafts the proposal created deleted, pre-existing unlinked). " +
+      "Clock = newest open blocker / revise_entries / author-marked fix / reviewer action — claim and release do NOT reset it. Zero open blockers (awaiting_rereview) never auto-closes. " +
       "awaiting_rereview = blockers fixed, or the author rewrote entries / marked a blocker fixed, and no open blockers remain. " +
       "Pass proposal_id for full detail (ops, baselines, blockers) plus live review_context and discovery_path when open|partial " +
       "(optional research menu from agent_preview think items — not next_actions; skip does not block apply). " +
@@ -1124,11 +1393,17 @@ export function registerProposalTools(
       "Partial counts as created; withdrawn omitted. Live pile stays proposal_stats.by_kind_status. " +
       "When escalated is true on a proposal, MCP must not call update_proposal until a steward releases the hold. " +
       "outcome_review* / outcome_lesson* fields = human-only steward retro on closed proposals (good|bad, what went wrong, what should have happened, lesson captured). " +
-      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured). " +
+      "Informational for retros — agents cannot set them and they do not gate any action. Filter outcome_review: good|bad|none|bad_open (bad_open = bad with no lesson captured; none = closed, unreviewed, excluding system closures abandoned_stale|abandoned_blocked|legacy_version). " +
+      "proposal_stats.by_outcome = whole-site all-time { good, bad, bad_open, none } with the same meanings. " +
       "Requires content_view, proposals_create, or proposals_review.",
     {
       proposal_id: z.string().optional(),
-      query: z.string().optional(),
+      query: z
+        .string()
+        .optional()
+        .describe(
+          "Whitespace-separated terms (max 8), ALL must match; each term is a case-insensitive substring of title/summary/rationale/tags/issue ids/entry paths, proposal id (full or prefix), or proposer_username",
+        ),
       status: z.enum(["open", "partial", "finished", "rejected", "withdrawn"]).optional(),
       kind: z.enum(["edits", "notes", "idea"]).optional(),
       issue_id: z.string().optional(),
@@ -1183,7 +1458,7 @@ export function registerProposalTools(
         .optional()
         .describe(
           "Steward outcome review on closed proposals (finished|rejected|withdrawn). good | bad; bad_open = bad with no lesson captured yet; " +
-            "none = closed and not reviewed. Omit status (or use a closed status) — open/partial never match.",
+            "none = closed and not reviewed, excluding system closures (close_reason abandoned_stale | abandoned_blocked | legacy_version). Omit status (or use a closed status) — open/partial never match.",
         ),
       attention: z
         .enum(["escalated", "awaiting_rereview", "no_feedback", "blocked", "needs_author"])
@@ -1212,7 +1487,7 @@ export function registerProposalTools(
         .string()
         .optional()
         .describe(
-          "Scoped only: attention (default when omitted) | created_at | updated_at. Invalid values fail.",
+          "Scoped only: attention (default when omitted) | created_at | updated_at | outcome_recent (verdict time, else close time, else updated — pairs with outcome_review). Invalid values fail.",
         ),
       sort_dir: z
         .string()
@@ -1502,6 +1777,7 @@ export function registerProposalTools(
             summary?: string;
             escalated?: boolean;
             escalated_note?: string | null;
+            idea_seo_target?: { main_keyword: string; cluster: { mode: string; pillar_path?: string } } | null;
             entries?: Array<{
               contentType: string;
               slug: string;
@@ -1545,6 +1821,7 @@ export function registerProposalTools(
                 escalated_note: match.escalated_note,
                 entries: match.entries,
                 related_entries: match.related_entries,
+                idea_seo_target: match.idea_seo_target ?? null,
                 open_blocker_count: match.open_blocker_count,
                 blockers: match.blockers,
               },
@@ -1591,13 +1868,16 @@ export function registerProposalTools(
     "update_proposal",
     "Lifecycle for a proposal. Requires proposals_create and/or proposals_review — actions depend on caps. " +
       "proposals_review (Reviewer): claim | release | apply | reject | accept | close | acknowledge | blockers. Approve can change live/draft. " +
-      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations | set_idea_funnel | revert — cannot apply/reject/accept. " +
+      "proposals_create only (authors): claim | release | withdraw | attach_variant | set_no_auto_retry | revise_entries | set_review_situations | set_idea_funnel | set_related_entries | set_idea_seo_target | revert — cannot apply/reject/accept. " +
+      "set_related_entries (open ideas, proposer): replace related_entries (target page type + slug); unknown content types refuse (unknown_content_type); refused after accept. " +
       "1.0 edits: apply promotes the proposal's draft(s); dry_run returns merge_preview without writing. Stale drafts rebuild on today's live when fields do not overlap; otherwise context_stale (needs_author). " +
       "revert (finished/partial 1.0 edits): files a new proposal that puts back pre-apply values; live unchanged until that one is approved; revert_conflicts when fields changed again. " +
       "Legacy (pre-1.0) proposals return legacy_version for anything but withdraw/reject/release — re-file. " +
       "Both (Publisher): full set. " +
       "Reject is rare (bad/impossible/illegal/harmful/duplicate/target missing): confirm_reject + reject_kind + close_note (min 80). Prefer add_blocker for polish; then revise_entries (proposer; idle or self-claim). " +
-      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page); new-URL ideas need idea_funnel first (no YAML). " +
+      "attach_variant: same creating session only. accept (ideas): four-eyes by human+role; blockers block; next_step min 20; accepted_entry {contentType,slug,locale} required (locks the page until an implementing edit is applied with none open; accepted_entry_taken → leave the idea open, accept later); new-URL ideas need idea_funnel first (no YAML); SEO-monitored new pages also need idea_seo_target (hub live + same locale; keyword not held by a live page or another accepted idea). " +
+      "apply of a hub-mode idea's first go-live returns warning idea_seo_hub_members_follow_up + one propose_change next_action per member. " +
+      "apply that frees an idea's page returns idea_page_released_waiting_ideas + one list_proposals next_action per open idea waiting on it (nothing auto-accepted). " +
       "close notes/ideas: close_reason + close_note. Withdraw: close_note min 20. Open blockers block apply/accept only (revise does not clear them). Four-eyes = username+role. " +
       "Multi-situation: review each pack independently; drop failing ops via revise_entries then apply (atomic). " +
       "Before apply, list_proposals(proposal_id) for live review_context.",
@@ -1620,6 +1900,8 @@ export function registerProposalTools(
         "revise_entries",
         "set_review_situations",
         "set_idea_funnel",
+        "set_related_entries",
+        "set_idea_seo_target",
         "revert",
       ]),
       report: z.string().optional(),
@@ -1751,6 +2033,24 @@ export function registerProposalTools(
         .describe(
           'For set_idea_funnel (open ideas, proposer/staff): stage + products. "all" only with awareness. Frozen after accept.',
         ),
+      related_entries: z
+        .array(
+          z.object({
+            contentType: z.string(),
+            slug: z.string(),
+            locale: z.string().optional(),
+          }),
+        )
+        .optional()
+        .describe(
+          "For set_related_entries (open ideas, proposer): full replacement. contentType must be a content-types.yml key (not a folder name); slug may not exist yet. Empty array clears.",
+        ),
+      idea_seo_target: IDEA_SEO_TARGET_SCHEMA.optional().describe(
+        "For set_idea_seo_target (open ideas, proposer/staff): main_keyword + cluster (join live same-locale hub | hub with named live members | standalone for fast_decay_news / broken_url, reason min 40). Frozen after accept.",
+      ),
+      seo_target_override: SEO_TARGET_OVERRIDE_SCHEMA.optional().describe(
+        "For revise_entries on edits implementing an idea: reason (min 40) when seo.main_keyword / seo.pillar_path differ from the locked target, or when setting seo.pillar_path: null on an idea-born page (news / broken-URL only).",
+      ),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
     async (args) => {
@@ -1764,7 +2064,7 @@ export function registerProposalTools(
           `Action '${args.action}' is not allowed for your proposal caps ` +
             `(create=${hasCreate}, review=${hasReview}). ` +
             (hasReview && !hasCreate
-              ? "Reviewer cannot withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, or set_idea_funnel."
+              ? "Reviewer cannot withdraw, attach_variant, set_no_auto_retry, revise_entries, set_review_situations, set_idea_funnel, set_related_entries, or set_idea_seo_target."
               : hasCreate && !hasReview
                 ? "Authors cannot apply, reject, accept, close, or manage blockers — use Proposal Reviewer or Publisher."
                 : "Need proposals_create and/or proposals_review."),
@@ -1803,10 +2103,40 @@ export function registerProposalTools(
             entries: args.entries,
             review_situations: args.review_situations,
             idea_funnel: args.idea_funnel,
+            related_entries: args.related_entries,
+            idea_seo_target: args.idea_seo_target,
+            seo_target_override: args.seo_target_override,
           }),
         });
         const data = (await res.json()) as Record<string, unknown>;
         if (!res.ok) {
+          const seoTarget = ideaSeoTargetFailure(data, {
+            tool: "update_proposal",
+            proposal_id: args.proposal_id,
+            site: args.site,
+          });
+          if (seoTarget) return seoTarget;
+          if (data.code === "unknown_content_type") {
+            const details = (data.details ?? {}) as { unknown?: string[]; valid_types?: string[] };
+            return fail(String(data.error ?? "unknown content type"), {
+              code: "unknown_content_type",
+              details,
+              warnings: [
+                {
+                  code: "nothing_saved",
+                  message: "related_entries unchanged. Use content type keys from details.valid_types (not folder names or tags).",
+                },
+              ],
+              next_actions: [
+                {
+                  tool: "update_proposal",
+                  reason: "Retry set_related_entries with valid content type keys.",
+                  priority: "required",
+                  args_hint: { proposal_id: args.proposal_id, action: "set_related_entries" },
+                },
+              ],
+            });
+          }
           const draftFirst = draftFirstFailure(data, {
             tool: "update_proposal",
             proposal_id: args.proposal_id,
@@ -2005,16 +2335,37 @@ export function registerProposalTools(
               ],
             });
           }
-          if (data.code === "accepted_entry_required" || data.code === "accepted_entry_taken") {
+          if (data.code === "accepted_entry_taken") {
+            const d = (data.details ?? {}) as { holder_id?: string; open_edit_id?: string | null; releases_when?: string };
+            const watchId = d.open_edit_id || d.holder_id;
+            return fail(String(data.error ?? data.code), {
+              code: "accepted_entry_taken",
+              details: d,
+              warnings: [
+                "Leave this idea open; do not close it as tracked_elsewhere. The page frees up once the holder's implementing edit is applied (with none still open); accept again then.",
+                "Applying the holder's edit returns idea_page_released_waiting_ideas listing this idea when its related_entries name the page.",
+              ],
+              next_actions: watchId
+                ? [
+                    {
+                      tool: "list_proposals",
+                      reason: d.open_edit_id
+                        ? "Track the open edit that holds the page; accept this idea after it is applied."
+                        : "The holder idea has no applied edit yet (stalled); its follow-up edit must ship before this idea can be accepted.",
+                      priority: "recommended",
+                      args_hint: { proposal_id: watchId },
+                    },
+                  ]
+                : [],
+            });
+          }
+          if (data.code === "accepted_entry_required") {
             return fail(String(data.error ?? data.code), {
               code: String(data.code),
               next_actions: [
                 {
                   tool: "update_proposal",
-                  reason:
-                    data.code === "accepted_entry_taken"
-                      ? "Pick a different contentType/slug/locale — another accepted idea already locked that page."
-                      : "Retry accept with accepted_entry { contentType, slug, locale } plus next_step.",
+                  reason: "Retry accept with accepted_entry { contentType, slug, locale } plus next_step.",
                   priority: "required",
                   args_hint: {
                     proposal_id: args.proposal_id,
@@ -2230,6 +2581,8 @@ export function registerProposalTools(
           priority: "required" | "recommended" | "optional";
           args_hint: Record<string, unknown>;
         }> = [];
+
+        if (args.action === "apply") next.push(...followUpActionsFromWarnings(data.warnings));
 
         if (args.action === "reject") {
           next.push({

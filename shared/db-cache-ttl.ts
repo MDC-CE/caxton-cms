@@ -7,7 +7,27 @@ export type DbCacheTtlConfig = {
   ttl_minutes?: number;
   /** @deprecated Prefer ttl_minutes; still read for back-compat. */
   ttl_hours?: number;
+  /** A stale copy is a warning until it is this many days old, then an error (default 7). */
+  stale_error_after_days?: number;
+  /** After a failed refresh, wait this long before retrying on page loads (default 5). */
+  refresh_retry_minutes?: number;
 };
+
+export const DEFAULT_STALE_ERROR_AFTER_DAYS = 7;
+export const DEFAULT_REFRESH_RETRY_MINUTES = 5;
+
+function positiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  return value != null && Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function resolveStaleErrorAfterDays(cache?: DbCacheTtlConfig | null): number {
+  return positiveNumber(cache?.stale_error_after_days) ?? DEFAULT_STALE_ERROR_AFTER_DAYS;
+}
+
+export function resolveRefreshRetryMinutes(cache?: DbCacheTtlConfig | null): number {
+  return positiveNumber(cache?.refresh_retry_minutes) ?? DEFAULT_REFRESH_RETRY_MINUTES;
+}
 
 export function resolveCacheTtlMinutes(cache?: DbCacheTtlConfig | null): number {
   if (cache?.ttl_minutes != null && Number.isFinite(Number(cache.ttl_minutes))) {

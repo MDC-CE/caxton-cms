@@ -16,6 +16,8 @@ import {
   type RegistryOrigin,
 } from "../shared/registry-resolve";
 import { resolveComponentBehaviors } from "@shared/component-behaviors";
+import type { TextLimitsByVariant } from "@shared/component-text-limits";
+import type { ComponentLayoutBlock, VariantMetadata } from "@shared/component-layout-traits";
 import { getPackageRoot, getProjectRoot } from "@shared/paths";
 import { child } from "./logger";
 const log = child({ module: "component-registry" });
@@ -106,7 +108,15 @@ export interface ComponentSchema {
     conversion?: { via: string; notes?: string };
   };
   props: Record<string, unknown>;
-  variants?: Record<string, { description?: string; best_for?: string }>;
+  /** How the section sits in page flow (see shared/component-layout-traits.ts). */
+  layout?: ComponentLayoutBlock;
+  variants?: Record<string, VariantMetadata>;
+  variant_props?: Record<string, Record<string, unknown>>;
+  /**
+   * Visible-character limits per section variant (`"*"` = every variant).
+   * Evaluated by shared/component-text-limits.ts on draft save (warn), live edit and publish.
+   */
+  text_limits?: TextLimitsByVariant;
 }
 
 export interface ComponentExample {
@@ -213,6 +223,14 @@ export function listVersions(componentType: string, contentFolder?: string): str
   }
 }
 
+/** Absolute schema.yml path for a component version (shared or site registry), or null. */
+export function schemaYmlPath(componentType: string, version: string, contentFolder?: string): string | null {
+  const componentPath = componentTypeDir(componentType, contentFolder);
+  if (!componentPath) return null;
+  const p = path.join(componentPath, version, "schema.yml");
+  return fs.existsSync(p) ? p : null;
+}
+
 export function loadSchema(componentType: string, version: string, contentFolder?: string): ComponentSchema | null {
   try {
     const componentPath = componentTypeDir(componentType, contentFolder);
@@ -247,6 +265,16 @@ function resolveSchemaFolderForSection(componentType: string, sectionVersion: un
   }
   const versions = listVersions(componentType, contentFolder);
   return versions.length > 0 ? versions[0]! : null;
+}
+
+/** Schema for a section's type at its declared version (falls back to the newest version). */
+export function loadSchemaForSection(
+  componentType: string,
+  sectionVersion: unknown,
+  contentFolder?: string,
+): ComponentSchema | null {
+  const folder = resolveSchemaFolderForSection(componentType, sectionVersion, contentFolder);
+  return folder ? loadSchema(componentType, folder, contentFolder) : null;
 }
 
 function getNestedFromRoot(root: unknown, dottedPath: string): unknown {

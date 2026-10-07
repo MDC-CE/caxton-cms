@@ -53,11 +53,13 @@ interface SchemaYml {
   when_to_use?: string;
   schema_org?: { handler?: string; description?: string };
   behaviors?: Record<string, unknown>;
-  variants?: Record<string, { description?: string; best_for?: string }>;
+  layout?: Record<string, unknown>;
+  variants?: Record<string, { description?: string; best_for?: string; avoid_when?: string; content_shape?: Record<string, unknown> }>;
   props?: Record<string, PropDef>;
   variant_props?: Record<string, Record<string, PropDef>>;
   image_sizes?: Record<string, string>;
   section_defaults?: unknown;
+  text_limits?: unknown;
 }
 
 export interface DriftIssue {
@@ -430,10 +432,12 @@ async function processComponent(
       when_to_use: existing?.when_to_use || "",
       ...(existing?.schema_org ? { schema_org: existing.schema_org } : {}),
       ...(existing?.behaviors ? { behaviors: existing.behaviors } : {}),
+      ...(existing?.layout ? { layout: existing.layout } : {}),
       ...(existing?.image_sizes ? { image_sizes: existing.image_sizes } : {}),
       ...(existing?.section_defaults !== undefined
         ? { section_defaults: existing.section_defaults }
         : {}),
+      ...(existing?.text_limits !== undefined ? { text_limits: existing.text_limits } : {}),
     };
 
     if (Object.keys(variantSchemas).length > 0) {

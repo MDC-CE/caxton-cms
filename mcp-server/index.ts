@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
+import v8 from "v8";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -10,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { registerPageTools } from "./tools/pages.js";
 import { registerSeoClusterTools } from "./tools/seo-clusters.js";
 import { registerComponentTools } from "./tools/components.js";
+import { registerDesignTools } from "./tools/design.js";
 import { registerUserTools } from "./tools/user.js";
 import { registerExplainTools } from "./tools/explain.js";
 import { registerProductTools } from "./tools/product.js";
@@ -20,7 +22,10 @@ import { registerProposalTools } from "./tools/proposals.js";
 import { registerValidationIssuesTools } from "./tools/validation-issues.js";
 import { registerOrganicTrafficTools } from "./tools/organic-traffic.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
+import { registerPaidTrafficTools } from "./tools/paid-traffic.js";
+import { registerAdsIssueTools } from "./tools/ads-issues.js";
 import { registerRuntimeIssuesTools } from "./tools/runtime-issues.js";
+import { registerVariableTools } from "./tools/variables.js";
 import {
   registerClient,
   lookupClient,
@@ -35,12 +40,14 @@ import {
   updateClientStaffUser,
   registerStaffSessionToken,
   getCachedBreathecodeUsername,
+  revokeMcpAccessForUser,
   initGcsStore,
   flushGcsWrites,
   getGcsAuthPersistenceHealth,
   TOKEN_EXPIRES_IN,
 } from "./lib/oauth.js";
 import { warnMcpBucketParity } from "./lib/bucket-parity.js";
+import { isInternalRequestAuthorized } from "./lib/internal-auth.js";
 import {
   fetchCallerGrants,
   fetchMcpAccess,
@@ -69,7 +76,8 @@ const PORT = parseInt(process.env.MCP_PORT || "3001", 10);
 // MCP_SERVER_SECRET (formerly MCP_API_KEY) is used exclusively as an internal
 // server-to-server credential for the MCP server's own loopback requests to the
 // main app's /api/auth/check-capability endpoint. It is never accepted as an
-// inbound caller credential — callers must use OAuth or a Breathecode token.
+// inbound caller credential for MCP tools — callers must use OAuth or a Breathecode
+// token. The only inbound use is loopback-only `/internal/*` (not proxied publicly).
 const SERVER_SECRET = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
 const STATIC_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "";
 const STATIC_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
@@ -405,6 +413,7 @@ async function createMcpServer(
   registerPageTools(mcp, mcpAuthor, mcpToken, grants);
   registerSeoClusterTools(mcp, mcpToken, grants);
   registerComponentTools(mcp, mcpToken, grants);
+  registerDesignTools(mcp, mcpToken, grants);
   registerUserTools(mcp, mcpToken, grants, {
     activeRoleId: opts?.activeRoleId,
     roleDescription: opts?.roleDescription,
@@ -412,6 +421,7 @@ async function createMcpServer(
   });
   registerExplainTools(mcp, mcpToken, grants);
   registerProductTools(mcp, mcpToken, grants);
+  registerVariableTools(mcp, mcpToken, grants);
   registerDatabaseTools(mcp, mcpToken);
   registerRedirectTools(mcp, mcpToken);
   registerMediaTools(mcp, mcpToken, grants);
@@ -419,6 +429,8 @@ async function createMcpServer(
   registerValidationIssuesTools(mcp, mcpToken, grants);
   registerOrganicTrafficTools(mcp, mcpToken, grants);
   registerAnalyticsTools(mcp, mcpToken, grants);
+  registerPaidTrafficTools(mcp, mcpToken, grants);
+  registerAdsIssueTools(mcp, mcpToken, grants);
   registerRuntimeIssuesTools(mcp, mcpToken, grants);
   return mcp;
 }
@@ -566,6 +578,28 @@ app.get("/tools", async (_req, res) => {
     console.error("[MCP] /tools introspection error:", err);
     res.status(500).json({ tools: [], error: "Failed to list tools" });
   }
+});
+
+// ─── Internal (main app → MCP, loopback only) ─────────────────────────────────
+
+app.post("/internal/revoke-user", (req, res) => {
+  const authorized = isInternalRequestAuthorized({
+    remoteAddress: req.socket.remoteAddress,
+    authorization: req.headers.authorization,
+    serverSecret: SERVER_SECRET,
+  });
+  if (!authorized) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+  if (!username) {
+    res.status(400).json({ error: "username is required" });
+    return;
+  }
+  const result = revokeMcpAccessForUser(username);
+  console.log(`[MCP] Revoked agent access for ${username}:`, result);
+  res.json({ ok: true, ...result });
 });
 
 // ─── OAuth 2.0 endpoints ──────────────────────────────────────────────────────
@@ -1248,8 +1282,37 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[MCP] ${signal} received — flushing GCS auth writes…`);
+  try {
+    const { flushTick } = await import("../server/process-stats");
+    flushTick();
+  } catch (err) {
+    console.error("[MCP] process stats flush failed", err);
+  }
   await flushGcsWrites();
   process.exit(0);
+}
+
+/** Soft heap guard — clean exit so pm2 can relaunch before a hard OOM. */
+const HEAP_WATCHDOG_INTERVAL_MS = 30_000;
+const HEAP_WATCHDOG_RATIO = 0.85;
+
+function startHeapWatchdog(): void {
+  const timer = setInterval(() => {
+    try {
+      const { heap_size_limit } = v8.getHeapStatistics();
+      const { heapUsed } = process.memoryUsage();
+      if (heap_size_limit > 0 && heapUsed / heap_size_limit > HEAP_WATCHDOG_RATIO) {
+        console.warn(
+          `[MCP] heap watchdog: heapUsed=${Math.round(heapUsed / 1024 / 1024)}MB ` +
+            `limit=${Math.round(heap_size_limit / 1024 / 1024)}MB (>${HEAP_WATCHDOG_RATIO * 100}%) — shutting down`,
+        );
+        void shutdown("MEMORY");
+      }
+    } catch (err) {
+      console.error("[MCP] heap watchdog error:", err);
+    }
+  }, HEAP_WATCHDOG_INTERVAL_MS);
+  timer.unref();
 }
 
 process.on("SIGTERM", () => {
@@ -1266,6 +1329,11 @@ async function startServer(): Promise<void> {
     console.error("[MCP] GCS store init failed —", (err as Error).message);
   }
   warnMcpBucketParity();
+
+  startHeapWatchdog();
+  const { randomUUID } = await import("node:crypto");
+  const { startTick } = await import("../server/process-stats");
+  startTick({ processName: "mcp", processStartId: randomUUID() });
 
   app.listen(PORT, "127.0.0.1", () => {
     console.log(`[MCP] Content-pages MCP server running on port ${PORT}`);

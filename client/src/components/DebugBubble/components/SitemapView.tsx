@@ -500,7 +500,7 @@ export function SitemapView({
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      window.location.href = "/private/settings?tab=robots";
+                      window.location.href = "/private/settings/robots";
                     }}
                   >
                     Site disallowed

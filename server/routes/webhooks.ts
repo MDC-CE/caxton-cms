@@ -8,6 +8,7 @@ import { clearMarkdownCache } from "../markdown";
 import { invalidateContentCaches } from "./_helpers";
 import { getTrackingSettings } from "../settings";
 import { buildLeadPayload } from "../utils/buildLeadPayload";
+import { recordLeadSubmission } from "../ads/lead-ledger";
 import { z } from "zod";
 import { child } from "../logger";
 const log = child({ module: "routes/webhooks" });
@@ -196,7 +197,8 @@ export function registerWebhooksRoutes(app: Express): void {
       return;
     }
 
-    const payload = buildLeadPayload(incoming as Record<string, unknown>);
+    const enriched = await recordLeadSubmission(req, res, incoming as Record<string, unknown>);
+    const payload = buildLeadPayload(enriched);
 
     const override = body.webhook as {
       url?: string;

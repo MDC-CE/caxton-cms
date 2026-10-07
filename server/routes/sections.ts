@@ -11,6 +11,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
 import { decodeHtmlValues } from "@shared/htmlEncoding";
+import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { execSync as _execSync, execFile } from "child_process";
 import {
   versioningUpdateSchema,
@@ -77,7 +78,9 @@ import {
   createContentEntry,
   deleteContentEntry,
   renameContentSlug,
+  checkSlugRename,
 } from "../content-editor";
+import { api } from "../rate-limit/api";
 import { findNewDeprecatedVarRefs, getDeprecatedFieldsForType } from "../deprecated-field-guard";
 import { flushAfterContentWrites, collectEntryHtmlPaths, fileMentionsRedirects } from "../content-write-flush";
 import {
@@ -114,6 +117,19 @@ import { contentIndex, type ContentType } from "../content-index";
 import { runScan as runComponentInsightsScan, readInsightsFile, suggestNext as suggestNextComponent } from "../component-insights";
 import { validateFieldSource, validateFieldMapping, extractByDotPath } from "../../scripts/validation/shared/fieldMappingValidator";
 import { validateSectionOperations } from "../section-save-validation";
+import { evaluateEditTextLimits } from "../text-limits-edit";
+import {
+  evaluateEditThemeColors,
+  summarizeThemeViolations,
+  themeViolationDetails,
+  THEME_COLORS_CODE,
+  type ThemeViolation,
+} from "../design/theme-gate";
+import {
+  TEXT_LIMITS_EXCEEDED_CODE,
+  summarizeTextLimitViolations,
+  type TextLimitViolation,
+} from "@shared/component-text-limits";
 import {
   getFolder,
   getType,
@@ -181,8 +197,9 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadMergedSinglePage, mergeSingleTemplate } from "../database-single-loader";
-import { rejectAttachedStructuralEdit } from "../shared-layout-entry";
+import { mergeSingleTemplate, pruneStaleSectionAliases } from "../database-single-loader";
+import { loadMergedSinglePage } from "../entry-delivery";
+import { rejectAttachedStructuralEdit, isTemplateVersioningSlug } from "../shared-layout-entry";
 import {
   resolveTemplateLocalePath,
   isTypeLayoutTarget,
@@ -235,6 +252,11 @@ import {
   resolveEventActor,
 } from "./_helpers";
 import { child } from "../logger";
+import {
+  agentOptOutAllowed,
+  findOriginIdeaForEntry,
+  isSeoClusterOptOutOp,
+} from "../content-proposals/idea-origin";
 const log = child({ module: "routes/sections" });
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
@@ -293,7 +315,7 @@ export function registerSectionsRoutes(app: Express): void {
       const entryFilePath = path.join(entryDir, `${locale}.yml`);
 
       // Load the current merged page to get the section (DB or static single_template)
-      const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       if (!mergedPage) {
         res.status(404).json({ error: "Entry not found" });
         return;
@@ -626,7 +648,7 @@ export function registerSectionsRoutes(app: Express): void {
           // Insert before all sections
           newSection._insertAfterSectionId = null;
         } else {
-          const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+          const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
           const mergedSections = Array.isArray(mergedPage?.sections)
             ? (mergedPage!.sections as Record<string, unknown>[])
             : [];
@@ -682,7 +704,7 @@ export function registerSectionsRoutes(app: Express): void {
       }
 
       // Return updated merged section list so the client can update without a full page reload
-      const updatedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const updatedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       res.json({
         success: true,
         sections: updatedPage?.sections ?? [],
@@ -818,7 +840,7 @@ export function registerSectionsRoutes(app: Express): void {
 
         // Fan out delete to sibling locale singles + clean entry overlays
         const typeConfig = getContentTypeConfig(contentType, getContentRoot(res));
-        const isSharedLayout = !!(typeConfig?.database?.slug || typeConfig?.single_template);
+        const isSharedLayout = typeUsesSharedTemplate(typeConfig);
         if (isSharedLayout) {
           const {
             fanOutStructuralOpsToSiblings,
@@ -908,7 +930,7 @@ export function registerSectionsRoutes(app: Express): void {
       const entryFilePath = path.join(entryDir, `${locale}.yml`);
 
       // Load the current merged page to get the section and its id (DB or static single_template)
-      const mergedPage = await loadMergedSinglePage(contentType, slug, locale, getContentRoot(res), getDB(res));
+      const mergedPage = await loadMergedSinglePage(getCI(res), contentType, slug, locale);
       if (!mergedPage) {
         res.status(404).json({ error: "Entry not found" });
         return;
@@ -1150,6 +1172,20 @@ export function registerSectionsRoutes(app: Express): void {
 
       const isMcpRequest = typeof req.headers["x-mcp-author"] === "string";
 
+      if (isMcpRequest && fieldUpdatesFromOps?.some(isSeoClusterOptOutOp)) {
+        const origin = findOriginIdeaForEntry(getContentRootName(res), contentType, slug);
+        if (origin) {
+          const allowed = agentOptOutAllowed(
+            origin,
+            typeof req.body?.seo_optout_reason === "string" ? req.body.seo_optout_reason : null,
+          );
+          if (!allowed.ok) {
+            res.status(422).json({ error: allowed.error, code: allowed.code, details: allowed.details });
+            return;
+          }
+        }
+      }
+
       // The save-time hard stop: a section that fails its component's own
       // server-side validation never reaches a page. The rejection carries
       // the violations so the caller — usually an MCP agent — fixes the
@@ -1185,6 +1221,61 @@ export function registerSectionsRoutes(app: Express): void {
         effectiveVariant && version !== undefined ? version : undefined;
       const resolvedLayoutTarget =
         layoutTarget === "entry" || isTypeLayoutTarget(layoutTarget) ? layoutTarget : undefined;
+
+      // Component text limits (schema.yml text_limits): drafts and staff live
+      // edits only warn; an agent's live edit that lengthens limited text is
+      // rejected. Unchanged over-limit copy never blocks an unrelated edit.
+      let textLimitWarnings: TextLimitViolation[] = [];
+      if (!isTypeLayoutTarget(resolvedLayoutTarget)) {
+        const textLimits = evaluateEditTextLimits({
+          ci: getCI(res),
+          contentType,
+          slug,
+          locale: normalizeLocale(locale),
+          variant: effectiveVariant,
+          operations: finalOperations,
+          contentRoot: getContentRoot(res),
+        });
+        if (textLimits.violations.length > 0) {
+          if (isMcpRequest && !textLimits.isDraftWrite) {
+            res.status(422).json({
+              error: `Text too long for this section: ${summarizeTextLimitViolations(textLimits.violations)}. Shorten it and retry (limits: component schema.yml text_limits, visible characters, HTML stripped).`,
+              code: TEXT_LIMITS_EXCEEDED_CODE,
+              violations: textLimits.violations,
+            });
+            return;
+          }
+          textLimitWarnings = textLimits.violations;
+        }
+      }
+
+      // Theme colors: agents may only write palette IDs (section backgrounds)
+      // and theme-backed inline styles in rich text. Rejected for any agent
+      // write (draft or live) that adds/changes an off-theme value; staff get
+      // warnings. Values already on the page never block.
+      let themeColorWarnings: ThemeViolation[] = [];
+      if (!isTypeLayoutTarget(resolvedLayoutTarget)) {
+        const themeCheck = evaluateEditThemeColors({
+          ci: getCI(res),
+          contentType,
+          slug,
+          locale: normalizeLocale(locale),
+          variant: effectiveVariant,
+          operations: finalOperations,
+          contentRoot: getContentRoot(res),
+        });
+        if (themeCheck.violations.length > 0) {
+          if (isMcpRequest) {
+            res.status(422).json({
+              error: `Use theme IDs for colors: ${summarizeThemeViolations(themeCheck.violations)}. Section backgrounds take a palette ID (allowed_background_ids); rich text must not hardcode color/font-size/letter-spacing.`,
+              code: THEME_COLORS_CODE,
+              details: themeViolationDetails(themeCheck.violations, themeCheck.theme),
+            });
+            return;
+          }
+          themeColorWarnings = themeCheck.violations;
+        }
+      }
 
       const touchedSectionIndexes = new Set<number>();
       for (const op of finalOperations as Array<{ action: string; index?: number; path?: string }>) {
@@ -1342,6 +1433,12 @@ export function registerSectionsRoutes(app: Express): void {
           } catch { /* ignore */ }
         }
 
+        if (wroteSharedTemplate || isTemplateVersioningSlug(slug)) {
+          try {
+            pruneStaleSectionAliases(contentType, locale, getContentRoot(res));
+          } catch { /* non-fatal */ }
+        }
+
         flushAfterContentWrites({
           ci,
           contentTypes: [contentType],
@@ -1361,10 +1458,18 @@ export function registerSectionsRoutes(app: Express): void {
           clearedFields?: unknown;
           shared_template_html_cache?: string;
           deprecated_template_refs?: unknown;
+          text_limit_warnings?: TextLimitViolation[];
+          theme_color_warnings?: ThemeViolation[];
         } = {
           success: true,
           updatedSections: result.updatedSections,
         };
+        if (textLimitWarnings.length > 0) {
+          response.text_limit_warnings = textLimitWarnings;
+        }
+        if (themeColorWarnings.length > 0) {
+          response.theme_color_warnings = themeColorWarnings;
+        }
         if (boundUpdates.length > 0) {
           response.boundUpdates = boundUpdates;
         }
@@ -1787,11 +1892,37 @@ export function registerSectionsRoutes(app: Express): void {
         contentRootName: getContentRootName(res),
         ci: getCI(res),
       });
-      if (!result.success) { res.status(result.statusCode).json({ error: result.error }); return; }
+      if (!result.success) {
+        res.status(result.statusCode).json({
+          error: result.error,
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.details ?? {}),
+        });
+        return;
+      }
       res.json(result.data);
     } catch (error) {
       log.error({ err: error }, "[Content] Rename slug error:");
       res.status(500).json({ error: "Failed to rename slug" });
+    }
+  });
+
+  // Read-only dry run of the rename checks, for the slug editor's live availability message.
+  api.post(app, "/api/content/rename-slug/check", { rate: "publicRead" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "content_edit_structure", req.body.contentType || undefined);
+      if (!auth.authorized) return;
+      const { contentType, folderSlug, locale, newSlug } = req.body;
+      const result = await checkSlugRename({ contentType, folderSlug, locale, newSlug, ci: getCI(res) });
+      if (!result.ok) {
+        const { ok: _ok, statusCode, code, error, ...details } = result;
+        res.status(statusCode).json({ available: false, code, reason: error, ...details });
+        return;
+      }
+      res.json({ available: true, newUrl: result.newUrl });
+    } catch (error) {
+      log.error({ err: error }, "[Content] Check slug rename error:");
+      res.status(500).json({ available: false, error: "Failed to check slug" });
     }
   });
 

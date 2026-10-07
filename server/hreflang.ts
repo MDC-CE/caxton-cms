@@ -7,6 +7,9 @@ import {
   getFullFieldMapping,
 } from "./content-types";
 import { getSupportedLocales, getDefaultLocale, getHomePage } from "./settings";
+import { getBaseUrl } from "./site-urls";
+
+export { getBaseUrl };
 
 function toBcp47(locale: string): string {
   const parts = locale.split("-");
@@ -14,12 +17,6 @@ function toBcp47(locale: string): string {
     return `${parts[0]}-${parts[1].toUpperCase()}`;
   }
   return locale;
-}
-
-export function getBaseUrl(): string {
-  if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, "");
-  if (process.env.REPLIT_DEV_DOMAIN) return `https://${process.env.REPLIT_DEV_DOMAIN}`;
-  return "http://localhost:5000";
 }
 
 function tagsFromLocaleUrls(

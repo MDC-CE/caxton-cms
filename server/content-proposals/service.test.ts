@@ -11,8 +11,10 @@ import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-atta
 import {
   createProposalService,
   listOpenProposalsForVariant,
+  parseProposalSort,
   parseProposerActorType,
   PROPOSAL_CLAIM_TTL_MS,
+  proposalQueryTerms,
   toProposalSummary,
   type ProposalEntryInput,
 } from "./service";
@@ -476,6 +478,45 @@ describe("content proposals", () => {
     expect(asc.proposals[1]!.created_at).toBeLessThanOrEqual(asc.proposals[2]!.created_at);
     const desc = svc.list({ kind: "edits", sort: "updated_at", sortDir: "desc", limit: 10 });
     expect(desc.proposals[0]!.updated_at).toBeGreaterThanOrEqual(desc.proposals[1]!.updated_at);
+  });
+
+  it("list query matches proposal id and proposer username", async () => {
+    const svc = makeService();
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const byAlice = await svc.create(
+      { title: "Alpha", summary, entries: [sampleEntry({ slug: "q-alpha" })] },
+      { username: "alice" },
+    );
+    const byBob = await svc.create(
+      { title: "Beta", summary, entries: [sampleEntry({ slug: "q-beta" })] },
+      { username: "Bob.Builder" },
+    );
+    expect(byAlice.ok && byBob.ok).toBe(true);
+    if (!byAlice.ok || !byBob.ok) return;
+    const aliceId = byAlice.proposal.id;
+
+    const full = svc.list({ query: aliceId, limit: 10 });
+    expect(full.proposals.map((p) => p.id)).toEqual([aliceId]);
+    const prefix = svc.list({ query: aliceId.slice(0, 8).toUpperCase(), limit: 10 });
+    expect(prefix.proposals.map((p) => p.id)).toContain(aliceId);
+
+    const author = svc.list({ query: "builder", limit: 10 });
+    expect(author.proposals.map((p) => p.id)).toEqual([byBob.proposal.id]);
+
+    const acrossFields = svc.list({ query: "  beta   BOB ", limit: 10 });
+    expect(acrossFields.proposals.map((p) => p.id)).toEqual([byBob.proposal.id]);
+    const reordered = svc.list({ query: `${aliceId.slice(0, 6)} alpha`, limit: 10 });
+    expect(reordered.proposals.map((p) => p.id)).toEqual([aliceId]);
+    expect(svc.list({ query: "alpha bob", limit: 10 }).total).toBe(0);
+    expect(svc.list({ query: "q_alpha", limit: 10 }).total).toBe(0);
+  });
+
+  it("proposalQueryTerms splits, dedupes, and caps terms", () => {
+    expect(proposalQueryTerms(undefined)).toEqual([]);
+    expect(proposalQueryTerms("   ")).toEqual([]);
+    expect(proposalQueryTerms("Alice  CTA alice")).toEqual(["alice", "cta"]);
+    expect(proposalQueryTerms("a b c d e f g h i j")).toHaveLength(8);
   });
 
   it("list attention sort, filter, status bias, and summary fields", async () => {
@@ -2041,6 +2082,92 @@ describe("content proposals", () => {
     expect(lessonEvents).toHaveLength(1);
   });
 
+  it("outcomes tab: by_outcome counts, any/none skip system closures, outcome_recent order", async () => {
+    const svc = makeService();
+    const steward = { username: "steward", actor: { type: "ui" as const } };
+    const summary =
+      "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+    const wentWrong = "Agent applied copy that named the wrong product on a selling page.";
+    const ids: Record<string, string> = {};
+    for (const key of ["good", "badLesson", "badOpen", "unreviewed", "open", "stale", "legacyGood"]) {
+      const created = await svc.create(
+        { title: `Outcome ${key}`, summary, entries: [sampleEntry({ slug: `outcome-${key}` })] },
+        { username: "alice" },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      ids[key] = created.proposal.id;
+      if (key === "open") continue;
+      const withdrawn = await svc.update(created.proposal.id, "withdraw", {
+        username: "alice",
+        close_note: "Pulling back to refile with a corrected product name scope.",
+      });
+      expect(withdrawn.ok).toBe(true);
+    }
+
+    const review = async (id: string, outcome: "good" | "bad") => {
+      const res = await svc.update(id, "review_outcome", {
+        ...steward,
+        outcome_review: outcome,
+        ...(outcome === "bad"
+          ? {
+              outcome_review_note: wentWrong,
+              outcome_review_expected: "Reviewer should have blocked until the product name matched the funnel.",
+            }
+          : {}),
+      });
+      expect(res.ok).toBe(true);
+    };
+    await review(ids.good, "good");
+    await review(ids.badLesson, "bad");
+    await review(ids.badOpen, "bad");
+    await review(ids.legacyGood, "good");
+    const lesson = await svc.update(ids.badLesson, "set_outcome_lesson", {
+      ...steward,
+      outcome_lesson_captured: true,
+    });
+    expect(lesson.ok).toBe(true);
+
+    const db = getSiteSqlite(SITE);
+    const setCloseReason = db.prepare(`UPDATE content_proposals SET close_reason = ? WHERE id = ?`);
+    setCloseReason.run("abandoned_stale", ids.stale);
+    setCloseReason.run("legacy_version", ids.legacyGood);
+
+    const t = Date.now() - 60_000;
+    const setTimes = db.prepare(
+      `UPDATE content_proposals SET outcome_review_at = ?, closed_at = ?, updated_at = ? WHERE id = ?`,
+    );
+    setTimes.run(t + 1000, t, t, ids.good);
+    setTimes.run(t + 2000, t, t, ids.badOpen);
+    setTimes.run(t + 3000, t, t, ids.badLesson);
+    setTimes.run(t + 4000, t, t, ids.legacyGood);
+    setTimes.run(null, t + 5000, t, ids.unreviewed);
+
+    expect(svc.stats().by_outcome).toEqual({ good: 2, bad: 2, bad_open: 1, none: 1 });
+
+    expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).toEqual([ids.unreviewed]);
+
+    const any = svc.list({ outcome_review: "any", sort: "outcome_recent", sort_dir: "desc" });
+    expect(any.total).toBe(5);
+    expect(any.proposals.map((p) => p.id)).toEqual([
+      ids.unreviewed,
+      ids.legacyGood,
+      ids.badLesson,
+      ids.badOpen,
+      ids.good,
+    ]);
+
+    const page2 = svc.list({ outcome_review: "any", sort: "outcome_recent", sort_dir: "desc", limit: 2, offset: 2 });
+    expect(page2.total).toBe(5);
+    expect(page2.proposals.map((p) => p.id)).toEqual([ids.badLesson, ids.badOpen]);
+
+    expect(parseProposalSort("outcome_recent", "desc")).toEqual({
+      ok: true,
+      sort: "outcome_recent",
+      sortDir: "desc",
+    });
+  });
+
   it("idea follow-through: accept locks entry, implements gates, stalled resurfaces after reject", async () => {
     const svc = makeService({
       liveValues: { "meta.title": "Old" },
@@ -2183,6 +2310,153 @@ describe("content proposals", () => {
     expect(applied.ok).toBe(true);
     expect(svc.stats().stalled_ideas).toBe(0);
     expect(svc.list({ stalled: true }).total).toBe(0);
+  });
+
+  describe("accepted-idea page lock release", () => {
+    const alice = {
+      username: "alice",
+      actor: { type: "mcp" as const, role: "copy_editor", model: "claude/sonnet", client: "Cursor" },
+    };
+    const bob = {
+      username: "bob",
+      actor: { type: "mcp" as const, role: "seo_specialist", model: "claude/sonnet", client: "Cursor" },
+    };
+    const PAGE = { contentType: "blog", slug: "best-ai-coding-agents", locale: "en" };
+    const NEXT_STEP = "Refresh the comparison table and bump Last verified in a follow-up edit.";
+    type Svc = ReturnType<typeof makeService>;
+
+    const fileIdea = async (svc: Svc, title: string, related: Array<Record<string, string>> = [PAGE]) => {
+      const res = await svc.create(
+        {
+          kind: "idea",
+          title,
+          summary: `${title}: refresh the best AI coding agents hub with the newest model release and pricing. `.repeat(2),
+          related_entries: related as Array<{ contentType: string; slug: string; locale?: string }>,
+          confirm_distinct: true,
+        },
+        alice,
+      );
+      if (!res.ok) throw new Error(`${res.code}: ${res.error}`);
+      return res.proposal.id;
+    };
+    const accept = (svc: Svc, id: string) =>
+      svc.update(id, "accept", { ...bob, next_step: NEXT_STEP, accepted_entry: PAGE });
+    const fileEdits = (svc: Svc, title: string, implementsId?: string) =>
+      svc.create(
+        {
+          title,
+          summary: `${title}: add the new model row and update the verified date on the hub. `.repeat(2),
+          ...(implementsId ? { implements_proposal_id: implementsId } : {}),
+          confirm_distinct: true,
+          entries: [sampleEntry({ ...PAGE, updates: [{ field_path: "meta.title", value: title }] })],
+        },
+        alice,
+      );
+    const takenDetails = (res: Awaited<ReturnType<Svc["update"]>>) => {
+      expect(res.ok).toBe(false);
+      if (res.ok) return null;
+      expect(res.code).toBe("accepted_entry_taken");
+      return res.details as { holder_id: string; open_edit_id: string | null; releases_when: string };
+    };
+
+    it("holds the page until the holder's edit is applied, then frees it and lists waiting ideas (Grok → Sol)", async () => {
+      const svc = makeService({ liveValues: { "meta.title": "Old" } });
+      const grok = await fileIdea(svc, "Grok 4.7 refresh");
+      expect((await accept(svc, grok)).ok).toBe(true);
+
+      const sol = await fileIdea(svc, "GPT-6.1 Sol refresh");
+      const otherLocale = await fileIdea(svc, "Spanish refresh", [{ ...PAGE, locale: "es" }]);
+      const anyLocale = await fileIdea(svc, "Any-locale refresh", [{ contentType: PAGE.contentType, slug: PAGE.slug }]);
+
+      const noEdit = takenDetails(await accept(svc, sol));
+      expect(noEdit).toEqual({ holder_id: grok, open_edit_id: null, releases_when: "holder_edit_applied" });
+      expect(svc.get(sol)!.status).toBe("open");
+
+      const first = await fileEdits(svc, "Grok draft", grok);
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      expect(takenDetails(await accept(svc, sol))?.open_edit_id).toBe(first.proposal.id);
+
+      const rejected = await svc.update(first.proposal.id, "reject", {
+        ...bob,
+        confirm_reject: true,
+        reject_kind: "bad_idea",
+        close_note: "This draft invents benchmark numbers we cannot source and must not ship as written for the hub.",
+      });
+      expect(rejected.ok).toBe(true);
+      expect(takenDetails(await accept(svc, sol))?.holder_id).toBe(grok);
+      expect(svc.stats().stalled_ideas).toBe(1);
+
+      const standaloneWhileHeld = await fileEdits(svc, "Unlinked fix");
+      expect(standaloneWhileHeld.ok).toBe(false);
+      if (!standaloneWhileHeld.ok) expect(standaloneWhileHeld.code).toBe("implements_required");
+
+      const retry = await fileEdits(svc, "Grok draft retry", grok);
+      expect(retry.ok).toBe(true);
+      if (!retry.ok) return;
+      const applied = await svc.update(retry.proposal.id, "apply", { ...bob });
+      expect(applied.ok).toBe(true);
+      if (!applied.ok) return;
+      const w = applied.warnings?.find((x) => x.code === "idea_page_released_waiting_ideas") as
+        | { details?: { waiting_ideas?: Array<{ id: string }>; next_actions?: Array<Record<string, unknown>>; released_entry?: unknown } }
+        | undefined;
+      expect(w?.details?.waiting_ideas?.map((i) => i.id)).toEqual([sol, anyLocale]);
+      expect(w?.details?.waiting_ideas?.some((i) => i.id === otherLocale)).toBe(false);
+      expect(w?.details?.next_actions?.[0]).toMatchObject({ tool: "list_proposals", args_hint: { proposal_id: sol } });
+      expect(w?.details?.released_entry).toEqual(PAGE);
+      const finished = listEvents({ site: SITE, type: "proposal_finished", limit: 50 }).find(
+        (e) => e.payload?.proposal_id === retry.proposal.id,
+      );
+      expect(finished?.payload?.waiting_idea_ids).toEqual([sol, anyLocale]);
+      expect(svc.stats().stalled_ideas).toBe(0);
+
+      const unlinked = await fileEdits(svc, "Unlinked fix after release");
+      expect(unlinked.ok).toBe(true);
+      if (!unlinked.ok) return;
+      const withdrawn = await svc.update(unlinked.proposal.id, "withdraw", {
+        ...alice,
+        close_note: "Withdrawing so the accepted Sol idea can own the next refresh.",
+      });
+      expect(withdrawn.ok).toBe(true);
+
+      const solAccepted = await accept(svc, sol);
+      expect(solAccepted.ok).toBe(true);
+      expect(svc.stats().stalled_ideas).toBe(1);
+
+      const viaOldIdea = await fileEdits(svc, "Late Grok follow-up", grok);
+      expect(viaOldIdea.ok).toBe(false);
+      if (!viaOldIdea.ok) {
+        expect(viaOldIdea.code).toBe("implements_required");
+        expect(viaOldIdea.duplicate_of).toBe(sol);
+      }
+    });
+
+    it("after release, edits may still implement the old idea while no newer idea holds the page", async () => {
+      const svc = makeService({ liveValues: { "meta.title": "Old" } });
+      const grok = await fileIdea(svc, "Grok 4.7 refresh");
+      expect((await accept(svc, grok)).ok).toBe(true);
+      const first = await fileEdits(svc, "Grok draft", grok);
+      if (!first.ok) throw new Error(first.error);
+      const applied = await svc.update(first.proposal.id, "apply", { ...bob });
+      expect(applied.ok).toBe(true);
+      if (applied.ok) expect(applied.warnings?.some((x) => x.code === "idea_page_released_waiting_ideas") ?? false).toBe(false);
+
+      const followUp = await fileEdits(svc, "Sol folded into Grok idea", grok);
+      expect(followUp.ok).toBe(true);
+      if (!followUp.ok) return;
+      const sol = await fileIdea(svc, "GPT-6.1 Sol refresh");
+      expect(takenDetails(await accept(svc, sol))?.open_edit_id).toBe(followUp.proposal.id);
+    });
+
+    it("two simultaneous accepts for the same freed page: exactly one reserves it", async () => {
+      const svc = makeService();
+      const a = await fileIdea(svc, "Grok 4.7 refresh");
+      const b = await fileIdea(svc, "GPT-6.1 Sol refresh");
+      const results = await Promise.all([accept(svc, a), accept(svc, b)]);
+      expect(results.filter((r) => r.ok)).toHaveLength(1);
+      const loser = results.find((r) => !r.ok);
+      expect(loser && !loser.ok ? loser.code : null).toBe("accepted_entry_taken");
+    });
   });
 
   it("stores author and resolver actors on blockers and clears the resolver on reopen", async () => {
@@ -3116,6 +3390,89 @@ describe("attached entry from an accepted idea", () => {
     if (!frozen.ok) expect(frozen.code).toBe("idea_funnel_frozen");
   });
 
+  it("idea content types: refuse unknown on create; set_related_entries for proposer only while open", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      knownContentTypes: () => ["blog", "landing"],
+      strategyForContentType: (ct) => (ct === "landing" ? { purpose: "Convert paid traffic" } : null),
+    });
+    const summary =
+      "New landing pitch for an AI bootcamp page that converts paid search visitors in Miami. ".repeat(2);
+    const alice = {
+      username: "alice",
+      actor: { type: "mcp" as const, role: "copy_editor", model: "claude/sonnet", client: "Cursor" },
+    };
+    const bob = {
+      username: "bob",
+      actor: { type: "mcp" as const, role: "seo_specialist", model: "claude/sonnet", client: "Cursor" },
+    };
+
+    const refused = await svc.create(
+      {
+        kind: "idea",
+        title: "New landing: AI Miami",
+        summary,
+        related_entries: [{ contentType: "landings", slug: "ai-miami", locale: "en" }],
+      },
+      alice,
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.code).toBe("unknown_content_type");
+      expect((refused as { details?: { valid_types?: string[] } }).details?.valid_types).toEqual(["blog", "landing"]);
+    }
+
+    const created = await svc.create({ kind: "idea", title: "New landing: AI Miami", summary }, alice);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const before = await svc.classifyLive(created.proposal);
+    expect(before?.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(true);
+
+    const unknown = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [{ contentType: "landings", slug: "ai-miami", locale: "en" }],
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.code).toBe("unknown_content_type");
+
+    const notProposer = await svc.update(created.proposal.id, "set_related_entries", {
+      ...bob,
+      related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+    });
+    expect(notProposer.ok).toBe(false);
+    if (!notProposer.ok) expect(notProposer.code).toBe("not_proposer");
+
+    const set = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [{ contentType: "landing", slug: "ai-miami", locale: "en" }],
+    });
+    expect(set.ok).toBe(true);
+    if (!set.ok) return;
+    expect(set.proposal.related_entries).toEqual([{ contentType: "landing", slug: "ai-miami", locale: "en" }]);
+    expect(svc.contentTypeStrategiesFor(set.proposal)).toEqual([
+      { contentType: "landing", role: "pitched", purpose: "Convert paid traffic" },
+    ]);
+    const after = await svc.classifyLive(set.proposal);
+    expect(after?.agent_preview.warnings.some((w) => w.code === "idea_content_type_missing")).toBe(false);
+    expect(after?.agent_preview.think_items.some((t) => t.id === "content_type_fit")).toBe(true);
+
+    const withdrawn = await svc.update(created.proposal.id, "withdraw", {
+      ...alice,
+      close_note: "Superseded by a broader campaign brief.",
+    });
+    expect(withdrawn.ok).toBe(true);
+    const closed = await svc.update(created.proposal.id, "set_related_entries", {
+      ...alice,
+      related_entries: [],
+    });
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.code).toBe("closed");
+  });
+
   it("proposal_idea_funnel_set: fires on create with funnel, skips unchanged saves, carries actor", async () => {
     const svc = createProposalService({
       site: SITE,
@@ -3317,5 +3674,254 @@ describe("attached entry from an accepted idea", () => {
     if (!applied.ok) return;
     expect(seededFunnel).toEqual({ stage: "awareness", products: "all" });
     expect(applied.proposal.entries[0]?.status).toBe("done");
+  });
+
+  it("legacy creates_entry apply seeds the idea SEO target as seo.* ops", async () => {
+    const appliedOps: Array<Array<{ field_path: string; value?: unknown }>> = [];
+    const HUB = "/en/blog/ai/hub-ai";
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async (entry) => {
+        appliedOps.push(entry.ops);
+        return { ok: true };
+      },
+      resolveExistence: () => ({ live: "missing", draftExists: false }),
+      inspectMissingTarget: () => ({ shape: "attached_file", requiredFields: ["title"] }),
+      prepareCreatesEntry: async () => ({ ok: true, seeded: true }),
+      discardSeededEntry: () => {},
+      stampPublishedAt: () => ({ ok: true }),
+      seoTarget: {
+        isMonitored: () => true,
+        resolveHub: (p) => ({ path: p, live: true, locale: "en", is_hub: true }),
+        keywordOwner: () => null,
+        selfPath: () => null,
+        memberInfo: () => ({ live: true, monitored: true, pillar_path: null }),
+      },
+    });
+    const summary = "New article pitch for an SEO seed test covering basics for beginners who search. ".repeat(2);
+    const alice = { username: "alice", actor: { type: "mcp" as const, role: "copy_editor", model: "m", client: "c" } };
+    const bob = { username: "bob", actor: { type: "mcp" as const, role: "seo_specialist", model: "m", client: "c" } };
+    const idea = await svc.create(
+      {
+        kind: "idea",
+        title: "New article SEO seed",
+        summary,
+        related_entries: [{ contentType: "blog", slug: "seo-seed-post", locale: "en" }],
+        idea_funnel: { stage: "awareness", products: "all" },
+        idea_seo_target: { main_keyword: "seo seed", cluster: { mode: "join", pillar_path: HUB } },
+      },
+      alice,
+    );
+    expect(idea.ok).toBe(true);
+    if (!idea.ok) return;
+    const accepted = await svc.update(idea.proposal.id, "accept", {
+      ...bob,
+      next_step: "Create the attached post with implements_proposal_id next.",
+      accepted_entry: { contentType: "blog", slug: "seo-seed-post", locale: "en" },
+    });
+    expect(accepted.ok).toBe(true);
+    const create = await svc.create(
+      {
+        title: "Seed create",
+        summary: "Implement accepted idea and let apply seed the frozen SEO target. ".repeat(2),
+        implements_proposal_id: idea.proposal.id,
+        review_situations: ["new_public_content"],
+        entries: [{ contentType: "blog", slug: "seo-seed-post", locale: "en", updates: [{ field_path: "title", value: "Seed" }] }],
+      },
+      alice,
+    );
+    expect(create.ok).toBe(true);
+    if (!create.ok) return;
+    const applied = await svc.update(create.proposal.id, "apply", { ...bob });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.proposal.entries[0]?.status).toBe("done");
+    expect(appliedOps[0]).toEqual([
+      { field_path: "seo.main_keyword", value: "seo seed" },
+      { field_path: "seo.pillar_path", value: HUB },
+      { field_path: "seo.is_pillar", value: false },
+      { field_path: "title", value: "Seed" },
+    ]);
+  });
+});
+
+describe("blocked inactivity sweep", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const BLOCKER_BODY =
+    "Hero CTA still points to the Coding Bootcamp. Must point to AI Flex because this is a decision-stage page.";
+  const SUMMARY = "Replace the live CTA title with a clearer next step for this Spanish blog post. ".repeat(2);
+
+  beforeEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+    ensurePipelineDb(SITE, { skipBackup: true });
+  });
+
+  afterEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+  });
+
+  async function blockedProposal(svc: ReturnType<typeof makeService>, slug = "hello"): Promise<string> {
+    const created = await svc.create(
+      { title: `CTA ${slug}`, summary: SUMMARY, entries: [sampleEntry({ slug })] },
+      { username: "alice" },
+    );
+    if (!created.ok) throw new Error(created.error);
+    const blocked = await svc.update(created.proposal.id, "add_blocker", { username: "blake", body: BLOCKER_BODY });
+    if (!blocked.ok) throw new Error(blocked.error);
+    return created.proposal.id;
+  }
+
+  /** Moves every activity timestamp of a proposal `days` into the past. */
+  function backdate(id: string, days: number): void {
+    const db = getSiteSqlite(SITE);
+    const t = Date.now() - days * DAY;
+    db.prepare(`UPDATE content_proposal_blockers SET created_at = ? WHERE proposal_id = ?`).run(t, id);
+    db.prepare(
+      `UPDATE content_proposals
+       SET updated_at = ?,
+           reviewer_action_at = CASE WHEN reviewer_action_at IS NULL THEN NULL ELSE ? END,
+           author_content_at = CASE WHEN author_content_at IS NULL THEN NULL ELSE ? END
+       WHERE id = ?`,
+    ).run(t, t, t, id);
+  }
+
+  it("flags after 10 idle days and withdraws as abandoned_blocked after 30", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    const t0 = Date.now();
+
+    expect((await svc.blockedSweep({ now: t0 + 9 * DAY })).flagged).toEqual([]);
+    expect(svc.get(id)!.blocked_flagged_at).toBeNull();
+
+    expect((await svc.blockedSweep({ now: t0 + 11 * DAY })).flagged).toEqual([id]);
+    const flagged = svc.get(id)!;
+    expect(flagged.blocked_flagged_at).toBeTruthy();
+    expect(toProposalSummary(flagged).blocked_flagged_at).toBe(flagged.blocked_flagged_at);
+    expect((await svc.blockedSweep({ now: t0 + 12 * DAY })).flagged).toEqual([]);
+
+    expect((await svc.blockedSweep({ now: t0 + 31 * DAY })).closed).toEqual([id]);
+    const closed = svc.get(id)!;
+    expect(closed.status).toBe("withdrawn");
+    expect(closed.close_reason).toBe("abandoned_blocked");
+    expect(closed.claim).toBeNull();
+    expect(closed.close_note).toContain("30 days");
+    expect(closed.close_note).not.toContain("published");
+
+    const types = listEvents({ site: SITE, limit: 200 })
+      .filter((e) => (e.payload as { proposal_id?: string }).proposal_id === id)
+      .map((e) => e.type);
+    expect(types).toContain("proposal_blocked_flagged");
+    expect(types).toContain("proposal_closed_abandoned_blocked");
+  });
+
+  it("closes on the first sweep without a prior flag when already idle 30+ days", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    backdate(id, 31);
+    const report = await svc.blockedSweep();
+    expect(report.flagged).toEqual([]);
+    expect(report.closed).toEqual([id]);
+    expect(svc.get(id)!.close_reason).toBe("abandoned_blocked");
+  });
+
+  it("claim and release do not reset the clock", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    backdate(id, 31);
+    await svc.update(id, "claim", { username: "alice" });
+    await svc.update(id, "release", { username: "alice" });
+    expect(svc.get(id)!.updated_at).toBeGreaterThan(Date.now() - DAY);
+    expect((await svc.blockedSweep()).closed).toEqual([id]);
+  });
+
+  it("an author rewrite after the flag clears it and restarts the clock", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    backdate(id, 11);
+    const t = Date.now();
+    expect((await svc.blockedSweep({ now: t })).flagged).toEqual([id]);
+
+    const db = getSiteSqlite(SITE);
+    db.prepare(`UPDATE content_proposals SET author_content_at = ? WHERE id = ?`).run(t + 1000, id);
+
+    const report = await svc.blockedSweep({ now: t + 2000 });
+    expect(report.cleared).toEqual([id]);
+    expect(report.flagged).toEqual([]);
+    expect(svc.get(id)!.blocked_flagged_at).toBeNull();
+    expect((await svc.blockedSweep({ now: t + 25 * DAY })).closed).toEqual([]);
+  });
+
+  it("resolving every blocker clears the flag and the proposal is never closed", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    backdate(id, 11);
+    expect((await svc.blockedSweep()).flagged).toEqual([id]);
+
+    await svc.update(id, "claim", { username: "alice" });
+    const bid = svc.get(id)!.blockers[0]!.id;
+    const resolved = await svc.update(id, "resolve_blocker", {
+      username: "alice",
+      blocker_id: bid,
+      resolve_note: "Pointed the hero CTA at AI Flex on the draft as requested.",
+    });
+    expect(resolved.ok).toBe(true);
+
+    const report = await svc.blockedSweep({ now: Date.now() + 60 * DAY });
+    expect(report.cleared).toEqual([id]);
+    expect(report.closed).toEqual([]);
+    const after = svc.get(id)!;
+    expect(after.status).toBe("open");
+    expect(after.blocked_flagged_at).toBeNull();
+  });
+
+  it("partial proposals close with a note that published pages stay live", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    const db = getSiteSqlite(SITE);
+    db.prepare(`UPDATE content_proposals SET status = 'partial' WHERE id = ?`).run(id);
+    db.prepare(`UPDATE content_proposal_entries SET status = 'done' WHERE proposal_id = ?`).run(id);
+    backdate(id, 31);
+
+    expect((await svc.blockedSweep()).closed).toEqual([id]);
+    const closed = svc.get(id)!;
+    expect(closed.status).toBe("withdrawn");
+    expect(closed.close_note).toContain("Pages already published stay live");
+    expect(closed.entries[0]?.status).toBe("done");
+  });
+
+  it("skips escalated, closed, and zero-open-blocker proposals", async () => {
+    const svc = makeService();
+    const escalated = await blockedProposal(svc, "escalated");
+    const rejected = await blockedProposal(svc, "rejected");
+    const plain = await svc.create(
+      { title: "No blockers", summary: SUMMARY, entries: [sampleEntry({ slug: "plain" })] },
+      { username: "alice" },
+    );
+    if (!plain.ok) throw new Error(plain.error);
+    const db = getSiteSqlite(SITE);
+    db.prepare(`UPDATE content_proposals SET escalated = 1 WHERE id = ?`).run(escalated);
+    db.prepare(`UPDATE content_proposals SET status = 'rejected' WHERE id = ?`).run(rejected);
+    for (const id of [escalated, rejected, plain.proposal.id]) backdate(id, 60);
+
+    const report = await svc.blockedSweep();
+    expect(report.checked).toBe(0);
+    expect(report.closed).toEqual([]);
+    expect(svc.get(escalated)!.status).toBe("open");
+    expect(svc.get(rejected)!.status).toBe("rejected");
+    expect(svc.get(plain.proposal.id)!.status).toBe("open");
+  });
+
+  it("outcome_review none excludes abandoned_blocked closures", async () => {
+    const svc = makeService();
+    const id = await blockedProposal(svc);
+    backdate(id, 31);
+    await svc.blockedSweep();
+    expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).not.toContain(id);
   });
 });

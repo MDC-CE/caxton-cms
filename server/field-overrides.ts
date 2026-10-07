@@ -32,6 +32,7 @@ import {
   type ContentTypeEditorHint,
 } from "./content-types";
 import { getDefaultContentRoot } from "./site-config";
+import { mappedFieldsStorageFor, type MappedFieldsStorage } from "./mapped-fields-storage";
 import { contentIndex } from "./content-index";
 import { markFileAsModified } from "./sync-state";
 import { resolveFieldValue } from "./transform";
@@ -44,7 +45,6 @@ import { writeSeoFields } from "./seo-index";
 import { readSeoBlockFromYamlText } from "./seo-fields";
 import { resolveEffectiveSeo, seoBaselineFromDbItem } from "./seo-effective-seo";
 import { assertSeoWriteLayerAllowed } from "./seo-write-layer";
-import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
 import {
   checkDeprecatedWrites,
   entryHasLiveStoredValue,
@@ -192,6 +192,27 @@ export function resolveMappedFieldsLayerPath(opts: {
   fileName: string;
   isVariantLayer: boolean;
   resolvedVariant: string | null;
+  /** Root keys vs the field_overrides bag, same for every layer of the entry. */
+  storage: MappedFieldsStorage;
+  error?: string;
+  statusCode?: number;
+} {
+  const layer = resolveMappedFieldsLayerFile(opts);
+  return { ...layer, storage: mappedFieldsStorageFor(opts.contentType, opts.contentRoot) };
+}
+
+function resolveMappedFieldsLayerFile(opts: {
+  contentType: string;
+  slug: string;
+  locale: string;
+  variant?: string | null;
+  contentRoot?: string;
+  requireExists?: boolean;
+}): {
+  filePath: string;
+  fileName: string;
+  isVariantLayer: boolean;
+  resolvedVariant: string | null;
   error?: string;
   statusCode?: number;
 } {
@@ -329,6 +350,28 @@ export function readFieldOverrides(
   if (!resolved.filePath || !fs.existsSync(resolved.filePath)) return {};
   try {
     const parsed = contentIndex.safeYamlLoad(fs.readFileSync(resolved.filePath, "utf-8"));
+    if (!parsed || typeof parsed !== "object") return {};
+    return readFoBagFromData(parsed as Record<string, unknown>);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `field_overrides` from the live `{locale}.yml` only. Unlike readFieldOverrides, never
+ * auto-resolves to a draft when the live file is missing (a source item page is live without one).
+ */
+export function readLiveFieldOverrides(
+  contentType: string,
+  slug: string,
+  locale: string,
+  contentRoot?: string,
+): Record<string, unknown> {
+  if (slug.includes("/") || /[^a-z0-9_-]/i.test(locale)) return {};
+  const filePath = path.join(getEntryContentDir(contentType, slug, contentRoot), `${locale}.yml`);
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    const parsed = contentIndex.safeYamlLoad(fs.readFileSync(filePath, "utf-8"));
     if (!parsed || typeof parsed !== "object") return {};
     return readFoBagFromData(parsed as Record<string, unknown>);
   } catch {
@@ -487,8 +530,6 @@ export function writeMappedFields(
       },
     };
   }
-  const isStatic = !config.database?.slug;
-
   const pendingUpdates: Record<string, unknown | null> = { ...updates };
   coerceUpdatesForStringEditorFields(
     pendingUpdates,
@@ -518,6 +559,7 @@ export function writeMappedFields(
   }
 
   const filePath = layer.filePath;
+  const isStatic = layer.storage === "root_key";
 
   const seoUpdates: Record<string, unknown> = {};
   for (const key of Object.keys(pendingUpdates)) {
@@ -961,18 +1003,11 @@ export async function buildFieldProvenance(opts: {
 
     originalItem = db.getOriginalMappedItem(dbName, slug, lookupKey);
 
-    const cached = await db.fetchItems(dbName);
-    const items = cached.items as Record<string, unknown>[];
-    mappedItem = items.find((i) => String(i[lookupKey] ?? "") === slug) ?? null;
-    // Live_request + function remaps so Fields tab matches page delivery (e.g. seats).
-    if (mappedItem) {
-      mappedItem = await hydrateEntryForDelivery(contentType, { ...mappedItem }, {
-        contentRoot,
-        locale,
-        db,
-        contentIndex,
-      });
-    }
+    // Offline: the page's entry layer from the stored copy (no source refresh, no live requests).
+    const { entryItemLayer } = await import("./entry-layer");
+    mappedItem =
+      entryItemLayer({ contentRoot: contentRoot ?? getDefaultContentRoot(), getDatabase: () => db }, contentType, slug, locale)
+        ?.singleEntry ?? null;
   } else if (!hasDatabase) {
     const { data } = contentIndex.loadMergedContent(
       contentType,

@@ -83,6 +83,20 @@ import {
 } from "@/lib/variable-badges";
 import { variableUsagePathToStaffHref } from "@/lib/variable-usage-href";
 import { VariableDetailModal } from "@/components/editing/VariableDetailModal";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  VARIABLE_CATEGORIES,
+  VARIABLE_CATEGORY_LABELS,
+  isFigureCategory,
+  missingVariableMetadata,
+  type VariableCategory,
+} from "@shared/variable-metadata";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { Location } from "@shared/session";
@@ -359,6 +373,7 @@ export default function VariablesPage() {
   );
   const [tab, setTab] = useState<DashTab>("globals");
   const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<VariableCategory | "all" | "missing" | "deprecated">("all");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<"inspect" | "create">("inspect");
@@ -407,17 +422,35 @@ export default function VariablesPage() {
     return { globals: globalsList, brandRows: brand, reservedRows: reserved };
   }, [definitions]);
 
+  const missingMetaCount = useMemo(
+    () =>
+      globals.filter(({ name, def }) => {
+        const m = missingVariableMetadata(name, def);
+        return m.description || m.category;
+      }).length,
+    [globals],
+  );
+
   const filteredGlobals = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return globals;
     return globals.filter(({ name, def }) => {
+      if (categoryFilter === "missing") {
+        const m = missingVariableMetadata(name, def);
+        if (!m.description && !m.category) return false;
+      } else if (categoryFilter === "deprecated") {
+        if (!def.deprecated) return false;
+      } else if (categoryFilter !== "all" && def.category !== categoryFilter) {
+        return false;
+      }
+      if (!q) return true;
       if (name.toLowerCase().includes(q)) return true;
+      if ((def.description || "").toLowerCase().includes(q)) return true;
       const resolved = definitions
         ? resolveVariable(name, definitions, mockContext)?.value
         : def.default;
       return (resolved || "").toLowerCase().includes(q);
     });
-  }, [globals, search, definitions, mockContext]);
+  }, [globals, search, categoryFilter, definitions, mockContext]);
 
   const openCreate = () => {
     setModalMode("create");
@@ -478,10 +511,14 @@ export default function VariablesPage() {
       <div className="container mx-auto px-4 py-6 space-y-6 max-w-6xl">
         <div className="rounded-md border bg-muted/30 p-4 space-y-2" data-testid="section-variables-intro">
           <p className="text-sm text-foreground">
-            Manage site-wide globals used in templates as{" "}
-            <code className="font-mono text-xs">{"{{ global.* }}"}</code>. Preview how they
-            resolve for a campus and language below. Brand and legal values are listed read-only —
-            edit them in Settings. Entry, SEO, and URL variables work differently; see{" "}
+            Each variable is one company fact used across the site. The description tells writers
+            and agents when to use it, and the category tells reviewers how carefully to check
+            changes. Prices, outcome claims and social proof get extra review.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Preview how values resolve for a campus and language below. Brand and legal values are
+            listed read-only — edit them in Settings. Entry, SEO, and URL variables work
+            differently; see{" "}
             <button
               type="button"
               className="underline underline-offset-2"
@@ -556,22 +593,63 @@ export default function VariablesPage() {
           </ToggleButtonBarList>
 
           <TabsContent value="globals" className="mt-4 space-y-3">
-            <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                className="pl-8"
-                placeholder="Search name or value…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                data-testid="input-search-variables"
-              />
+            {missingMetaCount > 0 && (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2"
+                data-testid="banner-variables-missing-metadata"
+              >
+                <p className="text-sm text-foreground">
+                  {missingMetaCount} variable{missingMetaCount !== 1 ? "s need" : " needs"} a
+                  description and category. Agents skip facts they cannot identify.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setCategoryFilter("missing")}
+                  data-testid="button-filter-missing-metadata"
+                >
+                  Show them
+                </Button>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative max-w-sm flex-1 min-w-[220px]">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  className="pl-8"
+                  placeholder="Search name, description or value…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  data-testid="input-search-variables"
+                />
+              </div>
+              <Select
+                value={categoryFilter}
+                onValueChange={(v) => setCategoryFilter(v as typeof categoryFilter)}
+              >
+                <SelectTrigger className="w-[200px]" data-testid="select-variable-category-filter">
+                  <SelectValue placeholder="All categories" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All categories</SelectItem>
+                  <SelectItem value="missing">Missing description</SelectItem>
+                  <SelectItem value="deprecated">Deprecated</SelectItem>
+                  {VARIABLE_CATEGORIES.map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {VARIABLE_CATEGORY_LABELS[c]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             {defsLoading ? (
               <p className="text-sm text-muted-foreground py-8 text-center">Loading variables…</p>
             ) : filteredGlobals.length === 0 ? (
               <p className="text-sm text-muted-foreground py-8 text-center">
-                {search ? "No globals match your search." : "No global variables yet. Create one to get started."}
+                {search || categoryFilter !== "all"
+                  ? "No globals match your search or filter."
+                  : "No global variables yet. Create one to get started."}
               </p>
             ) : (
               <div className="rounded-md border overflow-hidden">
@@ -641,8 +719,48 @@ export default function VariablesPage() {
                             className="border-b last:border-0 hover:bg-muted/20"
                             data-testid={`row-variable-${name}`}
                           >
-                            <td className="px-3 py-2 align-top">
-                              <code className="text-xs font-mono">{name}</code>
+                            <td className="px-3 py-2 align-top max-w-[320px]">
+                              <div className="space-y-1">
+                                <code className="text-xs font-mono">{name}</code>
+                                {def.description ? (
+                                  <p className="text-xs text-muted-foreground line-clamp-2">
+                                    {def.description}
+                                  </p>
+                                ) : null}
+                                <div className="flex flex-wrap gap-1">
+                                  {def.category && VARIABLE_CATEGORIES.includes(def.category as VariableCategory) ? (
+                                    <Badge
+                                      variant={isFigureCategory(def.category) ? "secondary" : "outline"}
+                                      className="text-[10px] font-normal"
+                                      data-testid={`badge-category-${name}`}
+                                    >
+                                      {VARIABLE_CATEGORY_LABELS[def.category as VariableCategory]}
+                                    </Badge>
+                                  ) : null}
+                                  {(() => {
+                                    const m = missingVariableMetadata(name, def);
+                                    return m.description || m.category ? (
+                                      <Badge
+                                        variant="destructive"
+                                        className="text-[10px] font-normal"
+                                        data-testid={`badge-missing-metadata-${name}`}
+                                      >
+                                        Missing description
+                                      </Badge>
+                                    ) : null;
+                                  })()}
+                                  {def.deprecated ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="text-[10px] font-normal text-muted-foreground"
+                                      title={def.replaced_by ? `Use ${def.replaced_by} instead` : undefined}
+                                      data-testid={`badge-deprecated-${name}`}
+                                    >
+                                      Deprecated{def.replaced_by ? ` → ${def.replaced_by}` : ""}
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                              </div>
                             </td>
                             <td className="px-3 py-2 align-top max-w-[320px]">
                               <div className="flex flex-wrap items-center gap-1.5">
@@ -799,7 +917,7 @@ export default function VariablesPage() {
             <div className="rounded-md border divide-y">
               <div className="px-3 py-2 flex items-center justify-between bg-muted/30">
                 <p className="text-sm font-medium">Brand</p>
-                <Link href="/private/settings?tab=brand">
+                <Link href="/private/settings/brand">
                   <Button variant="outline" size="sm" data-testid="link-settings-brand">
                     Open Brand settings
                   </Button>
@@ -826,7 +944,7 @@ export default function VariablesPage() {
             <div className="rounded-md border divide-y">
               <div className="px-3 py-2 flex items-center justify-between bg-muted/30">
                 <p className="text-sm font-medium">Legal &amp; consent</p>
-                <Link href="/private/settings?tab=legal">
+                <Link href="/private/settings/legal">
                   <Button variant="outline" size="sm" data-testid="link-settings-legal">
                     Open Legal settings
                   </Button>
@@ -945,6 +1063,17 @@ export default function VariablesPage() {
                   </code>{" "}
                   (number-only pipe default). Do not hardcode those percentages for the sitewide claim.
                   Historical Outcomes year charts, press cohort stats, and cohort FAQ stay literal.
+                </p>
+                <p>
+                  Each global carries <code className="font-mono">description</code> and{" "}
+                  <code className="font-mono">category</code> (required), plus optional{" "}
+                  <code className="font-mono">unit</code>, <code className="font-mono">deprecated</code>{" "}
+                  and <code className="font-mono">replaced_by</code>. The server rejects writes that
+                  leave description or category empty. Figure categories (price, outcome_claim,
+                  social_proof) ask for confirmation before a value change and route proposals that
+                  touch them through the outcome-figures review. Each site has its own{" "}
+                  <code className="font-mono">variables.yml</code>; agents read the catalog through
+                  the <code className="font-mono">list_variables</code> MCP tool.
                 </p>
                 <p>
                   Menu YAML is not part of the usage index yet — references there may not appear in

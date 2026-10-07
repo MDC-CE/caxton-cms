@@ -1,3 +1,4 @@
+import type { ThemePaint } from "@shared/theme-palette";
 import { queryClient } from "./queryClient";
 
 export const IS_SERVER = typeof document === 'undefined';
@@ -7,9 +8,11 @@ interface SingleQuery {
   data: unknown;
 }
 
+type ThemePaintField = { themePaint?: ThemePaint };
+
 export type InitialDataPayload =
-  | { queries: SingleQuery[]; queryKey?: never; data?: never }
-  | { queryKey: unknown[]; data: unknown; queries?: never };
+  | ({ queries: SingleQuery[]; queryKey?: never; data?: never } & ThemePaintField)
+  | ({ queryKey: unknown[]; data: unknown; queries?: never } & ThemePaintField);
 
 export let isSSRHydration = false;
 

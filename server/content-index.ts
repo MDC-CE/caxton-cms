@@ -9,11 +9,14 @@ import { deepMerge } from "./utils/deepMerge";
 import { regenerateSectionIds } from "./utils/regenerateSectionIds";
 import { normalizeUrlPattern, getAllConfigs, getFieldMapping, resolveUrlPatternWithMapping, getFullFieldMapping, getFieldMappingDefaults, extractUrlPatternParams, getContentTypeConfig, getHreflangsSource, resolveHreflangsFromRecord } from "./content-types";
 import { databaseManager, type DatabaseManager } from "./database";
+import { typeUsesSharedTemplate } from "../shared/sharedLayoutPaths";
+import { findEntryItem, findEntryPresence, itemLocales, loadItemsForType } from "./entry-layer";
 import { applyPerEntryLayer } from "./section-merge";
 import { applySectionLayoutDefaults } from "./section-layout-defaults";
 import { invalidateStaticListingCache } from "./static-listing-cache";
 import { isEntryDetached } from "./shared-layout-entry";
 import { isEmptyDetachedLocaleEntry } from "./empty-locale";
+import { isReservedContentSlug } from "../shared/safe-href";
 import {
   findBestSingleMirrorSource,
   buildMirroredLocaleSingle,
@@ -222,6 +225,10 @@ export class ContentIndex {
   }
 
   buildUrl(contentType: string, locale: string, slug: string, params?: Record<string, string>): string {
+    if (slug == null || isReservedContentSlug(String(slug))) {
+      return "";
+    }
+
     const normalized = this.normalizeType(contentType);
     const config = this.contentTypeConfigs[normalized];
     if (!config?.url_pattern) {
@@ -231,7 +238,9 @@ export class ContentIndex {
     let url = config.url_pattern[locale] || config.url_pattern["default"] || `/${locale}/${slug}`;
     if (params) {
       for (const [key, value] of Object.entries(params)) {
-        url = url.replace(`:${key}`, value);
+        const safe =
+          value == null || isReservedContentSlug(String(value)) ? "" : String(value);
+        url = url.replace(`:${key}`, safe);
       }
     }
     const unresolved: string[] = [];
@@ -372,12 +381,12 @@ export class ContentIndex {
 
     this.autoCreateSingleTemplates(baseDir);
 
-    // Build URL index for DB-backed content types from SQLite cache
-    for (const [contentType, config] of Object.entries(this.contentTypeConfigs)) {
-      if (!config?.database?.slug || !config?.url_pattern) continue;
-      const dbName = config.database.slug;
-      const items = this.database.getMappedItems(dbName);
-      if (!items || items.length === 0) continue;
+    // URL index for database pages (last good copy of each type's source items)
+    for (const contentType of Object.keys(this.contentTypeConfigs)) {
+      const config = this.contentTypeConfigs[contentType];
+      if (!config?.url_pattern) continue;
+      const typeItems = loadItemsForType(this, contentType);
+      if (!typeItems || typeItems.items.length === 0) continue;
       try {
         const fieldMapping = getFullFieldMapping(contentType, this.contentRoot);
         const defaults = getFieldMappingDefaults(contentType, this.contentRoot);
@@ -388,15 +397,13 @@ export class ContentIndex {
           files: [],
           locales: [],
         };
-        for (const item of items) {
+        for (const item of typeItems.items) {
           const itemSlug = String(item.slug || "");
           if (!itemSlug) continue;
-          // Detect the item's own locale so we don't register it under every language's URL pattern.
-          // If no locale field is found, fall back to registering under all patterns (backward compat).
-          const itemLocale = String(item["language"] || item["lang"] || item["locale"] || "");
-          for (const [localeKey, pattern] of Object.entries(config.url_pattern)) {
-            const locale = localeKey === "default" ? "en" : localeKey;
-            if (itemLocale && itemLocale !== locale) continue;
+          for (const locale of itemLocales(item, contentType, this.contentRoot)) {
+            const localeKey = config.url_pattern[locale] ? locale : "default";
+            const pattern = config.url_pattern[localeKey];
+            if (!pattern) continue;
             const url = resolveUrlPatternWithMapping(pattern, item, locale, fieldMapping, defaults);
             if (!url) continue;
             const params = this.extractUrlParams(pattern, url) || {};
@@ -766,6 +773,11 @@ export class ContentIndex {
     if (!pattern || !/:(?!slug\b|locale\b)[a-zA-Z_]+/.test(pattern)) return undefined;
     const fieldMapping = getFullFieldMapping(contentType, this.contentRoot);
     const defaults = getFieldMappingDefaults(contentType, this.contentRoot);
+    const item = findEntryItem(this, this.normalizeType(contentType), slug, locale);
+    if (item) {
+      const fromItem = extractUrlPatternParams(pattern, item, fieldMapping, defaults);
+      if (fromItem.missing.length === 0) return fromItem.params;
+    }
     try {
       const { data } = this.loadMergedContent(contentType, slug, locale);
       if (data) {
@@ -860,13 +872,13 @@ export class ContentIndex {
     const config = this.contentTypeConfigs[normalized];
     const includeEmpty = options?.includeEmptyLocales === true;
 
-    if (config?.database?.slug && getHreflangsSource(normalized, this.contentRoot)) {
-      const dbUrls = this.getAlternateUrlsFromDatabase(slug, normalized);
-      if (dbUrls !== null) {
-        return includeEmpty
-          ? dbUrls
-          : this.filterEmptyDetachedAlternateUrls(slug, normalized, dbUrls);
-      }
+    const dbUrls = getHreflangsSource(normalized, this.contentRoot)
+      ? this.getAlternateUrlsFromDatabase(slug, normalized)
+      : this.getAlternateUrlsFromPresence(slug, normalized);
+    if (dbUrls !== null) {
+      return includeEmpty
+        ? dbUrls
+        : this.filterEmptyDetachedAlternateUrls(slug, normalized, dbUrls);
     }
 
     // YAML: map per-locale URL slug → folder slug when needed
@@ -907,10 +919,7 @@ export class ContentIndex {
     contentType: string,
   ): Record<string, string> | null {
     const config = this.contentTypeConfigs[contentType];
-    const dbName = config?.database?.slug;
-    if (!dbName) return null;
-
-    const items = this.database.getMappedItems(dbName);
+    const items = loadItemsForType(this, contentType)?.items;
     if (!items || items.length === 0) return null;
 
     const item = items.find((i) => String(i.slug ?? "") === slug);
@@ -942,6 +951,18 @@ export class ContentIndex {
       if (url) urls[locale] = url;
     }
 
+    return urls;
+  }
+
+  /** Database pages without a translations field: one URL per language the item is a page in. */
+  private getAlternateUrlsFromPresence(slug: string, contentType: string): Record<string, string> | null {
+    if (!loadItemsForType(this, contentType)) return null;
+    const presence = findEntryPresence(this, contentType, slug);
+    if (!presence) return null;
+    const urls: Record<string, string> = {};
+    for (const [locale, localeSlug] of Object.entries(presence.localeSlugs)) {
+      urls[locale] = this.getCanonicalUrl(contentType, localeSlug, locale);
+    }
     return urls;
   }
 
@@ -1111,7 +1132,7 @@ export class ContentIndex {
       yaml.dump(data, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
 
     for (const [contentType, config] of Object.entries(this.contentTypeConfigs)) {
-      const isSharedLayout = !!(config.database?.slug || (config as { single_template?: boolean }).single_template);
+      const isSharedLayout = typeUsesSharedTemplate(config);
       if (!isSharedLayout) continue;
 
       const folder = config.directory || contentType;
@@ -1847,6 +1868,7 @@ export class ContentIndex {
    */
   refresh(opts?: { syncSlow?: boolean }): void {
     const syncSlow = opts?.syncSlow === true;
+    this.getDatabase().clearMappedMemo();
 
     if (!syncSlow) {
       this.scanFast();
@@ -2041,19 +2063,29 @@ export class ContentIndex {
         let singleLocalePath = resolveTemplateLocalePath(path.join(this.contentRoot, folder), locale, {
           fallbackLocale: "en",
         });
-        if (fs.existsSync(singleLocalePath) && path.resolve(singleLocalePath) !== path.resolve(filePath)) {
+        // Database item without an entry folder: the resolved file is the template itself.
+        const fileIsTemplate = path.resolve(singleLocalePath) === path.resolve(filePath);
+        if (fs.existsSync(singleLocalePath) && !fileIsTemplate) {
           const singleLocale = this.safeYamlLoad(fs.readFileSync(singleLocalePath, "utf-8")) as Record<string, unknown> | null;
           if (singleLocale) {
             baseData = Object.keys(baseData).length > 0 ? deepMerge(baseData, singleLocale) : singleLocale;
           }
         }
-        merged = { ...baseData };
-        const dataOnly = true; // attached path only — detached uses classic merge above
-        if (fs.existsSync(commonPath)) {
-          const commonData = this.safeYamlLoad(fs.readFileSync(commonPath, "utf-8")) as Record<string, unknown> | null;
-          if (commonData) merged = applyPerEntryLayer(merged, commonData, undefined, undefined, dataOnly);
+        if (fileIsTemplate) {
+          merged = localeData
+            ? Object.keys(baseData).length > 0
+              ? deepMerge(baseData, localeData)
+              : { ...localeData }
+            : { ...baseData };
+        } else {
+          merged = { ...baseData };
+          const dataOnly = true; // attached path only — detached uses classic merge above
+          if (fs.existsSync(commonPath)) {
+            const commonData = this.safeYamlLoad(fs.readFileSync(commonPath, "utf-8")) as Record<string, unknown> | null;
+            if (commonData) merged = applyPerEntryLayer(merged, commonData, undefined, undefined, dataOnly);
+          }
+          if (localeData) merged = applyPerEntryLayer(merged, localeData, undefined, undefined, dataOnly);
         }
-        if (localeData) merged = applyPerEntryLayer(merged, localeData, undefined, undefined, dataOnly);
       } else {
         if (fs.existsSync(commonPath)) {
           const commonContent = fs.readFileSync(commonPath, "utf-8");

@@ -41,7 +41,7 @@ import {
 } from "@/components/ui/tabs";
 import { ToggleButtonBarList, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import type { ContentInfo, SeoMeta, SeoLocation, SlugCheckStatus } from "../types";
+import type { ContentInfo, SeoMeta, SeoLocation, SlugRenameCheckStatus } from "../types";
 import { useResolveString } from "@/hooks/useVariables";
 import { cn } from "@/lib/utils";
 import {
@@ -152,7 +152,7 @@ export interface SeoModalProps {
   canonicalDirty?: boolean;
   newSlugValue: string;
   setNewSlugValue: (v: string) => void;
-  slugCheckStatus: SlugCheckStatus;
+  slugCheckStatus: SlugRenameCheckStatus;
   slugRenaming: boolean;
   slugRedirectPrompt: boolean;
   slugOldUrl: string;
@@ -161,6 +161,8 @@ export interface SeoModalProps {
   handleSlugRename: (createRedirect: boolean) => Promise<void>;
   currentLocaleSlug: string;
   slugCheckReason: string | null;
+  /** Re-run the availability check after an `error` result. */
+  onRetrySlugCheck?: () => void;
   setSlugRedirectPrompt: (v: boolean) => void;
   /** Locale for Fields tab provenance / field_overrides (live locale). */
   locale?: string;
@@ -265,6 +267,7 @@ export function SeoModal({
   handleSlugRename,
   currentLocaleSlug,
   slugCheckReason,
+  onRetrySlugCheck,
   setSlugRedirectPrompt,
   locale = "en",
   contentTypeLabel,
@@ -581,7 +584,7 @@ export function SeoModal({
                         )
                       }
                       placeholder={currentLocaleSlug}
-                      className={`flex-1 min-w-0 px-2 py-1 text-sm font-mono rounded-md border bg-background focus:outline-none focus:ring-1 focus:ring-ring ${slugCheckStatus === "taken" ? "border-destructive" : slugCheckStatus === "available" ? "border-green-500" : ""}`}
+                      className={`flex-1 min-w-0 px-2 py-1 text-sm font-mono rounded-md border bg-background focus:outline-none focus:ring-1 focus:ring-ring ${slugCheckStatus === "taken" || slugCheckStatus === "forbidden" ? "border-destructive" : slugCheckStatus === "available" ? "border-status-online" : ""}`}
                       data-testid="input-slug-editor"
                       disabled={slugRenaming}
                       autoFocus
@@ -633,14 +636,33 @@ export function SeoModal({
                     <p className="text-xs text-muted-foreground">Checking availability…</p>
                   )}
                   {slugCheckStatus === "available" && newSlugValue !== currentLocaleSlug && (
-                    <p className="text-xs text-green-600">Slug is available</p>
+                    <p className="text-xs text-status-online" data-testid="text-slug-available">Available</p>
                   )}
-                  {slugCheckStatus === "taken" && slugCheckReason && (
-                    <p className="text-xs text-destructive">{slugCheckReason}</p>
+                  {(slugCheckStatus === "taken" || slugCheckStatus === "forbidden") && slugCheckReason && (
+                    <p className="text-xs text-destructive" data-testid="text-slug-unavailable">{slugCheckReason}</p>
+                  )}
+                  {slugCheckStatus === "error" && (
+                    <div className="flex items-center gap-2" data-testid="text-slug-check-error">
+                      <p className="text-xs text-muted-foreground">
+                        {slugCheckReason || "Couldn't check this slug."}
+                      </p>
+                      {onRetrySlugCheck && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-xs"
+                          onClick={onRetrySlugCheck}
+                          data-testid="button-retry-slug-check"
+                        >
+                          Retry
+                        </Button>
+                      )}
+                    </div>
                   )}
                   {slugLocaleHint &&
                     newSlugValue !== currentLocaleSlug &&
                     slugCheckStatus !== "taken" &&
+                    slugCheckStatus !== "forbidden" &&
                     !slugLocalePrompt && (
                       <p className="text-xs text-amber-700 dark:text-amber-400" data-testid="text-slug-locale-hint">
                         {slugLocaleHint} Confirm when you apply, or change the slug.

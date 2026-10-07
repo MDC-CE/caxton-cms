@@ -3,7 +3,8 @@ import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../content-types", () => ({
+vi.mock("../content-types", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../content-types")>()),
   getFolder: (type: string) => {
     const map: Record<string, string> = {
       landing: "landings",

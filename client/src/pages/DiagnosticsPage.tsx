@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Play, RefreshCw, Save, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
+import {AlertTriangle, Bot, Brain, Check, CircleCheck, ChevronDown, Crosshair, Download, DownloadCloud, Eraser, Filter, Globe, Info, Loader2, Megaphone, Play, RefreshCw, Save, Scale, Search, Stethoscope, Trash2, Users, Wrench, X} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link, useLocation, useSearch } from "wouter";
@@ -108,6 +108,9 @@ import { MetricsAccessGate } from "@/components/MetricsAccessGate";
 import LeadsTab from "@/components/diagnostics/LeadsTab";
 import RuntimeIssuesTab from "@/components/diagnostics/RuntimeIssuesTab";
 import { DiagnosticsSeoPanel, DiagnosticsGeoPanel, DiagnosticsFunnelPanel } from "@/components/diagnostics/DiagnosticsSeoGeoPanels";
+import { AdsGlobalRollupCard } from "@/components/diagnostics/DiagnosticsAdsPanel";
+import { DiagnosticsAdsRoute } from "@/components/diagnostics/DiagnosticsAdsPlatforms";
+import { DiagnosticsLegalPanel, LegalGlobalRollupCard } from "@/components/diagnostics/DiagnosticsLegalPanel";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import {
   RedirectConflictResolverModal,
@@ -1264,16 +1267,11 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
       if (data.status === "busy") {
         throw new Error(
           data.message ||
-            (data.code === "diagnostics_sync_busy"
-              ? "You already have a one-page diagnostics run in progress."
-              : "Another diagnostics job is already running for this site."),
+            "Another diagnostics job is already running for this site.",
         );
       }
       if (data.status === "cached") {
         return { kind: "cached" as const, data };
-      }
-      if (data.status === "completed" && data.mode === "sync") {
-        return { kind: "completed" as const, data };
       }
       if (!data.job_id) {
         throw new Error("Missing job_id from diagnostics-jobs");
@@ -1622,6 +1620,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
     { key: "integrity", label: "Integrity" },
     { key: "content", label: "Content" },
     { key: "components", label: "Components" },
+    { key: "design", label: "Design" },
     { key: "forms", label: "Forms" },
     { key: "bindings", label: "Bindings" },
     { key: "performance", label: "Performance" },
@@ -1795,6 +1794,8 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
 
   return (
     <div className="space-y-6">
+      <AdsGlobalRollupCard />
+      <LegalGlobalRollupCard />
       {jobPanel && (
         <div
           className="rounded-lg border border-border overflow-hidden"
@@ -3042,7 +3043,7 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
 
 
 const DIAGNOSTICS_TABS: {
-  id: "global-health" | "leads" | "runtime-issues" | "seo" | "geo" | "funnel";
+  id: DiagnosticsTabId;
   label: string;
   href: string;
   Icon: LucideIcon;
@@ -3053,6 +3054,8 @@ const DIAGNOSTICS_TABS: {
   { id: "seo", label: "SEO", href: "/private/diagnostics/seo", Icon: Crosshair },
   { id: "geo", label: "GEO", href: "/private/diagnostics/geo", Icon: Brain },
   { id: "funnel", label: "Funnel", href: "/private/diagnostics/funnel", Icon: Filter },
+  { id: "ads", label: "Ads", href: "/private/diagnostics/ads", Icon: Megaphone },
+  { id: "legal", label: "Legal", href: "/private/diagnostics/legal", Icon: Scale },
 ];
 
 function tabHref(id: DiagnosticsTabId): string {
@@ -3131,6 +3134,12 @@ export default function DiagnosticsPage() {
             </TabsContent>
             <TabsContent value="funnel">
               <DiagnosticsFunnelPanel />
+            </TabsContent>
+            <TabsContent value="ads">
+              <DiagnosticsAdsRoute />
+            </TabsContent>
+            <TabsContent value="legal">
+              <DiagnosticsLegalPanel />
             </TabsContent>
           </Tabs>
         </div>

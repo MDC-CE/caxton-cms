@@ -12,6 +12,8 @@ import { schemaValidator } from "./schema";
 import { sitemapValidator } from "./sitemap";
 import { componentsValidator } from "./components";
 import { backgroundsValidator } from "./backgrounds";
+import { richTextStylesValidator } from "./rich-text-styles";
+import { designLayoutValidator } from "./design-layout";
 import { faqsValidator } from "./faqs";
 import { seoDepthValidator } from "./seo-depth";
 import { seoDuplicatesValidator } from "./seo-duplicates";
@@ -36,6 +38,7 @@ import { brokenAnchorsValidator } from "./broken-anchors";
 import { sectionVariantsValidator } from "./section-variants";
 import { componentBehaviorsValidator } from "./component-behaviors";
 import { ctaTrackingValidator } from "./cta-tracking";
+import { internalLinkUtmValidator } from "./internal-link-utm";
 import { requiredFieldsValidator } from "./required-fields";
 import { schemaOrgCompanionsValidator } from "./schema-org-companions";
 import { staticFieldOverridesValidator } from "./static-field-overrides";
@@ -50,8 +53,10 @@ import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
 import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
 import { unassignedVariablesValidator } from "./unassigned-variables";
+import { variablesMetadataValidator } from "./variables-metadata";
 import { funnelCompletenessValidator } from "./funnel-completeness";
 import { draftIntegrityValidator } from "./draft-integrity";
+import { textLimitsValidator } from "./text-limits";
 
 export const validators: Validator[] = [
   redirectValidator,
@@ -62,7 +67,10 @@ export const validators: Validator[] = [
   sitemapValidator,
   componentsValidator,
   sectionVariantsValidator,
+  textLimitsValidator,
   backgroundsValidator,
+  richTextStylesValidator,
+  designLayoutValidator,
   faqsValidator,
   seoDepthValidator,
   seoDuplicatesValidator,
@@ -95,10 +103,12 @@ export const validators: Validator[] = [
   brokenAnchorsValidator,
   componentBehaviorsValidator,
   ctaTrackingValidator,
+  internalLinkUtmValidator,
   updatedAtValidator,
   siteLinkIndexValidator,
   siteRelationIndexValidator,
   unassignedVariablesValidator,
+  variablesMetadataValidator,
   draftIntegrityValidator,
 ];
 
@@ -150,6 +160,8 @@ export {
   sitemapValidator,
   componentsValidator,
   backgroundsValidator,
+  richTextStylesValidator,
+  designLayoutValidator,
   faqsValidator,
   seoDepthValidator,
   seoDuplicatesValidator,

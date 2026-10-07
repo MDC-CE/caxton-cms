@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { SeoModal, type SeoModalTab } from "@/components/DebugBubble/components/SeoModal";
-import type { ContentInfo, SeoMeta, SeoLocation, SlugCheckStatus } from "@/components/DebugBubble/types";
+import type { ContentInfo, SeoMeta, SeoLocation } from "@/components/DebugBubble/types";
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
+import { useSlugRenameCheck } from "@/hooks/useSlugRenameCheck";
 import { useSeoModalSaves } from "@/hooks/useSeoModalSaves";
 import { useContentTypes } from "@/hooks/useContentTypes";
 import { normalizeLocale } from "@/lib/locale";
@@ -82,8 +83,6 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
   const baselineLocationsRef = useRef<string[]>([]);
 
   const [newSlugValue, setNewSlugValue] = useState("");
-  const [slugCheckStatus, setSlugCheckStatus] = useState<SlugCheckStatus>("idle");
-  const [slugCheckReason, setSlugCheckReason] = useState<string | null>(null);
   const [slugRenaming, setSlugRenaming] = useState(false);
   const [slugRedirectPrompt, setSlugRedirectPrompt] = useState(false);
   const [slugOldUrl, setSlugOldUrl] = useState("");
@@ -166,8 +165,6 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
       );
       setSeoLocationSearch("");
       setNewSlugValue(typeof data.slug === "string" && data.slug ? data.slug : target.slug);
-      setSlugCheckStatus("idle");
-      setSlugCheckReason(null);
       setSlugRedirectPrompt(false);
     } catch (error) {
       console.error("Error fetching SEO preview:", error);
@@ -206,21 +203,17 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
     refetch: fetchSeoPreview,
   });
 
-  useEffect(() => {
-    if (!newSlugValue || !target?.contentType || newSlugValue === currentLocaleSlug) {
-      setSlugCheckStatus("idle");
-      setSlugCheckReason(null);
-      return;
-    }
-    const slugRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    if (!slugRegex.test(newSlugValue)) {
-      setSlugCheckStatus("taken");
-      setSlugCheckReason("Use only lowercase letters, numbers, and hyphens");
-      return;
-    }
-    setSlugCheckStatus("available");
-    setSlugCheckReason(null);
-  }, [newSlugValue, target?.contentType, currentLocaleSlug]);
+  const {
+    status: slugCheckStatus,
+    reason: slugCheckReason,
+    retry: retrySlugCheck,
+  } = useSlugRenameCheck({
+    contentType: target?.contentType,
+    folderSlug: target?.slug,
+    locale,
+    newSlug: newSlugValue,
+    currentSlug: currentLocaleSlug,
+  });
 
   const handleSlugRename = async (createRedirect: boolean) => {
     if (!target?.contentType || !target?.slug || !newSlugValue || slugCheckStatus !== "available") return;
@@ -353,6 +346,7 @@ export function ManagedSeoModal({ open, onOpenChange, target, onSaved }: Managed
       handleSlugRename={handleSlugRename}
       currentLocaleSlug={currentLocaleSlug}
       slugCheckReason={slugCheckReason}
+      onRetrySlugCheck={retrySlugCheck}
       setSlugRedirectPrompt={setSlugRedirectPrompt}
       locale={locale}
       contentTypeLabel={

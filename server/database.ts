@@ -12,7 +12,8 @@ import { applyEditorialStampToDbMappedUpdates } from "./editorial-updated-at";
 import { setJobState } from "./db-job-state";
 import type { MediaGallery } from "./media-gallery";
 import { expandEditorFieldTokens } from "@shared/editor-field-values";
-import { resolveCacheTtlMinutes } from "@shared/db-cache-ttl";
+import { resolveCacheTtlMinutes, resolveRefreshRetryMinutes, type DbCacheTtlConfig } from "@shared/db-cache-ttl";
+import { freezeShared } from "./utils/deepFreeze";
 import { child } from "./logger";
 const log = child({ module: "database" });
 
@@ -58,11 +59,7 @@ export interface DatabaseConfig {
       results_path?: string;
     };
   };
-  cache?: {
-    ttl_minutes?: number;
-    /** @deprecated Prefer ttl_minutes. */
-    ttl_hours?: number;
-  };
+  cache?: DbCacheTtlConfig;
   field_mapping?: Record<string, string>;
   filter_by_locale?: boolean;
   editor?: Record<string, { type?: string; options?: (string | { value: string; label: string })[]; populate_options?: boolean; allow_custom_values?: boolean; split_comma_values?: boolean; cache_images?: boolean; description?: string }>;
@@ -541,10 +538,23 @@ interface OverridesFile {
   entries: Record<string, Record<string, unknown>>;
 }
 
+export type LastGoodItems = {
+  items: Record<string, unknown>[];
+  fetchedAt: string;
+  /** Older than the database's cache TTL (source not refreshed since). */
+  stale: boolean;
+  ageMs: number;
+};
+
 export class DatabaseManager {
   private configs = new Map<string, DatabaseConfig>();
   private memoryCache = new Map<string, { data: CacheEntry; expires: number }>();
   private cache: IDatabaseCache = new SqliteCache();
+  /** Parsed mapped copy per database, reused until the stored copy's fetched_at changes. */
+  private mappedMemo = new Map<string, { fetchedAt: string; items: Record<string, unknown>[] }>();
+  private memoGeneration = 0;
+  /** Listing rows per content type, keyed by the copy's fetched_at + memo generation. */
+  private listingMemo = new Map<string, { key: string; items: Record<string, unknown>[] }>();
 
   private overridesPath(dbName: string): string {
     return path.join(this.dbDir, dbName, "overrides.json");
@@ -726,6 +736,7 @@ export class DatabaseManager {
     }
     this.configs.set(name, config);
     this.memoryCache.delete(name);
+    this.clearMappedMemo(name);
   }
 
   delete(name: string): void {
@@ -737,6 +748,7 @@ export class DatabaseManager {
     this.configs.delete(name);
     this.memoryCache.delete(name);
     this.cache.clear(name);
+    this.clearMappedMemo(name);
   }
 
   private scheduleExternalImages(
@@ -746,6 +758,39 @@ export class DatabaseManager {
   ): void {
     if (!this.mediaGallery) return;
     ExternalImageCacher.scheduleItems(dbName, config, items, this.mediaGallery);
+  }
+
+  private refreshFailedAt = new Map<string, number>();
+  private refreshInFlight = new Map<string, Promise<void>>();
+
+  /**
+   * Refresh a database whose stored copy is missing or past its TTL. Never throws:
+   * a failed refresh is logged and the last good copy keeps serving. After a failure
+   * the source is not called again for `refresh_retry_minutes`; a manual refresh
+   * (`fetchItems(name, true)`) skips that wait and a success ends it.
+   */
+  async refreshIfExpired(name: string): Promise<void> {
+    const config = this.configs.get(name);
+    if (!config) return;
+    const lastGood = this.getLastGoodItems(name);
+    if (lastGood && !lastGood.stale) return;
+    const failedAt = this.refreshFailedAt.get(name);
+    if (failedAt !== undefined && Date.now() - failedAt < resolveRefreshRetryMinutes(config.cache) * 60_000) return;
+
+    const running = this.refreshInFlight.get(name);
+    if (running) return running;
+    const run = this.fetchItems(name, true)
+      .then(() => undefined)
+      .catch((err) => {
+        this.refreshFailedAt.set(name, Date.now());
+        log.warn(
+          { err, database: name, servingCopyFrom: lastGood?.fetchedAt ?? null },
+          `[DatabaseManager] Refresh of "${name}" failed; serving the last good copy`,
+        );
+      })
+      .finally(() => this.refreshInFlight.delete(name));
+    this.refreshInFlight.set(name, run);
+    return run;
   }
 
   async fetchItems(
@@ -824,6 +869,7 @@ export class DatabaseManager {
       raw_count: rawItems.length,
     };
     this.cache.write(name, rawEntry, true);
+    this.refreshFailedAt.delete(name);
 
     let items = config.field_mapping
       ? rawItems.map((item) =>
@@ -867,6 +913,7 @@ export class DatabaseManager {
     };
 
     this.cache.write(name, entry);
+    this.clearMappedMemo(name);
     this.memoryCache.set(name, {
       data: entry,
       expires: Date.now() + ttlMinutes * 60 * 1000,
@@ -1014,38 +1061,63 @@ export class DatabaseManager {
 
     try {
       const result = await this.fetchItems(dbName, forceRefresh);
-      let rawItems = result.items;
-
-      const dbConfig = this.get(dbName);
-      if (dbConfig.editor) {
-        const cacheFields = Object.entries(dbConfig.editor)
-          .filter(([, hint]) => hint.cache_images === true)
-          .map(([field]) => field);
-        if (cacheFields.length > 0) {
-          rawItems = rawItems.map((item) => {
-            const updated = { ...item };
-            for (const field of cacheFields) {
-              const val = item[field];
-              if (typeof val === "string" && val.startsWith("http")) {
-                const resolved = resolveBySourceUrl(val);
-                if (resolved) updated[field] = resolved;
-              }
-            }
-            return updated;
-          });
-        }
-      }
-
-      const ctMapping = getFieldMapping(contentType, this.contentRoot);
-      const fullMapping = getFullFieldMapping(contentType, this.contentRoot);
-      if ((!ctMapping || Object.keys(ctMapping).length === 0) && !fullMapping?.[RESERVED_IMAGE_FIELD] && !fullMapping?.[RESERVED_SLUG_FIELD]) {
-        return rawItems;
-      }
-      return applyContentTypeMapping(rawItems, ctMapping || {}, contentType, fullMapping);
+      return this.mapItemsForListing(dbName, result.items, contentType);
     } catch (err) {
       log.error({ err: err }, `[DatabaseManager] Failed to fetch mapped items for "${contentType}":`);
       return [];
     }
+  }
+
+  private mapItemsForListing(
+    dbName: string,
+    items: Record<string, unknown>[],
+    contentType: string,
+  ): Record<string, unknown>[] {
+    let rawItems = items;
+    const dbConfig = this.get(dbName);
+    if (dbConfig.editor) {
+      const cacheFields = Object.entries(dbConfig.editor)
+        .filter(([, hint]) => hint.cache_images === true)
+        .map(([field]) => field);
+      if (cacheFields.length > 0) {
+        rawItems = rawItems.map((item) => {
+          const updated = { ...item };
+          for (const field of cacheFields) {
+            const val = item[field];
+            if (typeof val === "string" && val.startsWith("http")) {
+              const resolved = resolveBySourceUrl(val);
+              if (resolved) updated[field] = resolved;
+            }
+          }
+          return updated;
+        });
+      }
+    }
+
+    const ctMapping = getFieldMapping(contentType, this.contentRoot);
+    const fullMapping = getFullFieldMapping(contentType, this.contentRoot);
+    if ((!ctMapping || Object.keys(ctMapping).length === 0) && !fullMapping?.[RESERVED_IMAGE_FIELD] && !fullMapping?.[RESERVED_SLUG_FIELD]) {
+      return rawItems;
+    }
+    return applyContentTypeMapping(rawItems, ctMapping || {}, contentType, fullMapping);
+  }
+
+  /**
+   * Listing rows for a database-backed type from the last good copy (no fetch):
+   * same mapping as fetchMappedItems, parsed once per stored copy. Shared and
+   * frozen outside production; callers copy before changing.
+   */
+  getListingItems(contentType: string): (LastGoodItems & { dbName: string }) | null {
+    const dbName = getContentTypeConfig(contentType, this.contentRoot)?.database?.slug;
+    if (!dbName || !this.exists(dbName)) return null;
+    const lastGood = this.getLastGoodItems(dbName);
+    if (!lastGood) return null;
+    const key = `${lastGood.fetchedAt}\u0000${this.memoGeneration}`;
+    const hit = this.listingMemo.get(contentType);
+    if (hit && hit.key === key) return { ...lastGood, items: hit.items, dbName };
+    const items = freezeShared(this.mapItemsForListing(dbName, lastGood.items, contentType));
+    this.listingMemo.set(contentType, { key, items });
+    return { ...lastGood, items, dbName };
   }
 
   getCacheInfo(name: string): { fetched_at: string; item_count: number } | null {
@@ -1094,13 +1166,43 @@ export class DatabaseManager {
     return null;
   }
 
-  getMappedItems(name: string): Record<string, unknown>[] | null {
+  /**
+   * Last stored mapped copy, even when older than the TTL (a broken source keeps
+   * serving it). Items are shared and frozen outside production: copy before changing.
+   */
+  getLastGoodItems(name: string): LastGoodItems | null {
     const config = this.configs.get(name);
     if (!config) return null;
-    const ttlMinutes = resolveCacheTtlMinutes(config.cache);
-    const mappedEntry = this.cache.read(name, ttlMinutes);
-    if (mappedEntry) return mappedEntry.items;
-    return null;
+    const fetchedAt = this.cache.readFetchedAt(name);
+    if (!fetchedAt) {
+      this.mappedMemo.delete(name);
+      return null;
+    }
+    let memo = this.mappedMemo.get(name);
+    if (!memo || memo.fetchedAt !== fetchedAt) {
+      const entry = this.cache.read(name, Infinity);
+      if (!entry) return null;
+      memo = { fetchedAt: entry.fetched_at, items: freezeShared(entry.items) };
+      this.mappedMemo.set(name, memo);
+    }
+    const ageMs = Math.max(0, Date.now() - new Date(memo.fetchedAt).getTime());
+    const ttlMs = resolveCacheTtlMinutes(config.cache) * 60 * 1000;
+    return { items: memo.items, fetchedAt: memo.fetchedAt, stale: ageMs > ttlMs, ageMs };
+  }
+
+  getMappedItems(name: string): Record<string, unknown>[] | null {
+    return this.getLastGoodItems(name)?.items ?? null;
+  }
+
+  /** Bumped whenever the memo is cleared; derived per-type memos key on it. */
+  get mappedMemoVersion(): number {
+    return this.memoGeneration;
+  }
+
+  clearMappedMemo(name?: string): void {
+    if (name) this.mappedMemo.delete(name);
+    else this.mappedMemo.clear();
+    this.memoGeneration++;
   }
 
   getOriginalMappedItem(
@@ -1133,6 +1235,7 @@ export class DatabaseManager {
   clearCache(name: string): void {
     this.memoryCache.delete(name);
     this.cache.clear(name);
+    this.clearMappedMemo(name);
   }
 
   patchDbEntry(
@@ -1200,6 +1303,7 @@ export class DatabaseManager {
       markFileAsModified(path.relative(process.cwd(), path.join(this.dbDir, dbName, "overrides.json")), author);
 
       this.memoryCache.delete(dbName);
+      this.clearMappedMemo(dbName);
       return patchedIdx !== -1;
     } catch {
       return false;
@@ -1256,6 +1360,7 @@ export class DatabaseManager {
 
       this.memoryCache.delete(dbName);
       this.cache.clear(dbName);
+      this.clearMappedMemo(dbName);
 
       return true;
     } catch {
@@ -1265,31 +1370,7 @@ export class DatabaseManager {
 
   /** Sync read of cached mapped items for seo-index rebuild (empty when cache is cold). */
   getMappedItemsFromCacheSync(contentType: string): Record<string, unknown>[] {
-    const ctConfig = getContentTypeConfig(contentType, this.contentRoot);
-    if (!ctConfig?.database?.slug) return [];
-    const dbName = ctConfig.database.slug;
-    if (!this.exists(dbName)) return [];
-
-    const memEntry = this.memoryCache.get(dbName);
-    let rawItems: Record<string, unknown>[] | undefined = memEntry?.data?.items as
-      | Record<string, unknown>[]
-      | undefined;
-    if (!rawItems?.length) {
-      const cached = this.cache.read(dbName, Infinity);
-      rawItems = cached?.items as Record<string, unknown>[] | undefined;
-    }
-    if (!rawItems?.length) return [];
-
-    const ctMapping = getFieldMapping(contentType, this.contentRoot);
-    const fullMapping = getFullFieldMapping(contentType, this.contentRoot);
-    if (
-      (!ctMapping || Object.keys(ctMapping).length === 0) &&
-      !fullMapping?.[RESERVED_IMAGE_FIELD] &&
-      !fullMapping?.[RESERVED_SLUG_FIELD]
-    ) {
-      return rawItems;
-    }
-    return applyContentTypeMapping(rawItems, ctMapping || {}, contentType, fullMapping);
+    return this.getListingItems(contentType)?.items ?? [];
   }
 }
 

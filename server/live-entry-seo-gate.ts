@@ -38,6 +38,12 @@ import fs from "fs";
 import { contentIndex } from "./content-index";
 import { formatSchemaOrgCompanionGateError } from "./schema-org-requirements";
 import {
+  SCHEMA_ORG_PAGE_URL_MISMATCH_CODE,
+  findSchemaOrgPageUrlGateMismatches,
+  formatSchemaOrgPageUrlGateError,
+} from "./schema-org-page-url-gate";
+import type { SchemaOrgPageUrlMismatch } from "@shared/schema-org-page-url";
+import {
   validateFormFieldSources,
   formatFormFieldSourceErrors,
 } from "@shared/validateFormFieldSources";
@@ -68,9 +74,12 @@ export type LiveSeoGateFailure = {
     | LiveRequiredFieldsCode
     | "empty_detached_locale"
     | "empty_page"
-    | "schema_org_companion";
+    | "schema_org_companion"
+    | typeof SCHEMA_ORG_PAGE_URL_MISMATCH_CODE;
   /** Field paths that must be set together (meta.* and/or editor.required keys). */
   missing_fields?: string[];
+  /** Page-type schema_org sections whose typed url / @id names another page. */
+  schema_org_page_url_mismatches?: SchemaOrgPageUrlMismatch[];
 };
 
 /**
@@ -239,6 +248,26 @@ export function evaluateLiveEntrySeoAndRequiredFields(
     : null;
   if (companionErr) {
     return { message: companionErr, code: "schema_org_companion" };
+  }
+
+  if (flags.runSchemaOrgCompanion) {
+    const pageUrlMismatches = findSchemaOrgPageUrlGateMismatches({
+      sections: resolvedPage.sections,
+      contentType,
+      slug,
+      locale,
+      pageData: resolvedPage,
+      canonicalUrl: metaForGate?.canonical_url,
+      contentRoot,
+    });
+    const pageUrlErr = formatSchemaOrgPageUrlGateError(pageUrlMismatches);
+    if (pageUrlErr) {
+      return {
+        message: pageUrlErr,
+        code: SCHEMA_ORG_PAGE_URL_MISMATCH_CODE,
+        schema_org_page_url_mismatches: pageUrlMismatches,
+      };
+    }
   }
 
   const formSourceIssues = flags.runFormSources

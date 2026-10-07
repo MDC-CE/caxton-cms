@@ -14,15 +14,21 @@ async function reschedule(jobType: string, delayMs = DAY_MS): Promise<void> {
   }
 }
 
-/** Daily (self-rescheduling): stale_since / 30-day flag / 90-day abandoned_stale close. */
+/**
+ * Daily (self-rescheduling): stale_since / 10-day flag / 30-day abandoned_stale close, then
+ * open blockers / 10-day flag / 30-day abandoned_blocked close.
+ */
 export class ProposalStaleSweepJob extends Job {
   async run(): Promise<{ ok: boolean }> {
     const { getSiteContextMap } = await import("../../site-manager");
     const { proposalServiceForSite } = await import("../../content-proposals/service");
     try {
       for (const ctx of Array.from(getSiteContextMap().values())) {
-        const report = await proposalServiceForSite(ctx).staleSweep();
+        const svc = proposalServiceForSite(ctx);
+        const report = await svc.staleSweep();
         log.info({ site: ctx.contentRootName, ...report }, "[ProposalStaleSweepJob] done");
+        const blocked = await svc.blockedSweep();
+        log.info({ site: ctx.contentRootName, ...blocked }, "[ProposalStaleSweepJob] blocked sweep done");
       }
     } finally {
       await reschedule("proposal_stale_sweep");
@@ -31,32 +37,23 @@ export class ProposalStaleSweepJob extends Job {
   }
 }
 
-/** Daily (self-rescheduling): verify `_draft.proposal` links locally and against production. */
+/**
+ * Daily (self-rescheduling), live server only: unlink / delete drafts whose proposal is missing
+ * or closed. A laptop holds a test copy of proposals and never cleans drafts.
+ */
 export class DraftLinkCheckJob extends Job {
   async run(): Promise<{ ok: boolean }> {
+    const { isLiveServer } = await import("../../live-server");
+    if (!isLiveServer()) {
+      log.info("[DraftLinkCheckJob] skipped: not the live server");
+      return { ok: true };
+    }
     const { getSiteContextMap } = await import("../../site-manager");
-    const { proposalServiceForSite, pipelineEnv } = await import("../../content-proposals/service");
-    const { fetchProductionAdmin, resolveProductionOrigin } = await import("../../dev-production-fetch");
+    const { proposalServiceForSite } = await import("../../content-proposals/service");
     try {
       for (const ctx of Array.from(getSiteContextMap().values())) {
-        const site = ctx.contentRootName;
-        const remoteStatus = async (proposalId: string): Promise<"open" | "closed" | "unknown"> => {
-          if (pipelineEnv() === "production") return "closed";
-          const origin = resolveProductionOrigin(site);
-          if (!origin) return "unknown";
-          const res = await fetchProductionAdmin(
-            new URL(`/api/admin/proposals/${encodeURIComponent(proposalId)}`, origin),
-            { method: "GET" },
-            origin,
-          );
-          if (!res.ok) return res.kind === "http" && res.status === 404 ? "closed" : "unknown";
-          const body = (await res.response.json().catch(() => null)) as { proposal?: { status?: string } } | null;
-          const status = body?.proposal?.status;
-          if (!status) return "unknown";
-          return status === "open" || status === "partial" ? "open" : "closed";
-        };
-        const report = await proposalServiceForSite(ctx).verifyDraftLinks({ remoteStatus });
-        log.info({ site, ...report }, "[DraftLinkCheckJob] done");
+        const report = await proposalServiceForSite(ctx).verifyDraftLinks();
+        log.info({ site: ctx.contentRootName, ...report }, "[DraftLinkCheckJob] done");
       }
     } finally {
       await reschedule("draft_link_check");
@@ -65,13 +62,9 @@ export class DraftLinkCheckJob extends Job {
   }
 }
 
-/** Startup: make sure both daily jobs are queued once; warn when PIPELINE_ENV is unset. */
+/** Startup: queue the daily jobs once (draft link check only on the live server). */
 export async function scheduleProposalMaintenance(): Promise<void> {
-  if (!process.env.PIPELINE_ENV?.trim()) {
-    log.warn(
-      "PIPELINE_ENV is not set — proposal drafts are linked with env 'unknown', and the daily link check verifies them against local and production before cleaning up.",
-    );
-  }
+  const { isLiveServer } = await import("../../live-server");
   await reschedule("proposal_stale_sweep", 10 * 60 * 1000);
-  await reschedule("draft_link_check", 15 * 60 * 1000);
+  if (isLiveServer()) await reschedule("draft_link_check", 15 * 60 * 1000);
 }

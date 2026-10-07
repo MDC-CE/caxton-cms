@@ -108,3 +108,85 @@ export function resolvedStatsFromArchiveSummary(summary: {
     warnings: Number(summary.warnings) || 0,
   };
 }
+
+type IssueNextAction = {
+  tool: string;
+  priority: "required" | "recommended" | "optional";
+  reason: string;
+  args_hint?: Record<string, unknown>;
+};
+
+type RedirectSuggestionRow = {
+  content_type: string;
+  slug: string;
+  locale: string;
+  from: string;
+  to: string;
+  reason: string;
+  inbound?: { from: string; source: string; all_languages: boolean }[];
+};
+
+/**
+ * Source-only facts on issue rows become warnings / next_actions (same row shape
+ * for every entry): `stale_source_data` for pages checked against an old
+ * database copy, and the redirect for SOURCE_ITEM_REMOVED.
+ */
+export function issueSourceGuidance(
+  rows: Record<string, unknown>[],
+  siteHint: Record<string, string> = {},
+): { warnings: Array<{ code: string; message: string }>; next_actions: IssueNextAction[] } {
+  const warnings: Array<{ code: string; message: string }> = [];
+  const next_actions: IssueNextAction[] = [];
+
+  const staleDbs = new Map<string, number>();
+  let staleWithoutDb = 0;
+  for (const row of rows) {
+    const age = row.stale_source_age_ms;
+    if (typeof age !== "number") continue;
+    const db = typeof row.stale_source_database === "string" ? row.stale_source_database : "";
+    if (db) staleDbs.set(db, Math.max(staleDbs.get(db) ?? 0, age));
+    else staleWithoutDb++;
+  }
+  if (staleDbs.size > 0 || staleWithoutDb > 0) {
+    const dbList = [...staleDbs.keys()];
+    warnings.push({
+      code: "stale_source_data",
+      message:
+        "Some issues were checked against an old database copy (stale_source_age_ms on the row); the source may already be fixed. " +
+        `Refresh the database${dbList.length ? ` (${dbList.join(", ")})` : ""} and re-check before adding an override.`,
+    });
+    for (const database of dbList) {
+      next_actions.push({
+        tool: "list_database_items",
+        priority: "recommended",
+        reason: `Refresh "${database}" before overriding: issues on its pages came from an old copy.`,
+        args_hint: { database, refresh: true, ...siteHint },
+      });
+    }
+  }
+
+  for (const row of rows) {
+    const s = row.redirect_suggestion as RedirectSuggestionRow | undefined;
+    if (!s || typeof s.from !== "string" || typeof s.to !== "string") continue;
+    const inbound = s.inbound ?? [];
+    next_actions.push({
+      tool: "update_redirect",
+      priority: "recommended",
+      reason:
+        `SOURCE_ITEM_REMOVED: redirect ${s.from} to ${s.to} (${s.reason.replace(/_/g, " ")}, same language ${s.locale}).` +
+        (inbound.length
+          ? ` Moves ${inbound.length} old address(es) saved on the removed page too: ${inbound.map((r) => r.from).join(", ")}. Show this list to staff before applying.`
+          : ""),
+      args_hint: {
+        action: "add",
+        from: s.from,
+        to: s.to,
+        locale: s.locale,
+        removed_entry: { content_type: s.content_type, slug: s.slug, locale: s.locale },
+        ...siteHint,
+      },
+    });
+  }
+
+  return { warnings, next_actions };
+}

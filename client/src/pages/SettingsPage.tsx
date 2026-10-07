@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  IconCheck,
   IconCode,
   IconLanguage,
   IconLoader2,
@@ -8,32 +7,30 @@ import {
   IconStar,
   IconTrash,
   IconDeviceFloppy,
-  IconPlayerPlay,
-  IconAlertCircle,
   IconPhoto,
-  IconChartBar,
-  IconInfoCircle,
   IconScale,
   IconMessage,
   IconServer,
   IconRobot,
+  IconSettings,
+  IconChevronDown,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { BRAND_LOGO_ENSURE_TAGS, OG_IMAGE_ENSURE_TAGS } from "@shared/standardMediaTags";
 import { ImagePickerDialog } from "@/components/editing/ImagePickerDialog";
 import { LinkPicker } from "@/components/editing/LinkPicker";
-import { Link, useSearch, useLocation } from "wouter";
-import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
+import { useLocation } from "wouter";
+import { SettingsShell, type SettingsSecondaryTab } from "@/components/settings/SettingsShell";
+import { generalSettingsHref, resolveGeneralSettingsTab, type GeneralSettingsTab } from "@/lib/settings-tab";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import { ToggleButtonBarList, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -46,6 +43,8 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { ServerTab } from "@/components/settings/ServerTab";
 import { RobotsTab } from "@/components/settings/RobotsTab";
+import { MigrationsTab } from "@/components/settings/MigrationsTab";
+import { ConsentWindowCard } from "@/components/settings/ConsentWindowCard";
 import {
   consentLabelFromKey,
   getBuiltinConsentFallback,
@@ -56,16 +55,14 @@ import {
   stripConsentHtml,
 } from "@shared/consent-settings";
 
-const SETTINGS_TABS = ["locales", "migrations", "brand", "robots", "legal", "server"] as const;
-type SettingsTab = (typeof SETTINGS_TABS)[number];
-
-function resolveSettingsTab(search: string): SettingsTab {
-  const tab = new URLSearchParams(search).get("tab");
-  if (tab && (SETTINGS_TABS as readonly string[]).includes(tab)) {
-    return tab as SettingsTab;
-  }
-  return "locales";
-}
+const GENERAL_TABS: SettingsSecondaryTab<GeneralSettingsTab>[] = [
+  { id: "locales", label: "Locales", href: generalSettingsHref("locales"), Icon: IconLanguage },
+  { id: "migrations", label: "Migrations", href: generalSettingsHref("migrations"), Icon: IconCode },
+  { id: "brand", label: "Brand", href: generalSettingsHref("brand"), Icon: IconPhoto },
+  { id: "robots", label: "Robots", href: generalSettingsHref("robots"), Icon: IconRobot },
+  { id: "legal", label: "Legal", href: generalSettingsHref("legal"), Icon: IconScale },
+  { id: "server", label: "Server", href: generalSettingsHref("server"), Icon: IconServer },
+];
 
 interface LocaleEntry {
   code: string;
@@ -76,18 +73,6 @@ interface LocaleSettings {
   default_locale: string;
   supported_locales: LocaleEntry[];
 }
-
-interface Migration {
-  filename: string;
-  name: string;
-  description: string;
-}
-
-interface MigrationRowState {
-  running: boolean;
-  result: { success: boolean; output: string } | null;
-}
-
 
 interface BrandSettings {
   title: string;
@@ -108,25 +93,16 @@ interface BrandSettings {
 export default function SettingsPage() {
   const { toast } = useToast();
   const { hasCapability, isValidated } = useDebugAuth();
-  const searchString = useSearch();
-  const [, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState<SettingsTab>(() => resolveSettingsTab(searchString));
+  const [pathname, setLocation] = useLocation();
+  const routeTab = resolveGeneralSettingsTab(pathname);
+  const activeTab: GeneralSettingsTab = routeTab ?? "locales";
 
   useEffect(() => {
-    const tab = new URLSearchParams(searchString).get("tab");
-    if (tab === "auth") {
-      setLocation("/private/security/auth");
-      return;
-    }
-    setActiveTab(resolveSettingsTab(searchString));
-  }, [searchString, setLocation]);
+    if (!routeTab) setLocation(generalSettingsHref("locales"), { replace: true });
+  }, [routeTab, setLocation]);
 
   const { data, isLoading } = useQuery<LocaleSettings>({
     queryKey: ["/api/settings/locales"],
-  });
-
-  const { data: migrations, isLoading: migrationsLoading } = useQuery<Migration[]>({
-    queryKey: ["/api/migrations"],
   });
 
   const { data: brandData, isLoading: brandLoading } = useQuery<BrandSettings>({
@@ -140,7 +116,6 @@ export default function SettingsPage() {
   const [newLabel, setNewLabel] = useState("");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [migrationStates, setMigrationStates] = useState<Record<string, MigrationRowState>>({});
   const [brandImagePickerOpen, setBrandImagePickerOpen] = useState(false);
   const [logoPickerOpen, setLogoPickerOpen] = useState(false);
   const [logoDarkPickerOpen, setLogoDarkPickerOpen] = useState(false);
@@ -194,6 +169,8 @@ export default function SettingsPage() {
   const [legalTermsUrl, setLegalTermsUrl] = useState("");
   const [legalPrivacyUrl, setLegalPrivacyUrl] = useState("");
   const [legalSaving, setLegalSaving] = useState<string | null>(null);
+  const [legalUrlsOpen, setLegalUrlsOpen] = useState(false);
+  const [consentMessagesOpen, setConsentMessagesOpen] = useState(false);
 
   const { data: consentDataRaw, refetch: refetchConsent } = useQuery({
     queryKey: ["/api/settings/consent"],
@@ -524,87 +501,25 @@ export default function SettingsPage() {
     }
   }
 
-  async function runMigration(filename: string) {
-    setMigrationStates((prev) => ({
-      ...prev,
-      [filename]: { running: true, result: null },
-    }));
-    try {
-      const res = await apiRequest("POST", "/api/migrations/run", { filename });
-      const result = await res.json();
-      setMigrationStates((prev) => ({
-        ...prev,
-        [filename]: { running: false, result },
-      }));
-    } catch (err: any) {
-      setMigrationStates((prev) => ({
-        ...prev,
-        [filename]: { running: false, result: { success: false, output: err.message || String(err) } },
-      }));
-    }
-  }
-
   return (
-    <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-4 pt-8 pb-24 space-y-4">
-        <div className="flex items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3">
-            <PrivateHistoryBackButton data-testid="button-back-settings" iconClassName="h-4 w-4" />
-            <div>
-              <h1 className="text-xl font-semibold" data-testid="text-settings-title">Settings</h1>
-              <p className="text-sm text-muted-foreground">Site-wide configuration</p>
-            </div>
-          </div>
-          <Link href="/private/tracking">
-            <Button variant="outline" size="sm" data-testid="button-go-tracking">
-              <IconChartBar className="h-4 w-4 mr-1.5" />
-              Tracking
-            </Button>
-          </Link>
-        </div>
+    <SettingsShell
+      section="general"
+      icon={IconSettings}
+      title="General"
+      titleTestId="text-settings-title"
+      description="Site-wide configuration"
+      backTestId="button-back-settings"
+      dirty={dirty}
+      secondary={{
+        value: activeTab,
+        tabs: GENERAL_TABS,
+        listTestId: "tabs-settings",
+        triggerTestId: (id) => `tab-${id}`,
+      }}
+    >
+        <Tabs value={activeTab}>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(v) => {
-            const next = v as SettingsTab;
-            setActiveTab(next);
-            const url = new URL(window.location.href);
-            if (next === "locales") {
-              url.searchParams.delete("tab");
-            } else {
-              url.searchParams.set("tab", next);
-            }
-            window.history.replaceState({}, "", url.pathname + url.search);
-          }}
-        >
-          <ToggleButtonBarList className="flex w-full" data-testid="tabs-settings">
-            <ToggleButtonBarTrigger value="locales" data-testid="tab-locales" className="gap-1.5">
-              <IconLanguage className="h-3.5 w-3.5" />
-              Locales
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="migrations" data-testid="tab-migrations" className="gap-1.5">
-              <IconCode className="h-3.5 w-3.5" />
-              Migrations
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="brand" data-testid="tab-brand" className="gap-1.5">
-              <IconPhoto className="h-3.5 w-3.5" />
-              Brand
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="robots" data-testid="tab-robots" className="gap-1.5">
-              <IconRobot className="h-3.5 w-3.5" />
-              Robots
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="legal" data-testid="tab-legal" className="gap-1.5">
-              <IconScale className="h-3.5 w-3.5" />
-              Legal
-            </ToggleButtonBarTrigger>
-            <ToggleButtonBarTrigger value="server" data-testid="tab-server" className="gap-1.5">
-              <IconServer className="h-3.5 w-3.5" />
-              Server
-            </ToggleButtonBarTrigger>
-          </ToggleButtonBarList>
-
-          <TabsContent value="locales" className="mt-4">
+          <TabsContent value="locales" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between gap-2 pb-4">
                 <div className="flex items-center gap-2">
@@ -716,93 +631,11 @@ export default function SettingsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="migrations" className="mt-4">
-            <Card>
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconCode className="h-5 w-5 text-muted-foreground" />
-                <CardTitle className="text-base">Migrations</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {migrationsLoading ? (
-                  <div className="flex items-center justify-center py-8">
-                    <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                ) : !migrations || migrations.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-4 text-center">No migration scripts found.</p>
-                ) : (
-                  <div className="space-y-3">
-                    <p className="text-xs text-muted-foreground">
-                      One-time data scripts. Each migration is idempotent — safe to re-run.
-                    </p>
-                    <div className="space-y-2">
-                      {migrations.map((migration) => {
-                        const state = migrationStates[migration.filename];
-                        const running = state?.running ?? false;
-                        const result = state?.result ?? null;
-                        return (
-                          <div key={migration.filename} className="space-y-2" data-testid={`row-migration-${migration.filename}`}>
-                            <div className="flex items-center gap-2 px-3 py-2.5 rounded-md border">
-                              <code className="text-xs font-mono text-muted-foreground flex-1 truncate" data-testid={`text-migration-name-${migration.filename}`}>
-                                {migration.filename}
-                              </code>
-                              {result && (
-                                result.success
-                                  ? <IconCheck className="h-4 w-4 text-green-500 shrink-0" />
-                                  : <IconAlertCircle className="h-4 w-4 text-destructive shrink-0" />
-                              )}
-                              <Popover>
-                                <PopoverTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    title="About this migration"
-                                    data-testid={`button-info-migration-${migration.filename}`}
-                                  >
-                                    <IconInfoCircle className="h-4 w-4 text-muted-foreground" />
-                                  </Button>
-                                </PopoverTrigger>
-                                <PopoverContent className="w-72 text-sm" side="left" align="start">
-                                  <p className="font-medium mb-1">{migration.name}</p>
-                                  <p className="text-muted-foreground text-xs leading-relaxed">{migration.description}</p>
-                                </PopoverContent>
-                              </Popover>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => runMigration(migration.filename)}
-                                disabled={running}
-                                title="Run migration"
-                                data-testid={`button-run-migration-${migration.filename}`}
-                              >
-                                {running
-                                  ? <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                                  : <IconPlayerPlay className="h-4 w-4 text-muted-foreground" />
-                                }
-                              </Button>
-                            </div>
-                            {result && (
-                              <pre
-                                className={`text-xs font-mono rounded-md border px-3 py-2 overflow-auto max-h-48 whitespace-pre-wrap ${
-                                  result.success
-                                    ? "border-green-500/30 bg-green-500/5 text-foreground"
-                                    : "border-destructive/30 bg-destructive/5 text-destructive"
-                                }`}
-                                data-testid={`text-migration-output-${migration.filename}`}
-                              >
-                                {result.output || (result.success ? "Done." : "Failed with no output.")}
-                              </pre>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+          <TabsContent value="migrations" className="mt-0">
+            <MigrationsTab />
           </TabsContent>
 
-          <TabsContent value="brand" className="mt-4">
+          <TabsContent value="brand" className="mt-0">
             <Card>
               <CardHeader className="flex flex-row items-center gap-2 pb-4">
                 <IconPhoto className="h-5 w-5 text-muted-foreground" />
@@ -1167,190 +1000,221 @@ export default function SettingsPage() {
             />
           </TabsContent>
 
-          <TabsContent value="robots" className="mt-4">
+          <TabsContent value="robots" className="mt-0">
             <RobotsTab />
           </TabsContent>
 
-          <TabsContent value="legal" className="mt-4">
+          <TabsContent value="legal" className="mt-0 space-y-4">
             <Card>
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconScale className="h-5 w-5 text-muted-foreground" />
-                <CardTitle className="text-base">Legal URLs</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {legalLoading ? (
-                  <div className="flex items-center justify-center py-8">
-                    <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                ) : (
-                  <>
-                    <div className="space-y-1">
-                      <p className="text-sm text-muted-foreground">
-                        These URLs are stored as <code className="font-mono">reserved.legal_terms_url</code> and <code className="font-mono">reserved.legal_privacy_url</code> in <code className="font-mono">variables.yml</code> and are automatically available as <code className="font-mono">global.*</code> variables site-wide.
-                      </p>
-                    </div>
-
-                    <div className="space-y-4 pt-2">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium" htmlFor="input-legal-terms-url">
-                          Terms &amp; Conditions URL
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/terms-conditions</code>).
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <LinkPicker
-                            value={legalTermsUrl}
-                            onChange={(v) => { setLegalTermsUrl(v); handleLegalSave("legal_terms_url", v); }}
-                            testId="link-picker-legal-terms-url"
-                            allowedTypes={["internal", "external"]}
-                          />
-                          {legalSaving === "legal_terms_url" && (
-                            <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium" htmlFor="input-legal-privacy-url">
-                          Privacy Policy URL
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                          Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/privacy-policy</code>).
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <LinkPicker
-                            value={legalPrivacyUrl}
-                            onChange={(v) => { setLegalPrivacyUrl(v); handleLegalSave("legal_privacy_url", v); }}
-                            testId="link-picker-legal-privacy-url"
-                            allowedTypes={["internal", "external"]}
-                          />
-                          {legalSaving === "legal_privacy_url" && (
-                            <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="mt-4">
-              <CardHeader className="flex flex-row items-center gap-2 pb-4">
-                <IconMessage className="h-5 w-5 text-muted-foreground" />
-                <div className="flex-1">
-                  <CardTitle className="text-base">Consent Messages</CardTitle>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={openAddConsent}
-                  data-testid="button-add-consent"
+              <CardHeader className="pb-4">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 text-left"
+                  aria-expanded={legalUrlsOpen}
+                  onClick={() => setLegalUrlsOpen((v) => !v)}
+                  data-testid="button-legal-urls-toggle"
                 >
-                  <IconPlus className="h-4 w-4 mr-1" />
-                  Add consent
-                </Button>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <IconScale className="h-5 w-5 text-muted-foreground" />
+                    Legal URLs
+                  </CardTitle>
+                  <IconChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", legalUrlsOpen && "rotate-180")} />
+                </button>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  Site-wide checkbox copy for lead forms, stored as <code className="font-mono">reserved.consent_*</code> variables.
-                  Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel (Marketing, SMS, WhatsApp, …) on.
-                  Only one can be Default; others stay off until you turn the current one off.
-                  Stored in <code className="font-mono">settings.yml</code> as <code className="font-mono">consent.fallback</code>. Off means no extra checkbox.
-                  <span className="font-medium text-foreground"> Marketing</span> is the copy for the Marketing switch.
-                  The default locale is <code className="font-mono">default</code>; other locales are <code className="font-mono">conditions</code> with <code className="font-mono">query.locale</code>.
-                  Empty builtins show the form&apos;s built-in copy so you can edit from it. Links and formatting use the rich-text editor.
-                </p>
-                <details className="text-xs text-muted-foreground">
-                  <summary className="cursor-pointer select-none">Read more (advanced)</summary>
-                  <p className="mt-1 leading-snug">
-                    Default writes <code className="font-mono">consent.fallback</code> in{" "}
-                    <code className="font-mono">site_*/settings.yml</code> via{" "}
-                    <code className="font-mono">PUT /api/settings/consent/fallback</code>
-                    {" "}(<code className="font-mono">server/settings.ts</code>).
-                    The form reads it in{" "}
-                    <code className="font-mono">client/src/components/lead_form/variants/LeadFormDefault.tsx</code>
-                    {" "}(<code className="font-mono">shouldShowFallbackConsent</code>).
-                    Default is not a YAML channel toggle — ConsentCard still uses{" "}
-                    <code className="font-mono">consent.marketing</code> / SMS / WhatsApp.
-                    General fallback does not set CRM <code className="font-mono">has_marketing_consent</code>.
-                  </p>
-                </details>
-                <div className="divide-y">
-                  {consentKeys.map((key) => {
-                    const stored = consentData?.[key] ?? {};
-                    const seen = new Set<string>();
-                    const localePreviews: { code: string; text: string; builtin: boolean }[] = [];
-                    for (const loc of supportedLocalesForConsent) {
-                      const storedText = stored[loc.code];
-                      const builtin = isBlankConsentHtml(storedText);
-                      const raw = builtin ? getBuiltinConsentFallback(key, loc.code) : storedText;
-                      const text = stripConsentHtml(raw ?? "");
-                      if (!text) continue;
-                      seen.add(loc.code);
-                      localePreviews.push({ code: loc.code, text, builtin });
-                    }
-                    for (const [code, raw] of Object.entries(stored)) {
-                      if (seen.has(code) || isBlankConsentHtml(raw)) continue;
-                      localePreviews.push({ code, text: stripConsentHtml(raw), builtin: false });
-                    }
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center gap-3 py-3"
-                        data-testid={`row-consent-${key}`}
-                      >
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm font-medium">{consentLabelFromKey(key)}</span>
-                            <Badge variant="secondary" className="font-mono text-xs">
-                              reserved.{key}
-                            </Badge>
-                            {consentFallback === key ? (
-                              <Badge data-testid={`badge-consent-fallback-${key}`}>
-                                Default
-                              </Badge>
-                            ) : null}
-                          </div>
-                          {localePreviews.length > 0 ? (
-                            <div className="space-y-1">
-                              {localePreviews.map(({ code, text, builtin }) => (
-                                <div key={code} className="flex items-center gap-2 min-w-0">
-                                  <Badge variant="outline" className="font-mono text-[10px] px-1.5 py-0 shrink-0">
-                                    {code}
-                                  </Badge>
-                                  {builtin ? (
-                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0 font-normal">
-                                      built-in
-                                    </Badge>
-                                  ) : null}
-                                  <p className={`text-xs truncate ${builtin ? "text-muted-foreground/70 italic" : "text-muted-foreground"}`}>
-                                    {text}
-                                  </p>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-xs text-muted-foreground/60 italic">
-                              No default set
-                            </p>
-                          )}
-                        </div>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => openEditConsent(key)}
-                          data-testid={`button-edit-consent-${key}`}
-                        >
-                          Edit
-                        </Button>
+              {legalUrlsOpen && (
+                <CardContent className="space-y-4">
+                  {legalLoading ? (
+                    <div className="flex items-center justify-center py-8">
+                      <IconLoader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-1">
+                        <p className="text-sm text-muted-foreground">
+                          These URLs are stored as <code className="font-mono">reserved.legal_terms_url</code> and <code className="font-mono">reserved.legal_privacy_url</code> in <code className="font-mono">variables.yml</code> and are automatically available as <code className="font-mono">global.*</code> variables site-wide.
+                        </p>
                       </div>
-                    );
-                  })}
-                </div>
-              </CardContent>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                        <div className="space-y-2 min-w-0">
+                          <label className="text-sm font-medium" htmlFor="input-legal-terms-url">
+                            Terms &amp; Conditions URL
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/terms-conditions</code>).
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <LinkPicker
+                              value={legalTermsUrl}
+                              onChange={(v) => { setLegalTermsUrl(v); handleLegalSave("legal_terms_url", v); }}
+                              testId="link-picker-legal-terms-url"
+                              allowedTypes={["internal", "external"]}
+                            />
+                            {legalSaving === "legal_terms_url" && (
+                              <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 min-w-0">
+                          <label className="text-sm font-medium" htmlFor="input-legal-privacy-url">
+                            Privacy Policy URL
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            Used in lead forms and consent copy. Accepts a full URL or a relative path (e.g. <code className="font-mono">/en/privacy-policy</code>).
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <LinkPicker
+                              value={legalPrivacyUrl}
+                              onChange={(v) => { setLegalPrivacyUrl(v); handleLegalSave("legal_privacy_url", v); }}
+                              testId="link-picker-legal-privacy-url"
+                              allowedTypes={["internal", "external"]}
+                            />
+                            {legalSaving === "legal_privacy_url" && (
+                              <IconLoader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              )}
             </Card>
+
+            <Card>
+              <CardHeader className="pb-4">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                    aria-expanded={consentMessagesOpen}
+                    onClick={() => setConsentMessagesOpen((v) => !v)}
+                    data-testid="button-consent-messages-toggle"
+                  >
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <IconMessage className="h-5 w-5 text-muted-foreground" />
+                      Consent Messages
+                    </CardTitle>
+                    <IconChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", consentMessagesOpen && "rotate-180")} />
+                  </button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={openAddConsent}
+                    data-testid="button-add-consent"
+                  >
+                    <IconPlus className="h-4 w-4 mr-1" />
+                    Add consent
+                  </Button>
+                </div>
+              </CardHeader>
+              {consentMessagesOpen && (
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    Site-wide checkbox copy for lead forms, stored as <code className="font-mono">reserved.consent_*</code> variables.
+                    Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel (Marketing, SMS, WhatsApp, …) on.
+                    Only one can be Default; others stay off until you turn the current one off.
+                    Stored in <code className="font-mono">settings.yml</code> as <code className="font-mono">consent.fallback</code>. Off means no extra checkbox.
+                    <span className="font-medium text-foreground"> Marketing</span> is the copy for the Marketing switch.
+                    The default locale is <code className="font-mono">default</code>; other locales are <code className="font-mono">conditions</code> with <code className="font-mono">query.locale</code>.
+                    Empty builtins show the form&apos;s built-in copy so you can edit from it. Links and formatting use the rich-text editor.
+                  </p>
+                  <details className="text-xs text-muted-foreground">
+                    <summary className="cursor-pointer select-none">Read more (advanced)</summary>
+                    <p className="mt-1 leading-snug">
+                      Default writes <code className="font-mono">consent.fallback</code> in{" "}
+                      <code className="font-mono">site_*/settings.yml</code> via{" "}
+                      <code className="font-mono">PUT /api/settings/consent/fallback</code>
+                      {" "}(<code className="font-mono">server/settings.ts</code>).
+                      The form reads it in{" "}
+                      <code className="font-mono">client/src/components/lead_form/variants/LeadFormDefault.tsx</code>
+                      {" "}(<code className="font-mono">shouldShowFallbackConsent</code>).
+                      Default is not a YAML channel toggle — ConsentCard still uses{" "}
+                      <code className="font-mono">consent.marketing</code> / SMS / WhatsApp.
+                      General fallback does not set CRM <code className="font-mono">has_marketing_consent</code>.
+                    </p>
+                  </details>
+                  <div className="divide-y">
+                    {consentKeys.map((key) => {
+                      const stored = consentData?.[key] ?? {};
+                      const seen = new Set<string>();
+                      const localePreviews: { code: string; text: string; builtin: boolean }[] = [];
+                      for (const loc of supportedLocalesForConsent) {
+                        const storedText = stored[loc.code];
+                        const builtin = isBlankConsentHtml(storedText);
+                        const raw = builtin ? getBuiltinConsentFallback(key, loc.code) : storedText;
+                        const text = stripConsentHtml(raw ?? "");
+                        if (!text) continue;
+                        seen.add(loc.code);
+                        localePreviews.push({ code: loc.code, text, builtin });
+                      }
+                      for (const [code, raw] of Object.entries(stored)) {
+                        if (seen.has(code) || isBlankConsentHtml(raw)) continue;
+                        localePreviews.push({ code, text: stripConsentHtml(raw), builtin: false });
+                      }
+                      return (
+                        <div
+                          key={key}
+                          className="flex items-center gap-3 py-3"
+                          data-testid={`row-consent-${key}`}
+                        >
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium">{consentLabelFromKey(key)}</span>
+                              <Badge variant="secondary" className="font-mono text-xs">
+                                reserved.{key}
+                              </Badge>
+                              {consentFallback === key ? (
+                                <Badge data-testid={`badge-consent-fallback-${key}`}>
+                                  Default
+                                </Badge>
+                              ) : null}
+                            </div>
+                            {localePreviews.length > 0 ? (
+                              <div className="space-y-1">
+                                {localePreviews.map(({ code, text, builtin }) => (
+                                  <div key={code} className="flex items-center gap-2 min-w-0">
+                                    <Badge variant="outline" className="font-mono text-[10px] px-1.5 py-0 shrink-0">
+                                      {code}
+                                    </Badge>
+                                    {builtin ? (
+                                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0 font-normal">
+                                        built-in
+                                      </Badge>
+                                    ) : null}
+                                    <p className={`text-xs truncate ${builtin ? "text-muted-foreground/70 italic" : "text-muted-foreground"}`}>
+                                      {text}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground/60 italic">
+                                No default set
+                              </p>
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => openEditConsent(key)}
+                            data-testid={`button-edit-consent-${key}`}
+                          >
+                            Edit
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              )}
+            </Card>
+
+            <ConsentWindowCard
+              locales={supportedLocalesForConsent}
+              defaultLocale={defaultLocaleForConsent}
+            />
 
             <Dialog
               modal={false}
@@ -1480,12 +1344,11 @@ export default function SettingsPage() {
             </Dialog>
           </TabsContent>
 
-          <TabsContent value="server" className="mt-4">
+          <TabsContent value="server" className="mt-0">
             <ServerTab />
           </TabsContent>
 
         </Tabs>
-      </div>
-    </div>
+    </SettingsShell>
   );
 }

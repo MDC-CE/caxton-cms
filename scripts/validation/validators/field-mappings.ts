@@ -3,6 +3,7 @@ import type { Validator, ValidatorResult, ValidationContext, ValidationIssue } f
 import { getAllConfigs } from "../../../server/content-types";
 import { getDefaultContentFolder } from "../../../server/site-config";
 import { scanTypeDirForDeprecatedFields } from "../../../server/deprecated-field-guard";
+import { mappedFieldsStorageFor } from "../../../server/mapped-fields-storage";
 import { listDeprecatedFields, validateDeprecations } from "../../../shared/deprecatedField";
 import {
   effectiveRequiredMode,
@@ -60,7 +61,7 @@ export const fieldMappingsValidator: Validator = {
         const scan = scanTypeDirForDeprecatedFields(
           path.join(contentRootAbs, config.directory),
           deprecatedKeys,
-          { isDbBacked: !!config.database },
+          { storage: mappedFieldsStorageFor(typeName, contentRootAbs) },
         );
         for (const field of deprecatedKeys) {
           const replacement = deprecated[field].replaced_by;

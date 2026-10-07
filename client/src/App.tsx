@@ -9,6 +9,7 @@ import { EditModeWrapper } from "@/components/editing/EditModeWrapper";
 import { DebugAuthProvider, useDebugAuth } from "@/hooks/useDebugAuth";
 import { ImagePickerProvider } from "@/contexts/ImagePickerContext";
 import { usePageTracking } from "@/hooks/usePageTracking";
+import { ThemeBackgroundVars } from "@/components/ThemeBackgroundVars";
 import type { ContentTypeApiItem } from "@/hooks/useContentTypes";
 import {
   buildContentTypeRoutes,
@@ -97,6 +98,9 @@ const VariableModalHost = lazyWithRetry(() =>
 );
 const OverlayRuntime = lazyWithRetry(() =>
   import("@/components/overlays/OverlayRuntime").then((m) => ({ default: m.OverlayRuntime })),
+);
+const ConsentBanner = lazyWithRetry(() =>
+  import("@/components/ConsentBanner").then((m) => ({ default: m.ConsentBanner })),
 );
 const BootstrapModal = lazyWithRetry(() =>
   import("@/components/BootstrapModal").then((m) => ({ default: m.BootstrapModal })),
@@ -295,6 +299,7 @@ function App({ ssrQueryClient }: AppProps = {}) {
             <EcommerceBootstrap />
             <Router />
             <ClientOnly>
+              <ThemeBackgroundVars />
               <Toaster />
               {import.meta.env.DEV ? (
                 <Suspense fallback={null}>
@@ -307,6 +312,7 @@ function App({ ssrQueryClient }: AppProps = {}) {
                 <VariableModalHostGate />
                 <Suspense fallback={null}><OverlayRuntime /></Suspense>
                 <Suspense fallback={null}><BootstrapModal /></Suspense>
+                <Suspense fallback={null}><ConsentBanner /></Suspense>
               </IdleMounted>
             </ClientOnly>
             </ImagePickerProvider>

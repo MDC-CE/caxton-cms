@@ -1,10 +1,10 @@
 import fs from "fs";
+import { listTypePages } from "./entry-layer";
 import path from "path";
 import yaml from "js-yaml";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
 import { getAllConfigs, getFolder, type ContentTypeEntry } from "./content-types";
 import { contentIndex } from "./content-index";
-import { databaseManager } from "./database";
 import {
   isEntryDetached,
   isSharedLayoutType,
@@ -23,6 +23,29 @@ import type {
 } from "@shared/schema";
 import { CACHE_DIR } from "./db-cache";
 import { child } from "./logger";
+import { getDefaultLocale } from "./settings";
+import { loadSchemaForSection } from "./component-registry";
+import {
+  resolveLayoutTraits,
+  type ComponentLayoutBlock,
+  type ResolvedLayoutTraits,
+} from "@shared/component-layout-traits";
+import { deliveredFingerprint } from "./design/fingerprint";
+import { loadSiteTheme } from "./theme-config";
+import { classifyThemeValue } from "@shared/theme-palette";
+import {
+  INSIGHTS_REVIEW_KEY,
+  parseInsightsReview,
+  reconcileLayoutLedger,
+  resolveApproval,
+  templateLayoutKey,
+  type InsightsReview,
+} from "./design/layout-approval";
+import {
+  pagePerformanceIsStale,
+  readPagePerformance,
+  runPagePerformanceJob,
+} from "./analytics/page-performance";
 
 const log = child({ module: "component-insights" });
 
@@ -211,6 +234,41 @@ export async function runStartupInsightsRebuild(): Promise<void> {
   } catch {
     /* logged */
   }
+  startPagePerformanceScheduler();
+}
+
+const PERFORMANCE_CHECK_MS = 60 * 60 * 1000;
+let performanceTimer: ReturnType<typeof setInterval> | null = null;
+let performanceRunning = false;
+
+/** Refresh GA4 page performance at most daily, then rebuild insights weights. */
+export async function refreshPagePerformance(force = false): Promise<{ ok: boolean; pages?: number; skipped?: string; error?: string }> {
+  const folder = getDefaultContentFolder();
+  if (performanceRunning) return { ok: true, skipped: "already_running" };
+  if (!force && !pagePerformanceIsStale(folder)) return { ok: true, skipped: "fresh" };
+  const data = readInsightsFile();
+  if (!data) return { ok: true, skipped: "no_insights_yet" };
+  performanceRunning = true;
+  try {
+    const result = await runPagePerformanceJob({
+      contentFolder: folder,
+      contentRoot: getDefaultContentRoot(),
+      records: data.pages,
+      urlsFor: (ct, slug) => contentIndex.getAlternateUrls(slug, ct) ?? {},
+    });
+    if (result.ok && result.pages) markInsightsDirty();
+    return result;
+  } finally {
+    performanceRunning = false;
+  }
+}
+
+function startPagePerformanceScheduler(): void {
+  if (performanceTimer) return;
+  const tick = () => void refreshPagePerformance().catch((err) => log.warn({ err }, "[ComponentInsights] performance refresh failed"));
+  setTimeout(tick, 5 * 60 * 1000).unref?.();
+  performanceTimer = setInterval(tick, PERFORMANCE_CHECK_MS);
+  performanceTimer.unref?.();
 }
 
 export async function requestInsightsRebuild(): Promise<ComponentInsightsData> {
@@ -238,20 +296,89 @@ function loadPageIntents(): PageIntent[] {
   }
 }
 
-function extractSections(data: unknown): InsightSection[] {
+const traitsCache = new Map<string, ResolvedLayoutTraits>();
+
+function sectionTraits(type: string, variant: string, version: unknown, contentFolder?: string): ResolvedLayoutTraits {
+  const folder = contentFolder ?? getDefaultContentFolder();
+  const key = `${folder}|${type}|${variant}|${typeof version === "string" ? version : ""}`;
+  let t = traitsCache.get(key);
+  if (!t) {
+    let block: ComponentLayoutBlock | undefined;
+    try {
+      block = loadSchemaForSection(type, version, folder)?.layout;
+    } catch {
+      block = undefined;
+    }
+    t = resolveLayoutTraits(block, variant);
+    traitsCache.set(key, t);
+  }
+  return t;
+}
+
+function spacingToken(v: unknown): string | undefined {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (typeof v === "number") return String(v);
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const r = v as Record<string, unknown>;
+    const m = spacingToken(r.mobile);
+    const d = spacingToken(r.desktop);
+    if (m || d) return `${m ?? ""}|${d ?? ""}`;
+  }
+  return undefined;
+}
+
+function rawSectionsOf(data: unknown): Array<Record<string, unknown>> {
   if (!data || typeof data !== "object") return [];
   const sections = (data as Record<string, unknown>).sections;
   if (!Array.isArray(sections)) return [];
-  return sections
-    .filter((s) => s && typeof s === "object" && typeof (s as Record<string, unknown>).type === "string")
-    .map((s) => {
-      const rec = s as Record<string, unknown>;
-      const variant =
-        typeof rec.variant === "string" && rec.variant.trim()
-          ? rec.variant.trim()
-          : "default";
-      return { type: String(rec.type), variant };
-    });
+  return sections.filter(
+    (s): s is Record<string, unknown> =>
+      !!s && typeof s === "object" && typeof (s as Record<string, unknown>).type === "string",
+  );
+}
+
+/** Insight view of raw YAML sections (variant, background, spacing, traits). */
+export function insightSectionsOf(sections: unknown, contentFolder?: string): InsightSection[] {
+  return extractSections({ sections }, contentFolder);
+}
+
+/** Legacy CSS that equals a theme color is recorded as its theme ID (what agents must write). */
+function normalizeBackground(value: string, contentFolder: string | undefined): string {
+  const folder = contentFolder ?? getDefaultContentFolder();
+  const theme = loadSiteTheme(path.isAbsolute(folder) ? folder : path.join(process.cwd(), folder));
+  const cls = classifyThemeValue(value, theme?.backgrounds);
+  return cls.kind === "theme_css" ? cls.id : value;
+}
+
+function extractSections(data: unknown, contentFolder?: string): InsightSection[] {
+  return rawSectionsOf(data).map((rec) => {
+    const variant =
+      typeof rec.variant === "string" && rec.variant.trim()
+        ? rec.variant.trim()
+        : "default";
+    const type = String(rec.type);
+    const out: InsightSection = { type, variant };
+    if (typeof rec.background === "string" && rec.background.trim()) {
+      out.background = normalizeBackground(rec.background.trim(), contentFolder);
+    }
+    const paddingY = spacingToken(rec.paddingY);
+    const marginY = spacingToken(rec.marginY);
+    if (paddingY || marginY) {
+      out.spacing = { ...(paddingY ? { paddingY } : {}), ...(marginY ? { marginY } : {}) };
+    }
+    const traits = sectionTraits(type, variant, rec.version, contentFolder);
+    if (traits.flow !== "in" || traits.self_padded || traits.edge) out.traits = traits;
+    return out;
+  });
+}
+
+const LIVE_LOCALE_FILE = /^[a-z]{2}(-[A-Za-z]{2,4})?\.yml$/;
+
+function funnelStageOf(data: Record<string, unknown> | null | undefined): string | undefined {
+  const funnel = data?.funnel;
+  if (!funnel || typeof funnel !== "object") return undefined;
+  const stage = (funnel as Record<string, unknown>).stage;
+  return typeof stage === "string" && stage.trim() ? stage.trim() : undefined;
 }
 
 function safeYamlLoad(raw: string): Record<string, unknown> | null {
@@ -265,9 +392,11 @@ function safeYamlLoad(raw: string): Record<string, unknown> | null {
 function readInsightsFieldsFromYaml(data: Record<string, unknown>): {
   intent: string | undefined;
   weight: number | undefined;
+  review: InsightsReview | null;
 } {
   let intent: string | undefined;
   let weight: number | undefined;
+  const review = parseInsightsReview(data[INSIGHTS_REVIEW_KEY]);
 
   if (typeof data.insights_intent === "string") {
     intent = data.insights_intent;
@@ -282,7 +411,7 @@ function readInsightsFieldsFromYaml(data: Record<string, unknown>): {
       );
     }
   }
-  return { intent, weight };
+  return { intent, weight, review };
 }
 
 function validateIntent(
@@ -300,38 +429,59 @@ function validateIntent(
   return DEFAULT_INTENT;
 }
 
-function loadTemplateSections(contentType: string, contentRoot: string): {
+export const TEMPLATE_LAYOUT_CANDIDATES = [
+  "template.en.yml",
+  "template.es.yml",
+  "single.en.yml",
+  "single.es.yml",
+  "_common.template.yml",
+  "_common.single.yml",
+];
+
+export interface ResolvedLayoutSource {
   sections: InsightSection[];
+  fingerprint: string;
   intent?: string;
   weight?: number;
-} {
+  review: InsightsReview | null;
+  /** Absolute file holding the sections (approval is written next to them for templates). */
+  file?: string;
+  locale?: string;
+  locales: string[];
+  funnelStage?: string;
+}
+
+export function loadTemplateSections(contentType: string, contentRoot: string): ResolvedLayoutSource {
   const folder = getFolder(contentType, contentRoot);
   const dir = path.join(contentRoot, folder);
-  const candidates = [
-    "template.en.yml",
-    "template.es.yml",
-    "single.en.yml",
-    "single.es.yml",
-    "_common.template.yml",
-    "_common.single.yml",
-  ];
-  for (const name of candidates) {
+  for (const name of TEMPLATE_LAYOUT_CANDIDATES) {
     const p = path.join(dir, name);
     if (!fs.existsSync(p)) continue;
     try {
       const data = safeYamlLoad(fs.readFileSync(p, "utf-8"));
       if (!data) continue;
-      const sections = extractSections(data);
-      if (sections.length === 0 && name !== "_common.single.yml" && name !== "_common.template.yml") continue;
+      const raw = rawSectionsOf(data);
+      if (raw.length === 0) continue;
       const fields = readInsightsFieldsFromYaml(data);
-      if (sections.length > 0) {
-        return { sections, intent: fields.intent, weight: fields.weight };
-      }
+      const localeMatch = /\.([a-z]{2}(?:-[A-Za-z]{2,4})?)\.yml$/.exec(name);
+      return {
+        sections: extractSections(data),
+        fingerprint: deliveredFingerprint(raw),
+        intent: fields.intent,
+        weight: fields.weight,
+        review: fields.review,
+        file: p,
+        ...(localeMatch ? { locale: localeMatch[1] } : {}),
+        locales: fs
+          .readdirSync(dir)
+          .map((f) => /^(?:template|single)\.([a-z]{2}(?:-[A-Za-z]{2,4})?)\.yml$/.exec(f)?.[1])
+          .filter((l): l is string => !!l),
+      };
     } catch {
       /* try next */
     }
   }
-  return { sections: [] };
+  return { sections: [], fingerprint: deliveredFingerprint([]), review: null, locales: [] };
 }
 
 function listSlugsForContentType(
@@ -342,25 +492,31 @@ function listSlugsForContentType(
     contentType as Parameters<typeof contentIndex.listContentSlugs>[0],
   );
 
-  const db = config.database as { slug?: string } | undefined;
-  const dbSlug = db?.slug;
-  if (!dbSlug) return dirSlugs;
-
-  const items = databaseManager.getMappedItems(dbSlug) ?? [];
-  const fromDb = items
-    .map((item) => String(item.slug || "").trim())
-    .filter(Boolean);
+  const listed = listTypePages(contentIndex, contentType);
+  if (!listed) return dirSlugs;
+  const fromDb = listed.pages.map((p) => p.slug);
   return Array.from(new Set([...dirSlugs, ...fromDb]));
 }
 
-function resolvePageSections(
+/**
+ * Live layout of one entry: `_common.yml` sections, else the first live
+ * locale file with sections (site default locale first). Drafts and A/B
+ * variant files are ignored; entries with no live locale return no sections.
+ */
+export function resolvePageSections(
   contentType: string,
   slug: string,
   contentDir: string,
-): { sections: InsightSection[]; intent?: string; weight?: number } {
+): ResolvedLayoutSource {
+  let raw: Array<Record<string, unknown>> = [];
   let sections: InsightSection[] = [];
   let intent: string | undefined;
   let weight: number | undefined;
+  let review: InsightsReview | null = null;
+  let file: string | undefined;
+  let locale: string | undefined;
+  let funnelStage: string | undefined;
+  const slugDir = path.join(contentDir, slug);
 
   try {
     const commonData = contentIndex.loadCommonData(
@@ -371,29 +527,43 @@ function resolvePageSections(
       const fields = readInsightsFieldsFromYaml(commonData);
       if (fields.intent) intent = fields.intent;
       if (fields.weight !== undefined) weight = fields.weight;
-      sections = extractSections(commonData);
+      if (fields.review) review = fields.review;
+      funnelStage = funnelStageOf(commonData);
+      raw = rawSectionsOf(commonData);
+      if (raw.length > 0) {
+        sections = extractSections(commonData);
+        file = path.join(slugDir, "_common.yml");
+      }
     }
   } catch {
     /* continue */
   }
 
-  const slugDir = path.join(contentDir, slug);
+  let locales: string[] = [];
   try {
-    const files = fs.readdirSync(slugDir).filter((f) => f.endsWith(".yml") && !f.startsWith("_"));
+    const defaultLocale = getDefaultLocale();
+    const files = fs.readdirSync(slugDir).filter((f) => LIVE_LOCALE_FILE.test(f));
+    locales = files.map((f) => f.replace(/\.yml$/, ""));
     const ordered = [
-      ...files.filter((f) => f === "en.yml"),
-      ...files.filter((f) => f !== "en.yml"),
+      ...files.filter((f) => f === `${defaultLocale}.yml`),
+      ...files.filter((f) => f !== `${defaultLocale}.yml`),
     ];
-    for (const file of ordered) {
+    for (const name of ordered) {
       try {
-        const data = safeYamlLoad(fs.readFileSync(path.join(slugDir, file), "utf-8"));
+        const data = safeYamlLoad(fs.readFileSync(path.join(slugDir, name), "utf-8"));
         if (!data) continue;
         const fields = readInsightsFieldsFromYaml(data);
         if (fields.intent) intent = fields.intent;
         if (fields.weight !== undefined) weight = fields.weight;
-        if (sections.length === 0) {
-          const found = extractSections(data);
-          if (found.length > 0) sections = found;
+        if (!review && fields.review) review = fields.review;
+        if (raw.length === 0) {
+          const found = rawSectionsOf(data);
+          if (found.length > 0) {
+            raw = found;
+            sections = extractSections(data);
+            file = path.join(slugDir, name);
+            locale = name.replace(/\.yml$/, "");
+          }
         }
       } catch {
         /* skip */
@@ -403,30 +573,56 @@ function resolvePageSections(
     /* no dir */
   }
 
-  return { sections, intent, weight };
+  if (locales.length === 0) {
+    return { sections: [], fingerprint: deliveredFingerprint([]), review: null, locales: [] };
+  }
+  return {
+    sections,
+    fingerprint: deliveredFingerprint(raw),
+    intent,
+    weight,
+    review,
+    ...(file ? { file } : {}),
+    locale: locale ?? (locales.includes(getDefaultLocale()) ? getDefaultLocale() : locales[0]),
+    locales,
+    ...(funnelStage ? { funnelStage } : {}),
+  };
+}
+
+export { templateLayoutKey };
+
+function pageRecordFrom(
+  contentType: string,
+  slug: string,
+  resolved: ResolvedLayoutSource,
+  intent: string,
+): PageRecord & { _review: InsightsReview | null; _file?: string } {
+  return {
+    key: `${contentType}/${slug}`,
+    contentType,
+    kind: "page",
+    slug,
+    intent,
+    weight: resolved.weight ?? 1,
+    instanceCount: 1,
+    sections: resolved.sections,
+    fingerprint: resolved.fingerprint,
+    ...(resolved.locale ? { locale: resolved.locale } : {}),
+    locales: resolved.locales,
+    ...(resolved.funnelStage ? { funnelStage: resolved.funnelStage } : {}),
+    _review: resolved.review,
+    ...(resolved.file ? { _file: resolved.file } : {}),
+  };
 }
 
 function scanInventory(
   validIntentIds: Set<string>,
   contentTypeIntentMap: Map<string, string>,
 ): PageRecord[] {
-  const records: PageRecord[] = [];
+  const records: Array<PageRecord & { _review?: InsightsReview | null; _file?: string }> = [];
   const configs = getAllConfigs();
   const contentRoot = getDefaultContentRoot();
   const contentFolder = getDefaultContentFolder();
-
-  // Cohorts: key → accumulating slugs + template sections
-  const cohorts = new Map<
-    string,
-    {
-      contentType: string;
-      templateId: string;
-      intent: string;
-      weight: number;
-      sections: InsightSection[];
-      slugs: string[];
-    }
-  >();
 
   for (const [contentType, config] of Object.entries(configs)) {
     const ctDefault = contentTypeIntentMap.get(contentType) ?? DEFAULT_INTENT;
@@ -438,6 +634,10 @@ function scanInventory(
       const template = loadTemplateSections(contentType, contentRoot);
       if (template.sections.length === 0 && slugs.length === 0) continue;
 
+      // A shared template is ONE layout: attached entries add reach, not weight.
+      const attached: string[] = [];
+      const entryIntents = new Map<string, number>();
+      const stages = new Map<string, number>();
       for (const slug of slugs) {
         if (slug === "single" || slug === "template") continue;
         const detached = isEntryDetached(contentType, slug, contentRoot);
@@ -450,49 +650,35 @@ function scanInventory(
             resolved.intent,
             `${contentType}/${slug}`,
           );
-          records.push({
-            key: `${contentType}/${slug}`,
-            contentType,
-            kind: "page",
-            slug,
-            intent,
-            weight: resolved.weight ?? 1,
-            instanceCount: 1,
-            sections: resolved.sections,
-          });
+          records.push(pageRecordFrom(contentType, slug, resolved, intent));
           continue;
         }
-
-        // Attached: use template sections; intent/weight from entry overrides or template
         const entryFields = resolvePageSections(contentType, slug, contentDir);
-        const intent = validateIntent(
-          entryFields.intent ?? template.intent ?? ctDefault,
-          validIntentIds,
-          entryFields.intent ?? template.intent,
-          `${contentType}/${slug}`,
-        );
-        const weight = entryFields.weight ?? template.weight ?? 1;
-        const sections = template.sections.length > 0 ? template.sections : entryFields.sections;
-        if (sections.length === 0) continue;
-
-        const templateId = "template";
-        const cohortKey = `${contentType}::${templateId}::${intent}::${weight}`;
-        let cohort = cohorts.get(cohortKey);
-        if (!cohort) {
-          cohort = {
-            contentType,
-            templateId,
-            intent,
-            weight,
-            sections,
-            slugs: [],
-          };
-          cohorts.set(cohortKey, cohort);
-        }
-        if (!cohort.slugs.includes(slug)) cohort.slugs.push(slug);
+        if (entryFields.intent) entryIntents.set(entryFields.intent, (entryIntents.get(entryFields.intent) ?? 0) + 1);
+        if (entryFields.funnelStage) stages.set(entryFields.funnelStage, (stages.get(entryFields.funnelStage) ?? 0) + 1);
+        attached.push(slug);
       }
-
-      // Template exists but zero attached slugs — still record once with instanceCount 0? Skip.
+      if (attached.length === 0 || template.sections.length === 0) continue;
+      const topOf = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      const pageIntent = template.intent ?? topOf(entryIntents);
+      const intent = validateIntent(pageIntent ?? ctDefault, validIntentIds, pageIntent, `${contentType}/template`);
+      const funnelStage = template.funnelStage ?? topOf(stages);
+      records.push({
+        key: templateLayoutKey(contentType),
+        contentType,
+        kind: "shared_template",
+        slugs: attached,
+        intent,
+        weight: template.weight ?? 1,
+        instanceCount: attached.length,
+        sections: template.sections,
+        fingerprint: template.fingerprint,
+        ...(template.locale ? { locale: template.locale } : {}),
+        locales: template.locales,
+        ...(funnelStage ? { funnelStage } : {}),
+        _review: template.review,
+        ...(template.file ? { _file: template.file } : {}),
+      });
       continue;
     }
 
@@ -506,34 +692,11 @@ function scanInventory(
         resolved.intent,
         `${contentType}/${slug}`,
       );
-      records.push({
-        key: `${contentType}/${slug}`,
-        contentType,
-        kind: "page",
-        slug,
-        intent,
-        weight: resolved.weight ?? 1,
-        instanceCount: 1,
-        sections: resolved.sections,
-      });
+      records.push(pageRecordFrom(contentType, slug, resolved, intent));
     }
   }
 
-  for (const [key, cohort] of cohorts) {
-    if (cohort.slugs.length === 0) continue;
-    records.push({
-      key,
-      contentType: cohort.contentType,
-      kind: "shared_template",
-      slugs: cohort.slugs,
-      intent: cohort.intent,
-      weight: cohort.weight,
-      instanceCount: cohort.slugs.length,
-      sections: cohort.sections,
-    });
-  }
-
-  // Overlays
+  // Overlays (reach only; excluded from layout learning)
   const overlaysFile = path.join(contentRoot, "overlays.yml");
   if (fs.existsSync(overlaysFile)) {
     try {
@@ -558,6 +721,7 @@ function scanInventory(
           weight: 1,
           instanceCount: 1,
           sections,
+          baseWeight: 0,
         });
       });
     } catch (err) {
@@ -565,15 +729,51 @@ function scanInventory(
     }
   }
 
+  // Approval (explicit insights_review, implicit via the layout ledger) + performance.
+  const seen = new Map<string, { fingerprint: string; mtimeMs?: number }>();
+  for (const r of records) {
+    if (r.kind === "overlay" || !r.fingerprint) continue;
+    let mtimeMs: number | undefined;
+    try {
+      if (r._file) mtimeMs = fs.statSync(r._file).mtimeMs;
+    } catch {
+      /* ignore */
+    }
+    seen.set(r.key, { fingerprint: r.fingerprint, ...(mtimeMs ? { mtimeMs } : {}) });
+  }
+  const ledger = reconcileLayoutLedger(contentFolder, seen);
+  const performance = readPagePerformance(contentFolder);
+  for (const r of records) {
+    const { _review, _file, ...clean } = r;
+    void _file;
+    if (r.kind === "overlay" || !r.fingerprint) continue;
+    clean.approval = resolveApproval({ review: _review ?? null, fingerprint: r.fingerprint, ledger: ledger[r.key] });
+    const perf = performance?.[r.key];
+    if (perf) clean.performance = perf;
+    clean.baseWeight = round3(clean.weight * clean.approval.factor * (perf?.factor ?? 1));
+    Object.assign(r, clean);
+    delete r._review;
+    delete r._file;
+  }
   return records;
+}
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
 }
 
 function sectionTypes(record: PageRecord): string[] {
   return record.sections.map((s) => s.type);
 }
 
-function effectiveWeight(record: PageRecord): number {
-  return record.weight * record.instanceCount;
+/**
+ * Learning weight of one layout record: manual insights_weight × approval ×
+ * performance (lift vs expected). Shared templates count once. Overlays and
+ * rejected layouts weigh 0. Relevance and locale are applied per query.
+ */
+export function effectiveWeight(record: PageRecord): number {
+  if (record.kind === "overlay") return 0;
+  return record.baseWeight ?? record.weight;
 }
 
 function computePairings(pages: PageRecord[]): ComponentPairing[] {
@@ -585,6 +785,7 @@ function computePairings(pages: PageRecord[]): ComponentPairing[] {
   for (const page of pages) {
     const types = sectionTypes(page);
     const w = effectiveWeight(page);
+    if (w <= 0) continue;
     for (let i = 0; i < types.length - 1; i++) {
       const from = types[i]!;
       const to = types[i + 1]!;
@@ -624,9 +825,10 @@ function computeTopSequences(pages: PageRecord[], maxSeqs = 20): ComponentSequen
   const seqMap = new Map<string, number>();
   for (const page of pages) {
     const types = sectionTypes(page);
-    if (types.length < 2) continue;
+    const w = effectiveWeight(page);
+    if (types.length < 2 || w <= 0) continue;
     const key = types.join(" → ");
-    seqMap.set(key, (seqMap.get(key) ?? 0) + effectiveWeight(page));
+    seqMap.set(key, (seqMap.get(key) ?? 0) + w);
   }
   return Array.from(seqMap.entries())
     .sort((a, b) => b[1] - a[1])

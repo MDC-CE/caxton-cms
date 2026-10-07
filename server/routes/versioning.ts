@@ -207,7 +207,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -280,7 +279,7 @@ function isSwarmCaller(req: Request): boolean {
 export type VariantProposalBadge = {
   id: string;
   env: string;
-  /** False when the link comes from `_draft.proposal` and the proposal is not in this environment's DB. */
+  /** False when the link comes from `_draft.proposal` and the proposal is not in this copy of the proposals DB. */
   local: boolean;
   title?: string;
   status?: string;
@@ -299,11 +298,11 @@ async function proposalsByVariantFor(opts: {
   const out: Record<string, Record<string, VariantProposalBadge>> = {};
   const { readDraftMeta } = await import("../versioning/draft-meta");
   let local: import("../content-proposals").OpenProposalForEntry[] = [];
-  let env = "unknown";
+  let env = "production";
   try {
     const mod = await import("../content-proposals");
     local = mod.listOpenProposalsForEntry(opts.site, opts.contentType, opts.slug);
-    env = mod.pipelineEnv();
+    env = mod.DRAFT_LINK_ENV;
   } catch {
     /* proposals DB unavailable — fall back to file links only */
   }
@@ -966,8 +965,12 @@ export function registerVersioningRoutes(app: Express): void {
         confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
         confirmSourceChanged: req.body?.confirm_source_changed === true,
         callerIsSwarm: isSwarmCaller(req),
+        callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
+        confirmTextLimits: req.body?.confirm_text_limits === true,
         findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
         dryRun,
+        seoStandaloneReason:
+          typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
       });
 
     try {
@@ -1077,8 +1080,12 @@ export function registerVersioningRoutes(app: Express): void {
       confirmOverwriteNewerLive: req.body?.confirm_overwrite_newer_live === true,
       confirmSourceChanged: req.body?.confirm_source_changed === true,
       callerIsSwarm: isSwarmCaller(req),
+      callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
+      confirmTextLimits: req.body?.confirm_text_limits === true,
       findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
       dryRun: req.body?.dry_run === true,
+      seoStandaloneReason:
+        typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
     });
     if (!result.ok) {
       res.status(result.status ?? 400).json({

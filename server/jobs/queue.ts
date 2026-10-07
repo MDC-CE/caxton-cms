@@ -10,7 +10,9 @@
 
 import path from "path";
 import fs from "fs";
+import os from "os";
 import crypto from "crypto";
+import { execFileSync } from "child_process";
 import { DuplicatedJobError } from "@sidequest/core";
 import { Sidequest, Job } from "sidequest";
 import { child } from "../logger";
@@ -18,7 +20,10 @@ import { getPackageRoot } from "@shared/paths";
 
 const log = child({ module: "job-queue" });
 
-const dataDir = path.resolve("data");
+// Tests must not touch the live worker's PID/heartbeat/restart files in data/.
+const dataDir = process.env.VITEST
+  ? path.join(os.tmpdir(), `website-v3-vitest-sidequest-${process.pid}`)
+  : path.resolve("data");
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const SIDEQUEST_DB = path.join(dataDir, "sidequest.sqlite");
@@ -29,7 +34,10 @@ export const SIDEQUEST_PID_PATH = path.join(dataDir, "sidequest.pid");
 /** Worker heartbeat — refreshed every 30s; used for stuck detection. */
 export const SIDEQUEST_HEARTBEAT_PATH = path.join(dataDir, "sidequest.heartbeat");
 
-/** Touched by platform ops restart API; systemd path unit restarts website-sidequest. */
+/**
+ * Touched by platform ops restart API for audit/debounce.
+ * Prod restart signals the worker PID; pm2-runtime relaunches Sidequest.
+ */
 export const SIDEQUEST_RESTART_FLAG_PATH = path.join(dataDir, "sidequest.restart-requested");
 
 /** Sidequest worker JSON log (tail via admin API). */
@@ -130,7 +138,83 @@ export function writeSidequestRestartFlag(requestedBy: string | null): void {
   fs.writeFileSync(SIDEQUEST_RESTART_FLAG_PATH, `${body}\n`, "utf-8");
 }
 
+export function clearSidequestRestartFlag(): void {
+  try {
+    fs.unlinkSync(SIDEQUEST_RESTART_FLAG_PATH);
+  } catch {
+    // missing file is fine
+  }
+}
+
 export const SIDEQUEST_RESTART_DEBOUNCE_MS = 30_000;
+
+/** Best-effort process command line (Linux /proc, else `ps`). */
+export function readProcessCmdline(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const procPath = `/proc/${pid}/cmdline`;
+    if (fs.existsSync(procPath)) {
+      return fs.readFileSync(procPath, "utf-8").replace(/\0/g, " ").trim() || null;
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf-8",
+      timeout: 2000,
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * If sidequest.pid points at a live foreign process:
+ * - sidequest-worker cmdline → SIGTERM then SIGKILL, then caller may proceed
+ * - anything else → refuse (throw)
+ * Stale/dead PID is ignored.
+ */
+export async function resolveForeignSidequestPidConflict(opts?: {
+  log?: (msg: string, meta?: Record<string, unknown>) => void;
+}): Promise<"none" | "killed-sidequest"> {
+  const existing = readSidequestWorkerPid();
+  if (existing === null || existing === process.pid) return "none";
+  if (!isProcessAlive(existing)) return "none";
+
+  const cmdline = readProcessCmdline(existing);
+  const log = opts?.log;
+  if (cmdline && /sidequest-worker/.test(cmdline)) {
+    log?.("[SidequestWorker] foreign sidequest PID alive — sending SIGTERM", {
+      pid: existing,
+      cmdline,
+    });
+    try {
+      process.kill(existing, "SIGTERM");
+    } catch {
+      // already gone
+    }
+    for (let i = 0; i < 50; i++) {
+      if (!isProcessAlive(existing)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (isProcessAlive(existing)) {
+      log?.("[SidequestWorker] foreign sidequest still alive — SIGKILL", { pid: existing });
+      try {
+        process.kill(existing, "SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
+    return "killed-sidequest";
+  }
+
+  const detail = cmdline ? `cmdline=${cmdline}` : "cmdline unavailable";
+  throw new Error(
+    `sidequest.pid ${existing} is alive but is not a sidequest-worker (${detail}). Refusing to start.`,
+  );
+}
 
 let configured = false;
 let starting: Promise<void> | null = null;
@@ -242,6 +326,11 @@ export type JobEnqueueOpts = {
   uniqueKey?: string;
   /** When uniqueKey is set, default true — pass false to coalesce one job per class (e.g. index_refresh). */
   uniqueWithArgs?: boolean;
+  /**
+   * With uniqueWithArgs: dedupe only while a matching job is waiting/running (alive-job),
+   * instead of a fixed 1-hour window that also blocks retries after a failed job.
+   */
+  uniqueWhileAlive?: boolean;
   delayMs?: number;
   queue?: string;
 };
@@ -399,6 +488,8 @@ export async function enqueueJob(
     if (opts.uniqueWithArgs === false) {
       // Coalesce one pending job per class (e.g. index_refresh per site).
       builder = builder.unique(true);
+    } else if (opts.uniqueWhileAlive) {
+      builder = builder.unique({ withArgs: true });
     } else {
       // Dedupe by class + payload within a fixed window (requires period).
       builder = builder.unique({ withArgs: true, period: "hour" });

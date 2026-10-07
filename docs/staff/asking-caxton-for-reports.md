@@ -683,6 +683,44 @@ North star: **scale or kill campaigns, landing efficiency, stop paying for 404s.
 
 ## More reports (paid pack)
 
+These need **Settings → Ads** connected (Meta spend). Without it, Caxton still answers with paid visits and site leads, just no cost.
+
+### D-Ads1. What did each landing page cost and produce?
+
+**Ask Caxton:**  
+“Paid landing pages last 28 days — spend, paid visits, unique leads, cost per lead. Flag pages with too little data.”
+
+**Example answer:** *Example.* “$4,120 USD spent; $3,650 landed on our pages, $470 went to Meta instant forms (listed separately). Top: /en/coding-bootcamp — $1,900, 1,240 paid visits, 38 leads (+4 repeats), $50 per lead. /es/landing/full-stack has 12 paid visits — not enough data for a rate. Leads count for the page the ad sent people to (last paid visit, 30 days). Visits in EU/UK include some estimates because 22% rejected tracking.”
+
+---
+
+### D-Ads2. Which campaigns send people where?
+
+**Ask Caxton:**  
+“Paid traffic by campaign last 28 days, with the pages each campaign lands on.”
+
+**Example answer:** *Example.* Campaign rows with spend, clicks, Meta leads, paid visits, and the landing pages under each. Meta leads and site leads are shown side by side, never added together.
+
+---
+
+### D-Ads3. Is our ad tracking healthy?
+
+**Ask Caxton:**  
+“Any ad tracking problems this week? Spend with no visits, ads missing UTMs, broken landing pages?”
+
+**Example answer:** *Example.* “1 error: ad 238… ($310 this week) points to a page that 404s — fix the link in Ads Manager or add a redirect. 2 warnings: 18% of Meta visits are unclear (ads missing the UTM template). Consent accepts in ask regions dropped from 71% to 58% — fewer measured visits, not fewer real ones.”
+
+---
+
+### D-Ads4. Did page version B convert paid visitors better?
+
+**Ask Caxton:**  
+“For paid traffic to [landing path], split by page version — visits, leads, conversion rate.”
+
+**Example answer:** *Example.* Per-version rows. Needs the `experiment_exposure` GA4 tag in Tag Manager; small versions are flagged “not enough data.”
+
+---
+
 ### D9. Program journey weak stages
 
 **Ask Caxton:** “For full-stack, which journey pages look thin?”

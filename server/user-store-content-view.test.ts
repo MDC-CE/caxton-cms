@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONSENT_SETTINGS_SPLIT_MIGRATION,
+  ensureAdsSettingsOnSeoSettingsRoles,
+  ensureConsentSettingsOnAdsSettingsRoles,
+  getBuiltInRoleCodeDefinition,
   ensureContentViewOnEditorRoles,
   ensureDeleteVariantOnCreateVariantRoles,
   ensureDatabasesEditDataOnAllContentEditors,
@@ -161,6 +165,53 @@ describe("migrateSeoEditSplit", () => {
       },
     };
     expect(migrateSeoEditSplit(roles)).toBe(false);
+  });
+});
+
+describe("ensureAdsSettingsOnSeoSettingsRoles", () => {
+  it("adds ads_settings to custom roles that manage SEO settings", () => {
+    const roles: Record<string, RoleDefinition> = {
+      seo_manager: { label: "SEO", capabilities: [{ name: "seo_settings" }] },
+      editor: { label: "Editor", capabilities: [{ name: "content_edit_text" }] },
+    };
+    expect(ensureAdsSettingsOnSeoSettingsRoles(roles)).toBe(true);
+    expect(roles.seo_manager.capabilities.map((g) => g.name)).toEqual(["seo_settings", "ads_settings"]);
+    expect(roles.editor.capabilities.map((g) => g.name)).toEqual(["content_edit_text"]);
+    expect(ensureAdsSettingsOnSeoSettingsRoles(roles)).toBe(false);
+  });
+});
+
+describe("ensureConsentSettingsOnAdsSettingsRoles", () => {
+  it("grants consent_settings once to custom roles with ads_settings", () => {
+    const roles: Record<string, RoleDefinition> = {
+      ads_team: { label: "Ads", capabilities: [{ name: "ads_settings" }] },
+      editor: { label: "Editor", capabilities: [{ name: "content_edit_text" }] },
+      platform_steward: { label: "Steward", capabilities: [{ name: "ads_settings" }] },
+    };
+    const applied: string[] = [];
+    expect(ensureConsentSettingsOnAdsSettingsRoles(roles, applied)).toBe(true);
+    expect(roles.ads_team.capabilities.map((g) => g.name)).toEqual(["ads_settings", "consent_settings"]);
+    expect(roles.editor.capabilities.map((g) => g.name)).toEqual(["content_edit_text"]);
+    expect(roles.platform_steward.capabilities.map((g) => g.name)).toEqual(["ads_settings"]);
+    expect(applied).toEqual([CONSENT_SETTINGS_SPLIT_MIGRATION]);
+  });
+
+  it("does not re-grant after staff remove it", () => {
+    const roles: Record<string, RoleDefinition> = {
+      ads_team: { label: "Ads", capabilities: [{ name: "ads_settings" }] },
+    };
+    expect(ensureConsentSettingsOnAdsSettingsRoles(roles, [CONSENT_SETTINGS_SPLIT_MIGRATION])).toBe(false);
+    expect(roles.ads_team.capabilities.map((g) => g.name)).toEqual(["ads_settings"]);
+  });
+});
+
+describe("built-in ads roles", () => {
+  it("Ads Manager gets ads caps but not consent; Steward gets both new caps", () => {
+    const ads = getBuiltInRoleCodeDefinition("ads_manager")!.capabilities.map((g) => g.name);
+    expect(ads).toEqual(["metrics_view", "content_view", "ads_settings", "ads_edit", "proposals_create"]);
+    expect(ads).not.toContain("consent_settings");
+    const steward = getBuiltInRoleCodeDefinition("platform_steward")!.capabilities.map((g) => g.name);
+    expect(steward).toEqual(expect.arrayContaining(["ads_settings", "ads_edit", "consent_settings"]));
   });
 });
 

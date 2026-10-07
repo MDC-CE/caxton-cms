@@ -39,10 +39,11 @@ import {
   triggerGracefulShutdown,
   isShutdownHandlerRegistered,
 } from "../server-control";
+import { resolveProcessStatsDetailRequest, resolveProcessStatsRequest, resolveRouteSeriesRequest } from "../process-stats";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, DatabaseManager } from "../database";
-import { collectSystemAlerts, recheckDatabaseHealth } from "../system-alerts";
+import { collectSystemAlerts, recheckDatabaseHealth, recheckDecisionModel } from "../system-alerts";
 import { runScan as runComponentInsightsScan, readInsightsFile } from "../component-insights";
 import { listEvents, listEventAuthors, clearAllEvents, listAgentSessions, getAgentSessionDetail, emitEvent, getLatestWriteGeneration, getOldestUnpublishedAgeMs, getUnpublishedCount, getUnpublishedEvents, findOpenAgentSession, resolveUsableAgentSession } from "../events/event-store";
 import { singleAttribution, EVENT_TYPES, type EventType } from "../events/types";
@@ -218,7 +219,6 @@ import {
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
 import { queryEntries } from "../query-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -270,7 +270,9 @@ import {
 import { child } from "../logger";
 import { sqlite } from "../db";
 import { errorLogFingerprint } from "../utils/error-log-fingerprint";
-import { resolveDatabaseBackedRedirectDestination } from "../debug-redirect-db-dest";
+import { writeRedirectOnDestinationPage } from "../redirect-destination";
+import { listInboundRedirects, parseRemovedEntry, removeInboundRedirects } from "../removed-item-redirect";
+import { findEntryPresence } from "../entry-layer";
 import { api } from "../rate-limit/api.js";
 const log = child({ module: "routes/admin" });
 
@@ -339,7 +341,154 @@ function loadSiteLLMConfig(res: Response): Record<string, unknown> {
   return {};
 }
 
+function parseErrorLogContext(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return { raw };
+  }
+}
+
 export function registerAdminRoutes(app: Express): void {
+  const readChart = async (req: import("express").Request, res: import("express").Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveProcessStatsRequest({
+        process: req.query.process,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+        kind: req.query.kind,
+        method: req.query.method,
+        route: req.query.route,
+      }, undefined, req.body);
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json(result.stats);
+    } catch (err) {
+      log.error({ err }, "Failed to read process stats");
+      res.status(500).json({ error: "Failed to read process stats" });
+    }
+  };
+  app.get("/api/admin/process-stats", readChart);
+  app.post("/api/admin/process-stats", readChart);
+
+  app.get("/api/admin/process-stats/route", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveRouteSeriesRequest({
+        process: req.query.process,
+        kind: req.query.kind,
+        route: req.query.route,
+        method: req.query.method,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      res.json(result.stats);
+    } catch (err) {
+      log.error({ err }, "Failed to read a process-stats route");
+      res.status(500).json({ error: "Failed to read route statistics" });
+    }
+  });
+
+  api.get(app, "/api/admin/process-stats/detail", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const result = resolveProcessStatsDetailRequest({
+        process: req.query.process,
+        starting_at: req.query.starting_at,
+        ending_at: req.query.ending_at,
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      const wantLogs = req.query.logs === "1";
+      if (!wantLogs) {
+        res.json(result.stats);
+        return;
+      }
+      const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+      const from = result.stats.startingAt;
+      const to = result.stats.endingAt;
+      let logsCoverage: "full" | "partial" | "none" = "full";
+      let logsSince: number | undefined;
+      if (to < cutoff) {
+        logsCoverage = "none";
+      } else if (from < cutoff) {
+        logsCoverage = "partial";
+        logsSince = cutoff;
+      }
+      const logFrom = Math.max(from, cutoff);
+      const rows = logsCoverage === "none"
+        ? []
+        : sqlite.prepare(
+          `SELECT id, ts, level, module, message, err_name
+           FROM error_log
+           WHERE ts >= ? AND ts <= ?
+           ORDER BY ts DESC, id DESC`,
+        ).all(logFrom, to) as Array<{
+          id: number;
+          ts: number;
+          level: string;
+          module: string;
+          message: string;
+          err_name: string | null;
+        }>;
+      type UniqueIssue = {
+        fingerprint: string;
+        module: string;
+        level: "error" | "warn";
+        message: string;
+        err_name: string | null;
+        count: number;
+        lastTs: number;
+        lastId: number;
+        sampleTs: number[];
+      };
+      const byFingerprint = new Map<string, UniqueIssue>();
+      for (const row of rows) {
+        const level: "error" | "warn" = row.level === "error" ? "error" : "warn";
+        const fingerprint = `${level}|${errorLogFingerprint(row.module, row.message)}`;
+        const existing = byFingerprint.get(fingerprint);
+        if (existing) {
+          existing.count += 1;
+          if (existing.sampleTs.length < 3) existing.sampleTs.push(row.ts);
+        } else {
+          byFingerprint.set(fingerprint, {
+            fingerprint,
+            module: row.module,
+            level,
+            message: row.message,
+            err_name: row.err_name,
+            count: 1,
+            lastTs: row.ts,
+            lastId: row.id,
+            sampleTs: [row.ts],
+          });
+        }
+      }
+      res.json({
+        ...result.stats,
+        logs: [...byFingerprint.values()],
+        logsCoverage,
+        ...(logsSince != null ? { logsSince } : {}),
+      });
+    } catch (err) {
+      log.error({ err }, "Failed to read process stats detail");
+      res.status(500).json({ error: "Failed to read process stats detail" });
+    }
+  });
+
   // GCS bucket status — migrationRequired flag + bucket name
   app.get("/api/admin/gcs-status", async (_req, res) => {
     const diagnostics = await gcs.checkArchitecture();
@@ -1216,6 +1365,13 @@ export function registerAdminRoutes(app: Express): void {
     res.json({ ...result, alerts: await collectSystemAlerts() });
   });
 
+  api.post(app, "/api/admin/decision-model-recheck", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    const result = await recheckDecisionModel(getContentRoot(res));
+    res.json({ ...result, alerts: await collectSystemAlerts() });
+  });
+
   // ─── Server controls (staff-only) ─────────────────────────────────────────
   // Richer status than /health, for the Settings → Server tab status card.
   app.get("/api/admin/server/status", async (req, res) => {
@@ -1592,178 +1748,125 @@ export function registerAdminRoutes(app: Express): void {
           ? (req.body.before_from as string).trim()
           : undefined;
 
-      if (isCustomDestination) {
-        const written = appendCustomRedirect({
-          contentRoot: getContentRoot(res),
-          contentRootName: getContentRootName(res),
-          from: normalizedFrom,
-          to: destUrl,
-          statusCode,
-          priority,
-          authorName,
-          beforeFrom,
-        });
-        if (!written.ok) {
-          res.status(written.status).json({ error: written.error, code: written.code });
-          return;
-        }
-
-        afterRedirectWrite(res, written.file);
-
-        res.json({
-          success: true,
-          message: `Custom redirect added: ${normalizedFrom} -> ${destUrl}`,
-          file: written.file,
-        });
-        return;
-      }
-
-      // Parse destination URL to find the content entry
-      const parsed = getCI(res).parseContentUrl(destUrl);
-      if (!parsed) {
-        res.status(400).json({
-          error: "Could not determine content type from destination URL",
-        });
-        return;
-      }
-
-      const { contentType, locale } = parsed;
-      const resolvedSlug = getCI(res).resolveBaseSlug(
-        parsed.slug,
-        contentType,
-      );
-      const entries = getCI(res).findBySlug(resolvedSlug, { contentType });
-
-      // DB-backed types (how-to, lesson, …) have no per-slug YAML folder for meta.redirects.
-      // Fall back to custom-redirects.yml when the sitemap/URL exists but findBySlug is empty.
-      // YAML override folders under the same type still take the meta.redirects path below.
-      if (entries.length === 0 && getCI(res).isDatabaseBacked(contentType)) {
-        const builtUrl = getCI(res).buildUrl(contentType, locale, parsed.slug);
-        const alternateUrls = getCI(res).getAlternateUrls(
-          parsed.slug,
-          contentType,
-        );
-        const resolvedDest = resolveDatabaseBackedRedirectDestination({
-          destUrl,
-          allLanguages: !!allLanguages,
-          builtUrl,
-          alternateUrls,
-          isKnownUrl: (url) => getCI(res).isKnownUrl(url),
-        });
-
-        if (!resolvedDest.ok) {
-          res.status(404).json({
-            error: `No content found for slug "${parsed.slug}" in ${contentType}`,
+      const ci = getCI(res);
+      if (beforeFrom && !isCustomDestination) {
+        const parsedDest = ci.parseContentUrl(destUrl);
+        if (parsedDest && findEntryPresence(ci, parsedDest.contentType, parsedDest.slug)) {
+          res.status(400).json({
+            code: "before_from_page_yaml",
+            error:
+              "before_from is only valid for custom-redirects.yml. Page meta.redirects cannot be reordered with move/before_from.",
           });
           return;
         }
+      }
 
-        const written = appendCustomRedirect({
-          contentRoot: getContentRoot(res),
-          contentRootName: getContentRootName(res),
-          from: normalizedFrom,
-          to: resolvedDest.to,
-          statusCode,
-          priority,
-          authorName,
-          beforeFrom,
-        });
-        if (!written.ok) {
-          res.status(written.status).json({ error: written.error, code: written.code });
-          return;
+      type WriteOutcome =
+        | { ok: true; file: string; created: string[]; skippedLocales: string[] }
+        | { ok: false; status: number; body: Record<string, unknown> };
+      const writeOne = (fromPath: string, code: number, allLangs: boolean, before?: string): WriteOutcome => {
+        const toCustom = (): WriteOutcome => {
+          const written = appendCustomRedirect({
+            contentRoot: getContentRoot(res),
+            contentRootName: getContentRootName(res),
+            from: fromPath,
+            to: destUrl,
+            statusCode: code,
+            priority,
+            authorName,
+            beforeFrom: before,
+          });
+          return written.ok
+            ? { ok: true, file: written.file, created: [], skippedLocales: [] }
+            : { ok: false, status: written.status, body: { error: written.error, code: written.code } };
+        };
+        if (isCustomDestination) return toCustom();
+        if (before) {
+          return ci.isKnownUrl(destUrl)
+            ? toCustom()
+            : { ok: false, status: 404, body: { error: `No page found at ${destUrl}` } };
         }
-
-        afterRedirectWrite(res, written.file);
-
-        const toLabel =
-          typeof resolvedDest.to === "string"
-            ? resolvedDest.to
-            : Object.values(resolvedDest.to).join(", ");
-        res.json({
-          success: true,
-          message: `Redirect added: ${normalizedFrom} -> ${toLabel}`,
-          file: written.file,
+        const onPage = writeRedirectOnDestinationPage({
+          ci,
+          destUrl,
+          from: fromPath,
+          statusCode: code,
+          allLanguages: allLangs,
+          onWrite: (abs) => markFileAsModified(abs, authorName, undefined, getContentRoot(res)),
         });
-        return;
-      }
-
-      if (entries.length === 0) {
-        res.status(404).json({
-          error: `No content found for slug "${parsed.slug}" in ${contentType}`,
-        });
-        return;
-      }
-
-      if (beforeFrom) {
-        res.status(400).json({
-          code: "before_from_page_yaml",
-          error:
-            "before_from is only valid for custom-redirects.yml. Page meta.redirects cannot be reordered with move/before_from.",
-        });
-        return;
-      }
-
-      const entry = entries[0];
-      const basePath = path.join(process.cwd(), entry.directory);
-
-      let targetFile: string;
-      if (allLanguages) {
-        targetFile = "_common.yml";
-      } else {
-        targetFile = `${locale}.yml`;
-      }
-
-      const filePath = path.join(basePath, targetFile);
-
-      let yamlData: Record<string, unknown> = {};
-      if (fs.existsSync(filePath)) {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        yamlData = (safeYamlLoad(raw) as Record<string, unknown>) || {};
-      }
-
-      if (!yamlData.meta || typeof yamlData.meta !== "object") {
-        yamlData.meta = {};
-      }
-      const meta = yamlData.meta as Record<string, unknown>;
-      if (!Array.isArray(meta.redirects)) {
-        meta.redirects = [];
-      }
-      const redirects = meta.redirects as unknown[];
-
-      const existingPath = (r: unknown) => {
-        if (typeof r === "string") return r.toLowerCase();
-        if (typeof r === "object" && r !== null && "path" in r)
-          return (r as { path: string }).path.toLowerCase();
-        return "";
+        if (onPage.kind === "error") {
+          return { ok: false, status: onPage.status, body: { error: onPage.error, ...(onPage.code ? { code: onPage.code } : {}) } };
+        }
+        if (onPage.kind === "page") {
+          return { ok: true, file: onPage.files[0], created: onPage.created, skippedLocales: onPage.skippedLocales };
+        }
+        // Not a page on this site (listing without an entry, other known URL): site-wide list.
+        if (!ci.isKnownUrl(destUrl)) {
+          return { ok: false, status: 404, body: { error: `No page found at ${destUrl}` } };
+        }
+        return toCustom();
       };
 
-      if (redirects.some((r) => existingPath(r) === normalizedFrom)) {
-        res.status(409).json({
-          error: `Redirect "${normalizedFrom}" already exists in ${targetFile}`,
-        });
+      const removed = parseRemovedEntry(req.body.removed_entry);
+      const inbound = removed
+        ? listInboundRedirects(ci, removed.contentType, removed.slug, removed.locale).filter(
+            (r) => r.from.toLowerCase() !== normalizedFrom,
+          )
+        : [];
+
+      const main = writeOne(normalizedFrom, statusCode, !!allLanguages, beforeFrom);
+      if (!main.ok) {
+        res.status(main.status).json(main.body);
         return;
       }
 
-      if (statusCode !== 301) {
-        redirects.push({ path: normalizedFrom, status: statusCode });
-      } else {
-        redirects.push(normalizedFrom);
+      const created = [...main.created];
+      const moved: { from: string; source: string; file: string }[] = [];
+      const notMoved: { from: string; source: string; error: string }[] = [];
+      for (const r of inbound) {
+        const out = writeOne(r.from.toLowerCase(), r.status, false);
+        if (out.ok) {
+          moved.push({ from: r.from, source: r.source, file: out.file });
+          created.push(...out.created);
+        } else {
+          notMoved.push({ from: r.from, source: r.source, error: String(out.body.error ?? "write failed") });
+        }
+      }
+      if (removed && moved.length > 0) {
+        const changed = removeInboundRedirects(
+          ci,
+          removed.contentType,
+          removed.slug,
+          removed.locale,
+          moved.map((m) => m.from),
+        );
+        for (const abs of changed) markFileAsModified(abs, authorName, undefined, getContentRoot(res));
       }
 
-      const yamlContent = safeYamlDump(yamlData, {
-        lineWidth: -1,
-        noRefs: true,
-      });
-      fs.writeFileSync(filePath, yamlContent, "utf-8");
-      markFileAsModified(filePath, authorName, undefined, getContentRoot(res));
+      if (created.length > 0 || moved.length > 0) ci.refresh();
+      afterRedirectWrite(res, main.file);
 
-      const writtenFile = `${entry.directory}/${targetFile}`;
-      afterRedirectWrite(res, writtenFile);
-
+      const warnings: Record<string, unknown>[] = [];
+      if (main.skippedLocales.length > 0) {
+        warnings.push({
+          code: "redirect_languages_skipped",
+          message: `Skipped ${main.skippedLocales.join(", ")}: the destination page does not exist in those languages.`,
+          locales: main.skippedLocales,
+        });
+      }
+      if (notMoved.length > 0) {
+        warnings.push({
+          code: "inbound_redirects_not_moved",
+          message: `${notMoved.length} old address(es) stayed on the removed page; see not_moved.`,
+        });
+      }
       res.json({
         success: true,
         message: `Redirect added: ${normalizedFrom} -> ${destUrl}`,
-        file: writtenFile,
+        file: main.file,
+        ...(created.length > 0 ? { created } : {}),
+        ...(removed ? { moved_inbound: moved, ...(notMoved.length > 0 ? { not_moved: notMoved } : {}) } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
       });
     } catch (err) {
       log.error({ err: err }, "[Debug] Failed to add redirect:");
@@ -3025,6 +3128,13 @@ export function registerAdminRoutes(app: Express): void {
         contentRoot,
         model: modelObj?.decision?.trim() || undefined,
       });
+      const { recordDecisionOutcome } = await import("../ai/decisions/health");
+      recordDecisionOutcome(
+        getContentRootName(res),
+        decisionProbe.ok
+          ? { status: "ok", model: decisionProbe.model }
+          : { status: "unavailable", reason: "error", message: decisionProbe.error },
+      );
 
       if (!decisionProbe.ok) {
         return res.status(400).json({
@@ -3545,10 +3655,136 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       const result = getComponentUsageData(componentType, { intent, contentType });
-      res.json(result);
+      const { buildVariantPairings, weighLayouts } = await import("../design/page-recipe");
+      const insights = readInsightsFile();
+      const layouts = insights
+        ? weighLayouts(insights.pages, { ...(intent ? { intent } : {}), ...(contentType ? { contentType } : {}) })
+        : [];
+      const variantPairings = buildVariantPairings(layouts, 500).filter(
+        (p) => p.from.startsWith(`${componentType}:`) || p.to.startsWith(`${componentType}:`),
+      );
+      res.json({
+        ...result,
+        suggest_next: suggestNextComponent(componentType, intent, "frequency")
+          .slice(0, 5)
+          .map((p) => ({ type: p.to, frequency: p.frequency, pmi: p.pmi })),
+        variant_pairings: {
+          after: variantPairings.filter((p) => p.from.startsWith(`${componentType}:`)).slice(0, 8),
+          before: variantPairings.filter((p) => p.to.startsWith(`${componentType}:`)).slice(0, 8),
+        },
+      });
     } catch (err) {
       log.error({ err: err }, "[ComponentInsights] Component usage failed:");
       res.status(500).json({ error: "Failed to get component usage", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Layout approval ("Approve layout as design reference") — staff only, never agents.
+  app.get("/api/private/component-insights/layout-approval", async (req, res) => {
+    const contentType = typeof req.query.contentType === "string" ? req.query.contentType : "";
+    const slug = typeof req.query.slug === "string" ? req.query.slug : "";
+    if (!contentType || !slug) return res.status(400).json({ error: "contentType and slug are required" });
+    const auth = await requireCapability(req, res, "content_view", contentType);
+    if (!auth.authorized) return;
+    try {
+      const { getEntryLayoutApproval } = await import("../design/layout-approval-service");
+      const result = getEntryLayoutApproval(contentType, slug);
+      if (!result) return res.status(404).json({ error: "No live layout for this entry" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to read layout approval", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/private/component-insights/recipe", async (req, res) => {
+    const auth = await requireCapability(req, res, "content_view");
+    if (!auth.authorized) return;
+    const str = (k: string) => (typeof req.query[k] === "string" && (req.query[k] as string).trim() ? (req.query[k] as string).trim() : undefined);
+    try {
+      const { getPageRecipe } = await import("../design/recipe-service");
+      const contentType = str("contentType");
+      const intent = str("intent");
+      const stage = str("stage");
+      const locale = str("locale");
+      const slug = str("slug");
+      res.json(
+        getPageRecipe({
+          ...(contentType ? { contentType } : {}),
+          ...(intent ? { intent } : {}),
+          ...(stage ? { stage } : {}),
+          ...(locale ? { locale } : {}),
+          ...(slug ? { slug } : {}),
+        }),
+      );
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build recipe", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/private/component-insights/rules", async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    try {
+      const { currentLearnedRules } = await import("../design/recipe-service");
+      const { RULE_MIN_APPROVED_PAGES, RULE_MIN_AGREEMENT } = await import("../design/page-recipe");
+      res.json({
+        rules: currentLearnedRules(),
+        thresholds: { approved_pages: RULE_MIN_APPROVED_PAGES, agreement: RULE_MIN_AGREEMENT },
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to read rules", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/api/private/component-insights/rules/:id/pin", async (req, res) => {
+    if (typeof req.headers["x-mcp-author"] === "string") {
+      return res.status(403).json({ error: "Rule pins are a staff decision; agents cannot pin or disable rules." });
+    }
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    const status = req.body?.status;
+    if (status !== "pinned" && status !== "disabled" && status !== null) {
+      return res.status(400).json({ error: "status must be 'pinned', 'disabled', or null (follow the data)" });
+    }
+    try {
+      const { RULE_DEFS, writeDesignRulePin } = await import("../design/page-recipe");
+      if (!RULE_DEFS.some((d) => d.id === req.params.id)) return res.status(404).json({ error: "Unknown rule" });
+      const root = getDefaultContentRoot();
+      const rootAbs = path.isAbsolute(root) ? root : path.join(process.cwd(), root);
+      const author = auth.author || "staff";
+      const file = writeDesignRulePin(
+        rootAbs,
+        req.params.id,
+        status ? { status, by: author, ...(typeof req.body?.note === "string" ? { note: req.body.note.slice(0, 300) } : {}) } : null,
+      );
+      markFileAsModified(file, author, undefined, root);
+      const { currentLearnedRules } = await import("../design/recipe-service");
+      res.json({ rules: currentLearnedRules(), file: path.relative(process.cwd(), file) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save pin", details: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/api/private/component-insights/layout-approval", async (req, res) => {
+    if (typeof req.headers["x-mcp-author"] === "string") {
+      return res.status(403).json({ error: "Layout approvals are a staff decision; agents cannot approve layouts." });
+    }
+    const contentType = typeof req.body?.contentType === "string" ? req.body.contentType : "";
+    const slug = typeof req.body?.slug === "string" ? req.body.slug : "";
+    const status = req.body?.status;
+    if (!contentType || !slug) return res.status(400).json({ error: "contentType and slug are required" });
+    if (status !== "approved" && status !== "rejected" && status !== null) {
+      return res.status(400).json({ error: "status must be 'approved', 'rejected', or null (clear)" });
+    }
+    const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+    if (!auth.authorized) return;
+    try {
+      const { setEntryLayoutApproval } = await import("../design/layout-approval-service");
+      const out = setEntryLayoutApproval({ contentType, slug, status, by: auth.author || "staff" });
+      if (!out.ok) return res.status(out.status).json({ error: out.error });
+      res.json(out.result);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save layout approval", details: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -3943,13 +4179,45 @@ export function registerAdminRoutes(app: Express): void {
   app.get("/api/admin/users", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
-    res.json(userStore.getAllUsers());
+    const { getDuplicatePreview } = await import("../staff-user-deletion");
+    res.json(
+      userStore.getActiveUsers().map((u) => {
+        const duplicate = getDuplicatePreview(u.username);
+        return duplicate ? { ...u, duplicate } : u;
+      }),
+    );
+  });
+
+  api.get(app, "/api/admin/users/deleted", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "users_manage");
+    if (!auth.authorized) return;
+    res.json(userStore.getDeletedUsers());
+  });
+
+  api.post(app, "/api/admin/users/:username/restore", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "users_manage");
+    if (!auth.authorized) return;
+    const { roles } = req.body ?? {};
+    if (!Array.isArray(roles) || roles.length === 0 || roles.some((r) => typeof r !== "string")) {
+      res.status(400).json({ error: "Pick at least one role" });
+      return;
+    }
+    const result = userStore.restoreUser(req.params.username, roles);
+    if (!result.ok) {
+      res.status(result.error === "User not found" ? 404 : 400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true, user: result.user });
   });
 
   app.put("/api/admin/users/:username/roles", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
     const { username } = req.params;
+    if (userStore.getUser(username)?.deletedAt) {
+      res.status(409).json({ error: "This user is deleted. Restore them first." });
+      return;
+    }
     const { roles } = req.body;
     if (!Array.isArray(roles)) {
       res.status(400).json({ error: "roles must be an array of role ids" });
@@ -4004,6 +4272,10 @@ export function registerAdminRoutes(app: Express): void {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
     const { username } = req.params;
+    if (userStore.getUser(username)?.deletedAt) {
+      res.status(409).json({ error: "This user is deleted. Restore them first." });
+      return;
+    }
     const { mcpReadEnabled, mcpWriteEnabled } = req.body ?? {};
     if (mcpReadEnabled !== undefined && typeof mcpReadEnabled !== "boolean") {
       res.status(400).json({ error: "mcpReadEnabled must be a boolean" });
@@ -4028,14 +4300,16 @@ export function registerAdminRoutes(app: Express): void {
   app.delete("/api/admin/users/:username", async (req, res) => {
     const auth = await requireCapability(req, res, "users_manage");
     if (!auth.authorized) return;
-    const result = userStore.deleteUser(req.params.username);
+    const { deleteStaffUser } = await import("../staff-user-deletion");
+    const result = await deleteStaffUser({
+      username: req.params.username,
+      actorUsername: auth.username,
+    });
     if (!result.ok) {
-      res.status(404).json({ error: result.error });
+      res.status(result.status).json({ error: result.error });
       return;
     }
-    const { revokeAllStaffSessions } = await import("../staff-session");
-    await revokeAllStaffSessions(req.params.username);
-    res.json({ ok: true });
+    res.json(result);
   });
 
   app.get("/api/admin/pending-users", async (req, res) => {
@@ -4054,6 +4328,32 @@ export function registerAdminRoutes(app: Express): void {
     }
     const result = userStore.addPendingUser(email, role);
     if (!result.ok) {
+      if (result.code === "user_exists") {
+        res.status(409).json({
+          code: result.code,
+          error: result.error,
+          username: result.user.username,
+          displayName: userStore.formatStaffDisplayName(result.user),
+        });
+        return;
+      }
+      if (result.code === "user_previously_deleted") {
+        const u = result.user;
+        res.status(409).json({
+          code: result.code,
+          error: result.error,
+          user: {
+            username: u.username,
+            staffId: u.id,
+            email: u.email,
+            firstName: u.firstName,
+            lastName: u.lastName,
+            deletedAt: u.deletedAt,
+            deletedBy: u.deletedBy,
+          },
+        });
+        return;
+      }
       res.status(400).json({ error: result.error });
       return;
     }
@@ -4266,6 +4566,98 @@ export function registerAdminRoutes(app: Express): void {
     }
   });
 
+  // Must be registered before /api/admin/error-log/:id or "export" is parsed as an id.
+  api.get(app, "/api/admin/error-log/export", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+
+    const windowHours = 48;
+    const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
+
+    try {
+      const rows = sqlite.prepare(
+        `SELECT id, ts, level, module, message, err_name, err_stack, context
+         FROM error_log WHERE ts >= ?
+         ORDER BY id ASC`
+      ).all(cutoff) as Array<{
+        id: number;
+        ts: number;
+        level: string;
+        module: string;
+        message: string;
+        err_name: string | null;
+        err_stack: string | null;
+        context: string | null;
+      }>;
+
+      const exported = rows.map((row) => ({
+        id: row.id,
+        ts: row.ts,
+        level: row.level === "error" ? "error" : "warn",
+        module: row.module,
+        message: row.message,
+        err_name: row.err_name,
+        err_stack: row.err_stack,
+        context: parseErrorLogContext(row.context),
+      }));
+
+      res.json({ rows: exported, total: exported.length, windowHours });
+    } catch (err) {
+      log.error({ err }, "Failed to export error_log");
+      res.status(500).json({ error: "Failed to export error log" });
+    }
+  });
+
+  // Dev-only: fetch production's error log (last 48h) for a local JSON download. Never writes locally.
+  api.post(app, "/api/admin/error-log/pull-production", { rate: "staffWrite" }, async (req, res) => {
+    if (process.env.NODE_ENV === "production") {
+      res.status(403).json({
+        error: "dev_only",
+        message: "Downloading the production error log is only available in development.",
+      });
+      return;
+    }
+
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+
+    const site =
+      (typeof req.body?.site === "string" && req.body.site) ||
+      getContentRootName(res);
+    const productionOrigin =
+      typeof req.body?.productionOrigin === "string" ? req.body.productionOrigin : undefined;
+
+    try {
+      const { fetchProductionErrorLog } = await import("../error-log/pull-production");
+      const result = await fetchProductionErrorLog(site, productionOrigin);
+      if (!result.success) {
+        if (result.code === "production_staff_token_required") {
+          res.status(401).json({
+            error: result.reason ?? result.error ?? "Production staff token required",
+            code: result.code,
+            productionOrigin: result.productionOrigin,
+            envVar: result.envVar,
+            success: false,
+          });
+          return;
+        }
+        res.status(400).json({
+          error: result.reason ?? "Failed to download production error log",
+          ...result,
+        });
+        return;
+      }
+      res.json({
+        ...result,
+        education:
+          "Production error log snapshot (last 48h). Local log was not changed. Nothing was uploaded to production.",
+      });
+    } catch (err) {
+      log.error({ err, site }, "Failed to download production error log");
+      res.status(500).json({ error: "Failed to download production error log" });
+    }
+  });
+
   // Single error_log row with stack + sanitized context (Error Log expanded row)
   api.get(app, "/api/admin/error-log/:id", { rate: "staffWrite" }, async (req, res) => {
     const auth = await requireCapability(req, res, "metrics_view");
@@ -4299,15 +4691,6 @@ export function registerAdminRoutes(app: Express): void {
         return;
       }
 
-      let context: Record<string, unknown> | null = null;
-      if (row.context) {
-        try {
-          context = JSON.parse(row.context) as Record<string, unknown>;
-        } catch {
-          context = { raw: row.context };
-        }
-      }
-
       res.json({
         id: row.id,
         ts: row.ts,
@@ -4316,7 +4699,7 @@ export function registerAdminRoutes(app: Express): void {
         message: row.message,
         err_name: row.err_name,
         err_stack: row.err_stack,
-        context,
+        context: parseErrorLogContext(row.context),
       });
     } catch (err) {
       log.error({ err, id }, "Failed to query error_log entry");

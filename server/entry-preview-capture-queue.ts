@@ -4,16 +4,20 @@
  */
 
 import { getSiteContextMap, type SiteContext } from "./site-manager";
+import * as fs from "fs";
+import { entryLocaleFilePath, loadEntry, refreshEntrySource } from "./entry-layer";
 import {
   DEFAULT_PREVIEW_WIDTH,
   hashPreviewProps,
 } from "./entry-preview-manager";
 import { getPreviewConfig, getLocaleKey, getContentTypeConfig } from "./content-types";
 import { isPreviewCaptureReady } from "./entry-preview-config";
-import { captureScreenshotToWebp, cloudflareBrowserConfigError, getPublicSiteUrl } from "./cloudflare-browser";
-import { buildSignedEntryPreviewFrameUrl } from "./entry-preview-capture-auth";
+import { captureScreenshotToWebp, cloudflareBrowserConfigError } from "./cloudflare-browser";
 import { persistGeneratedOgImageToEntryYaml } from "./entry-preview-og-yaml";
-import { buildPreviewPropResolveContext } from "./entry-preview-resolve";
+import {
+  buildEntryCaptureHtml,
+  classifyCaptureFailure,
+} from "./entry-preview-capture-html";
 import { getEntryPreviewSettings, normalizeLocale } from "./settings";
 import { child } from "./logger";
 
@@ -113,28 +117,11 @@ async function loadEntryForCapture(
   slug: string,
   locale: string,
 ): Promise<Record<string, unknown> | null> {
-  const config = getContentTypeConfig(contentType, site.contentRoot);
-  if (!config) return null;
-
-  if (config.database?.slug) {
-    const items = await site.database.fetchMappedItems(contentType);
-    const localeKey = getLocaleKey(contentType, site.contentRoot) || "lang";
-    return (
-      (items.find(
-        (item) =>
-          String(item.slug ?? "") === slug &&
-          String(item[localeKey] || "en") === locale,
-      ) as Record<string, unknown> | undefined) || null
-    );
-  }
-
-  const { data, error } = site.contentIndex.loadMergedContent(
-    contentType as never,
-    slug,
-    locale,
-  );
-  if (error || !data || typeof data !== "object") return null;
-  return data as Record<string, unknown>;
+  if (!getContentTypeConfig(contentType, site.contentRoot)) return null;
+  await refreshEntrySource(site.contentIndex, contentType);
+  const loaded = loadEntry(site.contentIndex, contentType, slug, locale);
+  if (!loaded) return null;
+  return loaded.singleEntry ?? loaded.data;
 }
 
 async function runOneJob(job: InternalJob): Promise<void> {
@@ -165,29 +152,30 @@ async function runOneJob(job: InternalJob): Promise<void> {
         ? "light"
         : "dark";
 
-  const ctx = await buildPreviewPropResolveContext({
+  const height = preview!.maxHeight ?? 630;
+  const captureDoc = await buildEntryCaptureHtml({
     contentType: job.contentType,
     slug: job.slug,
     locale,
     entry,
+    preview: preview!,
+    theme,
     contentRoot: site.contentRoot,
-    db: site.database,
     mediaGallery: site.mediaGallery,
-    theme,
+    db: site.database,
+    contentIndex: site.contentIndex,
+    width,
+    height,
   });
-  const propsHash = hashPreviewProps(preview!.props, ctx);
-
-  const frameUrl = buildSignedEntryPreviewFrameUrl({
-    contentType: job.contentType,
-    slug: job.slug,
-    locale,
-    theme,
-  });
+  const propsHash = hashPreviewProps(preview!.props, captureDoc.ctx);
 
   const { webp } = await captureScreenshotToWebp({
-    url: frameUrl,
+    html: captureDoc.html,
     width,
-    height: preview!.maxHeight ?? 630,
+    height,
+    waitForSelector: captureDoc.waitForSelector,
+    waitForTimeoutMs: captureDoc.waitForTimeoutMs,
+    waitUntil: "load",
     contentRoot: site.contentRoot,
   });
 
@@ -200,9 +188,12 @@ async function runOneJob(job: InternalJob): Promise<void> {
     propsHash,
   });
 
-  const typeConfig = getContentTypeConfig(job.contentType, site.contentRoot);
-  const entryForYaml = await loadEntryForCapture(site, job.contentType, job.slug, locale);
-  if (entryForYaml && !typeConfig?.database?.slug) {
+  // Only entries with their own language file get the generated image written back.
+  const ownFile = entryLocaleFilePath(site.contentIndex, job.contentType, job.slug, locale);
+  const entryForYaml = fs.existsSync(ownFile)
+    ? await loadEntryForCapture(site, job.contentType, job.slug, locale)
+    : null;
+  if (entryForYaml) {
     await persistGeneratedOgImageToEntryYaml({
       contentType: job.contentType,
       slug: job.slug,
@@ -238,7 +229,18 @@ async function pump(contentRootName: string): Promise<void> {
         } catch (err) {
           q.failedSession += 1;
           const message = err instanceof Error ? err.message : String(err);
-          log.error({ key: job.key, err: message }, "[entry-preview-capture-queue] failed");
+          const failureClass = classifyCaptureFailure(err);
+          log.error(
+            {
+              contentType: job.contentType,
+              slug: job.slug,
+              locale: job.locale,
+              failureClass,
+              key: job.key,
+              err: message.slice(0, 500),
+            },
+            "[entry-preview-capture-queue] failed",
+          );
           const site = resolveSiteByContentRootName(job.contentRootName);
           if (site) {
             try {

@@ -5,6 +5,7 @@ import {
   clearSSRHydration,
   readInitialDataPayload,
 } from "./lib/initialData";
+import { setThemePaint } from "@shared/theme-palette";
 import {
   preloadSectionsFromInitialData,
   prefetchRemainingSectionsFromInitialData,
@@ -41,6 +42,7 @@ if (typeof window !== "undefined") {
 }
 
 const initialDataPayload = readInitialDataPayload();
+setThemePaint(initialDataPayload?.themePaint ?? null);
 hydrateInitialData();
 
 if (typeof window !== "undefined") {

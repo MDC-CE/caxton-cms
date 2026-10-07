@@ -56,6 +56,23 @@ import { stripFunnelFromAllLocaleYamls } from "../funnel-fields";
 import { urlParamsForContentType } from "../field-scope-config";
 import type { ValidationCacheService } from "../services/validationCacheService";
 import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
+import { isSeoMonitoringEnabled } from "../seo-monitoring";
+import { checkLocaleSeoTarget } from "../content-proposals/locale-seo-gate";
+import { evaluatePageTextLimitsForSite } from "../text-limits";
+import { loadSiteTheme } from "../theme-config";
+import { evaluateRenderReviewGate } from "../design/review-freshness";
+import { recordLayoutPublish, templateLayoutKey } from "../design/layout-approval";
+import { deliveredFingerprint } from "../design/fingerprint";
+import {
+  evaluatePageThemeColors,
+  summarizeThemeViolations,
+  themeViolationDetails,
+  THEME_COLORS_CODE,
+} from "../design/theme-gate";
+import {
+  TEXT_LIMITS_EXCEEDED_CODE,
+  summarizeTextLimitViolations,
+} from "@shared/component-text-limits";
 
 export { hashVariantFileContents };
 
@@ -107,10 +124,16 @@ export type PromoteWithTeardownArgs = {
   viaProposalApply?: boolean;
   /** Caller holds an agentic swarm role: direct publish is not allowed. */
   callerIsSwarm?: boolean;
+  /** Caller is an MCP agent: text-limit violations always block (no confirm). */
+  callerIsMcp?: boolean;
+  /** Staff confirmed publishing text over the component text_limits. */
+  confirmTextLimits?: boolean;
   /** Open proposal owning this draft (local DB); `_draft.proposal` is checked first. */
   findOpenProposalForDraft?: (ref: DraftRef) => OpenProposalLink | null;
   /** Run every check, write nothing. */
   dryRun?: boolean;
+  /** New locale with `seo.pillar_path: null`: why it stays out of every cluster. */
+  seoStandaloneReason?: string | null;
 };
 
 export type PromoteWarning = { code: string; message: string; fields?: string[] };
@@ -436,6 +459,28 @@ export async function promoteVariantWithOptionalTeardown(
   const wasUnpublished = !templateMode && !hasAnyLiveLocale(contentDir, templateMode);
   const deletedSiblings: TrafficSibling[] = [];
 
+  // --- New language on a monitored page: the draft must carry its own keyword + hub ---
+  if (
+    (args.viaProposalApply || args.callerIsMcp) &&
+    !templateMode &&
+    !wasUnpublished &&
+    !fs.existsSync(defaultFilePath) &&
+    isSeoMonitoringEnabled(contentType, contentRoot)
+  ) {
+    const draftParsed = safeLoadYaml(fs.readFileSync(variantFilePath, "utf-8"));
+    const draftSeo = isPlainObject(draftParsed?.seo) ? (draftParsed!.seo as Record<string, unknown>) : null;
+    const gate = checkLocaleSeoTarget({
+      site: contentRootName,
+      contentType,
+      slug,
+      locale,
+      ci,
+      draftSeo,
+      standaloneReason: args.seoStandaloneReason,
+    });
+    if (!gate.ok) return { ok: false, code: gate.code, error: gate.error, details: gate.details };
+  }
+
   try {
     const variantContent = stripDraftMetaFromRaw(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8"));
     const identityErr = validateYamlIdentity(variantContent, {
@@ -454,8 +499,8 @@ export async function promoteVariantWithOptionalTeardown(
     const parsedVariant = (ci.safeYamlLoad(variantContent) as Record<string, unknown>) || {};
     const commonForGate = ci.loadCommonData(contentType, slug) || {};
     const mergedForGate = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
-    const { assertLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
-    const seoGateErr = assertLiveEntrySeoAndRequiredFields({
+    const { evaluateLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
+    const seoGate = evaluateLiveEntrySeoAndRequiredFields({
       contentType,
       slug,
       locale,
@@ -465,8 +510,16 @@ export async function promoteVariantWithOptionalTeardown(
       intent: "publish",
       isDraftWrite: false,
     });
-    if (seoGateErr) {
-      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGateErr}` };
+    if (seoGate) {
+      if (seoGate.code === "schema_org_page_url_mismatch") {
+        return {
+          ok: false,
+          code: seoGate.code,
+          error: `Cannot promote: ${seoGate.message}`,
+          details: { schema_org_page_url_mismatches: seoGate.schema_org_page_url_mismatches ?? [] },
+        };
+      }
+      return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGate.message}` };
     }
     if (!templateMode) {
       const urlCheck = assertLocaleUrlAvailable({
@@ -487,6 +540,91 @@ export async function promoteVariantWithOptionalTeardown(
     }
 
     const liveContent = fs.existsSync(defaultFilePath) ? fs.readFileSync(defaultFilePath, "utf-8") : null;
+
+    // Component text limits (schema.yml text_limits). Only text that differs
+    // from live counts; agents cannot override, staff can confirm.
+    const liveForGate = liveContent
+      ? (deepMerge(commonForGate, (ci.safeYamlLoad(liveContent) as Record<string, unknown>) || {}) as Record<string, unknown>)
+      : null;
+    const textLimitViolations = evaluatePageTextLimitsForSite(mergedForGate, {
+      before: liveForGate,
+      contentRoot,
+    });
+    if (textLimitViolations.length > 0) {
+      if (args.callerIsMcp || !args.confirmTextLimits) {
+        return {
+          ok: false,
+          code: TEXT_LIMITS_EXCEEDED_CODE,
+          error: `Cannot promote: text too long for this section — ${summarizeTextLimitViolations(textLimitViolations)}.${
+            args.callerIsMcp ? " Shorten it on the draft and retry." : " Shorten it, or confirm to publish anyway."
+          }`,
+          details: { violations: textLimitViolations },
+        };
+      }
+      warnings.push({
+        code: "text_limits_confirmed",
+        message: `Published with text over the component limits (confirmed): ${summarizeTextLimitViolations(textLimitViolations)}`,
+        fields: textLimitViolations.flatMap((v) => v.fields.map((f) => `${v.section_path}.${f}`)),
+      });
+    }
+
+    // Theme colors: agents cannot publish off-theme values the draft
+    // introduced (vs live); staff publish with a warning.
+    const theme = loadSiteTheme(contentRoot);
+    const themeViolations = evaluatePageThemeColors(mergedForGate, { theme, before: liveForGate });
+    if (themeViolations.length > 0) {
+      if (args.callerIsMcp) {
+        return {
+          ok: false,
+          code: THEME_COLORS_CODE,
+          error: `Cannot promote: use theme IDs for colors — ${summarizeThemeViolations(themeViolations)}. Fix them on the draft and retry.`,
+          details: themeViolationDetails(themeViolations, theme),
+        };
+      }
+      warnings.push({
+        code: "theme_colors_off_theme",
+        message: `Published with colors outside the theme: ${summarizeThemeViolations(themeViolations)}`,
+        fields: themeViolations.map((v) => v.property_path),
+      });
+    }
+
+    // Agents need a render review matching this structure before a new or
+    // restructured entry-owned page goes live (warn-only when reviews cannot run).
+    const reviewGate = evaluateRenderReviewGate({
+      callerIsMcp: args.callerIsMcp === true,
+      templateMode,
+      contentType,
+      slug,
+      locale,
+      variantSlug,
+      site: contentRootName,
+      contentRoot,
+      draftSections: mergedForGate.sections,
+      liveSections: liveForGate ? liveForGate.sections ?? [] : null,
+    });
+    if (reviewGate.status === "required") {
+      return {
+        ok: false,
+        code: "render_review_required",
+        error:
+          reviewGate.reason === "never_reviewed"
+            ? "Cannot promote: this page layout has not been render-reviewed. Run review_page_render on the draft, fix findings, then retry."
+            : "Cannot promote: the layout changed since the last render review (sections added, removed, reordered, or a variant/background switched). Re-run review_page_render, then retry.",
+        details: {
+          reason: reviewGate.reason,
+          fingerprint: reviewGate.fingerprint,
+          reviewed_fingerprint: reviewGate.review?.fingerprint ?? null,
+          last_review_job_id: reviewGate.review?.job_id ?? null,
+          review_args: { content_type: contentType, slug, locale, variant: variantSlug },
+        },
+      };
+    }
+    if (reviewGate.status === "unavailable") {
+      warnings.push({
+        code: "render_review_unavailable",
+        message: `Published without a render review (review service unavailable: ${reviewGate.reason}).`,
+      });
+    }
     const commonBefore = !templateMode && fs.existsSync(commonFilePath) ? fs.readFileSync(commonFilePath, "utf-8") : null;
     const routed = templateMode
       ? { localeRaw: variantContent, commonRaw: commonBefore, commonChanged: false, paths: [] as string[], draftCommon: {} as Record<string, unknown> }
@@ -676,6 +814,21 @@ export async function promoteVariantWithOptionalTeardown(
       });
     } catch {
       /* non-fatal */
+    }
+
+    try {
+      const sectionsLive = Array.isArray(mergedForGate.sections) && mergedForGate.sections.length > 0;
+      if (sectionsLive) {
+        recordLayoutPublish(
+          path.basename(contentRootName),
+          templateMode ? templateLayoutKey(contentType) : `${contentType}/${slug}`,
+          deliveredFingerprint(mergedForGate.sections),
+          author,
+          args.callerIsMcp === true,
+        );
+      }
+    } catch {
+      /* non-fatal: implicit approval bookkeeping only */
     }
 
     return {

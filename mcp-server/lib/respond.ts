@@ -135,6 +135,14 @@ export function actionRequired(
   });
 }
 
+/** Override on a database-sourced field: the source keeps its value but stops reaching the page. */
+export function overrideMasksSourceWarning(field: string, writtenTo: string): McpWarning {
+  return {
+    code: "override_masks_source",
+    message: `Source value unchanged. ${writtenTo} now takes priority over future source updates for ${field}; reset the field to follow the source again.`,
+  };
+}
+
 /** Common variant-isolation warnings for create_variant / edits with variant set. */
 export const VARIANT_WARNINGS: McpWarning[] = [
   {
@@ -194,6 +202,23 @@ export function promoteFailureNextActions(opts: {
     ...(opts.site ? { site: opts.site } : {}),
   };
   switch (opts.code) {
+    case "render_review_required":
+      return [
+        {
+          tool: "review_page_render",
+          priority: "required",
+          reason:
+            "New or restructured page layouts need a render review before an agent publishes. Review the draft, fix error findings on the draft, then retry this publish. Staff and template-attached entries are not gated.",
+          args_hint: {
+            source: "entry",
+            contentType: opts.contentType,
+            slug: opts.slug,
+            ...(opts.locale ? { locale: opts.locale } : {}),
+            variant: opts.variantSlug,
+            ...(opts.site ? { site: opts.site } : {}),
+          },
+        },
+      ];
     case "draft_in_proposal": {
       const proposalId = opts.details?.proposal_id;
       return [
@@ -256,7 +281,7 @@ export function diagnosticsAfterGoLiveNextAction(slug: string, site?: string): N
     tool: "run_entry_diagnostics",
     priority: "required",
     reason:
-      "Hard-refresh diagnostics for the live page (one slug — sync completed in that call; do not poll get_diagnostics_job)",
+      "Hard-refresh diagnostics for the live page (one slug → job_id; poll get_diagnostics_job until completed)",
     args_hint: { slugs: [slug], freshness: "hard", confirm: true, ...(site ? { site } : {}) },
   };
 }

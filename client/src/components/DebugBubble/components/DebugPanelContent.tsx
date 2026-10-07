@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, ArrowRight, BarChart2, Blocks, Book, Bot, Brain, Braces, Check, ChevronDown, ChevronRight, ClipboardList, Cookie, Database, Github, Globe, Home, Image, Languages, LogOut, Map, Menu, MessageCircle, Moon, Palette, Pencil, Plus, RefreshCw, Route, Search, Settings, Stethoscope, Sun, Unlink, Link2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BarChart2, Blocks, Book, Bot, Brain, Braces, Check, ChevronDown, ChevronRight, ClipboardList, Cookie, Database, Github, Globe, Home, Image, Languages, LogOut, Map, Megaphone, Menu, MessageCircle, Moon, Palette, Pencil, Plus, RefreshCw, Route, Search, Settings, Stethoscope, Sun, Unlink, Link2, X } from "lucide-react";
 import { IconServer, IconShoppingBag, IconTargetArrow, IconShield, IconAlertTriangle, IconLayersIntersect, IconInfoCircle, IconSwitchHorizontal } from "@tabler/icons-react";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { useTranslation } from "react-i18next";
@@ -509,7 +509,6 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
     if (!detachConfirmOpen) setShowDetachAdvanced(false);
   }, [detachConfirmOpen]);
   const { hasCapability } = useDebugAuth();
-  const canManageUsers = hasCapability("users_manage");
   const canViewMetrics = hasCapability("metrics_view");
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -933,7 +932,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                             robots settings are ignored until this is turned off.
                           </p>
                           <a
-                            href="/private/settings?tab=robots"
+                            href="/private/settings/robots"
                             className="text-xs text-primary underline"
                             onClick={(e) => e.stopPropagation()}
                           >
@@ -1131,7 +1130,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
               />
               <MenuItem
                 icon={IconAlertTriangle}
-                label="Server Error Log"
+                label="Server Error Log & Performance"
                 href="/private/error-log"
                 indicator="arrow"
                 testId="link-error-log"
@@ -1156,6 +1155,13 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                 href="/private/diagnostics/seo"
                 indicator="arrow"
                 testId="link-diagnostics-seo"
+              />
+              <MenuItem
+                icon={Megaphone}
+                label="Ads overview"
+                href="/private/diagnostics/ads"
+                indicator="arrow"
+                testId="link-diagnostics-ads"
               />
             </ExpandableMenuItem>
             )}
@@ -1234,6 +1240,13 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                 testId="link-settings-seo"
               />
               <MenuItem
+                icon={Megaphone}
+                label="Ads"
+                href="/private/settings/ads/meta"
+                indicator="arrow"
+                testId="link-settings-ads"
+              />
+              <MenuItem
                 icon={Palette}
                 label="Theme Editor"
                 href="/private/theme-editor"
@@ -1249,15 +1262,13 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                   testId="link-tracking"
                 />
               )}
-              {canManageUsers && (
-                <MenuItem
-                  icon={IconShield}
-                  label="Security and Users"
-                  href="/private/security/captcha"
-                  indicator="arrow"
-                  testId="link-security"
-                />
-              )}
+              <MenuItem
+                icon={IconShield}
+                label="Security and Users"
+                href="/private/security"
+                indicator="arrow"
+                testId="link-security"
+              />
             </ExpandableMenuItem>
           </div>
 

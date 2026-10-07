@@ -371,6 +371,34 @@ export function track(
   console.log(`[Tracking] Event: ${eventName}`, payload);
 }
 
+export interface ServedPageVersion {
+  /** `{contentType}:{slug}:{locale}` */
+  experiment_id: string;
+  /** Version slug served to this visitor. */
+  variant: string;
+}
+
+let currentPageVersion: ServedPageVersion | null = null;
+let lastExposureKey = "";
+
+/** Page version served on the current page (null when the page has no active test). */
+export function getCurrentPageVersion(): ServedPageVersion | null {
+  return currentPageVersion;
+}
+
+/**
+ * Push `experiment_exposure` once per page view for the version the server served.
+ * Pass null on pages without a test so a stale version is not sent with leads.
+ */
+export function trackPageVersion(pv: ServedPageVersion | null | undefined): void {
+  currentPageVersion = pv ?? null;
+  if (!pv || typeof window === "undefined") return;
+  const key = `${window.location.pathname}|${pv.experiment_id}|${pv.variant}`;
+  if (key === lastExposureKey) return;
+  lastExposureKey = key;
+  track("experiment_exposure", { experiment_id: pv.experiment_id, variant: pv.variant });
+}
+
 /**
  * Set user context data in dataLayer (called once after session bootstrap)
  */
@@ -450,6 +478,24 @@ export const SAMPLE_LEAD_PAYLOAD: Record<string, unknown> = {
   sms_consent: false,
   consent_whatsapp: false,
   token: "<turnstile_token>",
+  submission_id: "3f1c9a52-7d1e-4a8b-9c2f-5e6d7a8b9c0d",
+  utm_id: "",
+  gclid: "EAIaIQobChMI-sample",
+  fbp: "",
+  fbc: "",
+  first_utm_source: "google",
+  first_utm_medium: "cpc",
+  first_utm_campaign: "brand-2024",
+  landing_url: "/en/ai-engineering",
+  conversion_url: "/en/apply",
+  last_paid_landing_url: "https://example.com/en/ai-engineering",
+  last_paid_landing_at: "2026-09-28T14:03:00.000Z",
+  ad_platform: "google",
+  page_experiment_id: "",
+  page_variant: "",
+  is_test: false,
+  is_repeat: false,
+  consent_state: "granted",
 };
 
 /**

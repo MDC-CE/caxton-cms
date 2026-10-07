@@ -4,7 +4,7 @@ import { registerRoutes, startBackgroundSync } from "./routes/index";
 import { setupVite, serveStatic, log } from "./vite";
 import { registerDevViteForHubRender } from "./render-hub-html";
 import type { ViteDevServer } from "vite";
-import { fallbackRedirectMiddleware } from "./redirects";
+import { fallbackRedirectMiddleware, mergeQueryIntoTarget } from "./redirects";
 import { privateHtmlAuthMiddleware } from "./private-html-auth";
 import { initialDataMiddleware } from "./initial-data-middleware";
 import compression from "compression";
@@ -35,6 +35,8 @@ import { startEventWebhookDueScan } from "./events/event-webhooks";
 import { registerAllJobs } from "./jobs/register";
 import { configureJobQueue } from "./jobs/queue";
 import { ensurePipelineDbForSites } from "./pipeline-db/runner";
+import { warnIfLiveServerMisconfigured } from "./live-server";
+import { markInterruptedOnBoot } from "./data-migrations/ledger";
 import { startJobApplier, stopJobApplier } from "./jobs/applier";
 import { startEngineWatchdog } from "./jobs/engine-watchdog";
 import { scheduleSectionVariantsRefreshForFile } from "./registrySchemaValidationRefresh";
@@ -47,6 +49,7 @@ import { registerSgtmProxy } from "./sgtm-proxy";
 import { IPN_MOUNT_PATH, registerIpnProxy } from "./ipn-proxy";
 import { getOptimizationSettings } from "./settings";
 import { BOOT_ID, BOOT_TIME, getLastSoftReload, registerShutdownHandler } from "./server-control";
+import { beginRequest, endRequest, flushTick, noteApi, resolveApiRoute, startTick } from "./process-stats";
 import logger from "./logger";
 // Note: gcs.initFromEnv() is called by media.initFromEnv() in routes.ts,
 // which happens before sync-state needs it.
@@ -94,10 +97,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     if (p.startsWith(IPN_MOUNT_PATH)) {
       return next();
     }
-    const url = req.originalUrl;
-    const qIndex = url.indexOf('?');
-    const qs = qIndex >= 0 ? url.slice(qIndex) : '';
-    return res.redirect(301, p.slice(0, -1) + qs);
+    return res.redirect(301, mergeQueryIntoTarget(p.slice(0, -1), req.originalUrl));
   }
   next();
 });
@@ -112,10 +112,7 @@ const _legacyPageRedirects: Record<string, string> = {
 app.use((req: Request, res: Response, next: NextFunction) => {
   const target = _legacyPageRedirects[req.path];
   if (target) {
-    const url = req.originalUrl;
-    const qIndex = url.indexOf("?");
-    const qs = qIndex >= 0 ? url.slice(qIndex) : "";
-    return res.redirect(301, target + qs);
+    return res.redirect(301, mergeQueryIntoTarget(target, req.originalUrl));
   }
   next();
 });
@@ -234,9 +231,27 @@ function formatApiResponseForLog(path: string, body: Record<string, unknown>): s
   return `${raw.slice(0, API_LOG_BODY_MAX_CHARS)}… (${raw.length} chars)`;
 }
 
+/** Express routes of this process, except the MCP/OAuth proxy and the /apply redirect. */
+function shouldTrackRoute(req: Request): boolean {
+  if (!req.route) return false;
+  const path = req.path || "";
+  if (path === "/apply" || path.startsWith("/apply/")) return false;
+  if (
+    path === "/mcp"
+    || path.startsWith("/mcp/")
+    || path === "/oauth"
+    || path.startsWith("/oauth/")
+    || path === "/.well-known/oauth-authorization-server"
+    || path === "/.well-known/oauth-protected-resource"
+    || path.startsWith("/.well-known/oauth-protected-resource/")
+  ) return false;
+  return true;
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
+  beginRequest(req);
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
@@ -245,8 +260,19 @@ app.use((req, res, next) => {
     return originalResJson.apply(res, [bodyJson, ...args]);
   };
 
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    endRequest(req);
+  };
+
   res.on("finish", () => {
     const duration = Date.now() - start;
+    settle();
+    if (shouldTrackRoute(req)) {
+      noteApi(req.method, resolveApiRoute(req), duration, res.statusCode);
+    }
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       // 304 + polling endpoints: status line only (body unchanged / not useful in logs).
@@ -268,6 +294,7 @@ app.use((req, res, next) => {
       }
     }
   });
+  res.on("close", settle);
 
   next();
 });
@@ -450,7 +477,6 @@ app.use((req, res, next) => {
       const cached = getCachedHtml(buildHtmlCacheKey(siteId, cleanUrl, variantKey));
       if (!cached) return next();
 
-      const tHit = Date.now();
       const { injectGtmWebContainerId } = await import("./gtm-web-inject");
       const html = injectGtmWebContainerId(cached.html, site?.contentRoot);
 
@@ -458,17 +484,6 @@ app.use((req, res, next) => {
         .status(cached.status)
         .set({ "Content-Type": "text/html", "X-HTML-Cache": "HIT" })
         .send(html);
-
-      void import("./utils/request-health").then(({ logSlowHtmlIfNeeded }) => {
-        logSlowHtmlIfNeeded({
-          url: cleanUrl,
-          ms: Date.now() - tHit,
-          status: cached.status,
-          cache: "HIT",
-          outcome: "cache_hit",
-          appHtmlLength: cached.html?.length,
-        });
-      });
     });
   }
 
@@ -528,6 +543,8 @@ app.use((req, res, next) => {
   // It is the only port that is not firewalled.
   // VPS: bind loopback only (Nginx proxies). Do not merge this hardcode to
   // breatheco-de/Replit — there the process must listen on 0.0.0.0.
+  startTick({ processName: "web", processStartId: BOOT_ID, ingest: true });
+
   const port = parseInt(process.env.PORT || '5000', 10);
   server.listen({
     port,
@@ -537,7 +554,7 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on port ${port}`);
 
-    // ─── Periodic memory + event-loop health ─────────────────────────────────
+    // ─── Periodic memory usage logging ───────────────────────────────────────
     const memLogger = logger.child({ module: "memory" });
     setInterval(() => {
       const mem = process.memoryUsage();
@@ -548,9 +565,6 @@ app.use((req, res, next) => {
       const logFn = heapRatio > 0.80 ? memLogger.warn.bind(memLogger) : memLogger.info.bind(memLogger);
       logFn({ heapUsedMb, heapTotalMb, rssMb }, `high memory usage: heap ${heapUsedMb}/${heapTotalMb} MB (${Math.round(heapRatio * 100)}% used), rss ${rssMb} MB`);
     }, 5 * 60 * 1000).unref();
-    void import("./utils/request-health").then(({ startProcessHealthMonitor }) => {
-      startProcessHealthMonitor();
-    });
     // ─────────────────────────────────────────────────────────────────────────
 
     // All deferred background tasks fire here — server is already ready to handle requests.
@@ -660,6 +674,8 @@ app.use((req, res, next) => {
       logger.error({ err, worker: "PipelineDb" }, "failed to apply pipeline SQLite migrations");
       process.exit(1);
     }
+    warnIfLiveServerMisconfigured();
+    markInterruptedOnBoot(siteNames);
     if (process.env.NODE_ENV !== "production") {
       const wiped = wipeAllSiteEventStores(siteNames);
       if (wiped > 0) {
@@ -773,6 +789,12 @@ app.use((req, res, next) => {
   async function gracefulShutdown(signal: string): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
+
+    try {
+      flushTick();
+    } catch (err) {
+      logger.warn({ err }, "[Shutdown] process stats flush failed");
+    }
 
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");
     try {

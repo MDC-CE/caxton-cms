@@ -177,6 +177,30 @@ const REGISTRY = [
       "Change site-wide SEO config: Schema.org, brand, Search Console, OG/preview, companion ensure, and runtime-issue cleanup.",
   },
   {
+    name: "ads_settings",
+    label: "Manage Ads settings",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Connect ad accounts (Meta), edit ads alert thresholds, and run ads syncs. Does not authorize editing live ads (use Edit live ads) or the cookie consent window (use Manage cookie consent).",
+  },
+  {
+    name: "ads_edit",
+    label: "Edit live ads",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Change live ads in connected ad accounts from the staff UI, e.g. add missing tracking parameters. Changed ads go back to Meta review. Does not change budgets, audiences, or account connections.",
+  },
+  {
+    name: "consent_settings",
+    label: "Manage cookie consent",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "Edit the cookie consent window: which countries must accept or reject tracking, unknown-country mode, durations, and banner copy.",
+  },
+  {
     name: "content_types_manage",
     label: "Manage content types",
     scoped: false,

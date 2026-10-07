@@ -3,6 +3,7 @@ import { Loader2, Palette } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { themeIdForValue } from "@shared/theme-palette";
 
 interface ThemeColor {
   id: string;
@@ -28,6 +29,11 @@ interface ColorPickerProps {
   allowCustom?: boolean;
   allowNone?: boolean;
   testIdPrefix?: string;
+  /**
+   * "id" stores the theme palette ID (section wrapper backgrounds, resolved by
+   * the renderer); "css" stores the CSS value for fields rendered as raw CSS.
+   */
+  saveAs?: "id" | "css";
 }
 
 export function ColorPicker({
@@ -38,46 +44,48 @@ export function ColorPicker({
   allowCustom = true,
   allowNone = true,
   testIdPrefix = "color-picker",
+  saveAs = "css",
 }: ColorPickerProps) {
   const { data: theme, isLoading } = useQuery<ThemeConfig>({
     queryKey: ["/api/theme"],
   });
 
-  const colors = useMemo(() => {
+  const rawColors = useMemo<ThemeColor[]>(() => {
     if (!theme) return [];
-    
-    let themeColors: ThemeColor[] = [];
     switch (type) {
       case "background":
-        themeColors = theme.backgrounds || [];
-        break;
+        return theme.backgrounds || [];
       case "accent":
-        themeColors = theme.accents || [];
-        break;
+        return theme.accents || [];
       case "text":
-        themeColors = theme.text || [];
-        break;
+        return theme.text || [];
       case "courses":
-        themeColors = theme.courses || [];
-        break;
+        return theme.courses || [];
     }
-    
-    return themeColors.map((color) => {
-      const cssValue = color.cssVar ? `hsl(var(${color.cssVar}))` : color.value || "";
-      return {
-        id: color.id,
-        label: color.label,
-        cssValue,
-        previewStyle: cssValue,
-      };
-    });
+    return [];
   }, [theme, type]);
+
+  const selectedId = useMemo(() => themeIdForValue(value, rawColors), [value, rawColors]);
+
+  const colors = useMemo(
+    () =>
+      rawColors.map((color) => {
+        const cssValue = color.cssVar ? `hsl(var(${color.cssVar}))` : color.value || "";
+        return {
+          id: color.id,
+          label: color.label,
+          cssValue,
+          previewStyle: cssValue,
+        };
+      }),
+    [rawColors],
+  );
 
   const isSelected = useCallback(
     (color: { id: string; cssValue: string }) => {
-      return value === color.cssValue || value === color.id;
+      return value === color.cssValue || value === color.id || selectedId === color.id;
     },
-    [value],
+    [value, selectedId],
   );
 
   const isCustom =
@@ -150,7 +158,7 @@ export function ColorPicker({
             key={color.id}
             type="button"
             onClick={() => {
-              onChange(color.cssValue);
+              onChange(saveAs === "id" ? color.id : color.cssValue);
               setShowCustomInput(false);
             }}
             className={`w-7 h-7 rounded border-2 transition-all ${
@@ -194,6 +202,15 @@ export function ColorPicker({
           data-testid={`${testIdPrefix}-custom`}
           autoFocus
         />
+      )}
+      {saveAs === "id" && isCustom && (
+        <p
+          className="text-xs text-amber-600 dark:text-amber-400"
+          data-testid={`${testIdPrefix}-off-theme-warning`}
+        >
+          This color is not in the theme. It will still show, but it won't follow theme or dark-mode changes,
+          and agents can't reuse it. Pick a swatch, or add the color in the Theme editor.
+        </p>
       )}
     </div>
   );

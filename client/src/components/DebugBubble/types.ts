@@ -313,6 +313,8 @@ export interface SeoLocation {
 }
 
 export type SlugCheckStatus = 'idle' | 'checking' | 'available' | 'taken';
+/** Slug rename editor: adds a failed check (retryable) and missing rename permission. */
+export type SlugRenameCheckStatus = SlugCheckStatus | 'error' | 'forbidden';
 export type ContentTypeValue = string;
 import type { ComponentType } from "react";
 import type { LucideIcon } from "lucide-react";

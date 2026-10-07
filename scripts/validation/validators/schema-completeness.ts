@@ -3,6 +3,12 @@ import * as path from "path";
 import * as yaml from "js-yaml";
 import type { ContentFile, Validator, ValidatorResult, ValidationContext, ValidationIssue } from "../shared/types";
 import { hasSchemaOrgContributors } from "@shared/schema-org-sections";
+import {
+  findSchemaOrgPageUrlMismatches,
+  formatSchemaOrgPageUrlMismatch,
+  homeAliasPaths,
+} from "@shared/schema-org-page-url";
+import { getSiteHosts } from "../../../server/site-urls";
 import { escapeTemplateVars, unescapeObjectVars } from "@shared/templateVars";
 import {
   collectMissingJsonLdFields,
@@ -262,6 +268,28 @@ export const schemaCompletenessValidator: Validator = {
       }
 
       pagesWithSchema++;
+
+      const canonicalOverride = file.meta?.canonical_url;
+      const urlMismatches = findSchemaOrgPageUrlMismatches({
+        sections,
+        expectedPaths: [
+          url,
+          typeof canonicalOverride === "string" ? canonicalOverride : null,
+          ...(file.slug === "home" ? homeAliasPaths(file.locale) : []),
+        ],
+        siteHosts: getSiteHosts(),
+        locale: file.locale === "_common" ? undefined : file.locale,
+      });
+      for (const m of urlMismatches) {
+        warnings.push({
+          type: "warning",
+          code: "SCHEMA_ORG_PAGE_URL_MISMATCH",
+          message: `${formatSchemaOrgPageUrlMismatch(m)} (${url})`,
+          file: file.filePath,
+          suggestion:
+            "Remove url from this Schema.org section; the page address is filled in automatically. Never build it from a URL pattern.",
+        });
+      }
 
       let collected: PageSchemaCollectResult;
       try {

@@ -25,6 +25,10 @@ export type DiscoveryCtx = {
   databaseId?: string;
   componentName?: string;
   seoClusterId?: string;
+  /** A page whose entry comes from a database item (stored copy). */
+  dbEntrySlug?: string;
+  dbEntryLocale?: string;
+  dbEntryContentType?: string;
 };
 
 export type ScenarioClass = "normal" | "docs";
@@ -208,6 +212,19 @@ export const SCENARIOS: Scenario[] = [
     skipIf: needLight,
   },
   {
+    id: "get_entry_content_db",
+    tool: "get_entry_content",
+    about:
+      "Full body for a page whose entry comes from a database item (stored copy + field_overrides). Same tool and shape as static pages; compare p95 vs get_entry_content.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        slug: ctx.dbEntrySlug!,
+        locale: ctx.dbEntryLocale ?? "en",
+        contentType: ctx.dbEntryContentType,
+      }),
+    skipIf: (ctx) => (ctx.dbEntrySlug ? null : "no database-backed entry with a stored copy"),
+  },
+  {
     id: "get_entry_seo",
     tool: "get_entry_seo",
     about: "SEO/meta only for the heavy page (no body). Baseline vs search-engines variant.",
@@ -318,6 +335,27 @@ export const SCENARIOS: Scenario[] = [
   },
 
   {
+    id: "list_variables_catalog",
+    tool: "list_variables",
+    about:
+      "Site facts catalog mode: list_variables with no names — every non-deprecated variable row (name, category, description, default, varies_by). What writers call before quoting a stat.",
+    buildArgs: (ctx) => withSite(ctx, {}),
+    phase: "both",
+  },
+  {
+    id: "list_variables_detail",
+    tool: "list_variables",
+    about:
+      "Site facts detail mode: 3 names with context.entry on a landing that sets locations — resolves the page audience (location regions) and per-audience values. Heaviest list_variables path.",
+    buildArgs: (ctx) =>
+      withSite(ctx, {
+        names: ["global.campus_phone", "global.global_job_placement_rate", "global.global_salary_increase"],
+        context: { entry: { contentType: "landing", slug: "4geeks-others-chile", locale: "es" } },
+      }),
+    skipIf: (ctx) =>
+      ctx.site && ctx.site !== "4geeks.com" ? "fixture landing only exists on 4geeks.com" : null,
+  },
+  {
     id: "list_components",
     tool: "list_components",
     about: "All section component types for the site (shared ∪ site registry).",
@@ -333,13 +371,26 @@ export const SCENARIOS: Scenario[] = [
   {
     id: "get_component_usage",
     tool: "get_component_usage",
-    about: "Where a component appears, scoped to the primary contentType.",
+    about: "Where a component appears, scoped to the primary contentType (+ suggest_next and weighted variant_pairings).",
     buildArgs: (ctx) =>
       withSite(ctx, {
         componentType: ctx.componentName!,
         contentType: ctx.contentType,
       }),
     skipIf: needComponent,
+  },
+  {
+    id: "get_page_recipe_landing",
+    tool: "get_page_recipe",
+    about: "Page recipe for a new landing (decision stage): weighted skeleton slots, variant pairings and learned rules. Called at the start of every page design.",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "landing", stage: "decision", locale: ctx.locale }),
+    phase: "both",
+  },
+  {
+    id: "get_page_recipe_fields_blog",
+    tool: "get_page_recipe",
+    about: "Fields-mode recipe for a new blog post attached to the shared template (template sections + bound entry fields).",
+    buildArgs: (ctx) => withSite(ctx, { contentType: "blog", locale: ctx.locale }),
   },
 
   {
@@ -479,6 +530,51 @@ export const SCENARIOS: Scenario[] = [
     about:
       "GA4 BigQuery traffic_source_conversions (default session_last_click, no item_id). Soft N.C. when tracking.bigquery is unset.",
     buildArgs: (ctx) => withSite(ctx, { report: "traffic_source_conversions" }),
+  },
+  {
+    id: "get_paid_traffic_summary",
+    tool: "get_paid_traffic",
+    about:
+      "Paid traffic summary (default 28 days): joins cached Meta days + GA4 paid-landing days + lead ledger. Soft N.C. when neither Meta nor GA4 is set up. Also in burst.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "summary" }),
+    phase: "both",
+  },
+  {
+    id: "get_paid_traffic_entries_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Heaviest paid-traffic read: entries over 90 days with group=campaign and split_by_version (full campaign lists + variant rows), limit 100. Soft N.C. when not set up.",
+    buildArgs: (ctx) =>
+      withSite(ctx, { mode: "entries", days: 90, group: "campaign", split_by_version: true, limit: 100 }),
+  },
+  {
+    id: "get_paid_traffic_diagnostics_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Cross-platform ads overview (diagnostics without platform), 90-day KPIs: serves three saved report windows (meta / google / all) + the saved issue rows from the validation cache, then returns platform cards + shared issues + run state. Read-only (no checks, no probes). Soft N.C. when not set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", days: 90, limit: 50 }),
+  },
+  {
+    id: "get_paid_traffic_diagnostics_meta_90d",
+    tool: "get_paid_traffic",
+    about:
+      "Meta ads diagnostics, 90-day KPIs and 50 issues per page: the saved 90-day report window + saved issue rows (verify view per issue reads daily rollups for pending ones), top 3 ads and ≤20 affected ad ids per issue, job records for run state. Read-only — the most common agent loop read, so also in burst. Soft N.C. when Meta is not set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "meta", days: 90, limit: 50 }),
+    phase: "both",
+  },
+  {
+    id: "get_paid_traffic_summary_google",
+    tool: "get_paid_traffic",
+    about:
+      "Paid traffic summary filtered to Google over 90 days: reads cached Google transfer days + network days + GA4 paid landings + ledger, with the google block and google_networks. Soft N.C. / google_not_connected when Google isn't set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "summary", platform: "google", days: 90 }),
+  },
+  {
+    id: "get_paid_traffic_diagnostics_google",
+    tool: "get_paid_traffic",
+    about:
+      "Google Ads diagnostics (28-day KPIs): saved Google report window + transfer / matching / network blocks + saved Google issue rows and run state. Read-only. Returns not_connected quickly when Google isn't set up.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "google" }),
   },
   {
     id: "list_proposals",

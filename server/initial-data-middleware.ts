@@ -5,7 +5,7 @@ import * as yaml from "js-yaml";
 import type { Request, Response, NextFunction } from "express";
 import { contentIndex, ContentIndex } from "./content-index";
 import { resolveDynamicEntries } from "./dynamic-entries";
-import { resolveLayout, getAllConfigs, getLabel, getLayout, getPreviewConfig, finalizeSingleEntryForTemplates } from "./content-types";
+import { resolveLayout, getAllConfigs, getContentTypeConfig, getLabel, getLayout, getPreviewConfig } from "./content-types";
 import {
   applyComponentSectionDefaults,
   applyComponentImageSizes,
@@ -19,7 +19,9 @@ import { readNavigationEagerManifest } from "./navigation-eager-manifest";
 import { getDefaultLocale, normalizeLocale, resolveEffectiveRobots } from "./settings";
 import { getApiPath } from "../shared/api-paths";
 import { toOgLocale } from "../shared/locale";
-import { loadDatabaseSinglePage, attachVariableFieldsToSections } from "./database-single-loader";
+import { attachVariableFieldsToSections } from "./database-single-loader";
+import { loadEntryForDelivery } from "./entry-delivery";
+import { typeUsesSharedTemplate } from "./layout-owner";
 import { resolveAllTemplateVars, buildContentDeliveryParamBag } from "./resolve-template-vars";
 import { buildSingleEntryFromContent } from "./build-single-entry";
 import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
@@ -38,6 +40,8 @@ import {
 } from "./image-registry-subset";
 import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
+import { buildThemeBackgroundCss, type ThemePaint, type ThemePalettes } from "@shared/theme-palette";
+import { loadSiteTheme } from "./theme-config";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -84,6 +88,8 @@ export interface InitialDataPayload {
   locale?: string;
   /** When set, SSR HTML response should use this status (e.g. empty detached locale). */
   httpStatus?: number;
+  /** Light colors used to paint section backgrounds as real colors. */
+  themePaint?: import("@shared/theme-palette").ThemePaint;
 }
 
 export async function resolvePageQuery(
@@ -132,38 +138,30 @@ export async function resolvePageQuery(
           locale: normalizedProbe,
           availableUrls,
         });
-        const apiPath = fromDatabase
-          ? "/api/database-single"
-          : getApiPath(contentType);
         return {
-          queryKey: fromDatabase
-            ? ["/api/database-single", contentType, slug, normalizedProbe]
-            : [apiPath, slug, normalizedProbe],
+          queryKey: [getApiPath(contentType), slug, normalizedProbe],
           data: { ...payload, locale_unavailable: true },
         };
       }
     }
 
-    if (fromDatabase) {
+    if (typeUsesSharedTemplate(getContentTypeConfig(contentType, ci.contentRoot))) {
       try {
         let locale = cleanUrl.match(/^\/(es)\b/) ? "es" : "en";
         if (resolved.params?.locale) {
           locale = resolved.params.locale;
         }
         const normalizedLocale = normalizeLocale(locale);
-        const page = await loadDatabaseSinglePage(contentType, slug, normalizedLocale, ci.contentRoot, dbm);
-        if (!page) return null;
-        const pageData = page as unknown as Record<string, unknown>;
-        const singleEntry = finalizeSingleEntryForTemplates(
-          (pageData.singleEntry as Record<string, unknown>) || {},
-          { slug, locale: normalizedLocale },
-        ) || {};
-        pageData.singleEntry = singleEntry;
+        const delivered = await loadEntryForDelivery(ci, contentType, slug, normalizedLocale);
+        if (!delivered) return null;
+        const pageData = delivered.data;
+        const layout = resolveLayout(contentType, pageData, ci.contentRoot);
+        const singleEntry = delivered.singleEntry;
         const param = buildContentDeliveryParamBag({
           contentType,
           slug,
           locale: normalizedLocale,
-          record: singleEntry,
+          record: { ...pageData, ...(singleEntry || {}) },
           query: requestQuery,
           contentRoot: ci.contentRoot,
         });
@@ -172,18 +170,19 @@ export async function resolvePageQuery(
           Object.assign(param, urlPathParams);
         }
         pageData.param = param;
-        if (page.sections && Array.isArray(page.sections)) {
-          page.sections = (await resolveDynamicEntries(page.sections, normalizedLocale, {
+        if (singleEntry) pageData.singleEntry = singleEntry;
+        if (Array.isArray(pageData.sections)) {
+          pageData.sections = (await resolveDynamicEntries(pageData.sections, normalizedLocale, {
             db: dbm,
             contentRoot: ci.contentRoot,
             contentIndex: ci,
             singleEntry,
           })) as any;
-          applyComponentImageSizes(page.sections as unknown[]);
+          applyComponentImageSizes(pageData.sections as unknown[]);
         }
         // Fill missing image from entry-preview BEFORE template resolution so
-        // {{ single.image | fallback }} does not bake the pipe default into sections.
-        if (site?.entryPreviewManager) {
+        // {{ entry.image | fallback }} does not bake the pipe default into sections.
+        if (singleEntry && site?.entryPreviewManager) {
           await applyEntryPreviewOgImage(site.entryPreviewManager, {
             contentType,
             entry: singleEntry,
@@ -191,30 +190,24 @@ export async function resolvePageQuery(
             pageData,
           });
         }
-        if (Object.keys(singleEntry).length > 0) {
-          const resolvedVars = resolveAllTemplateVars(pageData, {
-            singleEntry,
-            param,
-            contentRoot: ci.contentRoot,
-            context: { locale: normalizedLocale },
-          }) as Record<string, unknown>;
-          Object.assign(pageData, resolvedVars);
-        } else {
-          const resolvedVars = resolveAllTemplateVars(pageData, {
-            param,
-            contentRoot: ci.contentRoot,
-            context: { locale: normalizedLocale },
-          }) as Record<string, unknown>;
-          Object.assign(pageData, resolvedVars);
-        }
+        const resolvedVars = resolveAllTemplateVars(pageData, {
+          ...(singleEntry && Object.keys(singleEntry).length > 0 ? { singleEntry } : {}),
+          param,
+          contentRoot: ci.contentRoot,
+          context: { locale: normalizedLocale },
+        }) as Record<string, unknown>;
+        Object.assign(pageData, resolvedVars);
         const { enhanceArticleSectionsInPage } = await import("./markdown-enhance");
         await enhanceArticleSectionsInPage(pageData);
-        const dbSingleRaw = ci.loadMergedContent(contentType, slug, normalizedLocale);
-        const layout = resolveLayout(contentType, dbSingleRaw.data || pageData, ci.contentRoot);
         const { layout: _strip, ...pageRest } = pageData;
         return {
-          queryKey: ["/api/database-single", contentType, slug, normalizedLocale],
-          data: { ...pageRest, layout },
+          queryKey: [getApiPath(contentType), slug, normalizedLocale],
+          data: {
+            ...pageRest,
+            layout,
+            detached: delivered.detached,
+            ...(delivered.perEntryRemovedSections ? { perEntryRemovedSections: delivered.perEntryRemovedSections } : {}),
+          },
         };
       } catch {
         return null;
@@ -881,7 +874,13 @@ export async function resolveInitialData(
       ? 404
       : undefined;
 
-  return { queries, locale: resolvedLocale, ...(httpStatus ? { httpStatus } : {}) };
+  const themePaint = themePaintFor(ci.contentRoot);
+  return {
+    queries,
+    locale: resolvedLocale,
+    ...(themePaint ? { themePaint } : {}),
+    ...(httpStatus ? { httpStatus } : {}),
+  };
 }
 
 function buildContentTypesPayload(
@@ -920,11 +919,26 @@ function buildContentTypesPayload(
   return result;
 }
 
+function themePaintFor(contentRoot: string): ThemePaint | undefined {
+  const theme = loadSiteTheme(contentRoot);
+  const light = theme?.colors?.light;
+  if (!light || Object.keys(light).length === 0) return undefined;
+  const backgrounds = (theme?.backgrounds ?? [])
+    .filter((entry) => entry.id)
+    .map((entry) => ({
+      id: entry.id,
+      ...(entry.cssVar ? { cssVar: entry.cssVar } : {}),
+      ...(entry.value ? { value: entry.value } : {}),
+      ...(entry.lightValue ? { lightValue: entry.lightValue } : {}),
+    }));
+  return { light, backgrounds };
+}
+
 function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
   try {
     const themePath = path.join(contentRoot, "theme.json");
     if (!fs.existsSync(themePath)) return "";
-    const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as {
+    const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as ThemePalettes & {
       colors?: { light?: Record<string, string>; dark?: Record<string, string> };
       typography?: { fontFamily?: string };
       breakpoints?: Record<
@@ -932,7 +946,7 @@ function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
         { margin?: number; columns?: number; gutter?: number }
       >;
     };
-    const colors = theme.colors;
+    const colors = theme.colors ?? {};
     let css = "";
     if (colors?.light && Object.keys(colors.light).length > 0) {
       const vars = Object.entries(colors.light)
@@ -969,6 +983,7 @@ function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
         }
       }
     }
+    css += buildThemeBackgroundCss(theme);
     return css ? `<style id="__theme_overrides__">\n${css}</style>` : "";
   } catch {
     return "";

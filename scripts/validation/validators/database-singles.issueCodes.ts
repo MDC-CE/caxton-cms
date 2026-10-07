@@ -35,6 +35,22 @@ export const DATABASE_SINGLES_ISSUE_CODES: Record<string, IssueCodeDefinition> =
     coding_agent_only: true,
     next_actions: [],
   },
+  SOURCE_ITEM_REMOVED: {
+    title: "Source Item Removed",
+    summary:
+      "The page's source item is gone, so the page is not listed or served. Entry files (overrides, drafts) are kept and nothing is written automatically. " +
+      "The suggested redirect target is the cluster main page, then the listing page, then the language's home page (first live target that is not itself a redirect).",
+    suggestion:
+      "Add the suggested redirect with update_redirect (add, from = removed page URL, to = suggested target, removed_entry = { content_type, slug, locale }). " +
+      "removed_entry moves the old addresses saved on the removed page to the same target. Show the inbound list to staff before applying.",
+    next_actions: [
+      {
+        tool: "update_redirect",
+        reason: "Redirect the removed page to the suggested target; pass removed_entry to move its old addresses too.",
+        priority: "recommended",
+      },
+    ],
+  },
   UNRESOLVED_SINGLE_VARS: {
     title: "Unresolved Single Vars",
   },

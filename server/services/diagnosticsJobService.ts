@@ -1,12 +1,10 @@
 /**
  * Async diagnostics jobs shared by MCP and the staff Diagnostics dashboard.
  *
- * - Max 1 async (forked) job per contentRoot
- * - Exactly one slug runs in-process (sync) and may run beside an async site job
- * - Sync single-flight is per callerId (staff/agent identity), not site-wide
+ * - Max 1 async (forked) job per contentRoot (including single-slug runs)
  * - Exact-scope dedupe returns the existing async job_id
  * - Envelopes under {contentRoot}/.cache/diagnostics-jobs/{jobId}.json (last 50)
- * - Heavy multi-slug / unscoped work runs in a forked child (diagnostics-worker.ts)
+ * - All recomputes run in a forked child (diagnostics-worker.ts) — never in-process
  * - Issues persist in ValidationCacheService; artifacts in {jobId}-results.json
  */
 
@@ -18,7 +16,6 @@ import {
   effectiveValidatorNames,
   issuesBySlugFromTargets,
   resolveUrlTargets,
-  runDiagnosticsJob,
   type MappedIssue,
 } from "../../scripts/validation/runDiagnosticsJob";
 import type {
@@ -29,6 +26,7 @@ import type {
 } from "../../scripts/validation/diagnosticsIpc";
 import { CROSS_ENTRY_VALIDATOR_NAMES } from "../../scripts/validation/shared/runClass";
 import type { ContentIndex } from "../content-index";
+import { listEntryKeys } from "../entry-layer";
 import type { ValidationCacheService } from "./validationCacheService";
 import { listCacheIssuesFromStore } from "./validationCacheService";
 import { isUrlStaleForFullRun } from "./validationCacheMerge";
@@ -83,8 +81,7 @@ export interface DiagnosticsJobRequest {
    */
   confirm?: boolean;
   /**
-   * Staff username / MCP author for one-slug sync single-flight.
-   * Falls back to "anonymous" when omitted (e.g. on-save redirects job).
+   * Staff username / MCP author (audit / future use). Optional.
    */
   callerId?: string;
 }
@@ -148,16 +145,6 @@ export type StartDiagnosticsResult =
       retry_after_seconds: number;
     }
   | {
-      status: "completed";
-      mode: "sync";
-      issuesBySlug: Record<string, MappedIssue[]>;
-      lastFullRunAtBySlug: Record<string, string | null>;
-      cacheMisses: string[];
-      summary: { errorCount: number; warningCount: number };
-      site_job_parallel: boolean;
-      retry_after_seconds: number;
-    }
-  | {
       status: "queued" | "running";
       job_id: string;
       reused?: boolean;
@@ -177,12 +164,6 @@ export type StartDiagnosticsResult =
       retry_after_seconds: number;
       message: string;
     }
-  | {
-      status: "busy";
-      code: "diagnostics_sync_busy";
-      retry_after_seconds: number;
-      message: string;
-    }
   | ({
       status: "needs_confirm";
       code: "confirm_run_diagnostics";
@@ -193,11 +174,6 @@ export type StartDiagnosticsResult =
 
 const jobsById = new Map<string, DiagnosticsJobRecord>();
 const runningByContentRoot = new Map<string, string>();
-/** One-slug in-process sync: at most one per staff/agent identity. */
-const syncInFlightByIdentity = new Map<
-  string,
-  { slug: string; urlCount: number; startedAt: number }
->();
 const jobCache = new Map<string, ValidationCacheService>();
 const jobContentRoot = new Map<string, string>();
 const jobChildren = new Map<string, ChildProcess>();
@@ -491,9 +467,8 @@ export function isDiagnosticsRunning(contentRoot: string): boolean {
   return !!(job && (job.status === "queued" || job.status === "running"));
 }
 
-/** Test helper — clear sync single-flight + async job maps. */
+/** Test helper — clear async job maps. */
 export function clearDiagnosticsRuntimeForTests(): void {
-  syncInFlightByIdentity.clear();
   jobsById.clear();
   runningByContentRoot.clear();
 }
@@ -526,18 +501,6 @@ export function markAsyncJobRunningForTests(
   jobsById.set(jobId, job);
   runningByContentRoot.set(contentRoot, jobId);
   return jobId;
-}
-
-/** Test helper — mark callerId as having an in-flight one-slug sync. */
-export function markSyncInFlightForTests(
-  callerId: string,
-  opts?: { slug?: string; urlCount?: number },
-): void {
-  syncInFlightByIdentity.set(callerId, {
-    slug: opts?.slug ?? "test-slug",
-    urlCount: opts?.urlCount ?? 1,
-    startedAt: Date.now(),
-  });
 }
 
 /** Mark leftover queued/running envelopes failed after server restart. */
@@ -737,7 +700,7 @@ function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorke
       cwd: getProjectRoot(),
       env: process.env,
       stdio: ["inherit", "inherit", "inherit", "ipc"],
-      execArgv: ["--import", "tsx"],
+      execArgv: ["--import", "tsx", "--perf-basic-prof-only-functions"],
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -772,6 +735,18 @@ function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorke
   }
 }
 
+/** Requested slugs/file match no page. Not retryable; the route answers 404. */
+export class DiagnosticsScopeError extends Error {
+  constructor(
+    message: string,
+    public code: "diagnostics_slug_not_found" | "diagnostics_file_not_found",
+    public details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "DiagnosticsScopeError";
+  }
+}
+
 export async function startDiagnosticsJob(
   req: DiagnosticsJobRequest,
 ): Promise<StartDiagnosticsResult> {
@@ -797,7 +772,11 @@ export async function startDiagnosticsJob(
       req.urls,
     );
     if (targetsProbe.length === 0) {
-      throw new Error(`No YAML-backed pages found for slugs: ${req.slugs.join(", ")}`);
+      throw new DiagnosticsScopeError(
+        `No page found for slugs: ${req.slugs.join(", ")}`,
+        "diagnostics_slug_not_found",
+        { slugs: req.slugs, empty_databases: listEntryKeys(req.ci).emptyDatabases },
+      );
     }
   }
 
@@ -813,7 +792,11 @@ export async function startDiagnosticsJob(
       req.file ?? "",
     );
     if (!isSharedTemplateFile) {
-      throw new Error(`No YAML-backed pages found for file: ${req.file}`);
+      throw new DiagnosticsScopeError(
+        `No page found for file: ${req.file}`,
+        "diagnostics_file_not_found",
+        { file: req.file, empty_databases: listEntryKeys(req.ci).emptyDatabases },
+      );
     }
     validatorOnly = true;
     filePaths = undefined;
@@ -880,62 +863,6 @@ export async function startDiagnosticsJob(
       cacheMisses: [],
       retry_after_seconds: 0,
     };
-  }
-
-  // Exactly one slug → in-process sync (bypass site async lock; single-flight per callerId).
-  const isOneSlugSync = req.slugs?.length === 1 && !validatorOnly;
-  if (isOneSlugSync && needsWork) {
-    const callerId = (req.callerId?.trim() || "anonymous");
-    const existingSync = syncInFlightByIdentity.get(callerId);
-    if (existingSync) {
-      return {
-        status: "busy",
-        code: "diagnostics_sync_busy",
-        retry_after_seconds: retryAfterSeconds(existingSync.urlCount || allTargets.length || 1),
-        message:
-          "You already have a one-page diagnostics run in progress. Wait and retry.",
-      };
-    }
-
-    const siteJobParallel = isDiagnosticsRunning(req.contentRoot);
-    syncInFlightByIdentity.set(callerId, {
-      slug: req.slugs![0],
-      urlCount: allTargets.length,
-      startedAt: Date.now(),
-    });
-    try {
-      const output = await runDiagnosticsJob({
-        contentRoot: req.contentRoot,
-        ci: req.ci,
-        cache: req.cache,
-        slugs: req.slugs,
-        urls: req.urls,
-        freshness,
-        max_age_seconds: maxAge,
-        validators: req.validators,
-        include_artifacts: !!req.include_artifacts,
-        categories: req.categories,
-        validator_only: false,
-        onProgress: () => {},
-      });
-      const { lastFullRunAtBySlug, cacheMisses } = issuesBySlugFromTargets(
-        req.cache,
-        allTargets,
-        req.categories,
-      );
-      return {
-        status: "completed",
-        mode: "sync",
-        issuesBySlug: output.issuesBySlug,
-        lastFullRunAtBySlug,
-        cacheMisses,
-        summary: output.summary,
-        site_job_parallel: siteJobParallel,
-        retry_after_seconds: 0,
-      };
-    } finally {
-      syncInFlightByIdentity.delete(callerId);
-    }
   }
 
   const runningId = runningByContentRoot.get(req.contentRoot);

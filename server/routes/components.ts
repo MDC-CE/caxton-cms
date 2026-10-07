@@ -69,7 +69,11 @@ import {
   getVariantExamples,
   deleteExample,
   deleteVariant,
+  schemaYmlPath,
 } from "../component-registry";
+import { getUsageSummary } from "../component-insights";
+import type { VariantMetadata } from "@shared/component-layout-traits";
+import { computeVariantDrift, updateVariantMetadata, type VariantMetadataPatch } from "../design/variant-metadata";
 import {
   getScreenshotIndex,
   getExampleScreenshotEntry,
@@ -184,7 +188,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -235,7 +238,21 @@ import {
   parseAndValidateDemoYaml,
   readDemo,
   readDemoYamlText,
+  parseAndValidatePageDemoYaml,
+  createPageDemo,
 } from "../component-section-demos";
+import { getPublicSiteUrl } from "../cloudflare-browser";
+import { pagePreviewQuery, verifyPagePreviewToken } from "../entry-preview-capture-auth";
+import { loadPagePreviewData, pagePreviewSourceFromQuery } from "../design/page-preview";
+import {
+  getRenderReviewJob,
+  renderReviewImage,
+  renderReviewUnavailableReason,
+  startRenderReview,
+} from "../design/render-review";
+import { reviewFreshness } from "../design/review-freshness";
+import { getValidationCacheService, type ValidationCacheService } from "../services/validationCacheService";
+import { deliveredFingerprint } from "../design/fingerprint";
 import { getComponentServerHooks } from "@shared/component-registry/server-hooks";
 import { child } from "../logger";
 import { writeVariantFile } from "../versioning/draft-meta";
@@ -277,6 +294,154 @@ export function registerComponentsRoutes(app: Express): void {
       section: demo.section,
       yaml: yamlText ?? undefined,
     });
+  });
+
+  // Multi-section page demos (throwaway layouts) → /private/page-preview?source=demo&hash=…
+  app.post("/api/page-demos", async (req, res) => {
+    if (!isMcpLoopbackRequest(req)) {
+      const staff = await requireStaffSession(req, res);
+      if (!staff.authorized) return;
+    }
+    const yamlText = typeof req.body?.yaml === "string" ? req.body.yaml : "";
+    const locale = typeof req.body?.locale === "string" && req.body.locale.trim() ? req.body.locale.trim() : "en";
+    const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 120) : undefined;
+    if (!yamlText.trim()) {
+      res.status(400).json({ error: "yaml is required (a sections array)" });
+      return;
+    }
+    const validated = parseAndValidatePageDemoYaml({ yamlText, contentFolder: getContentRootName(res) });
+    if (!validated.ok) {
+      res.status(400).json({
+        error: validated.error.message,
+        property_path: validated.error.property_path,
+        details: validated.error.details,
+      });
+      return;
+    }
+    try {
+      const { hash, relativePath } = createPageDemo({ sections: validated.sections, locale, title });
+      const base = getPublicSiteUrl() || `http://localhost:${process.env.PORT || "5000"}`;
+      res.json({
+        hash,
+        path: relativePath,
+        preview_url: `${base}/private/page-preview?${pagePreviewQuery({ source: "demo", hash })}`,
+        section_count: validated.sections.length,
+        fingerprint: deliveredFingerprint(validated.sections),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Page preview data: staff session, MCP loopback, or a signed capture token (Cloudflare).
+  // Page demos are readable by hash alone (hash is the secret, like section demos).
+  app.get("/api/page-preview/data", async (req, res) => {
+    const source = pagePreviewSourceFromQuery(req.query as Record<string, unknown>);
+    if (!source) {
+      res.status(400).json({ error: "Pass source=demo&hash=… or source=entry&content_type=…&slug=…&locale=…" });
+      return;
+    }
+    if (source.source === "entry" && !isMcpLoopbackRequest(req)) {
+      const token = typeof req.query.capture_token === "string" ? req.query.capture_token : "";
+      if (token) {
+        const viewport = req.query.viewport === "mobile" ? "mobile" : "desktop";
+        const verified = verifyPagePreviewToken(source, viewport, Number(req.query.exp), token);
+        if (!verified.ok) {
+          res.status(401).json({ error: verified.error });
+          return;
+        }
+      } else {
+        const staff = await requireStaffSession(req, res);
+        if (!staff.authorized) return;
+      }
+    }
+    const result = await loadPagePreviewData(getCI(res), source);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json(result.data);
+  });
+
+  // Render review jobs (review_page_render MCP tool). Staff session or MCP loopback.
+  const requireReviewAuth = async (req: Request, res: Response): Promise<boolean> => {
+    if (isMcpLoopbackRequest(req)) return true;
+    const staff = await requireStaffSession(req, res);
+    return staff.authorized;
+  };
+
+  app.post("/api/render-reviews", async (req, res) => {
+    if (!(await requireReviewAuth(req, res))) return;
+    const site = res.locals.site as { contentIndex: typeof contentIndex; validationCache: ValidationCacheService } | undefined;
+    const contentRoot = getContentRoot(res);
+    const unavailable = renderReviewUnavailableReason(contentRoot);
+    if (unavailable) {
+      res.status(503).json({ error: unavailable, code: "render_review_unavailable" });
+      return;
+    }
+    const source = pagePreviewSourceFromQuery((req.body ?? {}) as Record<string, unknown>);
+    if (!source) {
+      res.status(400).json({ error: "Pass source=demo + hash, or source=entry + content_type + slug (+ locale, variant)" });
+      return;
+    }
+    (await import("../design/recipe-service")).registerLearnedRuleCheck();
+    const viewports = Array.isArray(req.body?.viewports)
+      ? (req.body.viewports as unknown[]).filter((v): v is "desktop" | "mobile" => v === "desktop" || v === "mobile")
+      : undefined;
+    const job = startRenderReview({
+      site: getContentRootName(res),
+      source,
+      viewports,
+      contentRoot,
+      contentFolder: getContentRootName(res),
+      ci: getCI(res),
+      cache: site?.validationCache ?? getValidationCacheService(),
+    });
+    res.status(202).json({ job_id: job.id, status: job.status, viewports: job.viewports, retry_after_seconds: 20 });
+  });
+
+  app.get("/api/render-reviews/freshness", async (req, res) => {
+    if (!(await requireReviewAuth(req, res))) return;
+    const source = pagePreviewSourceFromQuery(req.query as Record<string, unknown>);
+    if (!source || source.source !== "entry") {
+      res.status(400).json({ error: "Pass content_type, slug, locale (+ variant)" });
+      return;
+    }
+    res.json(await reviewFreshness(getCI(res), getContentRootName(res), source));
+  });
+
+  app.get("/api/render-reviews/:id", async (req, res) => {
+    if (!(await requireReviewAuth(req, res))) return;
+    const job = /^[a-f0-9]{24}$/.test(req.params.id) ? getRenderReviewJob(req.params.id) : null;
+    if (!job) {
+      res.status(404).json({ status: "not_found", error: "Review job not found (expired or lost on redeploy)" });
+      return;
+    }
+    res.json(job);
+  });
+
+  app.get("/api/render-reviews/:id/image", async (req, res) => {
+    if (!(await requireReviewAuth(req, res))) return;
+    if (!/^[a-f0-9]{24}$/.test(req.params.id)) {
+      res.status(400).json({ error: "Invalid job id" });
+      return;
+    }
+    const viewport = req.query.viewport === "mobile" ? "mobile" : "desktop";
+    const sectionIndex = typeof req.query.section_index === "string" ? Number(req.query.section_index) : undefined;
+    const buf = await renderReviewImage({
+      jobId: req.params.id,
+      viewport,
+      ...(Number.isInteger(sectionIndex) ? { sectionIndex } : {}),
+      ...(typeof req.query.max_width === "string" ? { maxWidth: Math.min(1600, Number(req.query.max_width) || 600) } : {}),
+    });
+    if (!buf) {
+      res.status(404).json({ error: "Image not found for this job/viewport/section" });
+      return;
+    }
+    res.setHeader("Content-Type", "image/webp");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.send(buf);
   });
 
   app.post("/api/component-section-demos", async (req, res) => {
@@ -558,6 +723,80 @@ export function registerComponentsRoutes(app: Express): void {
       }
 
       res.json({ success: true });
+    },
+  );
+
+  app.get(
+    "/api/component-registry/:componentType/:version/variant-metadata",
+    async (req, res) => {
+      const auth = await requireCapability(req, res, "components_manage");
+      if (!auth.authorized) return;
+      const { componentType, version } = req.params;
+      const abs = schemaYmlPath(componentType, version);
+      if (!abs) {
+        res.status(404).json({ error: `No schema.yml for ${componentType}/${version}` });
+        return;
+      }
+      const schema = loadSchema(componentType, version);
+      const variants = (schema?.variants ?? { default: {} }) as Record<string, VariantMetadata | null>;
+      let live: Record<string, { count: number; pageCount: number }> = {};
+      try {
+        const usage = getUsageSummary(componentType);
+        live = Object.fromEntries(usage.variants.map((v) => [v.variant, { count: v.count, pageCount: v.pageCount }]));
+      } catch {
+        /* insights not built yet */
+      }
+      const evidence = new Map(
+        Object.entries(live).map(([variant, s]) => [variant, { uses: s.count, by_dir: {} as Record<string, number> }]),
+      );
+      res.json({
+        file: path.relative(process.cwd(), abs),
+        variants: Object.fromEntries(
+          Object.entries(variants).map(([name, meta]) => [name, { ...(meta ?? {}), live: live[name] ?? { count: 0, pageCount: 0 } }]),
+        ),
+        drift: computeVariantDrift(componentType, variants, evidence).filter((d) => d.kind === "unused_variant"),
+      });
+    },
+  );
+
+  app.patch(
+    "/api/component-registry/:componentType/:version/variant-metadata",
+    async (req, res) => {
+      const auth = await requireCapability(req, res, "components_manage");
+      if (!auth.authorized) return;
+      const { componentType, version } = req.params;
+      const parsed = z
+        .object({
+          variant: z.string().min(1),
+          best_for: z.string().max(400).optional(),
+          avoid_when: z.string().max(400).optional(),
+          approve: z.boolean().optional(),
+        })
+        .safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+        return;
+      }
+      const abs = schemaYmlPath(componentType, version);
+      if (!abs) {
+        res.status(404).json({ error: `No schema.yml for ${componentType}/${version}` });
+        return;
+      }
+      const { variant, best_for, avoid_when, approve } = parsed.data;
+      const patch: VariantMetadataPatch = {
+        ...(best_for !== undefined ? { best_for: best_for.trim() } : {}),
+        ...(avoid_when !== undefined ? { avoid_when: avoid_when.trim() } : {}),
+        ...(approve === true ? { metadata_status: "approved" as const } : approve === false ? { metadata_status: "draft" as const } : {}),
+      };
+      const schema = loadSchema(componentType, version);
+      const okWrite = updateVariantMetadata(abs, variant, patch, { createVariant: !schema?.variants });
+      if (!okWrite) {
+        res.status(404).json({ error: `Variant '${variant}' not found in ${componentType}/${version}` });
+        return;
+      }
+      const relPath = path.relative(process.cwd(), abs);
+      if (relPath.startsWith("site_")) markFileAsModified(relPath, auth.author ?? undefined, new Set([relPath]));
+      res.json({ success: true, file: relPath, synced_by: relPath.startsWith("site_") ? "content_sync" : "app_repo" });
     },
   );
 

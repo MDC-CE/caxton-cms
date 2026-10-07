@@ -1,5 +1,6 @@
 import type { Session } from '@shared/session';
-import { defaultSession } from '@shared/session';
+import { defaultSession, stripMarketingFields } from '@shared/session';
+import { hasTrackingConsent } from './consent';
 import {
   getSessionFromCookie,
   setSessionCookie,
@@ -17,9 +18,13 @@ export function getCachedSession(): Session | null {
   return migrateLegacySessionFromLocalStorage();
 }
 
-export function saveSession(session: Session): void {
+/**
+ * Persist the session to `4g_ctx`. Without tracking consent, campaign fields
+ * (UTMs, click ids, landing pages) stay in memory only and are left out of the cookie.
+ */
+export function saveSession(session: Session, trackingGranted: boolean = hasTrackingConsent()): void {
   if (typeof window === 'undefined') return;
-  setSessionCookie(session);
+  setSessionCookie(trackingGranted ? session : stripMarketingFields(session));
 }
 
 export function getLanguageFromCache(): 'en' | 'es' {

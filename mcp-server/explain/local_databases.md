@@ -65,6 +65,8 @@ MCP cannot edit upstream api/remote rows. When a content type has `database.slug
 1. `get_entry_fields` with `fields: [...]` (or omit once to list names) — provenance (original / db_override / ct_override)
 2. `update_entry_field` — `level: database` (listings + pages) or `level: content_type` (page only)
 
+MCP reads, listings, sitemap and validation read the last stored copy even after its TTL (they never call the source). A public page request refreshes an expired copy first; if that refresh fails, the page is served from the last good copy (never a 404 for that reason) and automatic refreshes pause for `cache.refresh_retry_minutes` (default 5). `refresh: true` / admin clear-cache always call the source and a success ends the pause. Issues checked against an old copy say so ("Checked against data from {age} ago") and `get_validation_issues` adds `stale_source_data` with a `list_database_items` `refresh: true` next action — refresh before adding an override, the source may already be fixed. `DATABASE_CACHE_STALE` turns from warning into error after `cache.stale_error_after_days` (default 7) in the database config.
+
 Mutate tools on non-local DBs **fail** with `next_actions` pointing at those tools when a linked CT + row `slug` are available. If no linked CT, overrides are not available for that bank. Overrides ≠ bank definition — do not use `create_or_update_database` for field overrides.
 
 ## Bulk add / update (max 40, local only)

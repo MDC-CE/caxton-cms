@@ -104,7 +104,7 @@ describe("rawFileCaption", () => {
     });
     expect(c.visible).toContain("Sections in this file are ignored");
     expect(nonEffect(c)).toContain("does not render on the page");
-    expect(c.advanced.some((a) => a.text.includes("database-single-loader.ts"))).toBe(true);
+    expect(c.advanced.some((a) => a.text.includes("entry-layer.ts"))).toBe(true);
   });
 
   it("5 template_variant localeFallback", () => {

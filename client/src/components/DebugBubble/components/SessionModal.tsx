@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, LogOut, ChevronDown } from "lucide-react";
+import { Check, Copy, LogOut, ChevronDown, Trash2 } from "lucide-react";
 import { IconRefresh, IconShield } from "@tabler/icons-react";
 import {
   Dialog,
@@ -16,12 +16,34 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { getConsumerToken, clearConsumerToken } from "@/hooks/useAuthUser";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { useSession } from "@/contexts/SessionContext";
 import { useToast } from "@/hooks/use-toast";
+import { clearConsentDecision, readConsentCookie } from "@/lib/consent";
+import type { ConsentDecision, ConsentMode } from "@shared/consent";
 import { CAPABILITY_REGISTRY } from "@shared/capabilities";
 import { cn } from "@/lib/utils";
+
+const CONSENT_DECISION_HELP: Record<ConsentDecision, string> = {
+  granted_explicit: "Visitor clicked Accept (or OK). Tracking is allowed.",
+  granted_implied:
+    "Visitor kept browsing in a notice country — OK click or scrolling ~250px counted as consent. Tracking is allowed.",
+  denied: "Visitor clicked Reject. Marketing/analytics storage stays off until they change their choice.",
+};
+
+const CONSENT_MODE_HELP: Record<ConsentMode, string> = {
+  ask: "Ask countries (EU/EEA/UK/CH by default): banner shows Accept and Reject with equal weight. Scrolling does not count as consent.",
+  notice:
+    "Notice countries (everywhere else, or unknown): short notice with OK. First meaningful scroll also counts as consent.",
+};
+
+function consentStateHelp(state: "granted" | "denied" | "unset"): string {
+  if (state === "granted") return "Tracking is on for this browser (GA/Meta Consent Mode granted).";
+  if (state === "denied") return "Tracking is off for this browser.";
+  return "No 4g_consent cookie yet — banner can still appear on public pages.";
+}
 
 const BUILT_IN_ROLE_LABELS: Record<string, string> = {
   webmaster: "Webmaster (deprecated)",
@@ -30,6 +52,7 @@ const BUILT_IN_ROLE_LABELS: Record<string, string> = {
   platform_ops: "Platform Ops",
   metrics_viewer: "Metrics Viewer",
   content_viewer: "Content Viewer",
+  ads_manager: "Ads Manager",
 };
 
 function capabilityLabel(name: string): string {
@@ -149,14 +172,33 @@ export function SessionModal(props: SessionModalProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rolesCapsOpen, setRolesCapsOpen] = useState(false);
   const [isClearingGeo, setIsClearingGeo] = useState(false);
+  const [consentRevision, setConsentRevision] = useState(0);
   const { roles, capabilities, isValidated } = useDebugAuth();
   const { refreshGeo } = useSession();
   const { toast } = useToast();
 
+  const consentCookie = open ? readConsentCookie() : null;
+  const consentState = session.consent?.tracking ?? "unset";
+  const consentLabel = consentCookie
+    ? `${consentState} (${consentCookie.decision} · ${consentCookie.mode})`
+    : consentState;
+
   // Re-read on open in case the user logged in/out since the modal mounted.
   useEffect(() => {
-    if (open) setConsumerTokenState(getConsumerToken());
+    if (open) {
+      setConsumerTokenState(getConsumerToken());
+      setConsentRevision((n) => n + 1);
+    }
   }, [open]);
+
+  function handleClearConsent() {
+    clearConsentDecision();
+    setConsentRevision((n) => n + 1);
+    toast({
+      title: "Consent cleared",
+      description: "4g_consent removed. The cookie banner can ask again.",
+    });
+  }
 
   async function handleClearGeoCache() {
     setIsClearingGeo(true);
@@ -447,7 +489,69 @@ export function SessionModal(props: SessionModalProps) {
           
           <div className="space-y-2">
             <h4 className="text-sm font-semibold text-foreground">Tracking</h4>
-            <div className="space-y-1 text-sm">
+            <div className="space-y-1 text-sm" data-consent-revision={consentRevision}>
+              <div className="flex justify-between gap-2 items-center">
+                <span className="text-muted-foreground shrink-0">Consent:</span>
+                <div className="flex items-center gap-1 min-w-0">
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono text-right hover:bg-muted/80 cursor-pointer underline-offset-2 hover:underline whitespace-normal break-all"
+                        title="Click for explanation"
+                        data-testid="text-tracking-consent"
+                      >
+                        {consentLabel}
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="end"
+                      className="w-80 space-y-2 text-sm z-[10001]"
+                      data-testid="popover-tracking-consent"
+                    >
+                      <p className="font-medium text-foreground">Tracking consent (`4g_consent`)</p>
+                      <p className="text-xs text-muted-foreground">{consentStateHelp(consentState)}</p>
+                      {consentCookie ? (
+                        <>
+                          <div className="space-y-1">
+                            <p className="text-xs font-medium text-foreground">
+                              Decision: <code className="font-mono">{consentCookie.decision}</code>
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {CONSENT_DECISION_HELP[consentCookie.decision]}
+                            </p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-medium text-foreground">
+                              Banner mode: <code className="font-mono">{consentCookie.mode}</code>
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {CONSENT_MODE_HELP[consentCookie.mode]}
+                            </p>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Cookie not set. Accept, Reject, OK, or (in notice mode) scrolling will write it.
+                        </p>
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                  {consentCookie ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                      title="Clear consent so the banner can ask again"
+                      onClick={handleClearConsent}
+                      data-testid="button-clear-tracking-consent"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">PPC Tracking ID:</span>
                 <code className="bg-muted px-1.5 py-0.5 rounded text-xs max-w-[150px] truncate">{session.utm?.ppc_tracking_id || '—'}</code>

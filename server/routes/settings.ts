@@ -30,6 +30,11 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import { loadSiteTheme } from "../theme-config";
+import { scanThemeBackgroundUsage, replaceSectionBackgroundEverywhere } from "../design/theme-usage";
+import { evaluateVariableWrite, type VariableWriteAction } from "../variable-write-rules";
+import { api } from "../rate-limit/api";
+import { handleVariableCatalogRequest } from "../variable-catalog-route";
 import { getConversionNameUsages, bulkReplaceConversionName, partialReplaceConversionNameBySection, buildFormState, getFormStateSuggestions, getConversionNameCounts, getAllFormEntries } from "../form-state";
 import { sectionMatchesId } from "../utils/sectionIdentity";
 import { deepMerge } from "../utils/deepMerge";
@@ -199,7 +204,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { loadDatabaseSinglePage, mergeSingleTemplate } from "../database-single-loader";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -414,8 +418,68 @@ export function registerSettingsRoutes(app: Express): void {
     }
   });
 
+  api.get(app, "/api/theme/background-usage", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "theme_edit");
+      if (!auth.authorized) return;
+      const contentRoot = getContentRoot(res);
+      const theme = loadSiteTheme(contentRoot);
+      if (!theme) {
+        res.status(404).json({ error: "Theme configuration not found" });
+        return;
+      }
+      res.json(scanThemeBackgroundUsage(contentRoot, theme.backgrounds ?? []));
+    } catch (error) {
+      log.error({ err: error }, "Error scanning theme background usage:");
+      res.status(500).json({ error: "Failed to scan background usage" });
+    }
+  });
+
+  api.post(app, "/api/theme/backgrounds/replace", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "theme_edit");
+      if (!auth.authorized) return;
+      const parsed = z.object({ from: z.string().min(1), to: z.string().min(1) }).safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "from and to are required" });
+        return;
+      }
+      const contentRoot = getContentRoot(res);
+      const theme = loadSiteTheme(contentRoot);
+      const backgrounds = theme?.backgrounds ?? [];
+      if (!backgrounds.some((b) => b.id === parsed.data.to)) {
+        res.status(400).json({ error: `"${parsed.data.to}" is not a background in the theme` });
+        return;
+      }
+      const result = replaceSectionBackgroundEverywhere(contentRoot, parsed.data.from, parsed.data.to, backgrounds);
+      for (const file of result.files) {
+        markFileAsModified(file, auth.author || undefined, undefined, contentRoot);
+      }
+      if (result.files.length > 0) invalidateContentCaches();
+      res.json({ ok: true, replaced: result.replaced, files: result.files });
+    } catch (error) {
+      log.error({ err: error }, "Error replacing section backgrounds:");
+      res.status(500).json({ error: "Failed to replace backgrounds" });
+    }
+  });
+
   app.get("/api/variables", (_req, res) => {
     res.json(getVM(res).getDefinitions());
+  });
+
+  // Must be registered before /api/variables/:name/* so "catalog" is not a :name.
+  api.get(app, "/api/variables/catalog", { rate: "publicRead" }, (req, res) => {
+    try {
+      const result = handleVariableCatalogRequest(req.query as Record<string, unknown>, {
+        vm: getVM(res),
+        ci: getCI(res),
+        contentRoot: getContentRoot(res),
+      });
+      res.status(result.status).json(result.body);
+    } catch (err: any) {
+      log.error({ err }, "Error building variable catalog");
+      res.status(500).json({ error: err?.message || "Failed to build variable catalog" });
+    }
   });
 
   // Must be registered before /api/variables/:name/* so "usage-summary" is not a :name.
@@ -447,12 +511,35 @@ export function registerSettingsRoutes(app: Express): void {
         return res.status(400).json({ error: "action is required" });
       }
 
+      const vm = getVM(res);
+      const decision = evaluateVariableWrite({
+        name,
+        action: action as VariableWriteAction,
+        existing: def,
+        body: (body ?? {}) as Record<string, unknown>,
+        knownNames: Object.keys(vm.getDefinitions()),
+        usageCount: () => getCI(res).getVariableUsage(name).length,
+      });
+      if (!decision.ok) {
+        return res
+          .status(decision.status)
+          .json({ error: decision.error, code: decision.code, details: decision.details ?? {} });
+      }
+      if (action === "set_metadata") {
+        vm.updateMetadata(name, decision.metadataPatch ?? {});
+        return res.json({ success: true, definitions: vm.getDefinitions() });
+      }
+      const applyMeta = () => {
+        if (decision.metadataPatch) vm.applyMetadata(name, decision.metadataPatch);
+      };
+
       switch (action) {
         case "set_default": {
           const { value } = body as { value: string };
           if (value === undefined) {
             return res.status(400).json({ error: "value is required" });
           }
+          applyMeta();
           getVM(res).updateDefault(name, value);
           break;
         }
@@ -465,6 +552,7 @@ export function registerSettingsRoutes(app: Express): void {
               .status(400)
               .json({ error: "condition with query and value is required" });
           }
+          applyMeta();
           getVM(res).addCondition(name, condition);
           break;
         }
@@ -483,6 +571,7 @@ export function registerSettingsRoutes(app: Express): void {
               error: "index and condition with query and value are required",
             });
           }
+          applyMeta();
           getVM(res).updateCondition(name, index, condition);
           break;
         }
@@ -504,6 +593,7 @@ export function registerSettingsRoutes(app: Express): void {
               .status(400)
               .json({ error: "fromIndex and toIndex are required" });
           }
+          applyMeta();
           getVM(res).reorderConditions(name, fromIndex, toIndex);
           break;
         }
@@ -634,6 +724,25 @@ export function registerSettingsRoutes(app: Express): void {
           error:
             "Invalid variable name. Use letters, numbers, and underscores only.",
         });
+      }
+
+      const renameDecision = evaluateVariableWrite({
+        name: oldName,
+        action: "rename",
+        existing: defToRename,
+        body: (req.body ?? {}) as Record<string, unknown>,
+        knownNames: Object.keys(getVM(res).getDefinitions()),
+        usageCount: () => 0,
+      });
+      if (!renameDecision.ok) {
+        return res.status(renameDecision.status).json({
+          error: renameDecision.error,
+          code: renameDecision.code,
+          details: renameDecision.details ?? {},
+        });
+      }
+      if (renameDecision.metadataPatch) {
+        getVM(res).applyMetadata(oldName, renameDecision.metadataPatch);
       }
 
       const affectedFiles = getCI(res).getVariableUsage(oldName);
@@ -1637,10 +1746,11 @@ export function registerSettingsRoutes(app: Express): void {
   });
 
   /**
-   * Throwaway Browser Run probe: screenshot the public home page and return WebP bytes.
+   * Throwaway Browser Run probe.
    * Does not write to disk, YAML, or the entry-preview queue.
    *
-   * Query: ?target=home (default) | example
+   * Query: ?target=og (default) | home | example
+   * - og: same HTML OG card pipeline as the capture queue (validates CF + CSS/fonts/logo)
    * - home: SITE_URL home page (validates Browser Run can reach your public URL)
    * - example: https://example.com (validates API token / Browser Rendering only)
    */
@@ -1660,8 +1770,72 @@ export function registerSettingsRoutes(app: Express): void {
         return res.status(400).json({ error: configError });
       }
 
-      const target = String(req.query.target || "home").toLowerCase();
+      const target = String(req.query.target || "og").toLowerCase();
       const timeoutMs = 25_000;
+
+      if (target === "og") {
+        const {
+          buildOgTestCaptureHtml,
+          toAbsolutePublicUrl,
+          EntryPreviewCaptureError,
+        } = await import("../entry-preview-capture-html");
+        const { buildPreviewPropResolveContext } = await import("../entry-preview-resolve");
+        const site = res.locals.site as import("../site-manager").SiteContext | undefined;
+        const mg = site?.mediaGallery ?? mediaGallery;
+        const ctx = await buildPreviewPropResolveContext({
+          contentType: "_og_test",
+          slug: "_og_test",
+          locale: getDefaultLocale(contentRoot),
+          entry: {},
+          contentRoot,
+          mediaGallery: mg,
+          theme: "dark",
+        });
+        const brandLogo = String(
+          (ctx.brand && (ctx.brand["brand.logo"] || ctx.brand["brand.logo_dark"])) || "",
+        ).trim();
+        const logoAbsoluteUrl = brandLogo ? toAbsolutePublicUrl(brandLogo) : null;
+        if (!logoAbsoluteUrl) {
+          return res.status(400).json({
+            error:
+              "No absolute brand logo URL for OG test capture. Set brand.logo / brand.logo_dark in variables.",
+          });
+        }
+        try {
+          const doc = buildOgTestCaptureHtml({ logoAbsoluteUrl, theme: "dark" });
+          const { webp, browserMsUsed, pngBytes } = await captureScreenshotToWebp({
+            html: doc.html,
+            waitForSelector: doc.waitForSelector,
+            waitForTimeoutMs: doc.waitForTimeoutMs,
+            waitUntil: "load",
+            timeoutMs,
+            width: 1200,
+            height: 630,
+            contentRoot,
+          });
+          res.setHeader("Content-Type", "image/webp");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Screenshot-Url", `html:og-test:${logoAbsoluteUrl.slice(0, 120)}`);
+          if (browserMsUsed != null) {
+            res.setHeader("X-Browser-Ms-Used", String(browserMsUsed));
+          }
+          res.setHeader("X-Screenshot-Png-Bytes", String(pngBytes));
+          res.send(webp);
+        } catch (shotErr: any) {
+          if (shotErr instanceof EntryPreviewCaptureError) {
+            return res.status(400).json({ error: shotErr.message });
+          }
+          const raw = String(shotErr?.message || shotErr);
+          if (/429|rate.?limit/i.test(raw)) {
+            return res.status(429).json({
+              error: `${raw} — captures share one cooldown; wait and retry, or prefer Generate missing over regenerating everything.`,
+            });
+          }
+          throw shotErr;
+        }
+        return;
+      }
+
       let captureUrl: string;
 
       if (target === "example") {

@@ -1,4 +1,4 @@
-import {
+import React, {
   useRef,
   useEffect,
   type AnchorHTMLAttributes,
@@ -12,6 +12,7 @@ import {
   isPrefetchableHref,
   prefetchNavigationHref,
 } from "@/lib/prefetchNavigation";
+import { isNonNavigableHref } from "@shared/safe-href";
 
 export type InternalLinkPrefetch = "none" | "hover";
 
@@ -33,16 +34,27 @@ export function InternalLink({
   onMouseEnter,
   target,
   rel,
+  className,
   ...rest
 }: InternalLinkProps) {
-  const isExternal = isExternalHref(href);
-  const useSpaNav = isInternalHref(href) && !isExternal;
+  const nonNavigable = isNonNavigableHref(href ?? "");
+  const isExternal = !nonNavigable && isExternalHref(href);
+  const useSpaNav = !nonNavigable && isInternalHref(href) && !isExternal;
   const handleClick = useInternalNav(useSpaNav ? onNavigate : undefined);
   const prefetchedRef = useRef(false);
 
   useEffect(() => {
     prefetchedRef.current = false;
   }, [href]);
+
+  // Do not emit crawlable href="null" / CSS-like values into the DOM.
+  if (nonNavigable) {
+    return (
+      <span className={className} {...(rest as Record<string, unknown>)}>
+        {children}
+      </span>
+    );
+  }
 
   const handleMouseEnter = (e: MouseEvent<HTMLAnchorElement>) => {
     onMouseEnter?.(e);
@@ -66,6 +78,7 @@ export function InternalLink({
   return (
     <a
       href={href}
+      className={className}
       onClick={(e) => {
         handleClick(e);
         onClick?.(e);

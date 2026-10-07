@@ -3,6 +3,8 @@
  * @description Copies images referenced as /attached_assets/* in the image registry
  * and YAML content files to 4geeks-com/images/ and updates all paths.
  * Idempotent — safe to re-run; files already at the destination are skipped.
+ * @scope all
+ * @dry-run
  *
  * Usage:
  *   npx tsx scripts/migrations/002_migrate_locale_images_to_marketing_folder.ts [--dry-run]

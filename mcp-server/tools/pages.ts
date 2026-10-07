@@ -8,6 +8,10 @@ import {
   isDbBacked,
   isSharedLayoutConfig,
   resolveContentType,
+  entryLocales,
+  entryNotFoundNote,
+  staleSourceWarning,
+  translateSourceItemGate,
   loadPage,
   loadVariantPage,
   safeLoad,
@@ -67,6 +71,12 @@ import {
   deprecatedTemplateRefWarnings,
   isDeprecatedFieldInfo,
 } from "../lib/deprecated-field-mcp.js";
+import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
+import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
+import { THEME_COLORS_CODE } from "../../shared/theme-palette.js";
+import { RENDER_REVIEW_REQUIRED_CODE, renderReviewRequiredResult } from "../lib/render-review-mcp.js";
+import { createEntryDiscoveryPath, designLoopNextActions } from "../lib/design-guidance.js";
+import { themeColorsRequiredResult } from "../lib/theme-colors-mcp.js";
 import {
   DEPRECATED_FIELD_CODE,
   deprecatedSystemHint,
@@ -74,11 +84,12 @@ import {
   isNonEmptyFieldValue,
 } from "../../shared/deprecatedField.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
-import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
+import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, overrideMasksSourceWarning, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
 import {
   isSignupFieldMapError,
   signupFieldMapActionRequired,
 } from "../lib/signup-field-map-hints.js";
+import { diagnosticsNotFoundResult } from "../lib/diagnostics-not-found.js";
 import {
   ok,
   fail,
@@ -113,6 +124,7 @@ import {
   isWeakKeywordMetricsForResearch,
 } from "../lib/entry-seo-research-hints.js";
 import { isSeoMonitoringEnabled } from "../../server/seo-monitoring.js";
+import { mappedFieldsStorageFor } from "../../server/mapped-fields-storage.js";
 import {
   buildAvailableFieldsCatalog,
   filterFieldsByRequest,
@@ -422,6 +434,7 @@ async function callEditSectionsApi(
     why?: string;
     highlights?: string[];
     agent_session_id?: string;
+    seo_optout_reason?: string;
   },
   mcpToken?: string,
   domain?: string,
@@ -441,11 +454,40 @@ async function callEditSectionsApi(
         ...(params.report ? { report: params.report } : {}),
         ...(params.why ? { why: params.why } : {}),
         ...(params.highlights?.length ? { highlights: params.highlights } : {}),
+        ...(params.seo_optout_reason ? { seo_optout_reason: params.seo_optout_reason } : {}),
       }),
     });
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok) {
       const errMsg = (data.error as string) || `Server error: ${res.status}`;
+      if (data.code === "seo_optout_idea_born") {
+        return {
+          error: fail(errMsg, {
+            code: "seo_optout_idea_born",
+            details: data.details ?? {},
+            warnings: [
+              {
+                code: "seo_optout_idea_born",
+                message:
+                  "Idea-born pages stay clustered. Agents may set seo.pillar_path: null (or include_in_clustering: false) only when the origin idea is fast_decay_news or broken_url AND seo_optout_reason (min 40 chars) is passed. Staff can still turn monitoring off in the UI.",
+              },
+            ],
+            next_actions: [
+              {
+                tool: "list_seo_clusters",
+                reason: "Find a live hub in this locale for the page instead of opting out.",
+                priority: "recommended",
+              },
+              {
+                tool: "update_fields",
+                reason: "Fix the cluster: seo.pillar_path to a live same-locale hub, or seo.is_pillar: true.",
+                priority: "recommended",
+                args_hint: { slug: params.slug, locale: params.locale, contentType: params.contentType },
+              },
+            ],
+          }),
+        };
+      }
       if (data.code === "report_quality" || data.code === "report_required" || data.code === "report_too_short") {
         return {
           error: actionRequired(
@@ -684,7 +726,14 @@ async function callRenameSlugApi(
     });
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok) {
-      return { ok: false, error: fail((data.error as string) || `Server error: ${res.status}`) };
+      const { error, ...details } = data;
+      return {
+        ok: false,
+        error: fail(
+          (error as string) || `Server error: ${res.status}`,
+          Object.keys(details).length > 0 ? details : undefined,
+        ),
+      };
     }
     return { ok: true, data };
   } catch (e) {
@@ -1261,13 +1310,13 @@ export function registerPageTools(
   mcp.tool(
     "agent_session",
     "Prefer bootstrap_agent once per MCP run before start (Claude.ai / Grok / any connector). " +
-    "Requires a role connector (/mcp/role/…). " +
+    "Required on role connectors (/mcp/role/…); optional on non-production plain /mcp (helps staff event trails). " +
     "start requires exact model (provider/model, e.g. claude/sonnet-4.5); if an open session exists for this username+role+client+site, retry with resume:true or force_new:true + report. " +
     "start returns agent_session_id — required on every mutating tool. " +
     "note/summarize require agent_session_id + report (min 80 chars). " +
     "summarize closes the run for the staff banner (last summarize wins). " +
     "Reports are staff-readable: for copy you set, list plain values (Title: …); no JSON/YAML dumps. " +
-    "After writes, follow conversation conventions from bootstrap_agent (skill.content) for human-facing replies. " +
+    "After writes, follow agent conventions from bootstrap_agent (skill.content) for human-facing replies. " +
     "Does not write YAML. Prefer write/issue report for per-change notes; use summarize once at end.",
     {
       action: z.enum(["start", "note", "summarize"]).describe("start | note | summarize"),
@@ -1780,6 +1829,8 @@ export function registerPageTools(
     locales: string[];
     urls?: Record<string, string>;
     data: Record<string, unknown>;
+    /** The entry's source item came from a database copy this old (ms). */
+    staleSourceAgeMs?: number;
   };
 
   type PagePayloadError = { content: [{ type: "text"; text: string }]; isError: true };
@@ -1793,44 +1844,16 @@ export function registerPageTools(
       return { content: [{ type: "text", text: (e as Error).message }], isError: true };
     }
     const resolved = resolveContentType(slug, contentType, contentPath);
-    // #region agent log
-    fetch("http://127.0.0.1:7585/ingest/7dd1bcc0-ea77-4f87-be7d-1ea690313598", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "574959" },
-      body: JSON.stringify({
-        sessionId: "574959",
-        hypothesisId: "C",
-        location: "mcp-server/tools/pages.ts:resolvePagePayload",
-        message: "resolvePagePayload YAML folder lookup",
-        data: {
-          slug,
-          locale,
-          contentTypeHint: contentType ?? null,
-          resolved: resolved
-            ? {
-                contentType: resolved.contentType,
-                dbSlug: (resolved.config as { database?: { slug?: string } })?.database?.slug ?? null,
-                directory: (resolved.config as { directory?: string })?.directory ?? null,
-              }
-            : null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (!resolved) {
-      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}` }], isError: true };
+      return { content: [{ type: "text", text: `Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}` }], isError: true };
     }
     const result = loadPage(resolved.contentType, slug, locale, contentPath);
     if (!result) {
-      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType})` }], isError: true };
+      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType}).${entryNotFoundNote(resolved.contentType, contentPath)}` }], isError: true };
     }
 
     const pageDir = path.join(contentPath, getDirectory(resolved.contentType, resolved.config), slug);
-    const dirFiles = fs.existsSync(pageDir) ? fs.readdirSync(pageDir) : [];
-    const locales = dirFiles
-      .map((f: string) => f.replace(/\.(yml|yaml)$/, ""))
-      .filter((n: string) => /^[a-z]{2}(-[a-z]{2})?$/.test(n));
+    const locales = entryLocales(resolved.contentType, slug, contentPath);
 
     const urlPattern = resolved.config.url_pattern;
     let urls: Record<string, string> | undefined;
@@ -1853,22 +1876,23 @@ export function registerPageTools(
         }
       }
       const resolvedUrls: Record<string, string> = {};
-      if (urlPattern["default"]) {
-        for (const l of locales) {
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern["default"].replace(":slug", localeSlug);
-        }
-      } else {
-        for (const l of locales) {
-          if (!urlPattern[l]) continue;
-          const localeSlug = localeSlugByLocale[l] || slug;
-          resolvedUrls[l] = urlPattern[l].replace(":slug", localeSlug);
-        }
+      for (const l of locales) {
+        const pattern = urlPattern[l] || urlPattern["default"];
+        if (!pattern) continue;
+        resolvedUrls[l] = pattern.replace(":slug", localeSlugByLocale[l] || slug);
       }
       if (Object.keys(resolvedUrls).length > 0) urls = resolvedUrls;
     }
 
-    return { contentType: resolved.contentType, slug, locale, locales, ...(urls ? { urls } : {}), data: result.data as Record<string, unknown> };
+    return {
+      contentType: resolved.contentType,
+      slug,
+      locale,
+      locales,
+      ...(urls ? { urls } : {}),
+      data: result.data as Record<string, unknown>,
+      ...(result.staleSourceAgeMs !== undefined ? { staleSourceAgeMs: result.staleSourceAgeMs } : {}),
+    };
   }
 
   // get_entry_content
@@ -1951,7 +1975,8 @@ export function registerPageTools(
       const deprecated_fields_present = deprecatedFieldsPresent(liveConfig, merged);
       const { layoutInfoForEntry } = await import("../../server/layout-owner.js");
       const layout = layoutInfoForEntry(payload.contentType, payload.slug, contentPath);
-      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending }, null, 2) }] };
+      const warnings = payload.staleSourceAgeMs !== undefined ? [staleSourceWarning(payload.staleSourceAgeMs)] : [];
+      return { content: [{ type: "text", text: JSON.stringify({ ...envelope, ...layout, ...merged, deprecated_fields_present, validation_issues: split.open, claimed_issues: split.claimed, completed_issues: split.completed, validation_pending: split.validation_pending, ...(warnings.length ? { warnings } : {}) }, null, 2) }] };
     }
   );
 
@@ -2191,6 +2216,7 @@ export function registerPageTools(
       };
 
       const kmWarnings: Array<{ code: string; message: string }> = [];
+      if (payload.staleSourceAgeMs !== undefined) kmWarnings.push(staleSourceWarning(payload.staleSourceAgeMs));
       if (keyword_metrics.source === "yaml_fallback") {
         kmWarnings.push({
           code: "keyword_metrics_yaml_fallback",
@@ -2620,29 +2646,26 @@ export function registerPageTools(
     },
   );
 
-  // run_entry_diagnostics (cached | sync completed for 1 slug | async job for multi/unscoped)
+  // run_entry_diagnostics (cached | async job — always fork for recompute, including 1 slug)
   mcp.tool(
     "run_entry_diagnostics",
     "Start or read page diagnostics against the unified validation-cache issue store. " +
-    "Exactly one slug: runs entry-local validators in-process and returns status 'completed' (mode sync) with open_issues[] in the same call — do NOT poll get_diagnostics_job. " +
-    "One sync at a time per agent (diagnostics_sync_busy if already running a page sync — retry this tool). " +
-    "May run while a site-wide async job is in flight (site_job_parallel warning — that job may later refresh the cache). " +
-    "Zero or 2+ slugs / unscoped: does NOT wait — returns 'cached', 'needs_confirm' (full-site — re-call with confirm:true), or 'queued'/'running' with job_id. " +
-    "On cached/completed: returns open_issues[] (default 50, errors first, diversified by code) — an open work queue. Soft-completed and other-author claims are excluded unless issue_status is completed, claimed, or all. Bulk/unscoped open_issues[] is still not authoritative for live failures; prefer one-slug sync. Paginate with open_issues_offset/open_issues_limit. " +
+    "Does NOT wait for validators: returns 'cached', 'needs_confirm' (full-site — re-call with confirm:true), or 'queued'/'running' with job_id. " +
+    "When queued/running (any scope including exactly one slug): wait retry_after_seconds then call get_diagnostics_job — do NOT re-call this tool to poll. " +
+    "On cached: returns open_issues[] (default 50, errors first, diversified by code) — an open work queue. Soft-completed and other-author claims are excluded unless issue_status is completed, claimed, or all. Bulk/unscoped open_issues[] is still not authoritative for live failures; prefer one-slug scoped jobs then poll. Paginate with open_issues_offset/open_issues_limit. " +
     "MCP: categories (e.g. ['seo']) narrow which validators RUN when validators are omitted (staff Diagnostics scope chips are view-only and unchanged). " +
-    "content_view/seo_edit may READ cached or needs_confirm responses; only a metrics-mutating staff cap may start a job or sync recompute. " +
+    "content_view/seo_edit may READ cached or needs_confirm responses; only a metrics-mutating staff cap may start a job. " +
     "Slug-scoped hard/max_age that would recompute do NOT require confirm:true. Full-site / unscoped jobs still need confirm:true. " +
     "Same-scope reuse of an in-flight async job and pure 'cached' responses skip confirm. " +
-    "When queued/running (multi-slug or unscoped): wait retry_after_seconds then call get_diagnostics_job — do NOT re-call this tool to poll. " +
     "freshness 'max_age' (default) recomputes only URLs whose lastFullRunAt is older than max_age_seconds (default 86400); " +
     "'hard' forces a recompute. Optional slugs scopes the run to entry-local validators only (never cross-entry like redirects/seo-duplicates — avoids false all-clear). " +
-    "side_effects: one-slug sync merges entry-local results into validation-cache in-process; multi/unscoped jobs fork a worker. " +
+    "side_effects: recompute jobs always fork a worker (including single-slug) so the public web process is not blocked. " +
     "non_effects: entry/slug runs do not refresh redirects/slug-conflicts/sitemap/seo-duplicates; fixing meta does not clear REDIRECT_CONFLICT or DUPLICATE_TITLE; " +
-    "does not change staff Diagnostics HTTP payloads. Empty issues without lastFullRunAt means cache_miss, not clean. After edits prefer freshness 'hard' + one slug. " +
+    "does not change staff Diagnostics HTTP payloads. Empty issues without lastFullRunAt means cache_miss, not clean. After edits prefer freshness 'hard' + one slug then poll get_diagnostics_job. " +
     "In-app / MCP content writes debounce entry-local validation for 1 minute; redirect-config changes queue redirects separately. " +
     "When get_entry_* returns validation_pending:true, cache may lag until that debounce settles.",
     {
-      slugs: z.array(z.string()).optional().describe("Optional page slugs to scope. Exactly one slug → sync completed. Omit or pass 2+ for async site job."),
+      slugs: z.array(z.string()).optional().describe("Optional page slugs to scope. Any slug count that needs a recompute starts an async job (poll get_diagnostics_job). Omit for site-wide (needs confirm:true)."),
       categories: z
         .array(z.string())
         .optional()
@@ -2749,34 +2772,7 @@ export function registerPageTools(
         const data = await res.json() as Record<string, unknown>;
 
         if (res.status === 409 || data.status === "busy") {
-          const code = String(data.code ?? "diagnostics_busy");
           const retry = Number(data.retry_after_seconds ?? 5);
-          if (code === "diagnostics_sync_busy") {
-            return ok(
-              {
-                status: "busy",
-                code: "diagnostics_sync_busy",
-                retry_after_seconds: retry,
-                message: String(
-                  data.message ??
-                    "You already have a one-page diagnostics run in progress. Wait and retry.",
-                ),
-              },
-              {
-                warnings: [{
-                  code: "diagnostics_sync_busy",
-                  message:
-                    "One page sync at a time per agent. Wait retry_after_seconds then call run_entry_diagnostics again — do not poll get_diagnostics_job.",
-                }],
-                next_actions: [{
-                  tool: "run_entry_diagnostics",
-                  reason: "Retry one-slug diagnostics after your in-flight sync finishes",
-                  args_hint: scopedArgsHint,
-                  priority: "required",
-                }],
-              },
-            );
-          }
           const jobId = String(data.job_id ?? "");
           return ok(
             {
@@ -2804,6 +2800,8 @@ export function registerPageTools(
         }
 
         if (!res.ok) {
+          const notFound = diagnosticsNotFoundResult(data, { slugs, site });
+          if (notFound) return notFound;
           return fail(String(data.message ?? data.error ?? `diagnostics-jobs failed (${res.status})`), data);
         }
 
@@ -2856,7 +2854,7 @@ export function registerPageTools(
           );
         }
 
-        if (data.status === "cached" || data.status === "completed") {
+        if (data.status === "cached") {
           const cacheMisses = Array.isArray(data.cacheMisses) ? data.cacheMisses as string[] : [];
           const { queue, warnings: queueWarnings } = await resolveDiagnosticsIssueQueue({
             domain,
@@ -2886,29 +2884,6 @@ export function registerPageTools(
               message:
                 "open_issues[] is a ranked page of the open work queue (default 50). Soft-completed and other-author claims are excluded unless issue_status is completed, claimed, or all. Use open_issues_offset/open_issues_next_offset to page; full set remains in validation-cache / staff Diagnostics.",
             });
-          }
-          if (data.status === "completed" && data.site_job_parallel === true) {
-            queueWarnings.push({
-              code: "diagnostics_site_job_parallel",
-              message:
-                "A site-wide diagnostics job was still running. This page sync updated the cache for this slug; the site job may later refresh the cache — re-run one-slug hard if issues look stale.",
-            });
-          }
-          if (data.status === "completed") {
-            return ok(
-              {
-                status: "completed",
-                mode: "sync",
-                cache_updated: true,
-                ...diagnosticsIssueQueueFields(queue),
-                lastFullRunAtBySlug: data.lastFullRunAtBySlug ?? {},
-                cache_misses: cacheMisses,
-                summary: data.summary,
-                site_job_parallel: data.site_job_parallel === true,
-                message: "One-slug diagnostics completed synchronously. Do not poll get_diagnostics_job.",
-              },
-              { warnings: queueWarnings, next_actions },
-            );
           }
           return ok(
             {
@@ -3269,6 +3244,9 @@ export function registerPageTools(
       confirm_cluster_resolution: z.boolean().optional().describe(
         "Required when becoming a pillar (seo.is_pillar:true) or opting out of clustering while ORPHAN_PAGE / PARTIALLY_SET_CLUSTER is still open. Prefer joining a hub with seo.pillar_path instead.",
       ),
+      seo_optout_reason: z.string().optional().describe(
+        "Idea-born pages only: why this page leaves every cluster (min 40 chars). Allowed only when the origin idea is fast_decay_news or broken_url; otherwise seo_optout_idea_born.",
+      ),
       seo_research_source: z
         .string()
         .optional()
@@ -3286,7 +3264,7 @@ export function registerPageTools(
         .describe("Required. From agent_session start — groups this write for staff monitoring."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
+    async ({ slug, locale, updates: inputUpdates, contentType, variant, confirm_live_edit, layout_target, confirm_layout_target, confirm_new_values, confirm_cluster_resolution, seo_optout_reason, seo_research_source, create_redirect, why, highlights, agent_session_id, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { contentPath, contentFolder, domain } = siteResult;
@@ -4074,6 +4052,7 @@ export function registerPageTools(
             why: whyText,
             highlights: highlightList,
             agent_session_id,
+            ...(seo_optout_reason ? { seo_optout_reason } : {}),
           },
           mcpToken,
           domain,
@@ -4082,6 +4061,7 @@ export function registerPageTools(
         boundUpdates = apiResult.data.boundUpdates;
         appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         warnings.push(...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs));
+        warnings.push(...textLimitWarnings(apiResult.data.text_limit_warnings));
         results.push(`${localeEntries.length} field(s) → ${pathInfo.relativeHint}`);
       }
 
@@ -4686,7 +4666,7 @@ export function registerPageTools(
       const ct = resolved.contentType;
       const ctDir = getDirectory(ct, resolved.config);
       const dbSlug = resolved.config.database?.slug as string | undefined;
-      const isStatic = !dbSlug;
+      const defaultStorage = mappedFieldsStorageFor(ct, siteResult.contentPath);
       const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const getHint = {
         tool: "get_entry_fields",
@@ -4721,57 +4701,50 @@ export function registerPageTools(
           };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           const writtenPath = data.path || ctPath;
-          const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
-          if (isStatic) {
-            return ok(
-              {
-                message: data.noop
-                  ? `No-op reset for ${ct}/${slug}.${field} (key not on layer; may live only on _common.yml)`
-                  : `Reset static ${ct}/${slug}.${field} on ${writtenPath}`,
-                storage,
-                path: writtenPath,
-                noop: !!data.noop,
-              },
-              {
-                warnings: [
-                  {
-                    code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
-                    message: data.noop
-                      ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
-                      : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
-                  },
-                ],
-                side_effects: data.noop
-                  ? [{ kind: "other", summary: `storage=${storage}; noop` }]
-                  : [
-                      { kind: "wrote_file", summary: `${writtenPath}#${field}` },
-                      { kind: "other", summary: `storage=${storage}` },
-                    ],
-                next_actions: [getHint],
-              },
-            );
-          }
-          return ok(
-            { message: `Reset ${ct}/${slug}.${field} → cleared ${dbPath} + ${writtenPath}#field_overrides` },
-            {
+          const storage = data.storage || defaultStorage;
+          const resetNextActions = [{ ...getHint, reason: "Confirm provenance is original after reset" }];
+          const payload = {
+            message: data.noop
+              ? `No-op reset for ${ct}/${slug}.${field} (key not on this layer)`
+              : `Reset ${ct}/${slug}.${field} on ${writtenPath}`,
+            storage,
+            path: writtenPath,
+            noop: !!data.noop,
+          };
+          if (storage === "root_key") {
+            return ok(payload, {
               warnings: [
                 {
-                  code: "reset_clears_both_layers",
-                  message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+                  code: data.noop ? "static_reset_noop" : "static_reset_layer_only",
+                  message: data.noop
+                    ? `Key absent on ${writtenPath}; reset does not rewrite _common.yml.`
+                    : `Deleted root key on ${writtenPath} only. Does not touch _common.yml.`,
                 },
               ],
-              side_effects: [
-                { kind: "wrote_file", summary: dbPath },
-                { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
-                { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
-                { kind: "other", summary: `storage=${storage}` },
-              ],
-              next_actions: [{
-                ...getHint,
-                reason: "Confirm provenance is original after reset",
-              }],
-            },
-          );
+              side_effects: data.noop
+                ? [{ kind: "other", summary: `storage=${storage}; noop` }]
+                : [
+                    { kind: "wrote_file", summary: `${writtenPath}#${field}` },
+                    { kind: "other", summary: `storage=${storage}` },
+                  ],
+              next_actions: resetNextActions,
+            });
+          }
+          return ok(payload, {
+            warnings: [
+              {
+                code: "reset_clears_both_layers",
+                message: `Cleared DB override (${dbPath}) and CT field_overrides on ${writtenPath} for this field. Baseline restored.`,
+              },
+            ],
+            side_effects: [
+              { kind: "wrote_file", summary: dbPath },
+              { kind: "wrote_file", summary: `${writtenPath}#field_overrides` },
+              { kind: "cache", summary: "Database item cache / listings may refresh for this slug" },
+              { kind: "other", summary: `storage=${storage}` },
+            ],
+            next_actions: resetNextActions,
+          });
         }
 
         if (level === "database") {
@@ -4785,13 +4758,18 @@ export function registerPageTools(
           const data = await res.json() as { error?: string };
           if (!res.ok) return fail(data.error || `Server error: ${res.status}`);
           return ok(
-            { message: `Database override set for ${ct}/${slug}.${field} → ${relPath}` },
+            {
+              message: `Database override set for ${ct}/${slug}.${field} → ${relPath}`,
+              storage: "db_override",
+              path: relPath,
+            },
             {
               warnings: [
                 {
                   code: "db_override_affects_listings",
                   message: `Wrote ${relPath}. Affects listings, dropdowns, and pages; shared across locales. Does not write field_overrides YAML.`,
                 },
+                overrideMasksSourceWarning(field, relPath),
               ],
               side_effects: [
                 { kind: "wrote_file", summary: relPath },
@@ -4893,7 +4871,7 @@ export function registerPageTools(
                   : [],
           });
         }
-        const storage = data.storage || (isStatic ? "root_key" : "field_overrides");
+        const storage = data.storage || defaultStorage;
         const writtenPath = data.path || relPathFallback;
         const isPublishedAt = field === "published_at";
         return ok(
@@ -4929,6 +4907,9 @@ export function registerPageTools(
                       ? `Variant layer only (${writtenPath}); published ${locale}.yml unchanged until promote.`
                       : `Locale ${locale} only; sibling locales unchanged. Live file only (not _common.yml) except published_at.`,
                   },
+                  ...(storage === "field_overrides"
+                    ? [overrideMasksSourceWarning(field, `field_overrides on ${writtenPath}`)]
+                    : []),
                 ],
             side_effects: [
               {
@@ -5627,8 +5608,9 @@ export function registerPageTools(
     "Confirm with the user before calling — this makes the page live. " +
     "Page-level fields in the draft (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
     "Rejections: proposal_required (swarm roles), draft_in_proposal (draft under an open proposal — apply that proposal instead), translation_source_changed, " +
-    "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees). " +
-    "On success, next_actions requires run_entry_diagnostics (hard + one slug — sync completed in that call).",
+    "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees), " +
+    "render_review_required (entry-owned page layout never reviewed or restructured since — run review_page_render on the draft first). " +
+    "On success, next_actions requires run_entry_diagnostics (hard + one slug → job_id; poll get_diagnostics_job).",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
       slug: z.string().describe("Page slug"),
@@ -5713,6 +5695,34 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === THEME_COLORS_CODE) {
+            return themeColorsRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === RENDER_REVIEW_REQUIRED_CODE) {
+            return renderReviewRequiredResult(errMsg, data, {
+              retryTool: "publish_draft",
+              contentType,
+              slug,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variantSlug,
+              site,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -5788,7 +5798,8 @@ export function registerPageTools(
     "Page-level fields (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
     "If live changed after the draft was created, non-overlapping edits are rebuilt on top of live (warning draft_rebuilt); overlaps fail with draft_base_stale (details.conflicting_fields) — " +
     "retry with confirm_overwrite_newer_live only after the user agrees to discard those live changes. draft_base_unknown = draft has no recorded base (same confirm). " +
-    "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure. " +
+    "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure, " +
+    "render_review_required (entry-owned layout changed vs live with no matching review_page_render). " +
     "dry_run: true runs every check and returns published_diff without writing. " +
     "For attached shared-layout entries, pass the entry slug (not \"single\") to promote entry drafts from translate_entry " +
     "({variantSlug}.{locale}.yml under the entry folder). Pass slug \"single\" only to promote a type-root template variant. " +
@@ -5796,7 +5807,7 @@ export function registerPageTools(
     "Fails when resolved meta.page_title / meta.description are empty, editor.required fields are empty, " +
     "or the promoted detached locale would be empty (EMPTY_LOCALE: no sections and no content). " +
     "This is a destructive operation — the previous live content will be replaced. Confirm with the user before calling. " +
-    "On success, next_actions requires run_entry_diagnostics (hard + one slug — sync completed in that call).",
+    "On success, next_actions requires run_entry_diagnostics (hard + one slug → job_id; poll get_diagnostics_job).",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
       slug: z.string().describe("Page slug"),
@@ -5811,6 +5822,12 @@ export function registerPageTools(
         .optional()
         .describe("Publish a translation whose source locale changed after translating. Ask the user first."),
       dry_run: z.boolean().optional().describe("Run every check and return published_diff without writing."),
+      seo_standalone_reason: z
+        .string()
+        .optional()
+        .describe(
+          "New language on an SEO-monitored page whose draft sets seo.pillar_path: null: why it stays out of every cluster (min 40 chars). Idea-born pages also need a fast_decay_news/broken_url origin idea.",
+        ),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5827,6 +5844,7 @@ export function registerPageTools(
       confirm_overwrite_newer_live,
       confirm_source_changed,
       dry_run,
+      seo_standalone_reason,
       report,
       agent_session_id,
       site,
@@ -5892,6 +5910,7 @@ export function registerPageTools(
             ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
             ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
             ...(dry_run ? { dry_run: true } : {}),
+            ...(seo_standalone_reason ? { seo_standalone_reason } : {}),
           }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -5900,6 +5919,65 @@ export function registerPageTools(
           const isEmpty = /EMPTY_LOCALE/i.test(errMsg);
           const serverCode = typeof data.code === "string" ? data.code : undefined;
           const details = (data.details as Record<string, unknown> | undefined) ?? undefined;
+          if (serverCode === "locale_seo_target_required") {
+            return fail(errMsg, {
+              code: serverCode,
+              details: details ?? {},
+              warnings: [
+                {
+                  code: "locale_seo_target_required",
+                  message:
+                    "Each language of an SEO-monitored page needs its own seo.main_keyword plus a live hub in the same language (seo.pillar_path) or seo.is_pillar: true, set on the draft. Standalone (pillar_path: null) needs seo_standalone_reason; idea-born pages only for news/broken-URL ideas.",
+                },
+              ],
+              next_actions: [
+                {
+                  tool: "get_or_refresh_seo_research",
+                  reason: `Pick the ${locale} keyword for this language.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "list_seo_clusters",
+                  reason: `Find a live ${locale} hub.`,
+                  priority: "recommended",
+                },
+                {
+                  tool: "update_fields",
+                  reason: "Set seo.main_keyword and seo.pillar_path (or seo.is_pillar) on the draft, then retry promote_variant.",
+                  priority: "required",
+                  args_hint: { slug, locale, contentType, variant: variantSlug },
+                },
+              ],
+            });
+          }
+          if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
+            return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === THEME_COLORS_CODE) {
+            return themeColorsRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (serverCode === RENDER_REVIEW_REQUIRED_CODE) {
+            return renderReviewRequiredResult(errMsg, data, {
+              retryTool: "promote_variant",
+              contentType,
+              slug,
+              locale,
+              variantSlug,
+              site,
+            });
+          }
           return fail(errMsg, {
             code: isEmpty ? "EMPTY_LOCALE" : serverCode,
             contentType,
@@ -6430,6 +6508,7 @@ const next_actions: NextAction[] = entryDeleted
     "Shared-layout / single_template drafts carry fields only: " +
     "put body/fields on the locale (title, description, content, … per field_mapping); sections must be [] — shell comes from template.{locale}.yml. " +
     "Call explain_site topic shared-layout and/or get_content_type_info before creating shared-layout entries. " +
+    "Section-built (entry-owned) pages such as landings: call get_page_recipe first to pick sections, then review_page_render on the draft before publish_draft (explain_site topic design). " +
     MULTI_SITE_TOOL_BLURB + "\n\n" +
     "locales map: locale → { meta?, sections?, …field_mapping keys }. Exactly one locale key.\n" +
     "URL pattern params (from url_pattern, e.g. :category) must be on the locale object — never _common.yml. " +
@@ -6802,6 +6881,24 @@ const next_actions: NextAction[] = entryDeleted
         ([, v]) => v.fields && typeof (v.fields as Record<string, unknown>).seo === "object",
       );
 
+      {
+        const { evaluatePageThemeColors, summarizeThemeViolations, themeViolationDetails } = await import(
+          "../../server/design/theme-gate.js"
+        );
+        const { loadSiteTheme } = await import("../../server/theme-config.js");
+        const theme = loadSiteTheme(contentPath);
+        for (const [loc, localeContent] of Object.entries(normalizedLocales)) {
+          const violations = evaluatePageThemeColors({ sections: localeContent.sections }, { theme });
+          if (violations.length > 0) {
+            return themeColorsRequiredResult(
+              `[${loc}] Use theme IDs for colors: ${summarizeThemeViolations(violations)}. Nothing was written.`,
+              { details: themeViolationDetails(violations, theme) },
+              { slug, locale: loc, contentType },
+            );
+          }
+        }
+      }
+
       fs.mkdirSync(pageDir, { recursive: true });
 
       const commonData: Record<string, unknown> = { slug, ...commonRecord };
@@ -6910,6 +7007,22 @@ const ghWarning = githubCommitWarning(commitResult);
           });
         }
       }
+      const funnelRaw = (commonRecord as Record<string, unknown>).funnel;
+      const createStage =
+        funnelRaw && typeof funnelRaw === "object" && typeof (funnelRaw as Record<string, unknown>).stage === "string"
+          ? ((funnelRaw as Record<string, unknown>).stage as string)
+          : undefined;
+      const designTarget = {
+        contentType,
+        slug,
+        locale: primaryLocale,
+        variant: draftVariant,
+        ...(site ? { site } : {}),
+        ...(createStage ? { stage: createStage } : {}),
+      };
+      if (!sharedLayoutCreate) {
+        next_actions.splice(next_actions.length - 1, 0, ...designLoopNextActions(designTarget));
+      }
       if (!refreshResult.ok) {
         warnings.push({
           code: "index_refresh_failed",
@@ -6933,6 +7046,22 @@ const ghWarning = githubCommitWarning(commitResult);
         site,
       });
 
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const cache = new Map();
+        for (const [loc, localeContent] of Object.entries(normalizedLocales)) {
+          const violations = evaluatePageTextLimitsForSite(
+            { sections: localeContent.sections },
+            { contentRoot: contentPath, cache },
+          );
+          for (const w of textLimitWarnings(violations)) {
+            warnings.push({ code: w.code, message: `[${loc}] ${w.message}` });
+          }
+        }
+      } catch {
+        /* text limits are advisory on create */
+      }
+
       const title =
         (normalizedLocales[primaryLocale]?.fields?.title as string | undefined) ||
         (typeof common.title === "string" ? common.title : undefined);
@@ -6951,6 +7080,7 @@ const ghWarning = githubCommitWarning(commitResult);
             ? { commitSha: commitResult.commitSha, commitShas: [commitResult.commitSha] }
             : {}),
           ...(refreshResult.knownUrlCount !== undefined ? { known_url_count: refreshResult.knownUrlCount } : {}),
+          ...(!sharedLayoutCreate ? { layout_owner: "entry", discovery_path: createEntryDiscoveryPath(designTarget) } : {}),
         },
         { warnings, next_actions, ...(side_effects.length > 0 ? { side_effects } : {}) },
       );
@@ -6960,7 +7090,8 @@ const ghWarning = githubCommitWarning(commitResult);
   // add_section
   mcp.tool(
     "add_section",
-    "Add a new section to a page. Inserts at the given index (or appends if omitted). Section must include a 'type' field matching a component type. contentType is optional — omit it and the server will auto-detect it from the slug.\n\n" +
+    "Add a new section to a page. Inserts at the given index (or appends if omitted). Section must include a 'type' field matching a component type. contentType is optional — omit it and the server will auto-detect it from the slug. " +
+    "Building a new layout: call get_page_recipe first to pick type/variant/background/spacing; background must be a theme ID.\n\n" +
     "IMPORTANT — article / split pages: 2+ article sections on a page ALWAYS continue one piece (no share choice). " +
     "Put the lead article first. show_toc on the first article only controls the shared TOC; later show_toc / meta are non-effects for chrome. " +
     "Reading time (on-page and OG) combines all article bodies and shows on the first only; mobile/top TOC only on the first; desktop side TOC may still appear on later parts. " +
@@ -7152,6 +7283,7 @@ const ghWarning = githubCommitWarning(commitResult);
         ...variantWarningsIfNeeded(variant),
         ...schemaOrgPageOverrideWarnings(sectionToAdd),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7226,6 +7358,14 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       });
       warnings.push(...modalHints.warnings);
       next_actions = [...next_actions, ...modalHints.next_actions];
+      if (pathInfo.layer !== "type_template") {
+        next_actions.push(
+          ...designLoopNextActions(
+            { contentType: resolved.contentType, slug, locale, ...(variant ? { variant } : {}), ...(site ? { site } : {}) },
+            { includeRecipe: existingSections.length < 3 },
+          ),
+        );
+      }
 
       return ok(
         {
@@ -7633,7 +7773,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
     "Optionally also replaces the meta block in the same call. " +
     "The caller supplies the complete new sections array; the server replaces the existing array atomically. " +
     "Accepts the same variant and confirm_live_edit versioning guards as update_fields. " +
-    "contentType is optional — omit it and the server will auto-detect from slug.\n\n" +
+    "contentType is optional — omit it and the server will auto-detect from slug. " +
+    "Designing a new layout: get_page_recipe first; afterwards review_page_render (agents need a fresh review to publish a restructured page).\n\n" +
     "What the caller must supply: a complete sections array (every section, in order). " +
     "What the server handles: path-sanitisation, conflict detection, atomic write via edit-sections API, " +
     "cache refresh, and Git mark-modified.\n\n" +
@@ -7800,6 +7941,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         UPDATED_AT_STAMP_WARNING,
         ...variantWarningsIfNeeded(variant),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
+        ...textLimitWarnings(apiResult.data.text_limit_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7841,6 +7983,14 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       });
       warnings.push(...modalHints.warnings);
       next_actions = [...next_actions, ...modalHints.next_actions];
+      if (pathInfo.layer !== "type_template") {
+        next_actions.push(
+          ...designLoopNextActions(
+            { contentType: resolved.contentType, slug, locale, ...(variant ? { variant } : {}), ...(site ? { site } : {}) },
+            { includeRecipe: false },
+          ),
+        );
+      }
 
       const stampEffect: McpSideEffect = {
         kind: "locale_yaml",
@@ -7939,7 +8089,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
 
       const resolved = resolveContentType(slug, contentType, contentPath);
       if (!resolved) {
-        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}`);
+        return fail(`Page not found for slug '${slug}'${contentType ? ` (contentType: ${contentType})` : ""}.${entryNotFoundNote(contentType, contentPath)}`);
       }
 
       if (mcpToken) {
@@ -7947,6 +8097,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           return denyWriteSuggestPropose("content_edit_text", resolved.contentType);
         }
       }
+
+      const itemGate = translateSourceItemGate(resolved.contentType, slug, target_locale, contentPath, site);
+      if (itemGate) return fail(itemGate.message, itemGate.details);
 
       const variantCheck = validateTranslateVariantSlug(
         typeof variantArg === "string" && variantArg.trim()
@@ -8401,6 +8554,15 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         });
       }
       pushSlugLocaleMismatchWarning(warnings, localeUrlSlug, target_locale);
+      try {
+        const { evaluatePageTextLimitsForSite } = await import("../../server/text-limits.js");
+        const merged = { ...common, ...localeData } as Record<string, unknown>;
+        warnings.push(
+          ...textLimitWarnings(evaluatePageTextLimitsForSite(merged, { contentRoot: contentPath })),
+        );
+      } catch {
+        /* text limits are advisory on translate */
+      }
       {
         const missing = draftMissingRequiredWarnings(resolved.config, common, localeData);
         if (missing.length > 0) {
@@ -8520,7 +8682,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         },
         {
           tool: "run_entry_diagnostics",
-          reason: "Validate before going live (one slug — sync completed in that call)",
+          reason: "Validate before going live (one slug → job_id; poll get_diagnostics_job)",
           args_hint: { slugs: [slug], freshness: "hard", confirm: true, ...siteHint },
           priority: "recommended",
         },
