@@ -244,7 +244,7 @@ describe("schemaCompletenessValidator PAGE_NO_SCHEMA", () => {
           type: "landing",
           url: "/landing/foo",
           filePath,
-          entryFields: { sections: [webPage("https://4geeks.com/en/landing/foo")] },
+          entryFields: { sections: [webPage("https://learning.mdc.edu/en/landing/foo")] },
         }),
       ),
     );
@@ -259,7 +259,7 @@ describe("schemaCompletenessValidator PAGE_NO_SCHEMA", () => {
           type: "landing",
           url: "/landing/foo",
           filePath,
-          entryFields: { sections: [webPage("https://www.4geeks.com/landing/foo/")] },
+          entryFields: { sections: [webPage("https://www.learning.mdc.edu/landing/foo/")] },
         }),
       ),
     );

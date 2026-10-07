@@ -21,6 +21,8 @@ const hero = (brand: Record<string, string>, extra: Record<string, unknown> = {}
   ...extra,
 });
 
+const SITE_ROOT = "site_learning-mdc-edu";
+
 function run(operations: unknown[], variant?: string) {
   return evaluateEditTextLimits({
     ci: {} as never,
@@ -29,6 +31,7 @@ function run(operations: unknown[], variant?: string) {
     locale: "en",
     variant,
     operations: operations as never,
+    contentRoot: SITE_ROOT,
   });
 }
 
@@ -39,11 +42,13 @@ beforeEach(() => {
 
 describe("textLimitRulesForSection", () => {
   it("reads hero productShowcase rules from the real schema.yml", () => {
-    const rules = textLimitRulesForSection(hero({ prefix: "a", highlight: "b" }));
+    const rules = textLimitRulesForSection(hero({ prefix: "a", highlight: "b" }), SITE_ROOT);
     expect(rules.map((r) => r.label)).toEqual(
       expect.arrayContaining(["H1", "H2", "H1 + H2", "Bullets"]),
     );
-    expect(textLimitRulesForSection({ type: "hero", variant: "singleColumn" })).toEqual([]);
+    expect(
+      textLimitRulesForSection({ type: "hero", variant: "singleColumn" }, SITE_ROOT),
+    ).toEqual([]);
   });
 });
 

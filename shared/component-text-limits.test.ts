@@ -11,8 +11,12 @@ import {
   type TextLimitsByVariant,
 } from "./component-text-limits";
 
+// MDC keeps platform section schemas under site_* (shared/component-registry is empty).
 const heroSchema = yaml.load(
-  fs.readFileSync(path.join(__dirname, "component-registry/hero/v1.0/schema.yml"), "utf8"),
+  fs.readFileSync(
+    path.join(__dirname, "../site_learning-mdc-edu/component-registry/hero/v1.0/schema.yml"),
+    "utf8",
+  ),
 ) as { text_limits: TextLimitsByVariant };
 const RULES = rulesForVariant(heroSchema.text_limits, "productShowcase");
 
