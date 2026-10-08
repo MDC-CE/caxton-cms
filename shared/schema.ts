@@ -993,6 +993,9 @@ export { programsShowcaseSectionSchema, type ProgramsShowcaseSection, type Progr
 import { credibilityStripSectionSchema, type CredibilityStripSection, type CredibilityStripItem, type CredibilityStripLogo } from "./site-component-schemas";
 export { credibilityStripSectionSchema, type CredibilityStripSection, type CredibilityStripItem, type CredibilityStripLogo };
 
+import { mosaicHeroSectionSchema, type MosaicHeroSection, type MosaicHeroPhoto } from "./site-component-schemas";
+export { mosaicHeroSectionSchema, type MosaicHeroSection, type MosaicHeroPhoto };
+
 import { contactBubbleSectionSchema, type ContactBubbleSection, type ContactBubbleImage } from "./site-component-schemas";
 export { contactBubbleSectionSchema, type ContactBubbleSection, type ContactBubbleImage };
 
@@ -1330,6 +1333,7 @@ const baseSectionSchema = z.union([
   trustCardsSectionSchema,
   programsShowcaseSectionSchema,
   credibilityStripSectionSchema,
+  mosaicHeroSectionSchema,
   contactBubbleSectionSchema,
   ogImagePreviewSectionSchema,
 ]);

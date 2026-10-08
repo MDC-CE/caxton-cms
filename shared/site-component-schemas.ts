@@ -286,6 +286,13 @@ export {
   type ModalTwoColumnSection,
 } from "../site_learning-mdc-edu/component-registry/modal/v1.0/schema";
 
+// mosaic_hero
+export {
+  mosaicHeroSectionSchema,
+  type MosaicHeroSection,
+  type MosaicHeroPhoto,
+} from "../site_learning-mdc-edu/component-registry/mosaic_hero/v1.0/schema";
+
 // numbered_steps
 export {
   numberedStepsStepSchema,

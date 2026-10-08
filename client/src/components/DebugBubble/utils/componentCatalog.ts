@@ -1,8 +1,9 @@
 import type { ComponentItem } from "../types";
-import { ArrowRight, Award, BarChart2, Book, Bot, Brain, Building2, CircleUserRound, Columns2, CreditCard, FolderCode, HelpCircle, Image, LayoutGrid, LayoutList, ListFilter, MessageSquare, PanelBottom, Rocket, ScrollText, ShieldCheck, Sparkles, Table, Users } from "lucide-react";
+import { ArrowRight, Award, BarChart2, Book, Bot, Brain, Building2, CircleUserRound, Columns2, CreditCard, FolderCode, HelpCircle, Image, LayoutGrid, LayoutList, ListFilter, MessageSquare, PanelBottom, Rocket, ScrollText, ShieldCheck, Sparkles, Table, Users, LayoutPanelLeft } from "lucide-react";
 
 export const componentsList: ComponentItem[] = [
   { type: "hero", label: "Hero", icon: Rocket, description: "Main banner section" },
+  { type: "mosaic_hero", label: "Mosaic Hero", icon: LayoutPanelLeft, description: "Heading and buttons beside a photo mosaic" },
   { type: "two_column", label: "Two Column", icon: Columns2, description: "Flexible two-column layout" },
   { type: "comparison_table", label: "Comparison Table", icon: Table, description: "Feature comparison with competitors" },
   { type: "features_grid", label: "Features Grid", icon: Columns2, description: "Grid of cards - highlight (stats) or detailed variants" },
