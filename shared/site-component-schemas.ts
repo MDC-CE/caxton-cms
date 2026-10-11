@@ -63,13 +63,21 @@ export {
   bentoCardsSectionSchema,
   type BentoCardItem,
   type BentoCardsSection,
+  type BentoPhotoCard,
+  type BentoCardsPhotoTiles,
+  type BentoCardsExpandingPhotos,
 } from "../site_learning-mdc-edu/component-registry/bento_cards/v1.0/schema";
 
 // bullet_tabs_showcase
 export {
   bulletTabsShowcaseSectionSchema,
   type BulletTabsShowcaseSection,
+  type BulletTabsDefaultSection,
+  type BulletTabsAudiencePathsSection,
+  type BulletTabsProfileListSection,
   type BulletTab,
+  type AudiencePathTab,
+  type AudiencePathProgram,
 } from "../site_learning-mdc-edu/component-registry/bullet_tabs_showcase/v1.0/schema";
 
 // career_support_explain
@@ -146,12 +154,18 @@ export {
   ctaBannerStripSchema,
   ctaBannerResourceShowcaseSchema,
   ctaBannerPromotionSchema,
+  ctaBannerOverlapFooterSchema,
+  ctaBannerSplitPhotoSchema,
+  ctaBannerEmailCaptureSchema,
   type CtaBannerSection,
   type CtaBannerDefault,
   type CtaBannerForm,
   type CtaBannerStrip,
   type CtaBannerResourceShowcase,
   type CtaBannerPromotion,
+  type CtaBannerOverlapFooter,
+  type CtaBannerSplitPhoto,
+  type CtaBannerEmailCapture,
 } from "../site_learning-mdc-edu/component-registry/cta_banner/v1.0/schema";
 
 // double_cta
@@ -209,6 +223,8 @@ export {
   type FeaturesGridStatsChartsCardBars,
   type FeaturesGridStatsChartsCardGauge,
   type FeaturesGridStatsChartsCardTrend,
+  type FeaturesGridScheduleOptions,
+  type FeaturesGridOpenColumns,
 } from "../site_learning-mdc-edu/component-registry/features_grid/v1.0/schema";
 
 // footer
@@ -236,6 +252,10 @@ export {
   type GraduatesCollageImage,
   type GraduatesFeaturedImage,
   type GraduatesStatsAsymmetric,
+  type GraduatesStatsQuoteStory,
+  type GraduatesStatsQuoteCard,
+  type GraduatesStatsNumbersBand,
+  type GraduatesStatsTiles,
 } from "../site_learning-mdc-edu/component-registry/graduates_stats/v1.0/schema";
 
 // image_row
@@ -291,6 +311,8 @@ export {
   mosaicHeroSectionSchema,
   type MosaicHeroSection,
   type MosaicHeroPhoto,
+  type MosaicHeroDefault,
+  type MosaicHeroCentered,
 } from "../site_learning-mdc-edu/component-registry/mosaic_hero/v1.0/schema";
 
 // numbered_steps
@@ -302,6 +324,8 @@ export {
   type NumberedStepsDefaultSection,
   type NumberedStepsBubbleTextSection,
   type NumberedStepsVerticalCardsSection,
+  type NumberedStepsHorizontalStepper,
+  type NumberedStepsPhotoTimeline,
 } from "../site_learning-mdc-edu/component-registry/numbered_steps/v1.0/schema";
 
 // og_image_preview
@@ -351,6 +375,9 @@ export {
 export {
   programsShowcaseSectionSchema,
   type ProgramsShowcaseSection,
+  type ProgramsShowcaseDefault,
+  type ProgramsShowcaseDateRows,
+  type ProgramsShowcaseDateChipCards,
   type ProgramItem,
 } from "../site_learning-mdc-edu/component-registry/programs_showcase/v1.0/schema";
 
@@ -469,11 +496,17 @@ export {
   bulletGroupSchema,
   benefitItemSchema,
   twoColumnColumnSchema,
+  twoColumnDefaultSchema,
+  twoColumnOverlapCardSchema,
+  twoColumnChecklistNoteSchema,
   twoColumnSectionSchema,
   type TwoColumnBullet,
   type BulletGroup,
   type BenefitItem,
   type TwoColumnColumn,
+  type TwoColumnDefaultSection,
+  type TwoColumnOverlapCard,
+  type TwoColumnChecklistNote,
   type TwoColumnSection,
 } from "../site_learning-mdc-edu/component-registry/two_column/v1.0/schema";
 

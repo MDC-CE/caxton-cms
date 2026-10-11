@@ -14,6 +14,7 @@ import { resolveAllTemplateVars } from "./resolve-template-vars";
 import { getVariableManager } from "./variable-manager";
 import { resolveLayout } from "./content-types";
 import type { ContentIndex } from "./content-index";
+import { getVersioningManager } from "./versioning/VersioningManager";
 
 /** Fallback used by LogoItem when menu YAML omits imageId (e.g. localized menus). */
 export const DEFAULT_NAVBAR_LOGO_ID = "4geeks-devs-logo-1763162063433";
@@ -228,6 +229,8 @@ export function buildVisitorImageRegistrySubset(opts: {
   contentIndex: ContentIndex;
   /** Extra URL-inferred locale when it differs from content locale (e.g. "en"). */
   urlLocale?: string;
+  /** Staff preview of a named version (e.g. unpublished `draft`). */
+  forceVariant?: string;
 }): ImageRegistryLike {
   const {
     fullRegistry,
@@ -237,30 +240,57 @@ export function buildVisitorImageRegistrySubset(opts: {
     contentRoot,
     contentIndex,
     urlLocale,
+    forceVariant,
   } = opts;
 
   let pageData: unknown = null;
-  try {
-    const result = contentIndex.loadContent({
-      contentType: contentType as any,
-      slug,
-      localeOrVariant: locale,
-    });
-    if (result.success) {
-      pageData = result.data;
+  const versioningManager = getVersioningManager();
+
+  if (forceVariant) {
+    const forced = versioningManager.getVariantContent(contentType, slug, forceVariant, locale);
+    if (forced && typeof forced === "object") {
+      pageData = forced;
+    }
+  }
+
+  if (!pageData) {
+    try {
+      const result = contentIndex.loadContent({
+        contentType: contentType as any,
+        slug,
+        localeOrVariant: locale,
+      });
+      if (result.success) {
+        pageData = result.data;
+      }
+    } catch {
+      pageData = null;
+    }
+  }
+
+  const liveSections = Array.isArray((pageData as { sections?: unknown[] } | null)?.sections)
+    ? ((pageData as { sections: unknown[] }).sections.length)
+    : 0;
+  if (!pageData || liveSections === 0) {
+    const draft = versioningManager.getVariantContent(contentType, slug, "draft", locale);
+    if (draft && typeof draft === "object") {
+      pageData = draft;
+    }
+  }
+
+  if (pageData && typeof pageData === "object") {
+    try {
       const raw = contentIndex.loadMergedContent(contentType as any, slug, locale);
       const layout = resolveLayout(
         contentType,
         raw.data || (pageData as Record<string, unknown>),
         contentRoot,
       );
-      if (pageData && typeof pageData === "object") {
-        (pageData as Record<string, unknown>).layout = layout;
-        (pageData as Record<string, unknown>).locale = locale;
-      }
+      (pageData as Record<string, unknown>).layout = layout;
+      (pageData as Record<string, unknown>).locale = locale;
+    } catch {
+      (pageData as Record<string, unknown>).locale = locale;
     }
-  } catch {
-    pageData = null;
   }
 
   const layout = (pageData as { layout?: { menu?: { top?: string | null; bottom?: string | null } } } | null)

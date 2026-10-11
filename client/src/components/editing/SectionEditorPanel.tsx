@@ -3372,6 +3372,7 @@ export function SectionEditorPanel({
                 options={[
                   { id: "default", label: "Default (Buttons)" },
                   { id: "form", label: "Form" },
+                  { id: "overlapFooter", label: "Overlap footer" },
                 ]}
               />
             )}

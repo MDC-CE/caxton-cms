@@ -319,11 +319,17 @@ export {
   bulletGroupSchema,
   benefitItemSchema,
   twoColumnColumnSchema,
+  twoColumnDefaultSchema,
+  twoColumnOverlapCardSchema,
+  twoColumnChecklistNoteSchema,
   twoColumnSectionSchema,
   type TwoColumnBullet,
   type BulletGroup,
   type BenefitItem,
   type TwoColumnColumn,
+  type TwoColumnDefaultSection,
+  type TwoColumnOverlapCard,
+  type TwoColumnChecklistNote,
   type TwoColumnSection,
 } from "./site-component-schemas";
 
@@ -366,6 +372,8 @@ export type {
   NumberedStepsDefaultSection,
   NumberedStepsBubbleTextSection,
   NumberedStepsVerticalCardsSection,
+  NumberedStepsHorizontalStepper,
+  NumberedStepsPhotoTimeline,
 } from "./site-component-schemas";
 
 // ============================================
@@ -437,6 +445,8 @@ export type {
   FeaturesGridStatsChartsCardBars,
   FeaturesGridStatsChartsCardGauge,
   FeaturesGridStatsChartsCardTrend,
+  FeaturesGridScheduleOptions,
+  FeaturesGridOpenColumns,
 } from "./site-component-schemas";
 
 // ============================================
@@ -459,12 +469,18 @@ export {
   ctaBannerStripSchema,
   ctaBannerResourceShowcaseSchema,
   ctaBannerPromotionSchema,
+  ctaBannerOverlapFooterSchema,
+  ctaBannerSplitPhotoSchema,
+  ctaBannerEmailCaptureSchema,
   type CtaBannerSection,
   type CtaBannerDefault,
   type CtaBannerForm,
   type CtaBannerStrip,
   type CtaBannerResourceShowcase,
   type CtaBannerPromotion,
+  type CtaBannerOverlapFooter,
+  type CtaBannerSplitPhoto,
+  type CtaBannerEmailCapture,
 } from "./site-component-schemas";
 
 // Type alias for backward compatibility
@@ -526,6 +542,9 @@ export {
   bentoCardsSectionSchema,
   type BentoCardItem,
   type BentoCardsSection,
+  type BentoPhotoCard,
+  type BentoCardsPhotoTiles,
+  type BentoCardsExpandingPhotos,
 } from "./site-component-schemas";
 
 // ============================================
@@ -902,11 +921,29 @@ import { ctaBannerSectionSchema } from "./site-component-schemas";
 import { projectShowcaseSectionSchema, projectsShowcaseSectionSchema } from "./site-component-schemas";
 import { comparisonTableSectionSchema } from "./site-component-schemas";
 import { geeksVsOthersComparisonSectionSchema } from "./site-component-schemas";
-import { bulletTabsShowcaseSectionSchema, type BulletTabsShowcaseSection, type BulletTab } from "./site-component-schemas";
-export { bulletTabsShowcaseSectionSchema, type BulletTabsShowcaseSection, type BulletTab };
-import { graduatesStatsSectionSchema, graduatesFeaturedImageSchema, type GraduatesStatsSection, type GraduatesStatItem, type GraduatesCollageImage, type GraduatesFeaturedImage, type GraduatesStatsAsymmetric } from "./site-component-schemas";
+import {
+  bulletTabsShowcaseSectionSchema,
+  type BulletTabsShowcaseSection,
+  type BulletTabsDefaultSection,
+  type BulletTabsAudiencePathsSection,
+  type BulletTabsProfileListSection,
+  type BulletTab,
+  type AudiencePathTab,
+  type AudiencePathProgram,
+} from "./site-component-schemas";
+export {
+  bulletTabsShowcaseSectionSchema,
+  type BulletTabsShowcaseSection,
+  type BulletTabsDefaultSection,
+  type BulletTabsAudiencePathsSection,
+  type BulletTabsProfileListSection,
+  type BulletTab,
+  type AudiencePathTab,
+  type AudiencePathProgram,
+};
+import { graduatesStatsSectionSchema, graduatesFeaturedImageSchema, type GraduatesStatsSection, type GraduatesStatItem, type GraduatesCollageImage, type GraduatesFeaturedImage, type GraduatesStatsAsymmetric, type GraduatesStatsQuoteStory, type GraduatesStatsQuoteCard, type GraduatesStatsNumbersBand, type GraduatesStatsTiles } from "./site-component-schemas";
 import { splitCardsSectionSchema } from "./site-component-schemas";
-export { graduatesStatsSectionSchema, graduatesFeaturedImageSchema, type GraduatesStatsSection, type GraduatesStatItem, type GraduatesCollageImage, type GraduatesFeaturedImage, type GraduatesStatsAsymmetric };
+export { graduatesStatsSectionSchema, graduatesFeaturedImageSchema, type GraduatesStatsSection, type GraduatesStatItem, type GraduatesCollageImage, type GraduatesFeaturedImage, type GraduatesStatsAsymmetric, type GraduatesStatsQuoteStory, type GraduatesStatsQuoteCard, type GraduatesStatsNumbersBand, type GraduatesStatsTiles };
 import { applyFormSectionSchema } from "./site-component-schemas";
 import { awardBadgesSectionSchema } from "./site-component-schemas";
 import { awardsMarqueeSectionSchema, type AwardsMarqueeSection, type AwardsMarqueeItem } from "./site-component-schemas";
@@ -987,14 +1024,40 @@ export { contactUsInfoSectionSchema, type ContactUsInfoSection, type ContactLoca
 import { trustCardsSectionSchema, type TrustCardsSection, type TrustCardItem } from "./site-component-schemas";
 export { trustCardsSectionSchema, type TrustCardsSection, type TrustCardItem };
 
-import { programsShowcaseSectionSchema, type ProgramsShowcaseSection, type ProgramItem } from "./site-component-schemas";
-export { programsShowcaseSectionSchema, type ProgramsShowcaseSection, type ProgramItem };
+import {
+  programsShowcaseSectionSchema,
+  type ProgramsShowcaseSection,
+  type ProgramsShowcaseDefault,
+  type ProgramsShowcaseDateRows,
+  type ProgramsShowcaseDateChipCards,
+  type ProgramItem,
+} from "./site-component-schemas";
+export {
+  programsShowcaseSectionSchema,
+  type ProgramsShowcaseSection,
+  type ProgramsShowcaseDefault,
+  type ProgramsShowcaseDateRows,
+  type ProgramsShowcaseDateChipCards,
+  type ProgramItem,
+};
 
 import { credibilityStripSectionSchema, type CredibilityStripSection, type CredibilityStripItem, type CredibilityStripLogo } from "./site-component-schemas";
 export { credibilityStripSectionSchema, type CredibilityStripSection, type CredibilityStripItem, type CredibilityStripLogo };
 
-import { mosaicHeroSectionSchema, type MosaicHeroSection, type MosaicHeroPhoto } from "./site-component-schemas";
-export { mosaicHeroSectionSchema, type MosaicHeroSection, type MosaicHeroPhoto };
+import {
+  mosaicHeroSectionSchema,
+  type MosaicHeroSection,
+  type MosaicHeroPhoto,
+  type MosaicHeroDefault,
+  type MosaicHeroCentered,
+} from "./site-component-schemas";
+export {
+  mosaicHeroSectionSchema,
+  type MosaicHeroSection,
+  type MosaicHeroPhoto,
+  type MosaicHeroDefault,
+  type MosaicHeroCentered,
+};
 
 import { contactBubbleSectionSchema, type ContactBubbleSection, type ContactBubbleImage } from "./site-component-schemas";
 export { contactBubbleSectionSchema, type ContactBubbleSection, type ContactBubbleImage };

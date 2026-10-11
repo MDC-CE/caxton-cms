@@ -1,0 +1,19 @@
+---
+description: Five rules for MDC Continuing Education landings (new variants, dual-edit, gallery images)
+globs: site_learning-mdc-edu/**
+alwaysApply: true
+---
+
+# MDC CE landings — five rules
+
+When building Continuing Education pages for Gabriel / Edwin / Alejandro:
+
+1. **Dual edit.** Every visible piece is editable in the CMS Props panel **and** in YAML/schema. Do not hardcode copy, images, CTAs, colors, or spacing in React.
+
+2. **Visitor first.** Public visitors should think less, act more. Short copy, one job per section. Build from mockup blocks that have a check — never X-blocks. Do not use the “Your next start date is weeks away” hero. Do **not** replace production `/en/home`; add a new landing.
+
+3. **New variant, not a new type.** If a hero/cards/CTA already exists, add a variant from the HTML/screenshot. Ship schema, field-editors, examples, and registry together. Do not invent a type from scratch. Repeat mistakes go into a Cursor rule/skill.
+
+4. **Images from Media Gallery only.** Upload to GCS first. Empty gallery is not done. No invented photos, no leftover grey placeholders.
+
+5. **Spacing and chrome are props** (`paddingY` sm/md/lg, background, button variant, photo frame none/line/glow). After a component is registered, put it on the page via YAML/agent — not only Debug Tools. Guide Gabriel one click at a time. Do not Publish unless asked.

@@ -61,16 +61,21 @@ export function getContentFolder(contentRoot?: string): string {
  * Normalize a file path so it carries the correct content folder prefix.
  * Handles absolute paths, already-prefixed relative paths, and bare relative paths.
  */
+function toPosixPath(filePath: string): string {
+  return filePath.replace(/\\/g, "/");
+}
+
 function normalizePath(filePath: string, contentRoot?: string): string {
   if (path.isAbsolute(filePath)) {
     const cwd = resolvePathForComparison(process.cwd());
     const abs = resolvePathForComparison(filePath);
-    return path.relative(cwd, abs);
+    return toPosixPath(path.relative(cwd, abs));
   }
-  const folder = getContentFolder(contentRoot);
-  return filePath.startsWith(`${folder}/`) || filePath.startsWith('client/')
-    ? filePath
-    : `${folder}/${filePath}`;
+  const folder = toPosixPath(getContentFolder(contentRoot));
+  const posix = toPosixPath(filePath);
+  return posix.startsWith(`${folder}/`) || posix.startsWith("client/")
+    ? posix
+    : `${folder}/${posix}`;
 }
 
 /**
@@ -155,9 +160,10 @@ async function saveSyncStateToBucket(state: SyncStateWithConfig, contentRoot?: s
  * Excludes component-registry, dot-prefixed state files, and image directories.
  */
 export function shouldTrackFile(filePath: string, allowedExceptions?: Set<string>, contentRoot?: string): boolean {
+  filePath = toPosixPath(filePath);
   if (allowedExceptions instanceof Set && allowedExceptions.has(filePath)) return true;
 
-  const folder = getContentFolder(contentRoot);
+  const folder = toPosixPath(getContentFolder(contentRoot));
   if (!filePath.startsWith(`${folder}/`)) {
     return false;
   }
@@ -707,7 +713,7 @@ export function getAllContentFiles(contentRoot?: string): string[] {
       } else {
         const ext = path.extname(entry.name).toLowerCase();
         if (ext === '.yml' || ext === '.yaml' || ext === '.json' || ext === '.ts' || ext === '.tsx' || ext === '.css') {
-          const relativePath = path.relative(process.cwd(), fullPath);
+          const relativePath = toPosixPath(path.relative(process.cwd(), fullPath));
           if (shouldTrackFile(relativePath, undefined, contentRoot)) {
             files.push(relativePath);
           }

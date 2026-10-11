@@ -8,7 +8,7 @@ import { useSectionContext } from "@/contexts/SectionContext";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useContentTypes } from "@/hooks/useContentTypes";
 import { detectContentInfo } from "@/components/DebugBubble/utils/debugHelpers";
-import { Pencil, CheckCircle2, Clock, AlertCircle, Unlink, ExternalLink, ShieldCheck, Shield, ChevronDown } from "lucide-react";
+import { Pencil, CheckCircle2, Clock, AlertCircle, Unlink, ExternalLink, ShieldCheck, Shield, MoreHorizontal } from "lucide-react";
 import { editContent } from "@/lib/contentApi";
 import { emitContentUpdated } from "@/lib/contentEvents";
 import { resolveTemplateFallback } from "@/lib/variable-manager";
@@ -21,6 +21,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { queryClient } from "@/lib/queryClient";
+import { resolveImageObjectStyle, type ImageFitMode } from "@/lib/imageFit";
+
+/** Below this, hover controls sit under the photo so labels stay readable. */
+const COMPACT_EDIT_MAX_EDGE_PX = 140;
 
 const ImagePickerDialog = lazy(() =>
   import("@/components/editing/ImagePickerDialog").then((m) => ({
@@ -76,14 +80,21 @@ export function useVisitorImageRegistry(opts: {
   enabled?: boolean;
 }) {
   const { contentType, slug, locale = "en", enabled = false } = opts;
+  const forceVariant =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("force_variant") ||
+        new URLSearchParams(window.location.search).get("variant") ||
+        undefined
+      : undefined;
   const { data, isLoading, isFetched } = useQuery<ImageRegistryData>({
-    queryKey: ["/api/image-registry", "visitor-subset", contentType, slug, locale],
+    queryKey: ["/api/image-registry", "visitor-subset", contentType, slug, locale, forceVariant],
     queryFn: async () => {
       const params = new URLSearchParams({
         contentType: contentType!,
         slug: slug!,
         locale,
       });
+      if (forceVariant) params.set("force_variant", forceVariant);
       const res = await fetch(`/api/image-registry/visitor-subset?${params.toString()}`);
       if (!res.ok) throw new Error(await res.text());
       return res.json() as Promise<ImageRegistryData>;
@@ -117,6 +128,13 @@ interface UniversalImageProps extends ImageRef {
   style?: React.CSSProperties;
   fieldContext?: FieldContext;
   sizes?: string;
+  /**
+   * How the photo fills its slot.
+   * - cover (default): fill and crop; uses gallery focal_point when set
+   * - contain: show the whole photo (may letterbox)
+   * - auto: cover when aspects are close, contain when they diverge a lot
+   */
+  fit?: ImageFitMode;
 }
 
 const ASPECT_RATIOS: Record<string, number> = {
@@ -146,16 +164,28 @@ export function UniversalImage({
   style,
   fieldContext,
   sizes: sizesProp,
+  fit = "cover",
 }: UniversalImageProps) {
   const { registry, loading: registryLoading, reverseMap } = useImageRegistry();
   const [isLoaded, setIsLoaded] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [slotSize, setSlotSize] = useState<{ w: number; h: number } | null>(null);
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const imgRefCallback = (el: HTMLImageElement | null) => {
-    (imgRef as React.MutableRefObject<HTMLImageElement | null>).current = el;
-    onImgRef?.(el);
-  };
+  const containerRef = useRef<HTMLDivElement>(null);
+  const onImgRefRef = useRef(onImgRef);
+  onImgRefRef.current = onImgRef;
+
+  // Stable ref callback — never setState here (new callback identity would loop).
+  const imgRefCallback = useMemo(
+    () => (el: HTMLImageElement | null) => {
+      (imgRef as React.MutableRefObject<HTMLImageElement | null>).current = el;
+      onImgRefRef.current?.(el);
+    },
+    [],
+  );
+
   const {
     isPriority: isPrioritySection,
     sectionIndex,
@@ -174,6 +204,24 @@ export function UniversalImage({
     new URLSearchParams(window.location.search).get("capture") === "1";
   const showEditChrome = isEditMode && !isCaptureMode;
   const { toast } = useToast();
+
+  // Measure slot for autofit and for compact staff edit controls on small thumbs.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    if (fit !== "auto" && !showEditChrome) return;
+    const apply = () => {
+      const rect = el.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return;
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      setSlotSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fit, id, isLoaded, showEditChrome]);
 
   // Non-blocking AI impression beacon (public pages only).
   useEffect(() => {
@@ -307,8 +355,29 @@ export function UniversalImage({
 
   const handleLoad = () => {
     setIsLoaded(true);
+    const el = imgRef.current;
+    if (el?.naturalWidth && el.naturalHeight) {
+      const w = el.naturalWidth;
+      const h = el.naturalHeight;
+      setNaturalSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+    }
     onLoad?.();
   };
+
+  useEffect(() => {
+    setNaturalSize(null);
+    setSlotSize(null);
+  }, [id]);
+
+  // Cached images can skip onLoad; read natural size once after paint without looping.
+  useEffect(() => {
+    if (fit !== "auto") return;
+    const el = imgRef.current;
+    if (!el?.complete || !el.naturalWidth || !el.naturalHeight) return;
+    const w = el.naturalWidth;
+    const h = el.naturalHeight;
+    setNaturalSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+  }, [fit, id, isLoaded]);
 
   const handleError = () => {
     setHasError(true);
@@ -408,6 +477,18 @@ export function UniversalImage({
 
   const intrinsicWidth = imageEntry?.width;
   const intrinsicHeight = imageEntry?.height;
+  const imageObjectStyle = resolveImageObjectStyle({
+    fit,
+    explicitObjectFit:
+      typeof style?.objectFit === "string" ? style.objectFit : undefined,
+    explicitObjectPosition:
+      typeof style?.objectPosition === "string" ? style.objectPosition : undefined,
+    imageWidth: intrinsicWidth ?? naturalSize?.w,
+    imageHeight: intrinsicHeight ?? naturalSize?.h,
+    slotWidth: slotSize?.w,
+    slotHeight: slotSize?.h,
+    focalPoint: imageEntry?.focal_point,
+  });
 
   const containerStyle: React.CSSProperties = aspectRatio
     ? { aspectRatio: aspectRatio.toString() }
@@ -531,13 +612,22 @@ export function UniversalImage({
       throw new Error("No field path configured");
     }
 
-    const isIdField = fieldContext?.srcField?.endsWith("_id") ?? false;
+    const isIdField =
+      !!fieldContext?.srcField?.endsWith("_id") ||
+      !!fieldContext?.fieldPath?.endsWith("image_id");
     const valueToSave = isIdField && registryId ? registryId : pickedSrc;
+    const variantFromUrl =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search).get("force_variant") ||
+          new URLSearchParams(window.location.search).get("variant") ||
+          undefined
+        : undefined;
 
     const result = await editContent({
       contentType: sectionContentType,
       slug: sectionSlug,
       locale: sectionLocale,
+      variant: variantFromUrl,
       operations: [{ action: "update_field", path, value: valueToSave }],
     });
 
@@ -581,133 +671,184 @@ export function UniversalImage({
     }
   };
 
+  const compactEditControls =
+    !!slotSize &&
+    (slotSize.w < COMPACT_EDIT_MAX_EDGE_PX || slotSize.h < COMPACT_EDIT_MAX_EDGE_PX);
+  // Wide mini thumbs (date-row cards): float to the right. Tall minis: under the photo.
+  const compactEditPlacement =
+    compactEditControls && slotSize && slotSize.w >= slotSize.h ? "beside" : "below";
+
+  const openOriginalImage = () => {
+    const originalUrl =
+      isOverridden && templateKey && dbOriginals[templateKey]
+        ? String(dbOriginals[templateKey])
+        : src;
+    window.open(originalUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const moreActionsMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-background text-foreground shadow-lg ring-2 ring-border"
+          data-testid={`button-open-image-${id}`}
+          aria-label="More photo actions"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <MoreHorizontal className="h-4 w-4" aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuItem
+          data-testid={`menu-item-choose-image-${id}`}
+          onSelect={() => setPickerOpen(true)}
+        >
+          <Pencil className="mr-2 h-4 w-4" aria-hidden />
+          Change photo…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          data-testid={`menu-item-open-original-${id}`}
+          onSelect={openOriginalImage}
+        >
+          <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
+          Open photo in new tab
+        </DropdownMenuItem>
+        {isOverridden && (
+          <DropdownMenuItem
+            data-testid={`menu-item-open-override-${id}`}
+            onSelect={() =>
+              window.open(String(dbOverrides[templateKey!]), "_blank", "noopener,noreferrer")
+            }
+          >
+            <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
+            Open custom version
+          </DropdownMenuItem>
+        )}
+        {isOverridden && (
+          <DropdownMenuItem
+            data-testid={`menu-item-reset-image-${id}`}
+            onSelect={(e) => {
+              handleResetOverride(e as unknown as React.MouseEvent);
+            }}
+          >
+            Reset to original
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const changePhotoButton = (
+    <button
+      type="button"
+      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground shadow-lg ring-2 ring-background"
+      data-testid={`button-edit-image-${id}`}
+      aria-label="Change photo"
+      onClick={handleEditClick}
+    >
+      <Pencil className="h-4 w-4 shrink-0" aria-hidden />
+      Change photo
+    </button>
+  );
+
   const editOverlay = canReplace ? (
     <div
-      className="absolute inset-0 z-20 flex items-center justify-center invisible group-hover/editimg:visible"
+      className="pointer-events-none absolute inset-0 z-20"
       data-edit-overlay="true"
     >
-      <div className="absolute inset-0 bg-black/40" />
-      <div className="relative z-10 flex items-center gap-2">
-        {/* Replace dropdown */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 bg-white/90 text-gray-900 rounded-md px-2.5 py-1.5 text-xs font-medium shadow-md cursor-pointer"
-              data-testid={`button-edit-image-${id}`}
-              aria-label="Replace image"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <Pencil className="h-3 w-3" />
-              Replace
-              <ChevronDown className="h-3 w-3" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent onClick={(e) => e.stopPropagation()}>
-            <DropdownMenuItem
-              data-testid={`menu-item-choose-image-${id}`}
-              onSelect={(e) => {
-                (e as unknown as React.MouseEvent).stopPropagation?.();
-                setPickerOpen(true);
-              }}
-            >
-              Choose new image
-            </DropdownMenuItem>
-            {isOverridden && (
-              <DropdownMenuItem
-                data-testid={`menu-item-reset-image-${id}`}
-                onSelect={(e) => {
-                  handleResetOverride(e as unknown as React.MouseEvent);
-                }}
-              >
-                Reset to original
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+      {/* Always-on micro cue: staff can see the photo is editable without hovering */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="pointer-events-auto absolute top-1.5 right-1.5 z-30 inline-flex h-7 w-7 items-center justify-center rounded-full bg-background/95 text-foreground shadow-md ring-1 ring-border transition-opacity group-hover/editimg:opacity-0 group-focus-within/editimg:opacity-0"
+            data-testid={`button-edit-image-cue-${id}`}
+            aria-label="Change photo"
+            onClick={handleEditClick}
+          >
+            <Pencil className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="text-xs">
+          Change photo
+        </TooltipContent>
+      </Tooltip>
 
-        {/* Open dropdown */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 bg-white/90 text-gray-900 rounded-md px-2.5 py-1.5 text-xs font-medium shadow-md cursor-pointer"
-              data-testid={`button-open-image-${id}`}
-              aria-label="Open image"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <ExternalLink className="h-3 w-3" />
-              Open
-              <ChevronDown className="h-3 w-3" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent onClick={(e) => e.stopPropagation()}>
-            <DropdownMenuItem
-              data-testid={`menu-item-open-original-${id}`}
-              onSelect={() => {
-                const originalUrl = isOverridden && templateKey && dbOriginals[templateKey]
-                  ? String(dbOriginals[templateKey])
-                  : src;
-                window.open(originalUrl, "_blank", "noopener,noreferrer");
-              }}
-            >
-              Open original image
-            </DropdownMenuItem>
-            {isOverridden && (
-              <DropdownMenuItem
-                data-testid={`menu-item-open-override-${id}`}
-                onSelect={() =>
-                  window.open(String(dbOverrides[templateKey!]), "_blank", "noopener,noreferrer")
-                }
-              >
-                Open override version
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+      {/* Dim the photo on hover */}
+      <button
+        type="button"
+        className="pointer-events-auto absolute inset-0 bg-black/0 transition-colors group-hover/editimg:bg-black/45 group-focus-within/editimg:bg-black/45"
+        aria-label="Change photo"
+        data-testid={`button-edit-image-surface-${id}`}
+        onClick={handleEditClick}
+      />
+
+      {/*
+        Large photos: full buttons centered on the image.
+        Small thumbs: float beside/below so labels are not clipped.
+      */}
+      <div
+        className={`pointer-events-auto absolute z-30 flex items-center gap-1.5 opacity-0 transition-opacity group-hover/editimg:opacity-100 group-focus-within/editimg:opacity-100 ${
+          compactEditControls && compactEditPlacement === "beside"
+            ? "left-full top-1/2 ml-1.5 -translate-y-1/2"
+            : compactEditControls
+              ? "left-1/2 top-full mt-1.5 -translate-x-1/2"
+              : "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        }`}
+      >
+        {changePhotoButton}
+        {moreActionsMenu}
       </div>
     </div>
   ) : null;
 
+  // Outer stays overflow-visible in edit mode so "Change photo" can sit under small thumbs.
+  // Inner crops the photo (object-fit) without clipping the staff controls.
   const imageContent = (
     <div
-      className={`relative overflow-hidden ${borderClasses} ${useSolidCard ? "" : className} ${canReplace ? "group/editimg" : ""}`}
+      ref={containerRef}
+      className={`relative ${borderClasses} ${useSolidCard ? "" : className} ${
+        canReplace ? "group/editimg overflow-visible" : "overflow-hidden"
+      }`}
       style={containerStyle}
       data-testid={`img-container-${id}`}
     >
-      {!isEager && !isLoaded && (
-        <div
-          className="absolute inset-0 bg-muted animate-pulse"
-          data-testid={`img-loading-${id}`}
+      <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
+        {!isEager && !isLoaded && (
+          <div
+            className="absolute inset-0 bg-muted animate-pulse"
+            data-testid={`img-loading-${id}`}
+          />
+        )}
+        <img
+          ref={imgRefCallback}
+          src={src}
+          alt={finalAlt}
+          loading={resolvedLoading}
+          decoding={decoding}
+          {...{ fetchpriority: fetchPriority }}
+          {...(srcsetString ? { srcSet: srcsetString } : {})}
+          {...(sizesString ? { sizes: sizesString } : {})}
+          {...(intrinsicWidth ? { width: intrinsicWidth } : {})}
+          {...(intrinsicHeight ? { height: intrinsicHeight } : {})}
+          onLoad={handleLoad}
+          onError={handleError}
+          className={`w-full h-full ${
+            isEager
+              ? "opacity-100"
+              : `transition-opacity duration-300 ${isLoaded ? "opacity-100" : "opacity-0"}`
+          }`}
+          style={{
+            ...style,
+            objectFit: imageObjectStyle.objectFit,
+            objectPosition: imageObjectStyle.objectPosition,
+          }}
+          data-testid={`img-${id}`}
         />
-      )}
-      <img
-        ref={imgRefCallback}
-        src={src}
-        alt={finalAlt}
-        loading={resolvedLoading}
-        decoding={decoding}
-        {...{ fetchpriority: fetchPriority }}
-        {...(srcsetString ? { srcSet: srcsetString } : {})}
-        {...(sizesString ? { sizes: sizesString } : {})}
-        {...(intrinsicWidth ? { width: intrinsicWidth } : {})}
-        {...(intrinsicHeight ? { height: intrinsicHeight } : {})}
-        onLoad={handleLoad}
-        onError={handleError}
-        className={`w-full h-full ${
-          isEager
-            ? "opacity-100"
-            : `transition-opacity duration-300 ${isLoaded ? "opacity-100" : "opacity-0"}`
-        }`}
-        style={{
-          objectFit: style?.objectFit || "cover",
-          objectPosition: style?.objectPosition || "center center",
-          ...style,
-        }}
-        data-testid={`img-${id}`}
-      />
-      {overrideBadge}
-      {statusBadge}
+        {overrideBadge}
+        {statusBadge}
+      </div>
       {editOverlay}
     </div>
   );
@@ -722,7 +863,7 @@ export function UniversalImage({
       <ImagePickerDialog
         open={pickerOpen}
         onOpenChange={setPickerOpen}
-        title="Replace Image"
+        title="Change photo"
         initialSrc={src}
         initialAlt={finalAlt}
         onSave={handlePickerSave}

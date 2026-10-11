@@ -307,6 +307,10 @@ export function registerMediaRoutes(app: Express): void {
       typeof req.query.urlLocale === "string" && req.query.urlLocale.trim()
         ? req.query.urlLocale.trim()
         : undefined;
+    const forceVariant =
+      typeof req.query.force_variant === "string" && req.query.force_variant.trim()
+        ? req.query.force_variant.trim()
+        : undefined;
 
     if (!contentType || !slug) {
       res.status(400).json({ error: "contentType and slug are required" });
@@ -334,6 +338,7 @@ export function registerMediaRoutes(app: Express): void {
         contentRoot,
         contentIndex: ci,
         urlLocale,
+        forceVariant,
       });
       res.json(subset);
     } catch (err: any) {
