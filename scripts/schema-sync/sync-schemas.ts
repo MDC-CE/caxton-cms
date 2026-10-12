@@ -337,7 +337,8 @@ async function loadVariantSchemasFromModule(schemaTs: string): Promise<{
   mainSchema: ZodObject<Record<string, ZodType>> | null;
   variantSchemas: Record<string, ZodObject<Record<string, ZodType>>>;
 }> {
-  const modulePath = path.resolve(schemaTs);
+  const { pathToFileURL } = await import("url");
+  const modulePath = pathToFileURL(path.resolve(schemaTs)).href;
   const module = await import(modulePath);
 
   let mainSchema: ZodObject<Record<string, ZodType>> | null = null;

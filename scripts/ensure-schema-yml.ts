@@ -21,11 +21,17 @@ const syncScript = path.join(root, "scripts", "schema-sync", "sync-schemas.ts");
 
 function runTsx(args: string[]): Promise<number> {
   return new Promise((resolve, reject) => {
-    const tsxBin = path.join(root, "node_modules", ".bin", "tsx");
+    const tsxBin = path.join(
+      root,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? "tsx.cmd" : "tsx",
+    );
     const child = spawn(tsxBin, [syncScript, ...args], {
       cwd: root,
       stdio: "inherit",
       env: process.env,
+      shell: process.platform === "win32",
     });
     child.on("error", reject);
     child.on("close", (code) => resolve(code ?? 1));

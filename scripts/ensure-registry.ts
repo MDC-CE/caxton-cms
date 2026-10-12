@@ -24,7 +24,13 @@ function runScript(
   args: string[] = [],
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const tsxBin = path.join(root, "node_modules", ".bin", "tsx");
+    // Windows npm shims are *.cmd; spawn without shell cannot exec the extensionless bin.
+    const tsxBin = path.join(
+      root,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? "tsx.cmd" : "tsx",
+    );
     const child = spawn(
       tsxBin,
       [path.join(root, "scripts", scriptName), ...args],
@@ -32,6 +38,7 @@ function runScript(
         cwd: root,
         stdio: "inherit",
         env: process.env,
+        shell: process.platform === "win32",
       },
     );
     child.on("error", reject);
