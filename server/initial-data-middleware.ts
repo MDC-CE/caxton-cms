@@ -988,12 +988,12 @@ function themeOnlyHtmlHook(res: Response, contentRoot: string): void {
         const html = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
         const injected = injectThemeOverrides(html, contentRoot);
         if (injected !== html) res.setHeader("content-length", Buffer.byteLength(injected, "utf-8"));
-        return originalEnd.call(this, injected, ...args);
+        return (originalEnd as (...a: unknown[]) => unknown).call(this, injected, ...args);
       } catch {
-        return originalEnd.call(this, chunk, ...args);
+        return (originalEnd as (...a: unknown[]) => unknown).call(this, chunk, ...args);
       }
     }
-    return originalEnd.call(this, chunk, ...args);
+    return (originalEnd as (...a: unknown[]) => unknown).call(this, chunk, ...args);
   } as any;
 }
 

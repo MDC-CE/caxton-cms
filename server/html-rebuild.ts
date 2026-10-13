@@ -72,7 +72,7 @@ export function buildHtmlRebuildSite(contentRootInput: string, siteId?: string):
     contentIndex,
     database,
     mediaGallery,
-  } as SiteContext;
+  } as unknown as SiteContext;
 }
 
 export async function enqueueHtmlRebuild(
