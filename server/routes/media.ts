@@ -307,10 +307,15 @@ export function registerMediaRoutes(app: Express): void {
       typeof req.query.urlLocale === "string" && req.query.urlLocale.trim()
         ? req.query.urlLocale.trim()
         : undefined;
+    // Private preview uses `?variant=`; public share links use `?force_variant=`.
+    // Accept both so edit-mode visitor-blank checks match the page being previewed.
     const forceVariant =
-      typeof req.query.force_variant === "string" && req.query.force_variant.trim()
+      (typeof req.query.force_variant === "string" && req.query.force_variant.trim()
         ? req.query.force_variant.trim()
-        : undefined;
+        : undefined) ||
+      (typeof req.query.variant === "string" && req.query.variant.trim()
+        ? req.query.variant.trim()
+        : undefined);
 
     if (!contentType || !slug) {
       res.status(400).json({ error: "contentType and slug are required" });

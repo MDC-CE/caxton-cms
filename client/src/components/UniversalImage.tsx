@@ -209,6 +209,9 @@ export function UniversalImage({
   const isCaptureMode =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("capture") === "1";
+  const isPrivatePreview =
+    typeof window !== "undefined" &&
+    window.location.pathname.startsWith("/private/preview/");
   const showEditChrome = isEditMode && !isCaptureMode;
   const { toast } = useToast();
 
@@ -444,8 +447,17 @@ export function UniversalImage({
     return null;
   }
 
-  // Id exists in the full gallery but would be blank on the public page
-  if (showEditChrome && !isDirectUrl && visitorSubsetReady && visitorSubset && !inVisitorSubset) {
+  // Id exists in the full gallery but would be blank on the public page.
+  // Skip on private preview: staff review 0% variants / drafts whose images are
+  // intentionally absent from the live (default) visitor subset.
+  if (
+    showEditChrome &&
+    !isPrivatePreview &&
+    !isDirectUrl &&
+    visitorSubsetReady &&
+    visitorSubset &&
+    !inVisitorSubset
+  ) {
     return renderBroken("visitor-blank");
   }
 

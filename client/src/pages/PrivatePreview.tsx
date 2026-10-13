@@ -3,7 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useSearch, useLocation } from "wouter";
 import { SectionRenderer } from "@/components/SectionRenderer";
-import { apiFetch } from "@/lib/queryClient";
+import { apiFetch, queryClient } from "@/lib/queryClient";
 import { normalizeContentType, useContentTypesRaw } from "@/hooks/useContentTypes";
 import type { CareerProgram, LandingPage, LocationPage, TemplatePage } from "@shared/schema";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -273,6 +273,13 @@ export default function PrivatePreview() {
   const handleRefetch = () => {
     refetch();
   };
+
+  // Public SSR seeds a per-page image-registry subset. Navigating here with
+  // staleTime: Infinity keeps that subset — variant mosaic ids then resolve to
+  // empty frames. Always pull the full catalog on private preview.
+  useEffect(() => {
+    void queryClient.invalidateQueries({ queryKey: ["/api/image-registry"] });
+  }, [normalizedType, slug, variant, locale]);
 
   useEffect(() => {
     if (!content || isLoading) return;

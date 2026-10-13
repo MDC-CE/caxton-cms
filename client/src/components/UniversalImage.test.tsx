@@ -138,6 +138,20 @@ describe("UniversalImage visitor-blank / edit broken", () => {
     expect(html).not.toContain('data-testid="img-full-only"');
   });
 
+  it("still renders img on private preview when id is missing from the live visitor subset", () => {
+    editModeMock.isEditMode = true;
+    vi.stubGlobal("window", {
+      ...globalThis.window,
+      location: {
+        search: "?variant=home-layout&locale=en",
+        pathname: "/private/preview/page/home",
+      },
+    });
+    const html = renderToStaticMarkup(<UniversalImage id="full-only" />);
+    expect(html).toContain('data-testid="img-full-only"');
+    expect(html).not.toContain("img-broken");
+  });
+
   it("shows BrokenImage in edit mode for unknown ids", () => {
     editModeMock.isEditMode = true;
     const html = renderToStaticMarkup(<UniversalImage id="nowhere" />);
