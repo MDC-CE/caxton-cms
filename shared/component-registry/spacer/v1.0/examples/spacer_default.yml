@@ -6,3 +6,4 @@ yaml: |
   version: "1.0"
   size: lg
   mobile_size: sm
+  background: muted
