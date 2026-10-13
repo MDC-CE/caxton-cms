@@ -2097,6 +2097,13 @@ export function registerGithubRoutes(app: Express): void {
             "Pull-all finished with errors",
           );
         } else {
+          // Soft/force pull writes YAML on disk but does not touch in-memory versioning
+          // cache — without this, Versions keeps showing empty variants after a good pull.
+          const siteCtx = res.locals.site as SiteContext | undefined;
+          const versioningManager = siteCtx?.versioningManager ?? getVersioningManager();
+          versioningManager.clearCache();
+          const ci = siteCtx?.contentIndex ?? contentIndex;
+          ci.refresh();
           log.info(
             { pulled: result.pulled, skipped: result.skipped, commitSha: result.commitSha, force },
             "Pull-all completed successfully",

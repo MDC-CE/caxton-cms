@@ -1642,6 +1642,15 @@ export async function autoPullNonConflicting(changedFiles?: string[], remoteComm
       } catch {
         /* non-fatal */
       }
+      // Auto-pull can rewrite versioning.yml; drop in-memory config so Versions UI matches disk.
+      if (pulled.some((f) => f.endsWith("/versioning.yml") || f.endsWith("\\versioning.yml"))) {
+        try {
+          const { getVersioningManager } = await import("./versioning/VersioningManager");
+          getVersioningManager().clearCache();
+        } catch {
+          /* non-fatal */
+        }
+      }
     }
 
     if (pulled.length > 0 && conflicted.length === 0 && errors.length === 0) {
