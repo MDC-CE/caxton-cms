@@ -1072,6 +1072,17 @@ export function registerVersioningRoutes(app: Express): void {
         for (const w of result.warnings) warnings.push({ locale, code: w.code, message: w.message });
       }
 
+      if (publishedLocales.length > 0) {
+        void import("../html-rebuild")
+          .then(({ scheduleHotHtmlRebuild }) => {
+            scheduleHotHtmlRebuild(
+              `publish-all:${contentType}/${resolved.slug}/${variantSlug}`,
+              root,
+            );
+          })
+          .catch(() => {});
+      }
+
       res.json({
         success: true,
         published: true,
@@ -1161,6 +1172,16 @@ export function registerVersioningRoutes(app: Express): void {
         ...(result.details ? { details: result.details } : {}),
       });
       return;
+    }
+    // Promote rewrites the live locale file; anonymous HTML still serves the old
+    // SSR shell (page + image-registry subset) until cache rebuilds. Home aliases
+    // (`/`, `/en`) are not matched by slug alone — rebuild hot keys for the site.
+    if (result.dryRun !== true) {
+      void import("../html-rebuild")
+        .then(({ scheduleHotHtmlRebuild }) => {
+          scheduleHotHtmlRebuild(`promote:${contentType}/${resolved.slug}/${locale}`, root);
+        })
+        .catch(() => {});
     }
     res.json({
       success: true,
