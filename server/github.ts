@@ -1661,6 +1661,27 @@ export async function autoPullNonConflicting(changedFiles?: string[], remoteComm
       }
     }
 
+    // Anonymous SSR shells bake page YAML + image-registry subset. After a content
+    // pull they stay stale until rebuild — visitors then see old chrome (e.g. 01/02
+    // tabs) while /api/pages already has the new props.
+    if (pulled.length > 0) {
+      const touchesPublicHtml = pulled.some(
+        (f) =>
+          f.includes("/pages/") ||
+          f.includes("\\pages\\") ||
+          f.includes("/component-registry/") ||
+          f.includes("\\component-registry\\") ||
+          f.endsWith("image-registry.json"),
+      );
+      if (touchesPublicHtml) {
+        void import("./html-rebuild")
+          .then(({ scheduleHotHtmlRebuild }) => {
+            scheduleHotHtmlRebuild("content-pull", opts?.contentRoot);
+          })
+          .catch(() => {});
+      }
+    }
+
     // Index + redirect cache refresh handled by site_bulk_synced pipeline jobs.
   } catch (error) {
     errors.push(error instanceof Error ? error.message : 'Unknown error');
