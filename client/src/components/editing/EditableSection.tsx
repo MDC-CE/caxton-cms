@@ -16,6 +16,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DbTemplateWarningDialog } from "@/components/editing/DbTemplateWarningDialog";
+import { SwapApplyChoiceDialog } from "@/components/editing/SwapApplyChoiceDialog";
+import { McpRequiredForAiModal } from "@/components/mcp/McpRequiredForAiModal";
+import type { SolveWithAiAgentSelectPayload } from "@/components/DebugBubble/SolveWithAiAgentDropdown";
+import { buildSectionSwapAiPrompt, getSectionHeadingForPrompt } from "@/components/DebugBubble/solveWithAiPrompt";
 import { AgentIcon } from "@/components/pipeline/AgentIcon";
 import { formatAgentLabel, resolveAgentId } from "@/components/pipeline/agentIcons";
 import { buildEntryActivityEventFocusHref } from "@/components/pipeline/EntryActivityBadge";
@@ -459,6 +463,10 @@ export function EditableSection({ children, section, index, sectionType, content
   const [isLoadingSwap, setIsLoadingSwap] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [showVersionPicker, setShowVersionPicker] = useState(false);
+  // Snapshot of the picked layout; the popover clears previewSection when it closes.
+  const [swapChoice, setSwapChoice] = useState<{ section: Section; version: string; variant: string } | null>(null);
+  const [swapAgentPayload, setSwapAgentPayload] = useState<SolveWithAiAgentSelectPayload | null>(null);
+  const [swapMcpModalOpen, setSwapMcpModalOpen] = useState(false);
   
   // X-spacing popover state
   const [xSpacingOpen, setXSpacingOpen] = useState(false);
@@ -767,8 +775,8 @@ export function EditableSection({ children, section, index, sectionType, content
     });
   };
 
-  const executeSwap = async (sectionToSave: Section) => {
-    if (!contentType || !slug) return;
+  const executeSwap = async (sectionToSave: Section): Promise<boolean> => {
+    if (!contentType || !slug) return false;
     setIsConfirming(true);
     try {
       const token = getDebugToken();
@@ -794,30 +802,86 @@ export function EditableSection({ children, section, index, sectionType, content
           }],
         })
       });
-      if (!res.ok) throw new Error('Failed to swap section');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body?.error === 'string' && body.error ? body.error : 'Failed to swap section variant.');
+      }
       setCurrentSection(sectionToSave);
       setSwapPopoverOpen(false);
       emitContentUpdated({ contentType: contentType!, slug: slug!, locale: locale || 'en' });
       toast({ title: "Section swapped", description: "The section variant has been updated." });
+      return true;
     } catch (err) {
-      toast({ title: "Error", description: "Failed to swap section variant.", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: err instanceof Error && err.message ? err.message : "Failed to swap section variant.",
+        variant: "destructive",
+      });
+      return false;
     } finally {
       setIsConfirming(false);
     }
   };
 
-  const handleConfirmSwap = async () => {
-    const sectionToSave = previewSection;
-    if (!sectionToSave || !contentType || !slug) return;
+  const handleOpenSwapChoice = () => {
+    if (!previewSection) return;
+    setSwapChoice({
+      section: previewSection,
+      version: selectedVersion || versions[0] || "",
+      variant: selectedVariant || "default",
+    });
+    setSwapPopoverOpen(false);
+  };
+
+  const handleUseSampleSwap = async () => {
+    const choice = swapChoice;
+    if (!choice || !contentType || !slug) return;
 
     if (isSharedTemplate) {
-      pendingSwapFn.current = () => executeSwap(sectionToSave);
+      setSwapChoice(null);
+      pendingSwapFn.current = async () => {
+        await executeSwap(choice.section);
+      };
       setSwapWarnOpen(true);
       return;
     }
 
-    await executeSwap(sectionToSave);
+    if (await executeSwap(choice.section)) {
+      setSwapChoice(null);
+    }
   };
+
+  const handleSwapAgentSelect = (payload: SolveWithAiAgentSelectPayload) => {
+    setSwapChoice(null);
+    setSwapAgentPayload(payload);
+    setSwapMcpModalOpen(true);
+    toast({
+      title: "Nothing changed yet",
+      description: "When your agent finishes, reload before editing this section.",
+    });
+  };
+
+  const swapAgentPrompt = (() => {
+    if (!swapChoice || !contentType || !slug) return "";
+    const pagePath = window.location.pathname.startsWith("/private/preview/")
+      ? `/${locale}/${contentType}/${slug}`
+      : window.location.pathname;
+    return buildSectionSwapAiPrompt({
+      url: pagePath,
+      contentType,
+      slug,
+      locale: locale || "en",
+      pageVariant: variant,
+      sectionIndex: index,
+      sectionHeading: getSectionHeadingForPrompt(currentSection),
+      component: sectionType,
+      fromVersion: (currentSection as { version?: string }).version,
+      fromVariant: (currentSection as { variant?: string }).variant,
+      toVersion: swapChoice.version,
+      toVariant: swapChoice.variant,
+      isSharedTemplate,
+    });
+  })();
   
   const handleXSpacingOpen = (open: boolean) => {
     setXSpacingOpen(open);
@@ -2050,7 +2114,7 @@ export function EditableSection({ children, section, index, sectionType, content
                     <X className="h-4 w-4" />
                   </Button>
                   {previewSection && (
-                    <Button size="sm" variant="outline" className="h-7 px-3" onClick={handleConfirmSwap} disabled={isConfirming} data-testid={`button-use-this-${index}`}>
+                    <Button size="sm" variant="outline" className="h-7 px-3" onClick={handleOpenSwapChoice} disabled={isConfirming} data-testid={`button-use-this-${index}`}>
                       {isConfirming ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Check className="h-3 w-3 mr-1" />}
                       Use This
                     </Button>
@@ -2548,6 +2612,33 @@ export function EditableSection({ children, section, index, sectionType, content
         operation="update"
         contentType={contentType || "page"}
         isLoading={isConfirming}
+      />
+
+      <SwapApplyChoiceDialog
+        open={!!swapChoice}
+        onOpenChange={(open) => {
+          if (!open) setSwapChoice(null);
+        }}
+        targetLabel={swapChoice ? `${sectionType} ${swapChoice.version} / ${deslugify(swapChoice.variant)}` : ""}
+        prompt={swapAgentPrompt}
+        entryKey={contentType && slug ? `${contentType}/${slug}/${locale || "en"}` : undefined}
+        isConfirming={isConfirming}
+        isBound={isBound}
+        boundSiblingCount={boundSiblingCount}
+        isSharedTemplate={isSharedTemplate}
+        onUseSample={() => void handleUseSampleSwap()}
+        onAgentSelect={handleSwapAgentSelect}
+        index={index}
+      />
+
+      <McpRequiredForAiModal
+        open={swapMcpModalOpen}
+        onOpenChange={setSwapMcpModalOpen}
+        defaultTab={swapAgentPayload?.setupTab}
+        agentId={swapAgentPayload?.agentId}
+        agentLabel={swapAgentPayload?.label}
+        prompt={swapAgentPayload?.prompt}
+        prefillUrlPrefix={swapAgentPayload?.prefillUrlPrefix}
       />
     </div>
   );

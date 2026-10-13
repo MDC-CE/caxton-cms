@@ -29,6 +29,7 @@
  *   POST /api/diagnostics/ads/run         — start a full Run (background; 409 when a Run or Sync is busy)
  *   POST /api/diagnostics/ads/recheck     — Re-check one issue or resource (instant or ready-to-confirm only)
  *   POST /api/diagnostics/ads/mark-fixed  — pending verification (MCP must send report); /undo reopens it
+ *   GET /api/ads/leads, GET /api/ads/leads/stats, GET /api/ads/leads/:id — Leads page: newest-first page of 20 + KPIs / UTC timeline / breakdowns + one lead's details
  *   GET /api/ads/export, GET /api/ads/leads/export — snapshots for local "Download from production"
  * Dev only (metrics_view): /api/ads/pull-production(/origin), /api/ads/leads/pull-production
  */
@@ -54,7 +55,10 @@ import {
   normalizeAdAccountId,
   normalizeGoogleCustomerId,
   normalizeMetaLeadConversionKey,
+  DEFAULT_UTM_CONVENTION,
+  type UtmConvention,
 } from "@shared/ads-settings";
+import { LEAD_ID_PATTERN, LEADS_NONE, parseLeadsQuery, type LeadsLocalCopy } from "@shared/leads-query";
 import { parseAttributionModel } from "@shared/paid-attribution";
 import type { AdPlatform } from "@shared/paid-traffic";
 import {
@@ -110,7 +114,7 @@ import { fetchAdsForFix, replaceAdUrlTags } from "../ads/meta-write";
 import { listLeadConversionOptions } from "../ads/meta-conversion-options";
 import { applyTrackingFix, previewTrackingFix, type TrackingFixDeps } from "../ads/tracking-fix";
 import { TRACKING_FIX_MAX_ADS, TRACKING_FIX_REPLACE_CODES, trackingFixModeFor } from "@shared/ads-tracking-fix";
-import type { AdsIssue } from "@shared/ads-diagnostics-rules";
+import type { AdsIssue, UtmGrace } from "@shared/ads-diagnostics-rules";
 
 const log = child({ module: "routes/ads" });
 
@@ -950,6 +954,89 @@ export function registerAdsRoutes(app: Express): void {
   });
 
   registerAdsProductionPullRoutes(app);
+  registerLeadsRoutes(app);
+}
+
+/**
+ * Leads page (/private/store/leads), metrics_view:
+ *   GET /api/ads/leads        — newest-first page of 20 ledger leads (?range, include_test, page, filters)
+ *   GET /api/ads/leads/stats  — KPIs, UTC timeline and breakdowns for the same params
+ *   GET /api/ads/leads/:id    — one lead's full ledger row (no browser_hash); 404 when unknown
+ */
+function registerLeadsRoutes(app: Express): void {
+  api.get(app, "/api/ads/leads", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = parseLeadsQuery(req.query as Record<string, unknown>);
+    if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
+    try {
+      const { listLeadsPage } = await import("../ads/leads-query");
+      res.json(listLeadsPage(getSite(res), parsed.query));
+    } catch (err) {
+      log.warn({ err }, "[ads] leads list failed");
+      res.status(500).json({ error: "Failed to load leads" });
+    }
+  });
+
+  api.get(app, "/api/ads/leads/stats", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = parseLeadsQuery(req.query as Record<string, unknown>);
+    if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
+    const site = getSite(res);
+    try {
+      const { getLeadsStats } = await import("../ads/leads-query");
+      let convention: UtmConvention | undefined;
+      try {
+        convention = getAdsSettings(getContentRoot(res)).utm_convention;
+      } catch {
+        convention = undefined;
+      }
+      let grace: UtmGrace | null = null;
+      try {
+        const { utmGraceState } = await import("../ads/utm-convention-history");
+        grace = utmGraceState(site, convention ?? DEFAULT_UTM_CONVENTION);
+      } catch {
+        grace = null;
+      }
+      let localCopy: LeadsLocalCopy | undefined;
+      if (process.env.NODE_ENV !== "production") {
+        const { readLeadsPullState } = await import("../ads/leads-pull-production");
+        localCopy = readLeadsPullState(site);
+      }
+      const stats = getLeadsStats(site, parsed.query, { convention, grace, localCopy });
+      const productFilter = parsed.query.filters.product;
+      if (productFilter && productFilter !== LEADS_NONE) {
+        const { findCatalogProduct } = await import("../ads/lead-product");
+        const product = findCatalogProduct({
+          contentRoot: getContentRoot(res),
+          productId: productFilter,
+          productSlug: productFilter,
+        });
+        stats.product_name = product?.name ?? productFilter;
+      }
+      res.json(stats);
+    } catch (err) {
+      log.warn({ err }, "[ads] leads stats failed");
+      res.status(500).json({ error: "Failed to load lead stats" });
+    }
+  });
+
+  api.get(app, "/api/ads/leads/:id", { rate: "staffWrite" }, async (req: Request, res: Response) => {
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const id = String(req.params.id ?? "");
+    if (!LEAD_ID_PATTERN.test(id)) return void res.status(400).json({ error: "Invalid lead ID" });
+    try {
+      const { getLeadDetail } = await import("../ads/leads-query");
+      const lead = getLeadDetail(getSite(res), id);
+      if (!lead) return void res.status(404).json({ error: "Lead not found" });
+      res.json(lead);
+    } catch (err) {
+      log.warn({ err }, "[ads] lead detail failed");
+      res.status(500).json({ error: "Failed to load lead" });
+    }
+  });
 }
 
 /** Refuse dev-only routes on production; returns true when the handler should stop. */

@@ -119,8 +119,8 @@ export type DocumentIdentityOpts = {
   resolveProduct: ProductResolveFn;
   skipIdentityIndexes?: Set<number>;
   /**
-   * When set, only these section indexes are identity-checked (draft/variant
-   * section saves). Publish/live omit this for full-document checks.
+   * When set, only these section indexes are identity-checked (section saves,
+   * live or draft). Publish omits this for full-document checks.
    */
   onlyValidateIndexes?: Set<number>;
 };

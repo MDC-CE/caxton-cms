@@ -167,8 +167,12 @@ import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
 import { resolveSingleVars } from "../single-resolver";
 import { getValidationCacheService } from "../services/validationCacheService";
 import { validatePublishedVariantLayer } from "../services/validatePublishedVariant";
+import {
+  diagnosticsHttpStatus,
+  getDiagnosticsJob,
+  startDiagnosticsJob,
+} from "../services/diagnosticsJobService";
 import { buildEntryKey } from "../../scripts/validation/shared/entryKey";
-import { scheduleOnSaveValidation } from "../services/onSaveValidation";
 import {
   normalizeLocale,
   getSupportedLocales,
@@ -603,36 +607,98 @@ export function registerVersioningRoutes(app: Express): void {
         >();
 
         if (newlyPublished.length > 0) {
-          const commonData =
-            (ci.loadCommonData(contentType, resolved.slug) as Record<string, unknown>) ||
-            {};
-          for (const v of newlyPublished) {
-            const vp = versioningManager.getVariantFilePath(
-              contentType,
-              resolved.slug,
-              v.slug,
-              locale,
-            );
-            const variantRaw =
-              (ci.safeYamlLoad(fs.readFileSync(vp, "utf-8")) as Record<string, unknown>) ||
-              {};
-            const result = await validatePublishedVariantLayer({
-              contentType,
-              slug: resolved.slug,
-              locale,
-              variantSlug: v.slug,
-              contentRoot: root,
-              ci,
-              variantRaw,
-              commonData,
+          const site = res.locals.site as { contentRootName?: string } | undefined;
+          const jobIds = [
+            ...(parseResult.data.validation_job_id ? [parseResult.data.validation_job_id] : []),
+            ...(parseResult.data.validation_job_ids ?? []),
+          ];
+          if (jobIds.length === 0) {
+            const started = [];
+            for (const v of newlyPublished) {
+              const job = await startDiagnosticsJob({
+                contentRoot: root,
+                contentRootName: site?.contentRootName ?? path.basename(root),
+                ci,
+                cache,
+                freshness: "hard",
+                confirm: true,
+                kind: "traffic",
+                entry: {
+                  contentType,
+                  slug: resolved.slug,
+                  locale,
+                  variant: v.slug,
+                },
+                purpose: {
+                  type: "traffic",
+                  contentType,
+                  slug: resolved.slug,
+                  locale,
+                  variant: v.slug,
+                },
+              });
+              started.push(job);
+            }
+            const first = started[0]!;
+            res.status(diagnosticsHttpStatus(first)).json({
+              ...first,
+              validation_job_ids: started
+                .map((j) => ("job_id" in j ? j.job_id : undefined))
+                .filter((id): id is string => !!id),
             });
-            validationBySlug.set(v.slug, result);
-            if (!result.ok) {
-              issuesByVariant[v.slug] = result.errors;
+            return;
+          }
+
+          const { readFileSync, existsSync } = fs;
+          for (const v of newlyPublished) {
+            const match = jobIds
+              .map((id) => getDiagnosticsJob(root, id))
+              .find(
+                (j) =>
+                  j.job?.purpose?.type === "traffic" &&
+                  j.job.purpose.variant === v.slug &&
+                  j.job.purpose.slug === resolved.slug &&
+                  j.job.purpose.locale === locale,
+              );
+            if (!match || match.status !== "completed" || !match.job) {
+              const pending = match?.job;
+              res.status(200).json({
+                status: match?.status ?? "not_found",
+                job_id: pending?.jobId,
+                retry_after_seconds: match?.retry_after_seconds ?? 2,
+                message: "Still checking this version before anyone can see it.",
+                validation_job_ids: jobIds,
+              });
+              return;
             }
-            if (result.warnings.length) {
-              warningsByVariant[v.slug] = result.warnings;
+            const resultsPath = path.join(
+              root,
+              ".cache",
+              "diagnostics-jobs",
+              `${match.job.jobId}-results.json`,
+            );
+            const results = existsSync(resultsPath)
+              ? (JSON.parse(readFileSync(resultsPath, "utf-8")) as {
+                  summary?: { errorCount?: number };
+                  cacheApply?: import("../../scripts/validation/diagnosticsIpc").DeferredCacheApply;
+                  validatorResults?: Array<{ errors?: unknown[]; warnings?: unknown[] }>;
+                })
+              : undefined;
+            const errorCount =
+              results?.summary?.errorCount ??
+              (results?.validatorResults ?? []).reduce((n, row) => n + (row.errors?.length ?? 0), 0);
+            if (errorCount > 0) {
+              issuesByVariant[v.slug] = (results?.validatorResults ?? []).flatMap(
+                (row) => row.errors ?? [],
+              );
+            } else if (results?.cacheApply) {
+              const { applyDeferredDiagnosticsCache } = await import(
+                "../services/applyDeferredDiagnostics"
+              );
+              await applyDeferredDiagnosticsCache(cache, { ...results.cacheApply, hold: false });
             }
+            const warnings = (results?.validatorResults ?? []).flatMap((row) => row.warnings ?? []);
+            if (warnings.length) warningsByVariant[v.slug] = warnings;
           }
 
           if (Object.keys(issuesByVariant).length > 0) {

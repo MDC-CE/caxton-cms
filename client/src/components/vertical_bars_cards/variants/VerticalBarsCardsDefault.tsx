@@ -168,7 +168,7 @@ export function VerticalBarsCards({ data }: VerticalBarsCardsProps) {
   return (
     <section
       ref={containerRef}
-      className={`py-16 md:py-24 ${data.background || "bg-background"}`}
+      className={data.background || "bg-background"}
       data-testid="section-vertical-bars-cards"
     >
       <div className="max-w-6xl mx-auto px-4">

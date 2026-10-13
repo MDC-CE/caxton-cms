@@ -17,8 +17,8 @@ TypeScript strict mode. ESM only.
 ## File Organization
 
 - **Client**: `pages/` for route-level components; `components/` with feature subfolders; `contexts/`, `hooks/`, `lib/` for shared logic.
-- **Server**: Routes and app logic in `server/`; AI in `server/ai/`, experiments in `server/experiments/`, content loading helpers in `server/utils/`.
-- **Component registry**: `marketing-content/component-registry/{component_name}/v1.0/` with `schema.ts`, `examples/`, optional `schema.yml` and `field-editors/`.
+- **Server**: Routes in `server/routes/`; entry loading in `server/entry-layer.ts` / `server/entry-delivery.ts`; AI in `server/ai/`, experiments in `server/experiments/`.
+- **Component registry**: `shared/component-registry/{type}/v1.0/` (shared, app repo) or `site_<name>/component-registry/{type}/v1.0/` (site, content repo), each with `schema.ts`, `schema.yml`, `examples/` and an optional `field-editors.ts` file. Variant TSX: `client/src/components/{type}/variants/{PascalType}{Variant}.tsx`.
 
 Use barrel `index.ts` in feature folders when exporting multiple related components.
 

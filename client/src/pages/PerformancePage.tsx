@@ -200,6 +200,7 @@ type DetailRoute = {
   durationCounts: number[];
   ssrCounts?: Record<string, number>;
   path?: string | null;
+  samplePaths?: string[];
 };
 
 type DetailResponse = {
@@ -226,9 +227,15 @@ type DetailResponse = {
 
 const SSR_LABELS: Record<string, string> = {
   ssr_ok: "rendered",
+  ssr_ok_cache_false: "rendered, cache=false",
+  ssr_ok_other_site: "rendered, other site",
+  ssr_ok_authorization: "rendered, authorization",
+  ssr_ok_baked_query: "rendered, query in page",
+  ssr_ok_not_read: "rendered, not a read",
   ssr_empty_fallback: "empty #root",
   ssr_error_fallback: "render error",
   client_fallback: "client only",
+  ssr_skipped_non_200: "skipped, not a success",
 };
 
 const RANGE_LABEL: Record<RangePreset, string> = {
@@ -1891,7 +1898,7 @@ function DetailBlock({
             </p>
             {showSsr && (
             <p className="mt-1 text-xs text-muted-foreground">
-              Render is how this server produced the HTML. Rendered: the page was built on the server. Client only: the browser got an empty page and built it itself. Empty #root: the server tried to render and the body came back empty, so the browser built it. Render error: rendering failed and the browser built it. ssr_skipped_non_200: the response was not a success, usually a 404, so the server skipped rendering.
+              Render is how this server produced the HTML. Rendered: the page was built on the server. Rendered with a reason means a stored copy was skipped and the server still built the page. Client only: the browser got an empty page and built it itself. Empty #root: the server tried to render and the body came back empty, so the browser built it. Render error: rendering failed and the browser built it. Skipped, not a success: the response was not a success, usually a 404, so the server skipped rendering. Unmatched lists a few public addresses from this span, not every call. Private is the staff area.
             </p>
             )}
             </>
@@ -1934,6 +1941,9 @@ function DetailBlock({
                     <TableCell className="px-3 py-2.5">
                       <div>{row.route}</div>
                       {row.path && <div className="text-xs text-muted-foreground">{row.path}</div>}
+                      {row.samplePaths && row.samplePaths.length > 0 && (
+                        <div className="text-xs text-muted-foreground break-all">{row.samplePaths.join(", ")}</div>
+                      )}
                     </TableCell>
                     <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.count}</TableCell>
                     <TableCell className="px-3 py-2.5 text-right tabular-nums">{row.avgMs} ms</TableCell>

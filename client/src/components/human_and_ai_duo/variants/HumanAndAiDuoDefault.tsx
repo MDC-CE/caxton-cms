@@ -181,7 +181,7 @@ export function HumanAndAIDuo({ data }: HumanAndAIDuoProps) {
 
   return (
     <section 
-      className={`py-14 ${backgroundClass}`}
+      className={backgroundClass}
       data-testid="section-human-and-ai-duo"
     >
       <div className="max-w-6xl mx-auto px-4">

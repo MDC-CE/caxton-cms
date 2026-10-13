@@ -64,7 +64,7 @@ export function CommunitySupport({ data }: CommunitySupportProps) {
 
   return (
     <section 
-      className={`py-14 ${backgroundClass}`}
+      className={backgroundClass}
       data-testid="section-community-support"
     >
       <div className="max-w-6xl mx-auto px-4">

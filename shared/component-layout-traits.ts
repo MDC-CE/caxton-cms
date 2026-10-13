@@ -69,7 +69,9 @@ export function resolveLayoutTraits(
   variant: string | null | undefined,
 ): ResolvedLayoutTraits {
   const sp = block?.self_padded;
-  const selfPadded = Array.isArray(sp) ? sp.includes(variant || "default") : sp === true;
+  const norm = (v: string) => v.replace(/[-_]/g, "").toLowerCase();
+  const want = norm(variant || "default");
+  const selfPadded = Array.isArray(sp) ? sp.some((v) => norm(String(v)) === want) : sp === true;
   return {
     flow: block?.flow === "out" ? "out" : "in",
     self_padded: selfPadded,

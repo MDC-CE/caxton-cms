@@ -2,136 +2,114 @@
 
 ## Architecture Overview
 
-This is a full-stack marketing website with **content-driven pages**. The codebase uses Vite + React (client), Express (server), and PostgreSQL via Drizzle ORM. Content lives in YAML/JSON under `marketing-content/`, not in the database.
+A multi-site, content-driven marketing platform: Vite + React (client, SSR), Express (server), YAML content per site. Page content lives in YAML under each site's content folder, not in the app database.
 
 ### Key Structure
-- **Client** (`client/src/`): React pages, components, hooks, contexts
-- **Server** (`server/`): Express routes, content loading, AI adaptation, GitHub sync
-- **Shared** (`shared/`): TypeScript schemas (Drizzle + Zod), utilities
-- **Content** (`marketing-content/`): YAML pages organized by type (programs, landings, locations, pages)
+- **Client** (`client/src/`): React pages, section components, hooks, contexts
+- **Server** (`server/`): Express routes, entry loading/delivery, SSR, GitHub content sync, MCP support
+- **Shared** (`shared/`): Zod schemas, shared component registry, locale and slug helpers
+- **Sites** ([sites.yml](sites.yml)): each site has a `content_folder` (`site_4geeks-com`, `site_4geeks-florida`, `site_business-4geeks`), gitignored in the app repo and synced to that site's content GitHub repo (`github_repo_url`)
+
+### Sites and inheritance
+- `inherit_components_from: <parent folder>` — the child site uses the parent's site component registry and, when the child has no `theme.json` of its own, the parent's theme (whole file, no merge).
+- `fallback_content_folder: <parent folder>` — images fall back to the parent folder.
 
 ### Content Organization
-Content files follow a **slug-based hierarchical structure** in `marketing-content/{contentType}/{slug}/`:
-- `index.yml` or variant files (e.g., `promoted.yml`, `variant-a.yml`)
-- `_common.yml` for metadata (locale, programs, locations)
-
-Localized content uses suffixes: `index.en.yml`, `index.es.yml` (resolved via `normalizeLocale()` in [shared/locale.ts](shared/locale.ts))
+Entries follow `site_<name>/{contentType}/{slug}/`:
+- `_common.yml` — locale-independent metadata
+- `en.yml`, `es.yml` — locale files (`normalizeLocale()` in [shared/locale.ts](shared/locale.ts))
+- `<variant>.<locale>.yml` — A/B variants; `draft.<locale>.yml` — drafts; `versioning.yml` — version history
+- Content types and URL patterns: `site_<name>/content-types.yml` (read via [server/content-types.ts](server/content-types.ts)). Some types are database-backed (cached items plus YAML overrides under `site_<name>/db/`).
 
 ## Critical Developer Workflows
 
 ### Build & Run
 ```bash
-npm run dev          # Start dev server (Vite + Express SSR)
-npm run build        # Build client (Vite) + server (esbuild to dist/)
-npm start           # Run production build (uses dist/index.js)
-npm run check       # TypeScript check
-npm run db:push     # Apply Drizzle migrations
+npm run dev          # Dev server (Vite + Express SSR); predev runs ensure:registry / ensure:schema-yml
+npm run build        # Client (Vite) + server (esbuild to dist/)
+npm start            # Production build (dist/index.js)
+npm run check        # TypeScript check
+npm test             # vitest (also the pre-push hook)
 ```
 
-**Important**: The server is built separately with esbuild (ESM format, bundles dependencies). Development uses `tsx` for live reload.
+The server is bundled separately with esbuild (ESM). Development uses `tsx`.
 
-### Testing Content Changes
-- **Page reload** triggers `registerRoutes()` which loads fresh YAML content
-- **API debugging endpoints**: `/api/debug/*` (token validation, cache status, sync status)
-- **Content edit**: POST `/api/content/edit` with operations array (validates, commits to GitHub, clears cache)
+### Editing content
+- Staff edit in the in-page editor; edits go through `/api/content/edit-sections` and `/api/content/edit-common` ([server/routes/sections.ts](server/routes/sections.ts)), then Cloud Sync commits to the content repo.
+- Agents edit through MCP tools, or edit `site_*` files and push them to the content repo with a SHA ([site-content-github.mdc](.cursor/rules/site-content-github.mdc)).
 
-## Content Type Patterns
+## Loading Content (server)
 
-### Loading Content
-Server-side: Use [server/utils/contentLoader.ts](server/utils/contentLoader.ts) helpers (`loadContent`, `listContentSlugs`, `loadCommonData`). Always validate against Zod schemas from [shared/schema.ts](shared/schema.ts).
+- [server/entry-layer.ts](server/entry-layer.ts) — `loadEntry`: one merge for static and database-backed entries (template layers → entry layer → variables). Read-only.
+- [server/entry-delivery.ts](server/entry-delivery.ts) — `loadEntryForDelivery`, `loadMergedSinglePage`: what routes and SSR render.
+- [server/content-types.ts](server/content-types.ts) — content type config, directories, URL patterns.
+- Validate against Zod schemas from [shared/schema.ts](shared/schema.ts).
 
-**Example route pattern** (see [server/routes.ts](server/routes.ts) line 508-600):
-```typescript
-app.get("/api/:type/:slug", (req, res) => {
-  const content = loadContent({ contentType: "programs", slug, schema: careerProgramSchema, localeOrVariant: locale });
-  if (!content.success) return res.status(404);
-  res.json(content.data);
-});
-```
-
-### Content Types
-1. **Career Programs** (`programs/`): Career path pages with structured curriculum
-2. **Landings** (`landings/`): High-converting marketing pages with hero, CTAs, testimonials
-3. **Locations** (`locations/{city}/`): Campus/location pages with campus.yml metadata
-4. **Template Pages** (`pages/`): Reusable page templates (apply form, terms, privacy)
-
-Each has a **component-based section model**: pages contain arrays of `{ type: "hero", variant: "...", data: {...} }` sections rendered dynamically by components.
-
-Do **not** add entry-level `context:` (`when_to_use` / `target_audience` / `goals`) on `_common.yml` or locale YAML — that brief was retired with adapt-with-AI. Prefer content-type `strategy` / field `fill_intent` and component-registry `when_to_use` for authoring guidance. Brand voice remains in `brand-context.yml` (read via `/api/brand-context`).
+Do **not** add entry-level `context:` (`when_to_use` / `target_audience` / `goals`) on `_common.yml` or locale YAML — that brief was retired with adapt-with-AI. Prefer content-type `strategy` / field `fill_intent` and component-registry `when_to_use` for authoring guidance. Brand voice remains in `site_<name>/brand-context.yml` (read via `/api/brand-context`).
 
 ## Key Files Reference
 
 ### Configuration
 - [vite.config.ts](vite.config.ts) — Path aliases: `@/*` → `client/src`, `@shared/*` → `shared`
-- [drizzle.config.ts](drizzle.config.ts) — PostgreSQL migrations config
-- [tsconfig.json](tsconfig.json) — Includes `client/src/**`, `shared/**`, `server/**`
+- [sites.yml](sites.yml) — sites, domains, content folders, inheritance, content repos
+- [tailwind.config.cjs](tailwind.config.cjs) — app-wide type scale, radius, spacing tokens
 
-### Content Patterns
-- [marketing-content/brand-context.yml](marketing-content/brand-context.yml) — Global brand voice/tone (SEO/GEO and brand readers)
-- [marketing-content/theme.json](marketing-content/theme.json) — Tailwind config override for landing pages
-- [marketing-content/molecules.json](marketing-content/molecules.json) — Reusable UI molecule definitions
+### Per-site content
+- `site_<name>/brand-context.yml` — brand voice/tone
+- `site_<name>/theme.json` — site colors and palettes (backgrounds, text, accents, courses, `colors.light` / `colors.dark`); overrides `client/src/index.css` defaults. A site without one uses its `inherit_components_from` parent's.
+- `site_<name>/image-registry.json` — media gallery registry
 
 ### Schema & Validation
-- [shared/schema.ts](shared/schema.ts) — All Zod schemas (users, pages, components)
-- [scripts/validation/service.ts](scripts/validation/service.ts) — Content validation service (runs on startup/manually)
+- [shared/schema.ts](shared/schema.ts) — Zod schemas (pages, sections) and Drizzle tables
+- [scripts/validation/service.ts](scripts/validation/service.ts) — content validation service
 
 ### Component Registry
-- [server/component-registry.ts](server/component-registry.ts) — Loads component metadata, versions, examples, schemas
-- [marketing-content/component-registry/](marketing-content/component-registry/) — Component definitions with schema.ts, examples, field editors
+- [server/component-registry.ts](server/component-registry.ts) — loads component metadata, versions, examples, schemas
+- [shared/component-registry/](shared/component-registry/) — shared types, used by every site (app repo)
+- `site_<name>/component-registry/` — site types (content repo); children inherit via `inherit_components_from`
+- The same type in both trees fails at boot.
 
 ### Utilities
 - [shared/locale.ts](shared/locale.ts) — `normalizeLocale()` handles en/es with fallbacks
-- [shared/slugMappings.ts](shared/slugMappings.ts) — Maps translated slugs to folder names
-- [server/github.ts](server/github.ts) — GitHub API for committing changes (requires GITHUB_TOKEN env var)
+- [shared/slugMappings.ts](shared/slugMappings.ts) — maps translated slugs to folder names
+- [server/github.ts](server/github.ts) / [server/sync-state.ts](server/sync-state.ts) — content repo commits and pending-change tracking
 
-## GitHub Sync & Content Editing
+## GitHub Sync
 
-### Workflow
-1. **Local changes**: User edits YAML via UI, calls POST `/api/content/edit`
-2. **Validation**: Content validated against schema
-3. **Commit**: [server/github.ts](server/github.ts) commits to GitHub with message format `[Author: X] Message`
-4. **Sync status**: GET `/api/github/sync-status` shows pending local/remote changes
-5. **Conflict handling**: Can force-push or pull remote changes
+1. Edits mark files as modified in sync state.
+2. Cloud Sync (or `commitAndPush` / `commitSingleFile`) commits to the site's content repo with `[Author: X] Message`.
+3. GET `/api/github/sync-status` shows pending local/remote changes; conflicts can be pulled or force-pushed.
 
-**Environment variables needed**:
-- `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` — Repo coordinates
-- `GITHUB_TOKEN` — Personal access token with repo write access
-- `DATABASE_URL` — PostgreSQL connection
+Needs `GITHUB_TOKEN` with write access to the content repos.
 
 ## Common Patterns & Conventions
 
 ### YAML Content Structure
-- Top-level `meta` object: SEO (title, description, robots, priority, change_frequency, redirects)
-- `sections` array: Components with `type`, `variant`, `data`
-- Localized variants: Use file suffixes (`index.en.yml`, `index.es.yml`)
-- Multilingual metadata in `_common.yml`
+- Top-level `meta`: SEO (title, description, robots, priority, change_frequency, redirects)
+- `sections` array: each section has `type`, `variant`, `version`, its props inline, and wrapper settings (`background`, `paddingY`, `marginY`)
 
 ### API Response Format
 Success: `{ ...contentData }` or `{ success: true, data: ... }`
 Error: `{ error: "message" }` with appropriate HTTP status
 
 ### Error Handling
-- **Content not found**: Return 404 with `{ error: "Content not found" }`
-- **Validation fails**: Return 400 with `{ error: "...", details: [...] }`
-- **Auth required**: Return 401; in dev mode auth can be bypassed with `X-Debug-Token` header
+- **Content not found**: 404 with `{ error: "Content not found" }`
+- **Validation fails**: 400 with `{ error: "...", details: [...] }`
+- **Auth required**: 401; in dev mode auth can be bypassed with `X-Debug-Token`
 
 ### Component Development
-- Components defined in [marketing-content/component-registry/{name}/](marketing-content/component-registry/)
-- Each version (v1.0, v1.1, etc.) has `schema.ts` (Zod) + `examples/` folder
-- Use `@shared/schema` exports for reusable component schemas (e.g., `ctaButtonSchema`, `imageSchema`)
-- Field editors (custom UI for YAML editing) placed in `field-editors/` folder
+Follow the skill [.agents/skills/internal-new-component/SKILL.md](.agents/skills/internal-new-component/SKILL.md) (reuse check, written spec, build, verify). Variant files in `client/src/components/{type}/variants/` are auto-registered by [client/src/components/sectionRegistry.ts](client/src/components/sectionRegistry.ts).
 
 ## Debugging Tips
 
 - **Cache issues**: POST `/api/debug/clear-sitemap-cache`, `/api/debug/clear-schema-cache`
 - **Token validation**: POST `/api/debug/validate-token` checks Breathecode API integration
 - **Session check**: POST `/api/debug/check-session` verifies token expiration
-- **Content loading**: Check `server/routes.ts` route definitions; trace through `loadContent()` to verify YAML parsing
-- **Schema mismatch**: Run scripts/validation/service.ts or POST `/api/validation/run` to validate all content
+- **Schema mismatch**: run `scripts/validation/service.ts` or POST `/api/validation/run`
 
 ## Important Notes
 
-1. **No database for content**: YAML files are source of truth; database only stores users/sessions
-2. **Locale fallback**: Missing locale defaults to "en" via `normalizeLocale()`
-3. **GitHub token required for edits**: Without `GITHUB_TOKEN`, POST `/api/content/edit` fails in production
-4. **Theme customization**: Landing pages respect `marketing-content/theme.json` for Tailwind color overrides
+1. **Content is YAML, not database**: page content lives in `site_*` YAML. The app SQLite databases (`data/app.db`, `data/<site>/app.db`) hold users, sessions, conversations, error logs, pipeline and migration state — not page content.
+2. **Locale fallback**: missing locale defaults to "en" via `normalizeLocale()`.
+3. **GitHub token required for content commits**: without `GITHUB_TOKEN`, Cloud Sync cannot push.
+4. **Theme**: site colors come from `site_<name>/theme.json` (or the parent's); `client/src/index.css` is the shared fallback layer.

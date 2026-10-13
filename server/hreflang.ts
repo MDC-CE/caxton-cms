@@ -74,7 +74,10 @@ export function generateHreflangTags(
     }
 
     // Same-slug fallback only when _hreflangs is NOT configured (legacy / simple types)
+    // and the resolver knows nothing about the entry. A one-locale answer is authoritative:
+    // inventing the other locale's same-slug URL emits hreflang to a 404.
     if (hreflangsConfigured) return [];
+    if (Object.keys(localeUrls).length > 0) return [];
 
     const config = getContentTypeConfig(contentType);
     if (!config?.url_pattern) return [];

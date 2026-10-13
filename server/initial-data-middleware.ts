@@ -23,10 +23,12 @@ import { attachVariableFieldsToSections } from "./database-single-loader";
 import { loadEntryForDelivery } from "./entry-delivery";
 import { typeUsesSharedTemplate } from "./layout-owner";
 import { resolveAllTemplateVars, buildContentDeliveryParamBag } from "./resolve-template-vars";
+import { requestBakesQueryParamTemplate, urlHasContentQuery } from "./html-page-cache";
 import { buildSingleEntryFromContent } from "./build-single-entry";
 import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
-import { databaseManager, type DatabaseManager, getCachedDatabaseEntryCount } from "./database";
+import { databaseManager, type DatabaseManager } from "./database";
 import { applyEntryModulePreload } from "./utils/html-transforms";
+import { buildInitialDataScriptTag, insertBefore, replaceLiteral } from "./utils/html-inject";
 import { applyEntryPreviewOgImage } from "./entry-preview-manager";
 import {
   buildLocaleUnavailablePayload,
@@ -40,8 +42,9 @@ import {
 } from "./image-registry-subset";
 import { resolveEffectiveCanonical } from "./resolve-effective-canonical";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
-import { buildThemeBackgroundCss, type ThemePaint, type ThemePalettes } from "@shared/theme-palette";
+import { isSiteThemedPath, type ThemePaint } from "@shared/theme-palette";
 import { loadSiteTheme } from "./theme-config";
+import { injectThemeOverrides } from "./theme-html";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -81,6 +84,8 @@ function firstPresetSizesFromImageEntry(
 interface SingleQuery {
   queryKey: unknown[];
   data: unknown;
+  /** Stripped before the payload is sent to the client. */
+  skipHtmlCache?: boolean;
 }
 
 export interface InitialDataPayload {
@@ -90,6 +95,11 @@ export interface InitialDataPayload {
   httpStatus?: number;
   /** Light colors used to paint section backgrounds as real colors. */
   themePaint?: import("@shared/theme-palette").ThemePaint;
+  /**
+   * Query-string {{ param.* }} must not be stored under a path-only cache key.
+   * Removed before `__INITIAL_DATA__` is written.
+   */
+  skipHtmlCache?: boolean;
 }
 
 export async function resolvePageQuery(
@@ -190,6 +200,11 @@ export async function resolvePageQuery(
             pageData,
           });
         }
+        const skipHtmlCache = requestBakesQueryParamTemplate(
+          url,
+          pageData,
+          urlPathParams ? Object.keys(urlPathParams) : undefined,
+        );
         const resolvedVars = resolveAllTemplateVars(pageData, {
           ...(singleEntry && Object.keys(singleEntry).length > 0 ? { singleEntry } : {}),
           param,
@@ -202,6 +217,7 @@ export async function resolvePageQuery(
         const { layout: _strip, ...pageRest } = pageData;
         return {
           queryKey: [getApiPath(contentType), slug, normalizedLocale],
+          ...(skipHtmlCache ? { skipHtmlCache: true } : {}),
           data: {
             ...pageRest,
             layout,
@@ -298,6 +314,11 @@ export async function resolvePageQuery(
         });
       }
 
+      const skipHtmlCache = requestBakesQueryParamTemplate(
+        url,
+        data,
+        urlPathParams ? Object.keys(urlPathParams) : undefined,
+      );
       if (singleEntry) {
         const resolved = resolveAllTemplateVars(data, {
           singleEntry,
@@ -320,6 +341,7 @@ export async function resolvePageQuery(
 
       return {
         queryKey: [apiPath, slug, isNonLocalized ? "auto" : locale],
+        ...(skipHtmlCache ? { skipHtmlCache: true } : {}),
         data,
       };
     }
@@ -544,8 +566,12 @@ function replaceMetaContent(html: string, attr: string, attrValue: string, repla
   const escaped = escapeAttr(replacement);
   const pattern = new RegExp(`(<meta[^>]*${attr.replace(":", "\\:")}="${attrValue}"[^>]*content=")[^"]*(")`);
   const patternRev = new RegExp(`(<meta[^>]*content=")[^"]*("[^>]*${attr.replace(":", "\\:")}="${attrValue}")`);
-  if (pattern.test(html)) return html.replace(pattern, `$1${escaped}$2`);
-  if (patternRev.test(html)) return html.replace(patternRev, `$1${escaped}$2`);
+  if (pattern.test(html)) {
+    return html.replace(pattern, (_m, open: string, close: string) => open + escaped + close);
+  }
+  if (patternRev.test(html)) {
+    return html.replace(patternRev, (_m, open: string, close: string) => open + escaped + close);
+  }
   return html;
 }
 
@@ -558,7 +584,10 @@ export function injectSsrMetaTags(
   if (!payload) return html;
 
   const lang = payload.locale || "en";
-  html = html.replace(/(<html\s[^>]*lang=")[^"]*(")/i, `$1${lang}$2`);
+  html = html.replace(
+    /(<html\s[^>]*lang=")[^"]*(")/i,
+    (_m, open: string, close: string) => open + escapeAttr(lang) + close,
+  );
   html = replaceMetaContent(html, "property", "og:locale", toOgLocale(lang));
 
   const knownPageApiPaths = new Set(
@@ -582,7 +611,7 @@ export function injectSsrMetaTags(
     if (html.includes('name="robots"')) {
       html = replaceMetaContent(html, "name", "robots", "noindex");
     } else {
-      html = html.replace("</head>", `<meta name="robots" content="noindex" />\n</head>`);
+      html = insertBefore(html, "</head>", `<meta name="robots" content="noindex" />\n`);
     }
     return html;
   }
@@ -608,7 +637,7 @@ export function injectSsrMetaTags(
   }) as Record<string, unknown>;
 
   if (typeof meta.page_title === "string" && !meta.page_title.includes("{{")) {
-    html = html.replace(/<title>[\s\S]*?<\/title>/, `<title>${escapeAttr(meta.page_title)}</title>`);
+    html = replaceLiteral(html, /<title>[\s\S]*?<\/title>/, `<title>${escapeAttr(meta.page_title)}</title>`);
     html = replaceMetaContent(html, "property", "og:title", meta.page_title);
     html = replaceMetaContent(html, "name", "twitter:title", meta.page_title);
   }
@@ -624,12 +653,12 @@ export function injectSsrMetaTags(
     if (html.includes('property="og:image"')) {
       html = replaceMetaContent(html, "property", "og:image", meta.og_image);
     } else {
-      html = html.replace("</head>", `<meta property="og:image" content="${escaped}" />\n</head>`);
+      html = insertBefore(html, "</head>", `<meta property="og:image" content="${escaped}" />\n`);
     }
     if (html.includes('name="twitter:image"')) {
       html = replaceMetaContent(html, "name", "twitter:image", meta.og_image);
     } else {
-      html = html.replace("</head>", `<meta name="twitter:image" content="${escaped}" />\n</head>`);
+      html = insertBefore(html, "</head>", `<meta name="twitter:image" content="${escaped}" />\n`);
     }
   }
 
@@ -640,7 +669,7 @@ export function injectSsrMetaTags(
   if (html.includes('name="robots"')) {
     html = replaceMetaContent(html, "name", "robots", robotsValue);
   } else {
-    html = html.replace("</head>", `<meta name="robots" content="${escapeAttr(robotsValue)}" />\n</head>`);
+    html = insertBefore(html, "</head>", `<meta name="robots" content="${escapeAttr(robotsValue)}" />\n`);
   }
 
   const contentTypeForCanonical = contentTypeFromPageQuery(pageQuery);
@@ -674,15 +703,12 @@ export function injectSsrMetaTags(
           "",
         );
       }
-      html = html.replace("</head>", `${canonicalTag}\n</head>`);
+      html = insertBefore(html, "</head>", `${canonicalTag}\n`);
 
       if (html.includes('property="og:url"')) {
         html = replaceMetaContent(html, "property", "og:url", canonicalHref);
       } else {
-        html = html.replace(
-          "</head>",
-          `<meta property="og:url" content="${escaped}" />\n</head>`,
-        );
+        html = insertBefore(html, "</head>", `<meta property="og:url" content="${escaped}" />\n`);
       }
     }
   }
@@ -724,6 +750,23 @@ function contentTypeFromPageQuery(
   return null;
 }
 
+/**
+ * A `?` that fills `{{ param.X }}` in the page YAML must be rendered, not served from the path copy.
+ * Query keys the page does not use (`utm`, `plan`) leave the copy in place.
+ */
+export function urlBakesStoredPageQuery(url: string, ci: ContentIndex | undefined): boolean {
+  if (!ci || !urlHasContentQuery(url)) return false;
+  const clean = url.split("?")[0].split("#")[0] || "/";
+  const resolved = ci.resolveUrl(clean);
+  if (!resolved) return false;
+  let locale = clean.startsWith("/es") ? "es" : "en";
+  if (resolved.params?.locale) locale = resolved.params.locale;
+  else if (resolved.patternLocale && resolved.patternLocale !== "default") locale = resolved.patternLocale;
+  const { data } = ci.loadMergedContent(resolved.contentType, resolved.slug, locale);
+  if (!data) return false;
+  return requestBakesQueryParamTemplate(url, data, resolved.params ? Object.keys(resolved.params) : undefined);
+}
+
 export async function resolveInitialData(
   url: string,
   ci: ContentIndex = contentIndex,
@@ -741,7 +784,11 @@ export async function resolveInitialData(
   };
 
   const queries: SingleQuery[] = [];
-  if (pageQuery) queries.push(pageQuery);
+  const skipHtmlCache = pageQuery?.skipHtmlCache === true;
+  if (pageQuery) {
+    delete pageQuery.skipHtmlCache;
+    queries.push(pageQuery);
+  }
   queries.push(variablesQuery);
 
   // Seed main-navbar and main-footer unconditionally so the header and footer
@@ -835,7 +882,7 @@ export async function resolveInitialData(
     }
   }
 
-  const contentTypesPayload = buildContentTypesPayload(ci, dbm);
+  const contentTypesPayload = buildContentTypesPayload(ci);
   queries.push({
     queryKey: ["/api/content-types"],
     data: contentTypesPayload,
@@ -880,12 +927,12 @@ export async function resolveInitialData(
     locale: resolvedLocale,
     ...(themePaint ? { themePaint } : {}),
     ...(httpStatus ? { httpStatus } : {}),
+    ...(skipHtmlCache ? { skipHtmlCache: true } : {}),
   };
 }
 
 function buildContentTypesPayload(
   ci: ContentIndex = contentIndex,
-  dbm: DatabaseManager = databaseManager,
 ): Record<string, unknown>[] {
   const configs = getAllConfigs(ci.contentRoot);
   const result: Record<string, unknown>[] = [];
@@ -910,9 +957,6 @@ function buildContentTypesPayload(
       url_pattern: config.url_pattern,
       locale_key: config.field_mapping?._locale || null,
       static_entry_count: ci.findByType(type).length,
-      database_entry_count: config.database?.slug
-        ? getCachedDatabaseEntryCount(dbm, config.database.slug)
-        : null,
       layout: getLayout(type, ci.contentRoot),
     });
   }
@@ -934,60 +978,23 @@ function themePaintFor(contentRoot: string): ThemePaint | undefined {
   return { light, backgrounds };
 }
 
-function buildThemeCssOverrides(contentRoot = getDefaultContentRoot()): string {
-  try {
-    const themePath = path.join(contentRoot, "theme.json");
-    if (!fs.existsSync(themePath)) return "";
-    const theme = JSON.parse(fs.readFileSync(themePath, "utf-8")) as ThemePalettes & {
-      colors?: { light?: Record<string, string>; dark?: Record<string, string> };
-      typography?: { fontFamily?: string };
-      breakpoints?: Record<
-        string,
-        { margin?: number; columns?: number; gutter?: number }
-      >;
-    };
-    const colors = theme.colors ?? {};
-    let css = "";
-    if (colors?.light && Object.keys(colors.light).length > 0) {
-      const vars = Object.entries(colors.light)
-        .map(([k, v]) => `  ${k}: ${v};`)
-        .join("\n");
-      css += `:root {\n${vars}\n}\n`;
-    }
-    if (colors?.dark && Object.keys(colors.dark).length > 0) {
-      const vars = Object.entries(colors.dark)
-        .map(([k, v]) => `  ${k}: ${v};`)
-        .join("\n");
-      css += `.dark {\n${vars}\n}\n`;
-    }
-    const fontFamily = theme.typography?.fontFamily?.trim();
-    if (fontFamily) {
-      const stack = `'${fontFamily.replace(/'/g, "")}', 'Plus Jakarta Sans Fallback', "Noto Color Emoji", sans-serif`;
-      // Scoped to .site-theme so Caxton admin chrome keeps platform fonts (Lato/Archivo).
-      css += `.site-theme {\n  --font-heading: ${stack};\n  --font-sans: ${stack};\n}\n`;
-    }
-    const bp = theme.breakpoints;
-    if (bp) {
-      const order = ["sm", "md", "lg", "xl"] as const;
-      const widths: Record<string, number> = { sm: 332, md: 679, lg: 1132, xl: 1468 };
-      for (const key of order) {
-        const entry = bp[key];
-        if (!entry) continue;
-        const min = widths[key];
-        const rules: string[] = [];
-        if (typeof entry.margin === "number") rules.push(`  --page-margin: ${entry.margin}px;`);
-        if (typeof entry.gutter === "number") rules.push(`  --page-gutter: ${entry.gutter}px;`);
-        if (typeof entry.columns === "number") rules.push(`  --grid-columns: ${entry.columns};`);
-        if (rules.length) {
-          css += `@media (min-width: ${min}px) {\n.site-theme {\n${rules.join("\n")}\n}\n}\n`;
-        }
+/** Page-rendering private routes (preview, demos): theme style only, no initial data. */
+function themeOnlyHtmlHook(res: Response, contentRoot: string): void {
+  const originalEnd = res.end;
+  res.end = function (this: Response, chunk?: any, ...args: any[]) {
+    const contentType = res.getHeader("content-type");
+    if (contentType && String(contentType).includes("text/html") && chunk) {
+      try {
+        const html = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+        const injected = injectThemeOverrides(html, contentRoot);
+        if (injected !== html) res.setHeader("content-length", Buffer.byteLength(injected, "utf-8"));
+        return originalEnd.call(this, injected, ...args);
+      } catch {
+        return originalEnd.call(this, chunk, ...args);
       }
     }
-    css += buildThemeBackgroundCss(theme);
-    return css ? `<style id="__theme_overrides__">\n${css}</style>` : "";
-  } catch {
-    return "";
-  }
+    return originalEnd.call(this, chunk, ...args);
+  } as any;
 }
 
 export function initialDataMiddleware(
@@ -995,7 +1002,14 @@ export function initialDataMiddleware(
   res: Response,
   next: NextFunction,
 ) {
-  if (req.path.startsWith("/api/") || req.path.startsWith("/private/")) {
+  if (req.path.startsWith("/api/")) {
+    return next();
+  }
+  if (req.path === "/private" || req.path.startsWith("/private/")) {
+    if (isSiteThemedPath(req.path)) {
+      const site = (res.locals as any).site as SiteContext | undefined;
+      themeOnlyHtmlHook(res, site?.contentRoot ?? getDefaultContentRoot());
+    }
     return next();
   }
 
@@ -1050,17 +1064,13 @@ export function initialDataMiddleware(
               const gcsHints =
                 '<link rel="preconnect" href="https://storage.googleapis.com" crossorigin />\n' +
                 '<link rel="dns-prefetch" href="https://storage.googleapis.com" />\n';
-              injected = injected.replace("</head>", gcsHints + "</head>");
+              injected = insertBefore(injected, "</head>", gcsHints);
             }
 
             if (payload) {
-              const scriptTag = `<script id="__INITIAL_DATA__" type="application/json">${JSON.stringify(payload).replace(/</g, "\\u003c")}</script>`;
-              injected = injected.replace("</body>", scriptTag + "</body>");
-              const themeStyle = buildThemeCssOverrides(ci.contentRoot);
-              if (themeStyle && !injected.includes('id="__theme_overrides__"')) {
-                injected = injected.replace("</head>", themeStyle + "</head>");
-              }
+              injected = insertBefore(injected, "</body>", buildInitialDataScriptTag(payload));
             }
+            injected = injectThemeOverrides(injected, ci.contentRoot);
             injected = applyEntryModulePreload(injected);
 
             const newLength = Buffer.byteLength(injected, "utf-8");

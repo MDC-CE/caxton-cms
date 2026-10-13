@@ -41,7 +41,7 @@ export function registerOrganicTrafficTools(
     "Read Google Search Console organic traffic (clicks/impressions) from the day cache / site BigQuery. " +
       "Exclusive mode per call: site | paths | clusters | opportunities | queries | leaderboard. " +
       `paths: 1–${MAX_ORGANIC_PATHS} public paths or absolute URLs (not slugs; deduped). ` +
-      `clusters: 1–${MAX_ORGANIC_HUBS} hub ids or pillar paths (deduped; selection_totals = unique paths, not site). ` +
+      `clusters: 1–${MAX_ORGANIC_HUBS} hub ids or pillar paths (deduped; selection_totals = unique paths, not site); also leads {organic_search, not_paid, tracked} per hub/member/cluster (same window + market as clicks; use not_paid when leads.estimated). ` +
       "opportunities: flattened work queue with kind (page2|low_ctr|link_gaps|decay|cannibalization|missing_serp), paginated — do not pass start/end (use decay_window). " +
       `queries: GSC-style query text search (query_contains min ${QUERIES_MIN_CONTAINS_LEN} chars); match contains|equals|starts_with; BigQuery first, day-cache fallback; nested landing pages; selection_totals = all matches in window. ` +
       `leaderboard: top day-cache paths by sort_by clicks|impressions (default clicks); optional path_prefix (normalized startsWith / exact-or-descendant); limit default ${LEADERBOARD_DEFAULT_LIMIT} max ${LEADERBOARD_MAX_LIMIT}; use offset to page down — prefer over batching paths for "top pages by traffic"; not a zero-traffic / full-CMS inventory. ` +

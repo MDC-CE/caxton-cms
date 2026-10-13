@@ -1,13 +1,13 @@
 ---
 description: Content loading patterns, YAML structure, API conventions, and component registry
-globs: server/**/*.ts,shared/**,site_*/**/*.yml,site_*/**/*.yaml,marketing-content/**
+globs: server/**/*.ts,shared/**,site_*/**/*.yml,site_*/**/*.yaml
 alwaysApply: false
 ---
 # Content and API Patterns
 
 ## Content Loading
 
-Use `loadContent`, `listContentSlugs`, `loadCommonData` from [server/utils/contentLoader.ts](server/utils/contentLoader.ts). Always validate with Zod schemas from `@shared/schema`.
+Use `loadEntry` ([server/entry-layer.ts](server/entry-layer.ts)) for the merged entry and `loadEntryForDelivery` / `loadMergedSinglePage` ([server/entry-delivery.ts](server/entry-delivery.ts)) for what routes render. Content type config and URL patterns: [server/content-types.ts](server/content-types.ts). Always validate with Zod schemas from `@shared/schema`.
 
 ## Site folders (`site_*`)
 
@@ -15,7 +15,7 @@ YAML under `site_*/` is content-repo data. After editing, commit via GitHub sync
 
 ## YAML Structure
 
-Top-level `meta` (SEO, redirects) and `sections` array. Sections: `type`, `variant`, `version`, `data`. Locale/variant files per [cursor-instructions](.cursor/rules/cursor-instructions.mdc).
+Top-level `meta` (SEO, redirects) and `sections` array. Sections: `type`, `variant`, `version`, props inline, plus wrapper settings (`background`, `paddingY`, `marginY`). Locale/variant files per [cursor-instructions](.cursor/rules/cursor-instructions.mdc).
 
 ## API Responses
 
@@ -30,7 +30,7 @@ Two registries (must not share the same `type` name — boot fails on collision)
 - **Shared** (app repo): [`shared/component-registry/`](shared/component-registry/) — platform defaults (≤~12 types). Screenshots under each type’s `screenshots/`.
 - **Per-site** (content): `site_*/component-registry/` — site-only types. Gallery thumbs under `.cache/{site}/component-screenshots/` (GCS-ready site scope).
 
-Resolve for a site = **shared ∪ that site**. Cross-site: promote to shared or duplicate — never reference another site’s registry.
+Resolve for a site = **shared ∪ that site's registry**, where a site with `inherit_components_from` in `sites.yml` uses its parent's registry. Other cross-site use: promote to shared or duplicate — never reference an unrelated site's registry.
 
 `schema.yml` stays in sync via `npm run ensure:schema-yml` on `predev`/`prebuild` (both trees). Manual: `npm run schema:sync -- --component=<type>`. Ensure does **not** push content GitHub.
 

@@ -1,31 +1,12 @@
 import type { ContentIndex } from "./content-index";
 import { createPublicUrlResolver, toPublicUrlPath } from "./redirects";
-
-const HREF_RE = /<a\b[^>]*\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
-const MD_LINK_RE = /\]\((\/[^)\s]+)\)/g;
-const URL_FIELD_KEYS = new Set([
-  "url",
-  "href",
-  "cta_url",
-  "link",
-  "path",
-  "to",
-  "permalink",
-]);
+import { extractHrefValues, extractInternalLinkHits } from "./internal-link-hits";
 
 /** Extract raw href values from rendered HTML. */
 export function extractHrefPaths(html: string): string[] {
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  HREF_RE.lastIndex = 0;
-  while ((m = HREF_RE.exec(html)) !== null) {
-    const raw = (m[1] ?? m[2] ?? m[3] ?? "").trim();
-    if (!raw || raw.startsWith("#") || raw.startsWith("mailto:") || raw.startsWith("tel:")) {
-      continue;
-    }
-    out.push(raw);
-  }
-  return out;
+  return extractHrefValues(html).filter(
+    (raw) => !raw.startsWith("#") && !raw.startsWith("mailto:") && !raw.startsWith("tel:"),
+  );
 }
 
 function hrefToPathname(href: string): string | null {
@@ -71,50 +52,11 @@ export function normalizePathForMatch(
  * Non-anchor UI navigations are intentionally excluded — SEO cluster best practice.
  */
 export function collectInternalPathsFromData(data: unknown): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-
-  const add = (raw: string) => {
-    const pathname = hrefToPathname(raw);
-    if (!pathname || seen.has(pathname)) return;
-    seen.add(pathname);
-    out.push(pathname);
-  };
-
-  const walk = (node: unknown, keyHint: string): void => {
-    if (node == null) return;
-    if (typeof node === "string") {
-      const t = node.trim();
-      if (!t) return;
-      if (
-        keyHint &&
-        (URL_FIELD_KEYS.has(keyHint) || keyHint.endsWith("_url") || keyHint.endsWith("_href"))
-      ) {
-        if (t.startsWith("/") || /^https?:\/\//i.test(t)) add(t);
-      }
-      MD_LINK_RE.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = MD_LINK_RE.exec(t)) !== null) {
-        add(m[1]);
-      }
-      for (const href of extractHrefPaths(t)) {
-        add(href);
-      }
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, keyHint);
-      return;
-    }
-    if (typeof node === "object") {
-      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-        walk(v, k);
-      }
-    }
-  };
-
-  walk(data, "");
-  return out;
+  const out = new Set<string>();
+  for (const hit of extractInternalLinkHits(data, { absolute: "all" })) {
+    if (hit.kind !== "bare") out.add(hit.path);
+  }
+  return [...out];
 }
 
 /** True when collected/rendered paths include a link to targetPath (after normalize). */

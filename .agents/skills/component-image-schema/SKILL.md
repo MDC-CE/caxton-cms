@@ -11,7 +11,7 @@ This skill covers every decision you need to make when adding an image field to 
 
 ## The Three Image Schemas
 
-All base schemas live in `4geeks-com/component-registry/_common/schema.ts`.
+All base schemas live in `shared/component-registry/_common/schema.ts`. Site packages import them through `site_<name>/component-registry/_common/schema.ts`, which only re-exports the shared file.
 
 ### 1. `imageSchema` — Simple inline image (recommended default)
 
@@ -110,7 +110,7 @@ laptop_image:
   alt: "Student working on AI course"
 ```
 
-**When to use:** Any image processed through the media gallery (`/4geeks-com/images/` or GCS), that benefits from responsive srcset, or needs focal-point control. For the laptop mockup in `features_quad`, this is the correct approach.
+**When to use:** Any image processed through the media gallery (registered in `site_<name>/image-registry.json`, usually served from GCS), that benefits from responsive srcset, or needs focal-point control. For the laptop mockup in `features_quad`, this is the correct approach.
 
 ---
 
@@ -270,9 +270,10 @@ laptop_image:
 
 ## Relevant Files
 
-- `4geeks-com/component-registry/_common/schema.ts`
-- `4geeks-com/component-registry/features_quad/v1.0/schema.ts`
-- `4geeks-com/component-registry/features_quad/v1.0/field-editors.ts`
-- `4geeks-com/component-registry/hero/v1.0/field-editors.ts`
-- `4geeks-com/component-registry/two_column_accordion_card/v1.0/field-editors.ts`
-- `4geeks-com/component-registry/two_column_accordion_card/v1.0/schema.ts`
+- `shared/component-registry/_common/schema.ts` (source of truth for the image schemas)
+- `site_4geeks-com/component-registry/_common/schema.ts` (re-export for site packages)
+- `site_4geeks-com/component-registry/features_quad/v1.0/schema.ts`
+- `site_4geeks-com/component-registry/features_quad/v1.0/field-editors.ts`
+- `shared/component-registry/hero/v1.0/field-editors.ts`
+- `site_4geeks-com/component-registry/two_column_accordion_card/v1.0/field-editors.ts`
+- `site_4geeks-com/component-registry/two_column_accordion_card/v1.0/schema.ts`

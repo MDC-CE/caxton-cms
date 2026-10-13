@@ -281,29 +281,43 @@ function rehypeGeekchart() {
   };
 }
 
-let processorPromise: ReturnType<typeof buildProcessor> | null = null;
+type MarkdownPlugins = { katex: boolean; shiki: boolean };
 
-async function buildProcessor() {
-  return unified()
-    .use(remarkParse)
-    .use(remarkGfm)
-    .use(remarkMath, remarkMathOptions)
-    .use(remarkFenceMeta)
-    .use(remarkRehype, { allowDangerousHtml: true })
-    .use(rehypeRaw)
-    .use(rehypeKatex, rehypeKatexOptions)
-    .use(rehypeSanitize, sanitizeSchema as Parameters<typeof rehypeSanitize>[0])
-    .use(rehypeSlug)
-    .use(rehypeGeekchart)
-    .use(rehypePrettyCode, prettyCodeOptions)
-    .use(rehypeUnwrapInlinePrettyCode)
-    .use(rehypeGithubAlerts)
-    .use(rehypeStringify, { allowDangerousHtml: true });
+const processors = new Map<string, ReturnType<typeof buildProcessor>>();
+
+export function markdownPluginFlags(markdown: string): MarkdownPlugins {
+  const katex =
+    markdown.includes("\\(") || markdown.includes("\\[") || markdown.includes("$$");
+  const shiki = markdown.includes("```") || markdown.includes("~~~");
+  return { katex, shiki };
 }
 
-async function getProcessor() {
-  if (!processorPromise) processorPromise = buildProcessor();
-  return processorPromise;
+async function buildProcessor(flags: MarkdownPlugins) {
+  let chain = unified().use(remarkParse).use(remarkGfm);
+  if (flags.katex) chain = chain.use(remarkMath, remarkMathOptions);
+  chain = chain
+    .use(remarkFenceMeta)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(rehypeRaw);
+  if (flags.katex) chain = chain.use(rehypeKatex, rehypeKatexOptions);
+  chain = chain
+    .use(rehypeSanitize, sanitizeSchema as Parameters<typeof rehypeSanitize>[0])
+    .use(rehypeSlug)
+    .use(rehypeGeekchart);
+  if (flags.shiki) {
+    chain = chain.use(rehypePrettyCode, prettyCodeOptions).use(rehypeUnwrapInlinePrettyCode);
+  }
+  return chain.use(rehypeGithubAlerts).use(rehypeStringify, { allowDangerousHtml: true });
+}
+
+async function getProcessor(flags: MarkdownPlugins) {
+  const key = `${flags.katex ? 1 : 0}${flags.shiki ? 1 : 0}`;
+  let pending = processors.get(key);
+  if (!pending) {
+    pending = buildProcessor(flags);
+    processors.set(key, pending);
+  }
+  return pending;
 }
 
 /**
@@ -323,7 +337,7 @@ export async function enhanceMarkdownToHtml(markdown: string): Promise<string> {
   }
 
   try {
-    const processor = await getProcessor();
+    const processor = await getProcessor(markdownPluginFlags(markdown));
     const file = await processor.process(normalizeMathDelimiters(markdown));
     const html = `${ARTICLE_HTML_MARKER}\n${String(file)}`;
     enhanceCache.set(key, { html, fetched_at: Date.now() });

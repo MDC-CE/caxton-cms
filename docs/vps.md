@@ -103,7 +103,7 @@ Actions secrets for SSH: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY
 3. Symlinks for `data` / `.cache` / `sites.yml` / … (not `site_*`); create real empty `site_*` dirs
 4. Write `.env`
 5. Abort checkpoint (if `.deploy-state/<sha>.abort` → discard release, exit 0)
-6. `npm ci` → **`content:pull --required`** → `npm run build` → **`ensure:pipeline-db --dry-run`** (validates pipeline SQLite migrations on DB copies; aborts before flip on failure)
+6. `npm ci` → **`content:pull --required`** → `npm run build` → **`ensure:pipeline-db --dry-run`** (validates pipeline SQLite migrations on DB copies; aborts before flip on failure) → **`node dist/prebuild-html-cache.js`** (writes this release's public HTML into `data/html-page-cache` while the previous process is still serving; boot loads it)
 7. Abort checkpoint again (last chance before cutover)
 8. Clear `.bootstrap-complete` on `site_*` (boot will hash-diff again)
 9. Flip `current`, restart, health-check (**rollback `current`** on failure)

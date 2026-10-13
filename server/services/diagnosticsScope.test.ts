@@ -1,13 +1,28 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { EventEmitter } from "events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("child_process", () => ({
+  fork: () => {
+    const child = new EventEmitter() as EventEmitter & {
+      send: () => boolean;
+      kill: () => void;
+      connected: boolean;
+    };
+    child.send = () => true;
+    child.kill = () => {};
+    child.connected = true;
+    return child;
+  },
+}));
 import { ContentIndex } from "../content-index";
 import { resetRegistry } from "../content-types";
 import { resetVariableManagerCache } from "../variable-manager";
 import { mockDatabase } from "../test-helpers/mock-database";
 import { resolveUrlTargets } from "../../scripts/validation/runDiagnosticsJob";
-import { DiagnosticsScopeError, startDiagnosticsJob } from "./diagnosticsJobService";
+import { clearDiagnosticsRuntimeForTests, startDiagnosticsJob } from "./diagnosticsJobService";
 import { ValidationCacheService } from "./validationCacheService";
 
 let tempDir: string;
@@ -54,6 +69,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearDiagnosticsRuntimeForTests();
   vi.restoreAllMocks();
   resetRegistry(contentRoot);
   resetVariableManagerCache();
@@ -67,22 +83,20 @@ describe("diagnostics scope for database-backed pages", () => {
     expect(targets.map((t) => t.url)).toEqual(["/en/exercise/bootstrap-exercises"]);
   }, 60_000);
 
-  it("rejects an unknown slug with a not-found scope error", async () => {
+  it("queues an unknown slug and lets the child report it on the first poll", async () => {
     cachedItems = null;
     const ci = buildIndex();
-    const err = await startDiagnosticsJob({
+    const result = await startDiagnosticsJob({
       contentRoot,
       contentRootName: "site_test",
       ci,
       cache: new ValidationCacheService(contentRoot),
       slugs: ["bootstrap-exercises"],
       confirm: true,
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DiagnosticsScopeError);
-    expect((err as DiagnosticsScopeError).code).toBe("diagnostics_slug_not_found");
-    expect((err as DiagnosticsScopeError).details).toMatchObject({
-      slugs: ["bootstrap-exercises"],
-      empty_databases: ["exercises"],
     });
+    expect(result.status).toBe("queued");
+    if (result.status === "queued" || result.status === "running") {
+      expect(result.job_id).toMatch(/^diag-/);
+    }
   }, 60_000);
 });

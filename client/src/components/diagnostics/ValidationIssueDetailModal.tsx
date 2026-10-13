@@ -131,7 +131,7 @@ export function ValidationIssueDetailModal({
     setToggling(true);
     try {
       const token = getDebugToken();
-      const res = await fetch("/api/validation/cache-issues/update", {
+      let res = await fetch("/api/validation/cache-issues/update", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -144,7 +144,38 @@ export function ValidationIssueDetailModal({
           ...(report ? { report } : {}),
         }),
       });
-      const body = await res.json().catch(() => ({}));
+      let body = await res.json().catch(() => ({}));
+      if (action === "complete" && res.status === 409 && body?.code === "diagnostics_busy") {
+        toast({
+          title: "Try again in a moment",
+          description: "A full-site check is already running, so this duplicate stays open.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (
+        action === "complete" &&
+        typeof body.job_id === "string" &&
+        (body.status === "queued" || body.status === "running")
+      ) {
+        const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+        await pollDiagnosticsJob(body.job_id);
+        res = await fetch("/api/validation/cache-issues/update", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getSessionHeaders(),
+            ...(token ? { Authorization: `Token ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            issueId: issue.id,
+            action,
+            job_id: body.job_id,
+            ...(report ? { report } : {}),
+          }),
+        });
+        body = await res.json().catch(() => ({}));
+      }
       if (!res.ok) {
         throw new Error(typeof body.error === "string" ? body.error : "Update failed");
       }

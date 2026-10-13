@@ -64,6 +64,7 @@ const builds = process.argv.includes("--cli-only")
       { entryPoints: ["server/index.ts"], outdir: "dist" },
       { entryPoints: ["sidequest.jobs.ts"], outfile: "dist/sidequest.jobs.js" },
       { entryPoints: ["server/jobs/sidequest-worker.ts"], outfile: "dist/sidequest-worker.js" },
+      { entryPoints: ["scripts/prebuild-html-cache.ts"], outfile: "dist/prebuild-html-cache.js" },
       { entryPoints: ["mcp-server/index.ts"], outfile: "dist/mcp-server.js" },
       cliBuildOptions(),
     ];

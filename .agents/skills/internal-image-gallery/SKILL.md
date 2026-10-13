@@ -17,7 +17,7 @@ Processing Layer  server/image-optimizer.ts        sharp-based responsive image 
 Intelligence Layer server/image-auto-tagger.ts     AI vision + heuristic tag assignment
 Scanner Layer     server/image-registry-scanner.ts Legacy scanner (superseded by MediaGallery.scan())
 UI Layer          client/src/pages/MediaGallery.tsx Admin dashboard
-Registry file     4geeks-com/image-registry.json  Persisted source of truth (JSON)
+Registry file     site_<name>/image-registry.json  Persisted source of truth per site (JSON)
 ```
 
 ## Singletons — Always Import, Never Instantiate
@@ -48,7 +48,7 @@ import type { ImageRegistry, ImageEntry, ImagePreset } from "@shared/schema";
 ### `ImageEntry` fields
 | Field | Type | Notes |
 |-------|------|-------|
-| `src` | `string` | URL path (`/4geeks-com/images/...`, `/attached_assets/...`, or GCS URL) |
+| `src` | `string` | GCS URL (most images), `/site_<name>/images/...` (local files served per site from `site_<name>/images/`), or `/attached_assets/...` |
 | `alt` | `string` | **Required**. Never leave as empty string or placeholder ("TODO") |
 | `focal_point` | enum (optional) | `center` \| `top` \| `bottom` \| `left` \| `right` \| corner variants |
 | `tags` | `string[]` (optional) | Drives preset selection (see Tag→Preset mapping) |
@@ -64,7 +64,7 @@ import type { ImageRegistry, ImageEntry, ImagePreset } from "@shared/schema";
 ```json
 {
   "presets": { "hero-wide": { "aspect_ratio": "16:9", "widths": [640,1280,1920], "quality": 85, "description": "..." } },
-  "images":  { "my-image": { "src": "/4geeks-com/images/my-image.png", "alt": "...", "tags": ["hero"] } }
+  "images":  { "my-image": { "src": "/site_4geeks-com/images/my-image.png", "alt": "...", "tags": ["hero"] } }
 }
 ```
 
@@ -413,5 +413,5 @@ Standalone stats reporter. Reads registry and walks YAML independently (does not
 - `scripts/admin/migrate-to-cloud.ts`
 - `scripts/admin/remove-unused-images.ts`
 - `scripts/stats/image-usage.ts`
-- `4geeks-com/image-registry.json`
+- `site_<name>/image-registry.json` (e.g. `site_4geeks-com/image-registry.json`)
 - `client/src/pages/MediaGallery.tsx`

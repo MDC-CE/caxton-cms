@@ -2,9 +2,15 @@ import { cpuThreadCoverage, formatCpuStackRaw, labelCpuSymbol, type CpuStackSymb
 
 const SSR_LABELS: Record<string, string> = {
   ssr_ok: "rendered",
+  ssr_ok_cache_false: "rendered, cache=false",
+  ssr_ok_other_site: "rendered, other site",
+  ssr_ok_authorization: "rendered, authorization",
+  ssr_ok_baked_query: "rendered, query in page",
+  ssr_ok_not_read: "rendered, not a read",
   ssr_empty_fallback: "empty #root",
   ssr_error_fallback: "render error",
   client_fallback: "client only",
+  ssr_skipped_non_200: "skipped, not a success",
 };
 
 const TOP_FRAMES = 6;
@@ -63,6 +69,7 @@ export type PerformanceDetailReportInput = {
       method: string;
       route: string;
       path?: string | null;
+      samplePaths?: string[];
       count: number;
       avgMs: number;
       maxMs: number;
@@ -228,7 +235,11 @@ export function buildPerformanceDetailMarkdown(input: PerformanceDetailReportInp
   }
 
   if (input.routes && input.routes.rows.length > 0) {
-    const showPath = input.routes.rows.some((row) => row.path);
+    const pathText = (row: { path?: string | null; samplePaths?: string[] }) => {
+      const bits = [row.path, row.samplePaths?.length ? row.samplePaths.join(", ") : ""].filter(Boolean);
+      return bits.join(" · ") || "—";
+    };
+    const showPath = input.routes.rows.some((row) => row.path || (row.samplePaths && row.samplePaths.length > 0));
     const headers = [
       ...(input.routes.showKind ? ["Kind"] : []),
       "Method",
@@ -246,7 +257,7 @@ export function buildPerformanceDetailMarkdown(input: PerformanceDetailReportInp
       ...(input.routes!.showKind ? [row.kind === "pages" ? "page" : "API"] : []),
       row.method,
       row.route,
-      ...(showPath ? [row.path || "—"] : []),
+      ...(showPath ? [pathText(row)] : []),
       String(row.count),
       `${row.avgMs} ms`,
       `${row.maxMs} ms`,

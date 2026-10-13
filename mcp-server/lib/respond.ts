@@ -275,6 +275,53 @@ export function promoteFailureNextActions(opts: {
   }
 }
 
+/**
+ * Poll follow-up for a diagnostics job body (`queued` / `running` / `busy`).
+ * When a completed job was opened to close an issue, the next step is `complete` again.
+ */
+export function diagnosticsJobNextActions(args: {
+  body: {
+    status?: string;
+    job_id?: string;
+    purpose?: { type?: string; issueId?: string };
+  };
+  site?: string;
+  issueList?: Record<string, unknown>;
+}): NextAction[] {
+  const jobId = args.body.job_id;
+  if (!jobId) return [];
+  const siteHint = args.site ? { site: args.site } : {};
+  const status = args.body.status;
+  if (status === "queued" || status === "running" || status === "busy") {
+    return [{
+      tool: "get_diagnostics_job",
+      reason: status === "busy"
+        ? "A site-wide diagnostics job is already running. Poll that job_id, then retry."
+        : "Poll until status is completed or failed",
+      args_hint: { job_id: jobId, ...siteHint, ...(args.issueList ?? {}) },
+      priority: "required",
+    }];
+  }
+  if (
+    status === "completed" &&
+    args.body.purpose?.type === "complete_issue" &&
+    args.body.purpose.issueId
+  ) {
+    return [{
+      tool: "update_issue",
+      reason: "The check finished. Call complete again with this job_id to archive the issue or leave it open.",
+      args_hint: {
+        issue_id: args.body.purpose.issueId,
+        action: "complete",
+        job_id: jobId,
+        ...siteHint,
+      },
+      priority: "required",
+    }];
+  }
+  return [];
+}
+
 /** Required follow-up after publish_draft / promote_variant — scoped hard refresh. */
 export function diagnosticsAfterGoLiveNextAction(slug: string, site?: string): NextAction {
   return {

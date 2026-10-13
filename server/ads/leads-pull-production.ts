@@ -13,9 +13,40 @@ import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { listLedgerRows, replaceLedgerFromSnapshot, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, replaceConsentFromSnapshot, utcDateKey, type ConsentDailyRow } from "./consent-store";
+import type { LeadsLocalCopy } from "@shared/leads-query";
 
 export const LEADS_PULL_DEFAULT_DAYS = 90;
 const DAY_MS = 86_400_000;
+const PULL_STATE_KEY = "leads_pulled_from_production";
+
+/** When leads were last downloaded from production into this (dev) database. */
+export function readLeadsPullState(site: string): LeadsLocalCopy {
+  const empty: LeadsLocalCopy = { pulled_at: null, since: null, origin: null };
+  try {
+    ensurePipelineDb(site);
+    const row = getSiteSqlite(site).prepare("SELECT value_json FROM pipeline_state WHERE key = ?").get(PULL_STATE_KEY) as
+      | { value_json: string }
+      | undefined;
+    if (!row) return empty;
+    const v = JSON.parse(row.value_json) as Partial<{ at: number; since: number; origin: string }>;
+    return {
+      pulled_at: typeof v.at === "number" ? v.at : null,
+      since: typeof v.since === "number" ? v.since : null,
+      origin: typeof v.origin === "string" ? v.origin : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function writeLeadsPullState(site: string, value: { at: number; since: number; origin: string }): void {
+  getSiteSqlite(site)
+    .prepare(
+      `INSERT INTO pipeline_state (key, value_json) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json`,
+    )
+    .run(PULL_STATE_KEY, JSON.stringify(value));
+}
 
 export type LeadsExportPayload = {
   leads: LedgerRow[];
@@ -102,10 +133,14 @@ export async function pullProductionLeads(
 
   try {
     ensurePipelineDb(site);
-    const { imported_leads, imported_consent_days } = getSiteSqlite(site).transaction(() => ({
-      imported_leads: replaceLedgerFromSnapshot(site, snap.leads, since),
-      imported_consent_days: replaceConsentFromSnapshot(site, snap.consent_daily, utcDateKey(since)),
-    }))();
+    const { imported_leads, imported_consent_days } = getSiteSqlite(site).transaction(() => {
+      const counts = {
+        imported_leads: replaceLedgerFromSnapshot(site, snap.leads, since),
+        imported_consent_days: replaceConsentFromSnapshot(site, snap.consent_daily, utcDateKey(since)),
+      };
+      writeLeadsPullState(site, { at: Date.now(), since, origin: productionOrigin });
+      return counts;
+    })();
     return { success: true, pulled: true, productionOrigin, imported_leads, imported_consent_days, since };
   } catch (err) {
     return fail(`Could not save the lead download (${err instanceof Error ? err.message : String(err)}).`);

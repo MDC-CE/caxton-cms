@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from "express";
-import { getDefaultContentRoot } from "../site-config";
+import { getDefaultContentRoot, getSiteConfigs } from "../site-config";
 import { createServer, type Server } from "http";
 import { storage } from "../storage";
 import { geoGet, geoSet } from "../geo-cache";
@@ -30,8 +30,10 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
-import { loadSiteTheme } from "../theme-config";
+import { checkThemeWrite, createOwnSiteTheme, loadSiteTheme, resolveSiteTheme, sitesInheritingThemeFrom } from "../theme-config";
 import { scanThemeBackgroundUsage, replaceSectionBackgroundEverywhere } from "../design/theme-usage";
+import { sharedTypesUsingBackground } from "../design/shared-base-palette";
+import { isSharedBasePaletteId } from "@shared/theme-palette";
 import { evaluateVariableWrite, type VariableWriteAction } from "../variable-write-rules";
 import { api } from "../rate-limit/api";
 import { handleVariableCatalogRequest } from "../variable-catalog-route";
@@ -263,6 +265,31 @@ function getContentRootName(res: Response): string {
   return path.isAbsolute(cr) ? path.relative(process.cwd(), cr) : cr;
 }
 
+function scheduleHotPublicHtml(contentRoot: string, reason: string): void {
+  void import("../html-rebuild")
+    .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild(reason, contentRoot))
+    .catch(() => {});
+}
+
+/** Theme saves also repaint sites that inherit this theme, each with its own content root. */
+function scheduleThemeHtmlRebuild(contentRoot: string, reason: string): void {
+  if (sitesInheritingThemeFrom(contentRoot).length === 0) {
+    scheduleHotPublicHtml(contentRoot, reason);
+    return;
+  }
+  void import("../html-rebuild")
+    .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild(reason))
+    .catch(() => {});
+}
+
+/** Path of the site's own theme.json for a write, or null after responding (inheriting sites are refused). */
+function themeWritePath(res: Response): string | null {
+  const check = checkThemeWrite(getContentRoot(res));
+  if (check.ok) return check.themePath;
+  res.status(check.status).json(check.body);
+  return null;
+}
+
 function persistTrackingSettings(
   input: Parameters<typeof updateTrackingSettings>[0],
   res: Response,
@@ -297,14 +324,15 @@ export function registerSettingsRoutes(app: Express): void {
 
   app.get("/api/theme", (_req, res) => {
     try {
-      const themePath = path.join(getContentRoot(res), "theme.json");
-      if (!fs.existsSync(themePath)) {
+      const resolved = resolveSiteTheme(getContentRoot(res));
+      if (!resolved) {
         res.status(404).json({ error: "Theme configuration not found" });
         return;
       }
-      const themeContent = fs.readFileSync(themePath, "utf-8");
-      const theme = JSON.parse(themeContent);
-      res.json(theme);
+      const parentDomain = resolved.inheritedFrom
+        ? getSiteConfigs().find((c) => c.contentFolder === resolved.inheritedFrom)?.domain ?? null
+        : null;
+      res.json({ ...resolved.theme, inherited_from: resolved.inheritedFrom, inherited_from_domain: parentDomain });
     } catch (error) {
       log.error({ err: error }, "Error loading theme:");
       res.status(500).json({ error: "Failed to load theme configuration" });
@@ -314,15 +342,13 @@ export function registerSettingsRoutes(app: Express): void {
   app.put("/api/theme/colors", (req, res) => {
     try {
       const { light, dark } = req.body as { light?: Record<string, string>; dark?: Record<string, string> };
-      const themePath = path.join(getContentRoot(res), "theme.json");
-      if (!fs.existsSync(themePath)) {
-        res.status(404).json({ error: "Theme configuration not found" });
-        return;
-      }
+      const themePath = themeWritePath(res);
+      if (!themePath) return;
       const theme = JSON.parse(fs.readFileSync(themePath, "utf-8"));
       theme.colors = { light: light || {}, dark: dark || {} };
       fs.writeFileSync(themePath, JSON.stringify(theme, null, 2));
       markFileAsModified('theme.json', undefined, undefined, getContentRoot(res));
+      scheduleThemeHtmlRebuild(getContentRoot(res), "theme-colors");
       res.json({ success: true });
     } catch (error) {
       log.error({ err: error }, "Error saving theme colors:");
@@ -333,11 +359,8 @@ export function registerSettingsRoutes(app: Express): void {
   app.put("/api/theme/preview-examples", (req, res) => {
     try {
       const examples = req.body as Array<{ component: string; version: string; example: string }>;
-      const themePath = path.join(getContentRoot(res), "theme.json");
-      if (!fs.existsSync(themePath)) {
-        res.status(404).json({ error: "Theme configuration not found" });
-        return;
-      }
+      const themePath = themeWritePath(res);
+      if (!themePath) return;
       const theme = JSON.parse(fs.readFileSync(themePath, "utf-8"));
       theme.preview_examples = Array.isArray(examples) ? examples : [];
       fs.writeFileSync(themePath, JSON.stringify(theme, null, 2));
@@ -373,12 +396,23 @@ export function registerSettingsRoutes(app: Express): void {
         return;
       }
 
-      const themePath = path.join(getContentRoot(res), "theme.json");
-      if (!fs.existsSync(themePath)) {
-        res.status(404).json({ error: "Theme configuration not found" });
+      const themePath = themeWritePath(res);
+      if (!themePath) return;
+      const theme = JSON.parse(fs.readFileSync(themePath, "utf-8"));
+
+      const nextBackgroundIds = new Set(parsed.data.backgrounds.map((b) => b.id));
+      const removedBase = ((theme.backgrounds as Array<{ id?: string }> | undefined) ?? [])
+        .map((b) => b.id ?? "")
+        .filter((id) => isSharedBasePaletteId(id) && !nextBackgroundIds.has(id));
+      if (removedBase.length > 0) {
+        const users = Array.from(new Set(removedBase.flatMap((id) => sharedTypesUsingBackground(id))));
+        res.status(400).json({
+          error: `${removedBase.join(", ")} ${removedBase.length === 1 ? "is" : "are"} required by components shared by every site${users.length ? ` (${users.join(", ")})` : ""}. You can change the value, but not remove it.`,
+          code: "base_palette_required",
+          ids: removedBase,
+        });
         return;
       }
-      const theme = JSON.parse(fs.readFileSync(themePath, "utf-8"));
 
       const knownVars = new Set<string>([
         ...Object.keys((theme.colors?.light as Record<string, string>) || {}),
@@ -406,6 +440,7 @@ export function registerSettingsRoutes(app: Express): void {
       fs.writeFileSync(tmpPath, JSON.stringify(theme, null, 2));
       fs.renameSync(tmpPath, themePath);
       markFileAsModified('theme.json', undefined, undefined, getContentRoot(res));
+      scheduleThemeHtmlRebuild(getContentRoot(res), "theme-palettes");
 
       if (unknownVarWarnings.length > 0) {
         res.json({ ok: true, warnings: unknownVarWarnings });
@@ -415,6 +450,25 @@ export function registerSettingsRoutes(app: Express): void {
     } catch (error) {
       log.error({ err: error }, "Error saving theme palettes:");
       res.status(500).json({ error: "Failed to save theme palettes" });
+    }
+  });
+
+  api.post(app, "/api/theme/own", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireCapability(req, res, "theme_edit");
+      if (!auth.authorized) return;
+      const contentRoot = getContentRoot(res);
+      const result = createOwnSiteTheme(contentRoot);
+      if (!result.ok) {
+        res.status(result.status).json(result.body);
+        return;
+      }
+      markFileAsModified("theme.json", auth.author || undefined, undefined, contentRoot);
+      scheduleHotPublicHtml(contentRoot, "theme-own-copy");
+      res.json({ ok: true, copied_from: result.copiedFrom });
+    } catch (error) {
+      log.error({ err: error }, "Error creating site theme:");
+      res.status(500).json({ error: "Failed to create a separate theme" });
     }
   });
 
@@ -1628,6 +1682,11 @@ export function registerSettingsRoutes(app: Express): void {
         contentRoot,
       );
       markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      if (hasTm) {
+        void import("../html-rebuild")
+          .then(({ invalidateHotHtmlAndRebuild }) => invalidateHotHtmlAndRebuild("gtm"))
+          .catch(() => {});
+      }
       const opt = getOptimizationSettings(contentRoot);
       const secret = resolveIpnSecret();
       res.json({
@@ -3030,6 +3089,7 @@ export function registerSettingsRoutes(app: Express): void {
         }
       }
 
+      scheduleHotPublicHtml(getContentRoot(res), "menu-structure");
       res.json({
         success: true,
         name,
@@ -3116,6 +3176,7 @@ export function registerSettingsRoutes(app: Express): void {
       });
       fs.writeFileSync(filePath, yamlContent, "utf-8");
       markFileAsModified(filePath, authorName, undefined, getContentRoot(res));
+      scheduleHotPublicHtml(getContentRoot(res), "menu-translations");
 
       res.json({
         success: true,

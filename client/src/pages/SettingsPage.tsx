@@ -1113,7 +1113,7 @@ export default function SettingsPage() {
                 <CardContent className="space-y-3">
                   <p className="text-sm text-muted-foreground">
                     Site-wide checkbox copy for lead forms, stored as <code className="font-mono">reserved.consent_*</code> variables.
-                    Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel (Marketing, SMS, WhatsApp, …) on.
+                    Turn on <span className="font-medium text-foreground">Default</span> in a consent&apos;s Edit dialog — that copy is the extra checkbox when a form has no channel switch on. The same consent is also a switch on each form, so you can show it together with Marketing.
                     Only one can be Default; others stay off until you turn the current one off.
                     Stored in <code className="font-mono">settings.yml</code> as <code className="font-mono">consent.fallback</code>. Off means no extra checkbox.
                     <span className="font-medium text-foreground"> Marketing</span> is the copy for the Marketing switch.
@@ -1130,9 +1130,8 @@ export default function SettingsPage() {
                       The form reads it in{" "}
                       <code className="font-mono">client/src/components/lead_form/variants/LeadFormDefault.tsx</code>
                       {" "}(<code className="font-mono">shouldShowFallbackConsent</code>).
-                      Default is not a YAML channel toggle — ConsentCard still uses{" "}
-                      <code className="font-mono">consent.marketing</code> / SMS / WhatsApp.
-                      General fallback does not set CRM <code className="font-mono">has_marketing_consent</code>.
+                      Default is also a channel switch (<code className="font-mono">consent.general</code> when General is Default), so a form can show it next to Marketing.
+                      The General checkbox does not set CRM <code className="font-mono">has_marketing_consent</code>.
                     </p>
                   </details>
                   <div className="divide-y">

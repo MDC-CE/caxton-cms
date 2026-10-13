@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconRosette, IconRosetteDiscountCheck } from "@tabler/icons-react";
+import { IconBrush, IconThumbDown, IconThumbUp } from "@tabler/icons-react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -89,10 +89,12 @@ export function LayoutApprovalControl({ contentType, slug }: { contentType: stri
         >
           {query.isLoading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : approved ? (
-            <IconRosetteDiscountCheck className="h-3.5 w-3.5 text-status-online" />
           ) : (
-            <IconRosette className={`h-3.5 w-3.5 ${state === "stale" ? "text-status-away" : "text-muted-foreground"}`} />
+            <IconBrush
+              className={`h-3.5 w-3.5 ${
+                approved ? "text-status-online" : state === "stale" ? "text-status-away" : "text-muted-foreground"
+              }`}
+            />
           )}
         </Button>
       </PopoverTrigger>
@@ -124,24 +126,33 @@ export function LayoutApprovalControl({ contentType, slug }: { contentType: stri
         <div className="flex flex-wrap gap-1.5">
           <Button
             size="sm"
-            className="h-7 text-xs"
+            variant="outline"
+            className="h-7 gap-1.5 text-xs border-status-online/40 bg-status-online/15 text-status-online"
             disabled={!!saving || state === "approved"}
             onClick={() => void save("approved")}
             data-testid="button-layout-approve"
           >
-            {saving === "approved" && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
+            {saving === "approved" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <IconThumbUp className="h-3.5 w-3.5" aria-hidden />
+            )}
             Approve layout
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="h-7 text-xs"
+            className="h-7 gap-1.5 text-xs border-status-busy/40 bg-status-busy/15 text-status-busy"
             disabled={!!saving || state === "rejected"}
             onClick={() => void save("rejected")}
             data-testid="button-layout-reject"
           >
-            {saving === "rejected" && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
-            Not a good example
+            {saving === "rejected" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <IconThumbDown className="h-3.5 w-3.5" aria-hidden />
+            )}
+            Not good
           </Button>
           {data?.review && (
             <Button

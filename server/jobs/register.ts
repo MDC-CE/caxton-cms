@@ -12,6 +12,9 @@ import { DraftLinkCheckJob, ProposalStaleSweepJob } from "./definitions/proposal
 import { MetaAdsSyncJob } from "./definitions/meta-ads-sync";
 import { AdsSyncJob } from "./definitions/ads-sync";
 import { AdsRecheckJob } from "./definitions/ads-recheck";
+import { HtmlPageRebuildJob } from "./definitions/html-page-rebuild";
+import { HtmlDbReaderRebuildJob } from "./definitions/html-db-reader-rebuild";
+import { HtmlContentTypeListingRebuildJob } from "./definitions/html-content-type-listing-rebuild";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -28,4 +31,7 @@ export function registerAllJobs(): void {
   registerJobClass("ads_sync", AdsSyncJob);
   registerJobClass("ads_recheck", AdsRecheckJob);
   registerJobClass("meta_ads_sync", MetaAdsSyncJob);
+  registerJobClass("html_page_rebuild", HtmlPageRebuildJob);
+  registerJobClass("html_db_reader_rebuild", HtmlDbReaderRebuildJob);
+  registerJobClass("html_content_type_listing_rebuild", HtmlContentTypeListingRebuildJob);
 }

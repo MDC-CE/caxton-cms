@@ -1,6 +1,9 @@
 /**
  * Forked diagnostics worker — runs validators off the Express event loop.
  * Started via child_process.fork with tsx. Communicates progress over IPC.
+ *
+ * Site-wide jobs exit after one start. The shared child stays up until the
+ * parent sends `stop` (queue empty). It never writes the issues cache.
  */
 
 import * as fs from "fs";
@@ -12,6 +15,7 @@ import { ValidationCacheService } from "../../server/services/validationCacheSer
 import { randomUUID } from "node:crypto";
 import { flushTick, startTick } from "../../server/process-stats";
 import { runDiagnosticsJob } from "./runDiagnosticsJob";
+import { runOffThreadJob } from "./runOffThreadJob";
 import type {
   DiagnosticsWorkerInboundMessage,
   DiagnosticsWorkerOutboundMessage,
@@ -34,12 +38,21 @@ async function bootstrapSite(contentRoot: string, contentRootName: string): Prom
   const mg = new MediaGallery(contentFolder);
   const database = new DatabaseManager(contentRoot, mg);
   const ci = new ContentIndex(contentFolder, database);
-  // Touch index so YAML + DB-backed URLs load (avoid full refresh side effects)
   ci.getStats();
 
   const cache = new ValidationCacheService(contentRoot);
   cache.setSkipGcsUpload(true);
   return { ci, cache };
+}
+
+const siteCache = new Map<string, { ci: ContentIndex; cache: ValidationCacheService }>();
+
+async function siteFor(contentRoot: string, contentRootName: string) {
+  const hit = siteCache.get(contentRoot);
+  if (hit) return hit;
+  const boot = await bootstrapSite(contentRoot, contentRootName);
+  siteCache.set(contentRoot, boot);
+  return boot;
 }
 
 async function handleStart(msg: DiagnosticsWorkerStartMessage): Promise<void> {
@@ -56,52 +69,66 @@ async function handleStart(msg: DiagnosticsWorkerStartMessage): Promise<void> {
       message: "Bootstrapping site context",
     });
 
-    const { ci, cache } = await bootstrapSite(contentRoot, contentRootName);
+    const { ci, cache } = await siteFor(contentRoot, contentRootName);
+    const kind = msg.kind ?? "diagnostics";
+    const usesDiagnosticsRunner =
+      kind === "diagnostics" || kind === "seo-duplicates";
 
-    const output = await runDiagnosticsJob({
-      contentRoot,
-      ci,
-      cache,
-      slugs: msg.slugs,
-      urls: msg.urls,
-      freshness: msg.freshness,
-      max_age_seconds: msg.max_age_seconds,
-      validators: msg.validators,
-      include_artifacts: msg.include_artifacts,
-      categories: msg.categories,
-      validator_only: msg.validator_only,
-      onProgress: (p) => {
-        lastProcessed = p.processed;
-        lastTotal = p.total;
-        send({
-          type: "progress",
-          jobId,
-          processed: p.processed,
-          total: p.total,
-          staleUrlCount: p.staleUrlCount,
-          urlCount: p.urlCount,
-          message: p.message,
-          status: "running",
-        });
-      },
-    });
+    const output = usesDiagnosticsRunner
+      ? await runDiagnosticsJob({
+          contentRoot,
+          ci,
+          cache,
+          slugs: msg.slugs,
+          urls: msg.urls,
+          files: msg.file ? [msg.file] : undefined,
+          freshness: msg.freshness,
+          max_age_seconds: msg.max_age_seconds,
+          validators: kind === "seo-duplicates" ? ["seo-duplicates"] : msg.validators,
+          include_artifacts: msg.include_artifacts,
+          categories: msg.categories,
+          validator_only: msg.validator_only,
+          onProgress: (p) => {
+            lastProcessed = p.processed;
+            lastTotal = p.total;
+            send({
+              type: "progress",
+              jobId,
+              processed: p.processed,
+              total: p.total,
+              staleUrlCount: p.staleUrlCount,
+              urlCount: p.urlCount,
+              message: p.message,
+              status: "running",
+            });
+          },
+        })
+      : {
+          summary: { errorCount: 0, warningCount: 0 },
+          resultsPayload: await runOffThreadJob(msg, ci),
+        };
+
+    const payload = "resultsPayload" in output ? output.resultsPayload : output;
+    const summary = payload.summary;
+    if (!usesDiagnosticsRunner) {
+      lastProcessed = 1;
+      lastTotal = 1;
+    }
 
     fs.mkdirSync(path.dirname(resultsPath), { recursive: true });
-    fs.writeFileSync(resultsPath, JSON.stringify(output.resultsPayload, null, 2) + "\n", "utf-8");
+    fs.writeFileSync(resultsPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
 
     send({
       type: "completed",
       jobId,
       processed: Math.max(lastProcessed, lastTotal),
       total: lastTotal,
-      summary: output.summary,
+      summary,
       resultsPath,
     });
-    process.exitCode = 0;
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     send({ type: "failed", jobId, error });
-    process.exitCode = 1;
   }
 }
 
@@ -110,6 +137,35 @@ function flushStats(): void {
     flushTick();
   } catch (err) {
     console.error("[diagnostics-worker] process stats flush failed", err);
+  }
+}
+
+let reusable = false;
+let stopAfter = false;
+let working = false;
+const inbox: DiagnosticsWorkerStartMessage[] = [];
+
+async function drain(): Promise<void> {
+  if (working) return;
+  const msg = inbox.shift();
+  if (!msg) {
+    if (stopAfter || !reusable) {
+      flushStats();
+      process.exit(0);
+    }
+    return;
+  }
+  working = true;
+  if (msg.reusable) reusable = true;
+  await handleStart(msg);
+  working = false;
+  if (inbox.length > 0) {
+    void drain();
+    return;
+  }
+  if (stopAfter || !reusable) {
+    flushStats();
+    process.exit(0);
   }
 }
 
@@ -123,11 +179,18 @@ process.on("SIGINT", () => {
 });
 
 process.on("message", (raw: DiagnosticsWorkerInboundMessage) => {
-  if (!raw || typeof raw !== "object" || raw.type !== "start") return;
-  void handleStart(raw).finally(() => {
-    flushStats();
-    setTimeout(() => process.exit(process.exitCode ?? 0), 50);
-  });
+  if (!raw || typeof raw !== "object") return;
+  if (raw.type === "stop") {
+    stopAfter = true;
+    if (!working && inbox.length === 0) {
+      flushStats();
+      process.exit(0);
+    }
+    return;
+  }
+  if (raw.type !== "start") return;
+  inbox.push(raw);
+  void drain();
 });
 
 startTick({ processName: "diagnostics-worker", processStartId: randomUUID() });

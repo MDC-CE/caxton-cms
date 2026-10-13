@@ -50,7 +50,8 @@ export const seoClusterValidator: Validator = {
     const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
 
-    const publicUrls = createPublicUrlResolver(contentIndex);
+    const ci = context.contentIndex ?? contentIndex;
+    const publicUrls = createPublicUrlResolver(ci);
     const seoIndex = loadSeoIndex(context.contentRoot);
     const orphanIds = new Set(seoIndex.orphans);
     const liveFiles = liveFilesForSeo(context);
@@ -191,7 +192,7 @@ export const seoClusterValidator: Validator = {
         let finalHub: string | null = null;
         if (!hubPaths.has(pillarNorm)) {
           try {
-            const canon = canonicalizePillarPath(pillarNorm, pillarLocale, contentIndex);
+            const canon = canonicalizePillarPath(pillarNorm, pillarLocale, ci);
             if (canon.path !== pillarNorm && hubPaths.has(toPublicUrlPath(canon.path))) {
               finalHub = toPublicUrlPath(canon.path);
             }

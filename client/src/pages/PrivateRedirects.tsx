@@ -298,7 +298,22 @@ export default function PrivateRedirects() {
     setValidationExpanded(false);
     try {
       const res = await apiRequest("POST", "/api/validation/run/redirects");
-      const data = await res.json();
+      const started = await res.json();
+      let data = started;
+      if (
+        typeof started.job_id === "string" &&
+        (started.status === "queued" || started.status === "running")
+      ) {
+        const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+        const done = await pollDiagnosticsJob(started.job_id);
+        const validators = Array.isArray(done.validators) ? done.validators : [];
+        const first = validators[0] as { status?: string } | undefined;
+        data = first ?? {
+          status: (done.summary?.errorCount ?? 0) > 0 ? "failed" : (done.summary?.warningCount ?? 0) > 0 ? "warning" : "passed",
+          errors: [],
+          warnings: [],
+        };
+      }
       setValidationResult(data);
       if (data.status === "failed" || data.status === "warning") {
         setShowValidation(true);
@@ -1379,7 +1394,7 @@ export default function PrivateRedirects() {
                                           {
                                             value: "fallback" as const,
                                             label: "Fallback",
-                                            desc: "Only redirects if no real page matches. Real pages take priority.",
+                                            desc: "Only redirects if no real page matches. Pattern rules also skip when their destination page does not exist.",
                                           },
                                         ].map((option, i) => (
                                           <button

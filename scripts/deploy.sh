@@ -499,6 +499,10 @@ echo "[deploy] validating pipeline SQLite migrations (dry-run)"
 npm run ensure:pipeline-db -- --dry-run
 abort_requested && handle_abort
 
+echo "[deploy] prebuilding public HTML (before traffic flip)"
+NODE_ENV=production node dist/prebuild-html-cache.js
+abort_requested && handle_abort
+
 # Intentionally clear flags after pull wrote them — boot hash-diff catches newer content.
 clear_bootstrap_complete_flags
 

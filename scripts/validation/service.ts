@@ -277,6 +277,11 @@ export class ValidationService {
     return listValidators();
   }
 
+  /** Run validators against a context built by the caller (one page, redirects, images). */
+  useContext(ctx: ValidationContext): void {
+    this.context = ctx;
+  }
+
   getContext(): ValidationContext | null {
     return this.context;
   }

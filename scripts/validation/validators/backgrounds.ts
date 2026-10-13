@@ -10,9 +10,9 @@
 import * as fs from "fs";
 import * as yaml from "js-yaml";
 import type { Validator, ValidationContext, ValidatorResult, ValidationIssue } from "../shared/types";
-import { classifyThemeValue, paletteIds } from "../../../shared/theme-palette";
+import { classifyThemeValue, missingBasePaletteIds, paletteIds } from "../../../shared/theme-palette";
 import { escapeTemplateVars, unescapeObjectVars } from "../../../shared/templateVars";
-import { loadSiteTheme, siteThemePath } from "../../../server/theme-config";
+import { hasOwnSiteTheme, loadSiteTheme, siteThemePath } from "../../../server/theme-config";
 import { getDefaultContentRoot } from "../../../server/site-config";
 import { BACKGROUNDS_ISSUE_CODES } from "./backgrounds.issueCodes";
 
@@ -48,6 +48,16 @@ export const backgroundsValidator: Validator = {
     }
 
     const entries = theme.backgrounds ?? [];
+    const missingBase = hasOwnSiteTheme(contentRoot) ? missingBasePaletteIds(entries) : [];
+    if (missingBase.length > 0) {
+      warnings.push({
+        type: "warning",
+        code: "MISSING_BASE_PALETTE",
+        message: `theme.json lacks shared base palette IDs: ${missingBase.join(", ")}. Components shared by every site use them.`,
+        file: siteThemePath(contentRoot),
+        suggestion: "Add these background entries in the Theme editor (values can differ per site); see SHARED_BASE_PALETTE in shared/theme-palette.ts",
+      });
+    }
     const allowed = paletteIds(entries);
     const allowedHint = allowed.slice(0, 8).join(", ");
     let totalBackgrounds = 0;

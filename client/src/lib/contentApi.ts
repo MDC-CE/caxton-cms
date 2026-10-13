@@ -1,6 +1,7 @@
 import { getDebugToken, resolveAuthorName } from "@/hooks/useDebugAuth";
 import type { EditOperation } from "@shared/schema";
 import { encodeHtmlValues } from "@shared/htmlEncoding";
+import type { BrokenInternalLink, InternalLinkWarning } from "@shared/internalLinkGate";
 
 export interface ContentEditRequest {
   contentType: string;
@@ -21,6 +22,19 @@ export interface ContentEditResponse {
   /** Education: shared-template save HTML cache / async flush note (not a failure). */
   shared_template_html_cache?: string;
   boundUpdates?: string[];
+  code?: string;
+  /** Save blocked: links on the page that do not reach a live page. */
+  broken_internal_links?: BrokenInternalLink[];
+  /** Saved, but some links redirect, point at drafts, or are not blocked yet on this site. */
+  link_warnings?: InternalLinkWarning[];
+}
+
+export interface CommonEditResponse {
+  success: boolean;
+  error?: string;
+  code?: string;
+  broken_internal_links?: BrokenInternalLink[];
+  link_warnings?: InternalLinkWarning[];
 }
 
 export interface CommonEditRequest {
@@ -29,7 +43,7 @@ export interface CommonEditRequest {
   operations: { action: "update_field"; path: string; value: unknown }[];
 }
 
-export async function editCommonContent(request: CommonEditRequest): Promise<{ success: boolean; error?: string }> {
+export async function editCommonContent(request: CommonEditRequest): Promise<CommonEditResponse> {
   const token = getDebugToken();
   const author = await resolveAuthorName();
 
@@ -46,7 +60,12 @@ export async function editCommonContent(request: CommonEditRequest): Promise<{ s
     return await response.json();
   } else {
     const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-    return { success: false, error: errorData.error || `Request failed with status ${response.status}` };
+    return {
+      success: false,
+      error: errorData.error || `Request failed with status ${response.status}`,
+      ...(errorData.code ? { code: errorData.code } : {}),
+      ...(errorData.broken_internal_links ? { broken_internal_links: errorData.broken_internal_links } : {}),
+    };
   }
 }
 
@@ -94,6 +113,8 @@ export async function editContent(request: ContentEditRequest): Promise<ContentE
     return {
       success: false,
       error: errorData.error || `Request failed with status ${response.status}`,
+      ...(errorData.code ? { code: errorData.code } : {}),
+      ...(errorData.broken_internal_links ? { broken_internal_links: errorData.broken_internal_links } : {}),
     };
   }
 }

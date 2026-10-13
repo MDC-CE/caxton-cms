@@ -72,6 +72,11 @@ import {
   isDeprecatedFieldInfo,
 } from "../lib/deprecated-field-mcp.js";
 import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
+import {
+  brokenInternalLinksResult,
+  internalLinkWarnings,
+  isBrokenInternalLinksError,
+} from "../lib/internal-links-mcp.js";
 import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
 import { THEME_COLORS_CODE } from "../../shared/theme-palette.js";
 import { RENDER_REVIEW_REQUIRED_CODE, renderReviewRequiredResult } from "../lib/render-review-mcp.js";
@@ -84,7 +89,7 @@ import {
   isNonEmptyFieldValue,
 } from "../../shared/deprecatedField.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
-import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, overrideMasksSourceWarning, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
+import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, diagnosticsJobNextActions, overrideMasksSourceWarning, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
 import {
   isSignupFieldMapError,
   signupFieldMapActionRequired,
@@ -2280,7 +2285,9 @@ export function registerPageTools(
     "Example claim: \"SEO title empty on blog/foo/en — will set meta.page_title from H1 and re-check.\" " +
     AGENT_REPORT_ISSUE_COMPLETE_EXAMPLE + " " +
     "Example release: \"Tried updating meta.page_title; validator still fails because sitemap entry missing — need redirects change.\" " +
-    "Does NOT push YAML/GitHub. complete runs entry-local (or seo-duplicates) revalidation before overlay. " +
+    "Does NOT push YAML/GitHub. The first complete waits up to 25 seconds. " +
+    "If the check finishes, this call archives or refuses. If it is still running, poll get_diagnostics_job, " +
+    "then call complete again with job_id to archive or refuse. " +
     "A later validator cache write that rewrites the same id clears complete but keeps an active claim and prior_attempts; may emit validation_issue_reopened in admin events. " +
     "Requires content_edit_text or seo_edit. Pass issue_id only (no update-by-code). Optional model (best-effort, self-reported).",
     {
@@ -2302,8 +2309,12 @@ export function registerPageTools(
       agent_session_id: z
         .string()
         .describe("Required. From agent_session start — groups claim/complete/release under the same run."),
+      job_id: z
+        .string()
+        .optional()
+        .describe("After get_diagnostics_job reports completed, when the first complete timed out. That call archives or refuses. Omit on the first call."),
     },
-    async ({ issue_id, action, site, model, report, why, highlights, agent_session_id }) => {
+    async ({ issue_id, action, site, model, report, why, highlights, agent_session_id, job_id }) => {
       const canMutate =
         !mcpToken ||
         !grants ||
@@ -2376,10 +2387,43 @@ export function registerPageTools(
               ...(trimmedReport ? { report: trimmedReport } : {}),
               ...(action === "complete" && why ? { why } : {}),
               ...(action === "complete" && highlights ? { highlights } : {}),
+              ...(action === "complete" && job_id ? { job_id } : {}),
             }),
           },
         );
         const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (
+          action === "complete" &&
+          (data.status === "queued" || data.status === "running" || data.status === "busy")
+        ) {
+          return ok(
+            {
+              status: data.status,
+              job_id: data.job_id,
+              retry_after_seconds: data.retry_after_seconds,
+              code: data.code,
+              message: data.status === "busy"
+                ? "Site-wide diagnostics is already running. The issue was not archived."
+                : "The check is still running after 25 seconds. The issue was not archived. Poll get_diagnostics_job, then complete again with job_id.",
+            },
+            {
+              warnings: [
+                {
+                  code: "issue_not_archived",
+                  message:
+                    "This complete did not archive the issue. It does not save traffic. Poll get_diagnostics_job; when status is completed, call update_issue complete with that job_id.",
+                },
+              ],
+              next_actions: diagnosticsJobNextActions({
+                body: {
+                  status: String(data.status),
+                  job_id: typeof data.job_id === "string" ? data.job_id : undefined,
+                },
+                site,
+              }),
+            },
+          );
+        }
         if (!res.ok) {
           const code = typeof data.code === "string" ? data.code : "update_issue_failed";
           if (code === "report_required" || code === "report_too_short" || code === "report_quality") {
@@ -2427,7 +2471,7 @@ export function registerPageTools(
           {
             code: "complete_revalidates",
             message:
-              "complete re-runs entry-local validators (or seo-duplicates for DUPLICATE_TITLE/DESCRIPTION) before soft-complete. Refuses with complete_rejected_still_open if the issue still reproduces; records prior_attempts. Returns auto_completed_ids for siblings on the same entry cleared by that revalidation.",
+              "A complete that finishes within 25 seconds archives or refuses in this call. If it is still running, poll get_diagnostics_job, then complete again with job_id. That second call archives or refuses. Duplicate title/description uses the site-wide child and can be busy.",
           },
           {
             code: "claim_ttl_30m",
@@ -2927,19 +2971,19 @@ export function registerPageTools(
               kind: "diagnostics_job",
               summary: `Background job ${jobId} will write validation-cache.json when completed.`,
             }],
-            next_actions: [{
-              tool: "get_diagnostics_job",
-              reason: "Poll until status is completed or failed",
-              args_hint: {
+            next_actions: diagnosticsJobNextActions({
+              body: {
+                status: typeof data.status === "string" ? data.status : "queued",
                 job_id: jobId,
-                ...(site ? { site } : {}),
+              },
+              site,
+              issueList: {
                 ...(open_issues_limit != null ? { open_issues_limit } : {}),
                 ...(severity ? { severity } : {}),
                 ...(category ? { category } : {}),
                 ...(codes?.length ? { codes } : {}),
               },
-              priority: "required",
-            }],
+            }),
           },
         );
       } catch (e) {
@@ -3113,7 +3157,14 @@ export function registerPageTools(
           issuesBySlugFallback: data.issuesBySlug,
           viewerAuthor: mcpViewerAuthor(mcpToken),
           });
-        const next_actions: NextAction[] = [];
+        const next_actions: NextAction[] = diagnosticsJobNextActions({
+          body: {
+            status: "completed",
+            job_id,
+            purpose: data.purpose as { type?: string; issueId?: string } | undefined,
+          },
+          site,
+        });
         const pageNext = diagnosticsIssuePageNextAction({
           tool: "get_diagnostics_job",
           args_hint: issueArgsHint,
@@ -4062,6 +4113,7 @@ export function registerPageTools(
         appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         warnings.push(...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs));
         warnings.push(...textLimitWarnings(apiResult.data.text_limit_warnings));
+        warnings.push(...internalLinkWarnings(apiResult.data.link_warnings));
         results.push(`${localeEntries.length} field(s) → ${pathInfo.relativeHint}`);
       }
 
@@ -5704,6 +5756,15 @@ export function registerPageTools(
               publish: true,
             });
           }
+          if (isBrokenInternalLinksError(serverCode)) {
+            return brokenInternalLinksResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
           if (serverCode === THEME_COLORS_CODE) {
             return themeColorsRequiredResult(errMsg, data, {
               slug,
@@ -5952,6 +6013,15 @@ export function registerPageTools(
           }
           if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
             return textLimitsExceededResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              publish: true,
+            });
+          }
+          if (isBrokenInternalLinksError(serverCode)) {
+            return brokenInternalLinksResult(errMsg, data, {
               slug,
               contentType,
               locale,
@@ -7284,6 +7354,7 @@ const ghWarning = githubCommitWarning(commitResult);
         ...schemaOrgPageOverrideWarnings(sectionToAdd),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
         ...textLimitWarnings(apiResult.data.text_limit_warnings),
+        ...internalLinkWarnings(apiResult.data.link_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;
@@ -7942,6 +8013,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         ...variantWarningsIfNeeded(variant),
         ...deprecatedTemplateRefWarnings(apiResult.data.deprecated_template_refs),
         ...textLimitWarnings(apiResult.data.text_limit_warnings),
+        ...internalLinkWarnings(apiResult.data.link_warnings),
       ];
 appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let side_effects: McpSideEffect[] | undefined;

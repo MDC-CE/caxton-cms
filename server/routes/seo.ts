@@ -144,8 +144,7 @@ import {
   buildRobotsTxtContent,
 } from "../settings";
 import { variableManager } from "../variable-manager";
-import { getValidationService } from "../../scripts/validation/service";
-import { getCanonicalUrl, normalizeUrl } from "../../scripts/validation/shared/canonicalUrls";
+import { normalizeUrl } from "../../scripts/validation/shared/canonicalUrls";
 import {
   isNonLocalFilesystemSrc,
   buildRegistrySrcToIdMap,
@@ -671,42 +670,20 @@ export function registerSeoRoutes(app: Express): void {
         }
       }
 
+      if (!resolved) {
+        res.status(404).json({
+          error: "No page in the index for this path",
+          sections: [],
+        });
+        return;
+      }
+
       if (!rawData) {
-        const service = getValidationService();
-        let context = service.getContext();
-        if (!context) {
-          context = await service.buildContext();
-        }
-
-        const matchingFiles = (context.contentFiles as any[]).filter(
-          (f: any) => normalizeUrl(getCanonicalUrl(f)) === normalizedPath,
-        );
-
-        const file =
-          matchingFiles.find((f: any) => f.locale === effectiveLocale) ||
-          matchingFiles.find((f: any) => f.locale !== "_common") ||
-          matchingFiles[0] ||
-          null;
-
-        if (!file) {
-          res.json({ sections: [] });
-          return;
-        }
-
-        rawData = {};
-        try {
-          const commonPath = path.join(path.dirname(file.filePath), "_common.yml");
-          if (fs.existsSync(commonPath)) {
-            const commonData =
-              (safeYamlLoad(fs.readFileSync(commonPath, "utf-8")) as Record<string, unknown>) || {};
-            rawData = { ...commonData };
-          }
-          if (fs.existsSync(file.filePath)) {
-            const localeData =
-              (safeYamlLoad(fs.readFileSync(file.filePath, "utf-8")) as Record<string, unknown>) || {};
-            rawData = { ...rawData, ...localeData };
-          }
-        } catch {}
+        res.status(404).json({
+          error: "This page has no content for that language",
+          sections: [],
+        });
+        return;
       }
 
       const includeYaml = req.query.includeYaml === "true";
@@ -938,6 +915,7 @@ export function registerSeoRoutes(app: Express): void {
       if (perspectiveRaw === "traffic") {
         const data = await buildTrafficClusterMetrics({
           seoIndex,
+          site: contentFolder,
           contentRoot,
           contentFolder,
           market: marketParam,

@@ -315,19 +315,18 @@ export type ConsentChannelDef = {
 };
 
 /**
- * Channel switches for ConsentCard: every Settings consent except Default
- * (`consent.fallback`). Builtins always appear (unless they are the fallback);
- * custom keys come from `settingsKeys`.
+ * Channel switches for ConsentCard: every Settings consent, including Default
+ * (`consent.fallback`). Builtins always appear; custom keys come from `settingsKeys`.
+ * `fallbackKey` is unused here — the form still shows that checkbox when no
+ * channel is on (`shouldShowFallbackConsent`).
  */
 export function consentCardChannels(
   settingsKeys: string[],
-  fallbackKey?: string | null,
+  _fallbackKey?: string | null,
 ): ConsentChannelDef[] {
-  const skip = normalizeConsentFallbackKey(fallbackKey);
   const seen = new Set<string>();
   const defs: ConsentChannelDef[] = [];
   const add = (settingsKey: string) => {
-    if (skip === settingsKey) return;
     const yamlField = yamlFieldFromConsentKey(settingsKey);
     if (!yamlField || NON_CHANNEL_CONSENT_KEYS.has(yamlField) || seen.has(yamlField)) return;
     seen.add(yamlField);

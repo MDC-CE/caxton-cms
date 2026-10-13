@@ -161,15 +161,21 @@ function detectLocale(req: Request): string {
  * Substitute `$1`…`$n` in a redirect target. Relative (site) destinations lowercased
  * so case-insensitive regex matches still land on canonical lowercase content URLs.
  * Absolute http(s) destinations keep original capture casing (external IDs may be caseful).
+ * Single pass with a replacer: capture values come from the visitor's URL and are
+ * inserted literally (never re-scanned for `$2`, `$&`, …).
  */
-function applyCaptureGroups(target: string, captureGroups: string[]): string {
+export function applyCaptureGroups(target: string, captureGroups: string[]): string {
   const lowercaseCaptures = !/^https?:\/\//i.test(target);
-  let out = target;
-  for (let i = 0; i < captureGroups.length; i++) {
-    const value = lowercaseCaptures ? captureGroups[i].toLowerCase() : captureGroups[i];
-    out = out.replace(new RegExp(`\\$${i + 1}`, "g"), value);
-  }
-  return out;
+  return target.replace(/\$(\d+)/g, (match, digits: string) => {
+    // Longest group number that exists wins; trailing digits stay literal ("$12" with one group → value + "2").
+    for (let len = digits.length; len > 0; len--) {
+      const value = captureGroups[Number(digits.slice(0, len)) - 1];
+      if (value !== undefined) {
+        return (lowercaseCaptures ? value.toLowerCase() : value) + digits.slice(len);
+      }
+    }
+    return match;
+  });
 }
 
 function resolveRedirectTarget(entry: RedirectEntry, req: Request, captureGroups?: string[]): string {
@@ -217,9 +223,26 @@ function withInboundQuery(target: string, req: Request): string {
   return mergeQueryIntoTarget(target, req.originalUrl);
 }
 
+/**
+ * True when following `target` would request the same path again (a guaranteed browser loop).
+ * Case or trailing-slash differences are not loops: the next hop matches exactly and stops here.
+ */
+export function isSelfRedirectTarget(requestPath: string, host: string | undefined, target: string): boolean {
+  const base = `http://${host || "localhost"}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(target, base);
+  } catch {
+    return false;
+  }
+  if (parsed.host !== new URL(base).host) return false;
+  return parsed.pathname === requestPath;
+}
+
 function sendRedirect(
   req: Request,
   res: Response,
+  next: NextFunction,
   opts: {
     from: string;
     to: string;
@@ -230,6 +253,11 @@ function sendRedirect(
     logLabel?: string;
   },
 ): void {
+  if (isSelfRedirectTarget(req.path, req.headers.host, opts.to)) {
+    log.warn(`[Redirects] Skipped self-redirect${opts.logLabel ? ` ${opts.logLabel}` : ""}: ${opts.from} -> ${opts.to} (source: ${opts.source ?? "unknown"})`);
+    next();
+    return;
+  }
   applyRedirectTraceCookie(req, res, {
     from: opts.from,
     to: opts.to,
@@ -259,7 +287,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
     ((res.locals.site as any)?.contentRoot as string | undefined) || ci.contentRoot;
   const homeAliasTarget = resolveLocaleHomeAliasTarget(req.path, ci, contentRoot);
   if (homeAliasTarget) {
-    sendRedirect(req, res, {
+    sendRedirect(req, res, next, {
       from: req.path,
       to: withInboundQuery(homeAliasTarget, req),
       status: 301,
@@ -279,7 +307,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
   if (entry) {
     const status = entry.status || 301;
     const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-    sendRedirect(req, res, {
+    sendRedirect(req, res, next, {
       from: req.path,
       to: target,
       status,
@@ -296,7 +324,7 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
       const captureGroups = match.slice(1);
       const status = regexEntry.status || 301;
       const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
-      sendRedirect(req, res, {
+      sendRedirect(req, res, next, {
         from: req.path,
         to: target,
         status,
@@ -342,7 +370,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     if (entry) {
       const status = entry.status || 301;
       const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-      sendRedirect(req, res, {
+      sendRedirect(req, res, next, {
         from: req.path,
         to: target,
         status,
@@ -362,7 +390,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
         const captureGroups = match.slice(1);
         const status = regexEntry.status || 301;
         const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
-        sendRedirect(req, res, {
+        sendRedirect(req, res, next, {
           from: req.path,
           to: target,
           status,
@@ -393,7 +421,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     const soft = findCanonicalSoftMatch(cleanUrlNoSlash, activeCi);
     if (soft) {
       const target = withInboundQuery(soft.canonicalUrl, req);
-      sendRedirect(req, res, {
+      sendRedirect(req, res, next, {
         from: cleanUrl,
         to: target,
         status: 301,
@@ -419,7 +447,7 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     if (entry) {
       const status = entry.status || 301;
       const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-      sendRedirect(req, res, {
+      sendRedirect(req, res, next, {
         from: req.path,
         to: target,
         status,
@@ -433,13 +461,22 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
   }
 
   if (activeRegexFb) {
+    const reachMaps = getActiveRedirectMaps(siteCi);
+    const locale = detectLocale(req);
     for (const { regex, entry: regexEntry } of activeRegexFb) {
       const match = req.path.match(regex);
       if (match) {
         const captureGroups = match.slice(1);
+        const reachable = resolveReachableTarget(
+          resolveRedirectTarget(regexEntry, req, captureGroups),
+          locale,
+          activeCi,
+          reachMaps,
+        );
+        if (!reachable) continue;
         const status = regexEntry.status || 301;
-        const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
-        sendRedirect(req, res, {
+        const target = withInboundQuery(reachable, req);
+        sendRedirect(req, res, next, {
           from: req.path,
           to: target,
           status,
@@ -675,6 +712,64 @@ export function toPublicUrlPath(rawInput: string): string {
   return urlPath;
 }
 
+const MAX_FALLBACK_CHAIN_HOPS = 3;
+
+function matchRedirectHop(
+  urlPath: string,
+  normalized: string,
+  locale: string,
+  maps: RedirectMaps,
+): string | null {
+  const exact = maps.map.get(normalized) ?? maps.fallbackNonCustomMap.get(normalized) ?? maps.fallbackMap.get(normalized);
+  if (exact) return resolveTarget(exact, locale);
+  for (const list of [maps.regexBefore, maps.regexFallbackNonCustom]) {
+    for (const { regex, entry } of list) {
+      const m = urlPath.match(regex);
+      if (m) return resolveTarget(entry, locale, m.slice(1));
+    }
+  }
+  return null;
+}
+
+/**
+ * Final URL a custom regex fallback should send the visitor to, or null when the
+ * destination never reaches a live page (caller tries the next rule, then 404).
+ * Category fixes and redirect chains collapse into a single hop.
+ */
+function resolveReachableTarget(
+  target: string,
+  locale: string,
+  ci: typeof contentIndex,
+  maps: RedirectMaps,
+  visited: Set<string> = new Set(),
+): string | null {
+  if (/^https?:\/\//i.test(target)) return target;
+  const urlPath = stripTrailingSlash(toPublicUrlPath(target));
+  const normalized = normalizePath(urlPath);
+  if (ci.isKnownUrl(urlPath) || ci.isKnownUrl(normalized)) return target;
+  try {
+    const soft = findCanonicalSoftMatch(urlPath, ci);
+    if (soft) return soft.canonicalUrl;
+  } catch {}
+  if (visited.has(normalized) || visited.size >= MAX_FALLBACK_CHAIN_HOPS) return null;
+  visited.add(normalized);
+  const next = matchRedirectHop(urlPath, normalized, locale, maps);
+  return next ? resolveReachableTarget(next, locale, ci, maps, visited) : null;
+}
+
+function getActiveRedirectMaps(siteCi: typeof contentIndex | undefined): RedirectMaps {
+  if (siteCi) return _getSiteRedirectMaps(siteCi);
+  const map = getRedirectMap();
+  return {
+    map,
+    regexBefore: regexRedirectsBefore ?? [],
+    fallbackMap: fallbackMap ?? new Map(),
+    regexFallback: regexRedirectsFallback ?? [],
+    fallbackNonCustomMap: fallbackNonCustomMap ?? new Map(),
+    regexFallbackNonCustom: regexRedirectsFallbackNonCustom ?? [],
+  };
+}
+
 function withDestinationExists(
   result: RedirectTestResult,
   ci: typeof contentIndex,
@@ -738,7 +833,11 @@ function evaluatePublicUrl(
 
     for (const { regex, entry } of maps.regexFallback) {
       const m = urlPath.match(regex);
-      if (m) return withDestinationExists(makeResult(entry, locale, "regex", "fallback", m.slice(1)), ci);
+      if (!m) continue;
+      const result = makeResult(entry, locale, "regex", "fallback", m.slice(1));
+      const reachable = resolveReachableTarget(result.resolvedTo ?? "", locale, ci, maps);
+      if (!reachable) continue;
+      return { ...result, resolvedTo: reachable, destinationExists: true };
     }
   }
 

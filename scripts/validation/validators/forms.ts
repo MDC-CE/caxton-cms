@@ -1,11 +1,15 @@
 /**
  * Forms Validator
  *
- * Scans all content files and reports:
+ * Scans the entry folders of the pages in the validation context (all locale
+ * files, including unpublished draft.*.yml overlays) and reports:
  * - conversion_name values that are set but not in the known conversion events list
  * - missing conversion_name when a bound form-settings object is present
  *   (absent nested forms, e.g. CTA-only heroes, are allowed)
  * - form fields.*.source.related_field issues (empty/missing/broken/slugs combo)
+ *
+ * Settings (conversion events, auth) come from the context's site, not the
+ * default site.
  */
 
 import * as fs from "fs";
@@ -19,34 +23,36 @@ import {
 import { validateSignupFormFields } from "../../../shared/authSignupFieldMap";
 import { validateFormFieldSources } from "../../../shared/validateFormFieldSources";
 import { resolveBoundFormSettingsPath } from "../../../shared/wipeOnDuplicate";
-import {
-  getAllDirectories,
-  getContentTypeConfig,
-  getType,
-} from "../../../server/content-types";
+import { getContentTypeConfig } from "../../../server/content-types";
 import { getTrackingSettings, getAuthSettings, getAuthConversionEventConfig } from "../../../server/settings";
 import { loadAllFieldEditors } from "../../../server/component-registry";
 import { escapeTemplateVars, unescapeObjectVars } from "../../../shared/templateVars";
 import { getDefaultContentRoot } from "../../../server/site-config";
 import { FORMS_ISSUE_CODES } from "./forms.issueCodes";
 
-const CONTENT_ROOT = getDefaultContentRoot();
-const CONTENT_DIRS = getAllDirectories().map((dir) => path.join(CONTENT_ROOT, dir));
+function isYamlFile(name: string): boolean {
+  return name.endsWith(".yml") || name.endsWith(".yaml");
+}
 
-function walkYamlFiles(dir: string): string[] {
-  const results: string[] = [];
-  if (!fs.existsSync(dir)) return results;
-
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...walkYamlFiles(fullPath));
-    } else if (entry.name.endsWith(".yml") || entry.name.endsWith(".yaml")) {
-      results.push(fullPath);
+/**
+ * Folders (absolute) → content type to scan: each context file's entry folder
+ * plus its content-type folder (shared template.*.yml files live there).
+ * Folders outside the site root are ignored so one site's run never reports
+ * another site's files.
+ */
+function collectEntryDirs(context: ValidationContext, root: string): Map<string, string> {
+  const rootAbs = path.resolve(root);
+  const dirs = new Map<string, string>();
+  for (const file of context.contentFiles) {
+    if (!file.filePath) continue;
+    const dir = path.dirname(path.resolve(file.filePath));
+    if (!dir.startsWith(rootAbs + path.sep)) continue;
+    const typeDir = path.join(rootAbs, path.relative(rootAbs, dir).split(path.sep)[0]);
+    for (const d of [dir, typeDir]) {
+      if (!dirs.has(d)) dirs.set(d, file.type);
     }
   }
-  return results;
+  return dirs;
 }
 
 function safeLoadYaml(filePath: string): Record<string, unknown> | null {
@@ -61,18 +67,6 @@ function safeLoadYaml(filePath: string): Record<string, unknown> | null {
   }
 }
 
-function contentTypeFromPath(filePath: string): string | null {
-  const rel = path.relative(path.join(process.cwd(), CONTENT_ROOT), filePath);
-  const parts = rel.split(path.sep);
-  const dir = parts[0];
-  if (!dir) return null;
-  try {
-    return getType(dir, CONTENT_ROOT);
-  } catch {
-    return dir;
-  }
-}
-
 export const formsValidator: Validator = {
   name: "forms",
   issueCodes: FORMS_ISSUE_CODES,
@@ -82,33 +76,36 @@ export const formsValidator: Validator = {
   estimatedDuration: "fast",
   category: "forms",
 
-  async run(_context: ValidationContext): Promise<ValidatorResult> {
+  async run(context: ValidationContext): Promise<ValidatorResult> {
     const startTime = Date.now();
     const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
-    const conversionNames = getTrackingSettings().conversion_events.map((e) => e.name);
-    const authConversion = getAuthConversionEventConfig();
-    const signupFieldMap = getAuthSettings().signup?.field_map;
+    const root = context.contentRoot ?? getDefaultContentRoot();
+    const conversionNames = getTrackingSettings(root).conversion_events.map((e) => e.name);
+    const authConversion = getAuthConversionEventConfig(root);
+    const signupFieldMap = getAuthSettings(root).signup?.field_map;
     const allFieldEditors = loadAllFieldEditors();
 
-    for (const fullDir of CONTENT_DIRS) {
-      const yamlFiles = walkYamlFiles(fullDir);
+    for (const [entryDir, ct] of Array.from(collectEntryDirs(context, root))) {
+      if (!fs.existsSync(entryDir)) continue;
+      const yamlFiles = fs
+        .readdirSync(entryDir, { withFileTypes: true })
+        .filter((d) => d.isFile() && isYamlFile(d.name))
+        .map((d) => path.join(entryDir, d.name));
+      const common = safeLoadYaml(path.join(entryDir, "_common.yml")) || {};
+      const config = getContentTypeConfig(ct, root);
 
       for (const filePath of yamlFiles) {
+        const base = path.basename(filePath);
+        const isCommon = base === "_common.yml" || base === "_common.yaml";
+        if (isCommon) continue;
+
         const parsed = safeLoadYaml(filePath);
         if (!parsed) continue;
 
         const relativePath = path.relative(process.cwd(), filePath);
         const sections = Array.isArray(parsed.sections) ? parsed.sections : [];
-        const base = path.basename(filePath);
-        const isCommon = base === "_common.yml" || base === "_common.yaml";
-        if (isCommon) continue;
-
-        const commonPath = path.join(path.dirname(filePath), "_common.yml");
-        const common = safeLoadYaml(commonPath) || {};
         const singleEntry = { ...common, ...parsed };
-        const ct = contentTypeFromPath(filePath);
-        const config = ct ? getContentTypeConfig(ct, CONTENT_ROOT) : undefined;
         const editor = config?.editor as Record<string, { type?: string }> | undefined;
         const isDraft = base.startsWith("draft.");
 

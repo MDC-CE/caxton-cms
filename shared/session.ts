@@ -1,3 +1,5 @@
+import type { TrafficChannel } from './traffic-channel';
+
 export interface Location {
   slug: string;
   name: string;
@@ -93,6 +95,11 @@ export interface Session {
     first?: PaidLandingRef;
     last?: PaidLandingRef;
   };
+  /** Traffic channel of the first visit (write-once) and the latest non-direct visit. */
+  entry_channel?: {
+    first?: ChannelTouch;
+    last?: ChannelTouch;
+  };
   consent: {
     geolocation: boolean | null;
     /** Tracking banner choice mirrored from the `4g_consent` cookie. */
@@ -111,6 +118,16 @@ export interface PaidLandingRef {
   campaign_id?: string | null;
   adset_id?: string | null;
   ad_id?: string | null;
+}
+
+export interface ChannelTouch {
+  channel: TrafficChannel;
+  /** Referrer host only, never the full URL. */
+  referrer_host?: string;
+  /** Normalized pathname this visit landed on. */
+  path: string;
+  /** Epoch milliseconds. */
+  at: number;
 }
 
 /**
@@ -147,7 +164,14 @@ export const MARKETING_UTM_KEYS: readonly (keyof UTMParams)[] = [
 export function stripMarketingFields(session: Session): Session {
   const utm: UTMParams = { ...session.utm };
   for (const key of MARKETING_UTM_KEYS) delete utm[key];
-  const { first_touch: _ft, paid_landing: _pl, landing_page: _lp, conversion_page: _cp, ...rest } = session;
+  const {
+    first_touch: _ft,
+    paid_landing: _pl,
+    entry_channel: _ec,
+    landing_page: _lp,
+    conversion_page: _cp,
+    ...rest
+  } = session;
   return { ...rest, utm };
 }
 
@@ -186,6 +210,10 @@ export interface WorkerMessage {
     host?: string; // window.location.hostname (for paid landing host)
     fbp?: string; // `_fbp` cookie read by main thread
     fbc?: string; // `_fbc` cookie read by main thread
+    /** `document.referrer` on page load; omitted on re-inits (geo refresh) so no channel is recorded. */
+    referrer?: string;
+    /** Current hostname + parent cookie domain (self-referrals and internal UTMs). */
+    ownHosts?: string[];
   };
 }
 

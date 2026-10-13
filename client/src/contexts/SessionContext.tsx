@@ -15,7 +15,7 @@ import { setVisitorContext } from '../lib/tracking';
 import { clearOverlayGeoCache } from '@/hooks/useOverlays';
 import { getConsentState, hasTrackingConsent, onConsentChange } from '../lib/consent';
 import { syncAdContext } from '../lib/adContext';
-import { readRawCookie } from '../lib/sessionCookie';
+import { getParentCookieDomain, readRawCookie } from '../lib/sessionCookie';
 
 function browserAdCookies(): { host: string; fbp?: string; fbc?: string } {
   return {
@@ -125,6 +125,10 @@ export function SessionProvider({ children }: SessionProviderProps) {
             device: getDeviceInfo(),
             existingUserId: getUserIdFromCookie() ?? undefined,
             ...browserAdCookies(),
+            referrer: document.referrer || '',
+            ownHosts: [window.location.hostname, getParentCookieDomain()].filter(
+              (h): h is string => !!h,
+            ),
           },
         };
 

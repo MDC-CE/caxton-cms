@@ -21,7 +21,7 @@ export const siteLinkIndexValidator: Validator = {
   async run(context: ValidationContext): Promise<ValidatorResult> {
     const startTime = Date.now();
     const contentRoot = context.contentRoot;
-    const publicUrls = createPublicUrlResolver(contentIndex);
+    const publicUrls = createPublicUrlResolver(context.contentIndex ?? contentIndex);
     const outboundByEntry: Record<string, string[]> = {};
 
     for (const file of liveFilesForSeo(context)) {

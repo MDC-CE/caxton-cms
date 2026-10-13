@@ -77,6 +77,7 @@ describe("allowedToolNames", () => {
     expect(names.has("get_organic_traffic")).toBe(true);
     expect(names.has("get_analytics_report")).toBe(true);
     expect(names.has("get_paid_traffic")).toBe(true);
+    expect(names.has("get_leads_breakdown")).toBe(true);
     expect(names.has("get_runtime_issues")).toBe(true);
     expect(names.has("list_media")).toBe(false);
     expect(names.has("list_entries")).toBe(false);
@@ -109,6 +110,7 @@ describe("allowedToolNames", () => {
     expect(names.has("get_organic_traffic")).toBe(false);
     expect(names.has("get_analytics_report")).toBe(false);
     expect(names.has("get_paid_traffic")).toBe(false);
+    expect(names.has("get_leads_breakdown")).toBe(false);
     expect(names.has("get_runtime_issues")).toBe(false);
     expect(names.has("update_fields")).toBe(false);
     expect(names.has("create_entry")).toBe(false);

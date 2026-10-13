@@ -155,7 +155,6 @@ import {
   getDatabaseName,
   getFieldMapping,
   getLookupKey,
-  getLocaleKey,
   getLocaleDefault,
   getIndexes,
   hasDatabaseSingle,
@@ -201,15 +200,12 @@ import { aggregateImageQueuePending, collectGcsSyncInventory } from "../gcs-sync
 import { runGcsConnectionTest } from "../gcs-connection-test";
 import { isImageQueueBusy } from "../image-queue-worker";
 import { z } from "zod";
+import { publicPageHead } from "../public-page-schema";
 import {
-  generateSsrSchemaHtml,
-  generateDatabaseSsrHtml,
-  generateListingSsrHtml,
   clearSsrSchemaCache,
   loadRawYaml,
   resolveFaqItems,
   buildFaqPageSchema,
-  resolvePageRobots,
   type FaqSection,
 } from "../ssr-schema";
 import {
@@ -218,7 +214,6 @@ import {
   clearMarkdownCacheByUrl,
 } from "../markdown";
 import { resolveDynamicEntries } from "../dynamic-entries";
-import { queryEntries } from "../query-entries";
 import { getBaseUrl } from "../hreflang";
 import * as userManager from "../user-manager";
 import * as userStore from "../user-store";
@@ -3799,108 +3794,12 @@ export function registerAdminRoutes(app: Express): void {
       return next();
     }
 
-    let schemaHtml = "";
-
-    const cleanUrl = url.split("?")[0].split("#")[0];
-    const resolved = getCI(res).resolveUrl(cleanUrl);
-    const isDatabaseRoute = resolved && resolved.fromDatabase;
-    const listingResolved = !isDatabaseRoute
-      ? getCI(res).resolveListingUrl(cleanUrl)
-      : null;
-    const isListingRoute = !!listingResolved;
-
-    let robotsDirective = "index, follow";
-
-    // Detect blog post URLs even when content-index can't resolve them (e.g. object-type category field)
-    const blogUrlMatch = !isDatabaseRoute
-      ? cleanUrl.match(/^\/(en|es)\/blog\/[^/]+\/([^/?#]+)$/)
-      : null;
-
-    if (isDatabaseRoute && resolved) {
-      try {
-        const locale =
-          resolved.patternLocale && resolved.patternLocale !== "default"
-            ? resolved.patternLocale
-            : getDefaultLocale();
-        // Fetch only the single entry needed for JSON-LD — not the whole content type.
-        const { items: posts } = await queryEntries(
-          {
-            from: { contentType: resolved.contentType },
-            locale,
-            filters: [{ field: "slug", value: resolved.slug }],
-            limit: 5,
-          },
-          {
-            db: getDB(res),
-            contentIndex: getCI(res),
-            contentRoot: getContentRoot(res),
-          },
-        );
-        const localeKey = getLocaleKey(resolved.contentType) || "lang";
-        const post =
-          posts.find(
-            (p) => p.slug === resolved.slug && (p as any)[localeKey] === locale,
-          ) || posts.find((p) => p.slug === resolved.slug);
-        if (post) {
-          schemaHtml = await generateDatabaseSsrHtml(
-            resolved.contentType,
-            post,
-            locale,
-            getCI(res),
-            getContentRoot(res),
-          );
-          if (typeof (post as any).robots === "string") {
-            robotsDirective = (post as any).robots;
-          }
-        }
-      } catch (err) {
-        log.error({ err, url }, "[SSR-DB] Error generating schema for");
-      }
-    } else if (isListingRoute && listingResolved) {
-      schemaHtml = generateListingSsrHtml(
-        listingResolved.contentType,
-        listingResolved.locale,
-        getContentRoot(res),
-      );
-    } else if (blogUrlMatch) {
-      try {
-        const locale = blogUrlMatch[1];
-        const slug = blogUrlMatch[2];
-        const { items: posts } = await queryEntries(
-          {
-            from: { contentType: "blog" },
-            locale,
-            filters: [{ field: "slug", value: slug }],
-            limit: 5,
-          },
-          {
-            db: getDB(res),
-            contentIndex: getCI(res),
-            contentRoot: getContentRoot(res),
-          },
-        );
-        const localeKey = getLocaleKey("blog") || "lang";
-        const post =
-          posts.find((p) => p.slug === slug && (p as any)[localeKey] === locale) ||
-          posts.find((p) => p.slug === slug);
-        if (post) {
-          schemaHtml = await generateDatabaseSsrHtml("blog", post, locale, getCI(res), getContentRoot(res));
-          if (typeof (post as any).robots === "string") {
-            robotsDirective = (post as any).robots;
-          }
-        }
-      } catch (err) {
-        log.error({ err, url }, "[SSR-Blog] Error generating schema for");
-      }
-    } else {
-      schemaHtml = await generateSsrSchemaHtml(url, getCI(res), getContentRoot(res));
-      robotsDirective = resolvePageRobots(url, getCI(res), getContentRoot(res));
-    }
-
-    robotsDirective = resolveEffectiveRobots(robotsDirective, getContentRoot(res));
+    const head = await publicPageHead(url, getCI(res), getDB(res), getContentRoot(res));
+    const schemaHtml = head.schemaHtml;
+    const isBlogRoute = head.isBlogRoute;
+    let robotsDirective = resolveEffectiveRobots(head.robotsDirective, getContentRoot(res));
     res.setHeader("X-Robots-Tag", robotsDirective);
 
-    const isBlogRoute = isDatabaseRoute || isListingRoute || !!blogUrlMatch;
     if (!schemaHtml && !isBlogRoute) {
       return next();
     }

@@ -94,6 +94,7 @@ export const ENTRY_LOCAL_VALIDATOR_NAMES = [
   "schema-org-companions",
   "content-quality",
   "section-variants",
+  "listing-sort",
   "text-limits",
   "backgrounds",
   "rich-text-styles",

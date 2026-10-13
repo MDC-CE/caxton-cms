@@ -545,6 +545,7 @@ type JobPollResponse = {
   message?: string;
   code?: string;
   summary?: { errorCount: number; warningCount: number };
+  reportPath?: string;
   log?: JobLogLine[];
 };
 
@@ -1473,7 +1474,18 @@ function GlobalHealthTab({ onOpenLeads }: { onOpenLeads?: () => void }) {
   const saveReportMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/validation/save-report", {});
-      return (await res.json()) as { ok: boolean; path: string; timestamp: string };
+      const started = await res.json();
+      if (
+        typeof started.job_id === "string" &&
+        (started.status === "queued" || started.status === "running")
+      ) {
+        const done = await pollDiagnosticsJob(started.job_id);
+        if (done.status === "failed") {
+          throw new Error(done.error || done.message || "Report failed");
+        }
+        return { ok: true, path: done.reportPath || "", timestamp: new Date().toISOString() };
+      }
+      return started as { ok: boolean; path: string; timestamp: string };
     },
     onSuccess: (data) => {
       toast({

@@ -5,6 +5,126 @@
 window_days: 6
 
 entries:
+  - date: "2026-10-08"
+    summary: "New get_leads_breakdown: staff Leads page numbers (channel vs UTM source / medium) for agents"
+    agent_impact:
+      - "get_leads_breakdown (metrics_view, read-only, one site per call): kpis, breakdowns (channels, source_medium, conversion_paths, landing_paths, experiments, time_to_lead) with drill-down filter per row. range 7d|30d|90d|all; filters channel/source/medium/conversion_path/landing_path/experiment/variant/ttl/product, \"(none)\" = empty."
+      - "Opt-in include_timeline (day/week series) and include_leads (latest 20 matching leads only, no paging, no personal data)."
+      - "Warnings: single_site, not_production_data, filters_match_nothing (+ next_action dropping the most specific filter), paid_count_differs_from_paid_traffic and source_medium_differs_from_channel (always), channel_tracking_partial, paid_rule_change_in_range, no_consent_leads."
+      - "Non-effects: get_paid_traffic and get_organic_traffic unchanged; use get_paid_traffic for spend / campaigns / cost per lead."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/leads-breakdown.ts
+      - mcp-server/explain/ads.md
+      - shared/mcp-tool-catalog.ts
+  - date: "2026-10-08"
+    summary: "Lead ledger records the product; paused products count as lead conversions"
+    agent_impact:
+      - "lead_submissions stores product_id + product_slug (catalog-validated, paused included; NULL when unresolved or before migration 35). Staff Leads page filters with ?product=<id or slug>; product cards link there via 'Check Leads'."
+      - "resolveConversionProduct no longer rejects paused products: GA4 item_id is now sent for leads on paused products, so their 'Lead conversions (28d)' can rise from this date."
+      - "Non-effects: CRM payload unchanged (ledger_product_* keys are stripped); no MCP tool args or payloads changed."
+    tools_changed: false
+    paths:
+      - shared/resolveConversionProduct.ts
+      - server/ads/lead-ledger.ts
+      - server/ads/lead-product.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-08"
+    summary: "Lead traffic channel + organic search leads in get_organic_traffic clusters"
+    agent_impact:
+      - "get_organic_traffic mode=clusters adds hubLeads / clusterLeads / members[].leads {organic_search, not_paid, tracked} and top-level leads {available, tracking_since, estimated, basis, selection_totals}; same window + market as clicks, credited to channel_landing_path. Use not_paid when leads.estimated (warnings organic_leads_partly_tracked / _not_tracked / _estimated / _unavailable)."
+      - "Lead ledger stores channel, first_channel, last_organic_channel, channel_landing_path, referrer_host, country, traffic_status (not sent to the CRM). Paid wins within 30 days; fbclid-only = meta_unclear on the staff Leads page only. Internal UTMs (own host / parent domain) are ignored by the session."
+      - "Non-effects: get_paid_traffic and Ads reports unchanged; utm_* never synthesized or rewritten; no CRM field added."
+    tools_changed: false
+    paths:
+      - mcp-server/lib/organic-traffic-mcp.ts
+      - server/seo-organic-leads.ts
+      - shared/traffic-channel.ts
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/ads.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-08"
+    summary: "Section spacing rule enforced in code (check:section-spacing)"
+    agent_impact:
+      - "Section variants may not set vertical padding/margin (py/pt/pb/my/mt/mb, style padding/margin) on their outermost element, or on its first child unless that child is a card. Fails pre-commit, prebuild (build and deploy) and npm test."
+      - "Exceptions are marker comments in the variant file: '// section-spacing: self-padded' (also list the variant under layout.self_padded) or '// section-spacing: overlay' (layout.flow: out). credibility_strip and lead_form carry self-padded markers pending a decision; their schema.yml does not list them yet (the check warns)."
+      - "Non-effects: no MCP tool args or payloads changed; content paddingY / marginY unaffected."
+    tools_changed: false
+    paths:
+      - scripts/section-spacing/lib.ts
+      - .husky/pre-commit
+      - mcp-server/explain/design.md
+  - date: "2026-10-08"
+    summary: "Section outer padding moved from variant code into each section's paddingY"
+    agent_impact:
+      - "About 40 variants (banner, testimonials_slide, features_quad default, course_selector, graduates_stats, article, hero credibility, ...) no longer add their own outer py-*. Existing sections got the old padding added to paddingY (often px values like 48px or two-value 'md 80px'); live pages render the same."
+      - "New sections of these types render with 0 vertical padding unless you set paddingY or insert from a registry example (examples were updated). Do not remove paddingY from these sections to 'fix' px values; that padding used to be in code."
+      - "self_padded now: features_quad [laptopEdge], why_learn_ai [laptopEdge], project_showcase true; numbered_steps no longer self_padded. Variant names in self_padded match ignoring -/_/case (laptop-edge = laptopEdge)."
+      - "Non-effects: no MCP tool args or payload shapes changed; marginY and paddingX untouched. Where a variant root painted a Tailwind bg-* class around the moved padding, that section's background became the equivalent theme ID (muted-30 was added to the 4geeks themes for bg-muted/30)."
+    tools_changed: false
+    paths:
+      - scripts/section-padding/inventory.ts
+      - shared/component-layout-traits.ts
+      - mcp-server/explain/design.md
+  - date: "2026-10-08"
+    summary: "Sites without their own theme.json use the inherit_components_from parent's theme; shared base palette"
+    agent_impact:
+      - "A site with inherit_components_from and no theme.json now uses the parent's theme.json (whole file, no merge) for theme_colors_required, recipes, insights and validators. Before, such sites had no theme and the color gate was off; agent writes there now need theme IDs from the parent theme."
+      - "Shared components (shared/component-registry/) and their examples may only use base palette background IDs: background, muted, card, primary, secondary, accent, light-blue-5, light-blue-5-gradient, hero-orbit-gradient (SHARED_BASE_PALETTE in shared/theme-palette.ts). Every theme keeps them."
+      - "Non-effects: no MCP tool args or payload shapes changed; theme_colors_required payload unchanged (allowed IDs now present on inheriting sites)."
+    tools_changed: false
+    paths:
+      - server/theme-config.ts
+      - shared/theme-palette.ts
+      - mcp-server/explain/design.md
+      - mcp-server/explain/content_system.md
+  - date: "2026-10-06"
+    summary: "Saves and publish check every internal link on the page reaches a live page (broken_internal_links)"
+    agent_impact:
+      - "Live saves (update_fields, edit_entry_sections, add_entry_section, replace_entry_sections on live files), publish_draft and promote_variant check every internal link on the merged page: markdown, <a href>, url/link/*_url fields, bare /en/ and /es/ paths. Live = same answer as test_redirect. An old broken link in another field also blocks."
+      - "Failure: code broken_internal_links, action_required fix_broken_internal_links, broken_internal_links[] {link, field_path, component?, closest_live_match?, draft_target?}, next_actions update_fields (dot field_path) + get_entry_content. Nothing is written."
+      - "Draft (variant) saves never block: warnings broken_internal_links_on_draft / internal_link_draft_target; those links block at publish. Links that 301 to a live page pass with warning internal_link_redirects (links[].final_url). Shared type-template edits are not checked."
+      - "Blocking starts per site only after data migration 005_fix_broken_internal_links completed; before that live saves pass with warning broken_internal_links_not_enforced. Validator BROKEN_INTERNAL_LINK now also sees markdown and href links."
+    tools_changed: false
+    paths:
+      - server/internal-link-gate.ts
+      - server/internal-link-hits.ts
+      - shared/internalLinkGate.ts
+      - mcp-server/lib/internal-links-mcp.ts
+      - mcp-server/explain/seo.md
+      - scripts/migrations/005_fix_broken_internal_links.ts
+  - date: "2026-10-06"
+    summary: "Custom regex fallback redirects only fire when the destination is live"
+    agent_impact:
+      - "custom-redirects.yml regex rules with priority: fallback skip when their destination never reaches a live page or external URL: the next rule is tried, then 404. No more redirect-to-another-404 (e.g. /us/blog/x no longer goes to /en/blog/blog/x)."
+      - "A destination that needs a blog category fix, or is itself a redirect (max 3 hops), resolves straight to the final URL in one 301. test_redirect resolvedTo shows that final URL. Exact fallbacks, before rules, and page meta.redirects are unchanged."
+    tools_changed: false
+    paths:
+      - server/redirects.ts
+      - mcp-server/explain/redirects.md
+  - date: "2026-10-06"
+    summary: "update_issue complete waits up to 25 seconds, then archives in that call"
+    agent_impact:
+      - "update_issue action complete still starts a diagnostics job and does not block the web process. The update call waits up to 25 seconds. If the check finishes, that same call archives (auto_completed_ids) or refuses with complete_rejected_still_open."
+      - "If the check is still running, the response is queued or running with job_id, retry_after_seconds, and next_actions to get_diagnostics_job. When that job is completed, call update_issue complete again with job_id. That second call archives or refuses. Claim, release, and uncomplete are unchanged."
+      - "DUPLICATE_TITLE and DUPLICATE_DESCRIPTION still use the site-wide child. If that child is already running, complete returns busy immediately and the issue stays open."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/routes/validation.ts
+      - server/services/verifiedCompleteIssue.ts
+  - date: "2026-10-05"
+    summary: "update_issue complete returns a diagnostics job instead of archiving in one call"
+    agent_impact:
+      - "update_issue action complete no longer archives in that call. The first response matches run_entry_diagnostics: status queued or busy, job_id, retry_after_seconds, and next_actions to get_diagnostics_job. The issue is not archived and traffic is not saved. Claim, release, and uncomplete are unchanged."
+      - "Poll GET /api/validation/diagnostics-jobs/:jobId via get_diagnostics_job. When status is completed and the job purpose is complete_issue, next_actions adds update_issue complete with that job_id. That second call archives (auto_completed_ids) or refuses with complete_rejected_still_open."
+      - "DUPLICATE_TITLE and DUPLICATE_DESCRIPTION use the site-wide diagnostics child. If that child is already running, complete returns busy and the issue stays open. A normal page issue uses the shared child and does not wait on the site-wide job."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/respond.ts
+      - server/routes/validation.ts
+      - server/services/diagnosticsJobService.ts
   - date: "2026-10-02"
     summary: "Signup GTM event uses the same lead dataLayer body as other form conversions"
     agent_impact:

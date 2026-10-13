@@ -33,6 +33,7 @@ export type AskAgentPromptId =
   | "organic-link-gaps"
   | "page-diagnostics"
   | "draft-feedback"
+  | "section-variant-swap"
   | "redirect-overwrites-content"
   | "resolved-issue-context"
   | "proposal-bad-outcome"
@@ -46,6 +47,7 @@ export const ASK_AGENT_PROMPT_IDS: AskAgentPromptId[] = [
   "organic-link-gaps",
   "page-diagnostics",
   "draft-feedback",
+  "section-variant-swap",
   "redirect-overwrites-content",
   "resolved-issue-context",
   "proposal-bad-outcome",

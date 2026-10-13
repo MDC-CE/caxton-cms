@@ -9,14 +9,9 @@ import { seoEntryId } from "./seo-index";
 import { getAllConfigs, getFullFieldMapping } from "./content-types";
 import { databaseManager } from "./database";
 import { mappingSourceString, type FieldMappingValue } from "@shared/validateEditorFieldTypes";
+import { extractInternalLinkHits, type InternalLinkHit } from "./internal-link-hits";
 
-export interface InternalLinkHit {
-  link: string;
-  fieldPath: string;
-  component?: string;
-}
-
-const INTERNAL_URL_PATTERN = /(?:^|\s)(\/(?:en|es)\/[^\s"'<>]*)/g;
+export { extractInternalLinkHits, type InternalLinkHit } from "./internal-link-hits";
 
 /** Fields likely to contain hrefs in DB-backed rows. */
 const DB_LINK_FIELD_HINTS = new Set([
@@ -29,74 +24,18 @@ const DB_LINK_FIELD_HINTS = new Set([
   "text",
 ]);
 
-export function findInternalLinks(
-  obj: unknown,
-  hits: InternalLinkHit[],
-  currentPath = "",
-  sectionType?: string,
-): void {
-  if (!obj || typeof obj !== "object") {
-    if (typeof obj === "string") {
-      let match: RegExpExecArray | null;
-      const re = new RegExp(INTERNAL_URL_PATTERN.source, "g");
-      while ((match = re.exec(obj)) !== null) {
-        hits.push({
-          link: match[1]!,
-          fieldPath: currentPath || "(root)",
-          component: sectionType,
-        });
-      }
-    }
-    return;
-  }
-
-  if (Array.isArray(obj)) {
-    const underSections =
-      currentPath === "sections" || currentPath.endsWith(".sections");
-    obj.forEach((item, index) => {
-      const itemPath = `${currentPath}[${index}]`;
-      let nextSectionType = sectionType;
-      if (
-        underSections &&
-        item &&
-        typeof item === "object" &&
-        !Array.isArray(item)
-      ) {
-        const t = (item as Record<string, unknown>).type;
-        if (typeof t === "string" && t.length > 0) nextSectionType = t;
-      }
-      findInternalLinks(item, hits, itemPath, nextSectionType);
-    });
-    return;
-  }
-
-  const record = obj as Record<string, unknown>;
-  for (const [key, value] of Object.entries(record)) {
-    const fieldPath = currentPath ? `${currentPath}.${key}` : key;
-    findInternalLinks(value, hits, fieldPath, sectionType);
-  }
-}
-
-function normalizeOutboundPath(link: string, resolver: PublicUrlResolver, locale: string): string | null {
-  const trimmed = link.trim();
-  if (!trimmed.startsWith("/")) return null;
-  const norm = trimmed.replace(/\/$/, "") || "/";
-  if (!resolver.isLive(norm, locale)) return norm;
-  return norm;
+export function findInternalLinks(obj: unknown, hits: InternalLinkHit[]): void {
+  hits.push(...extractInternalLinkHits(obj));
 }
 
 export function collectOutboundPathsFromData(
   data: Record<string, unknown>,
-  locale: string,
-  resolver?: PublicUrlResolver,
+  _locale: string,
+  _resolver?: PublicUrlResolver,
 ): string[] {
-  const publicUrls = resolver ?? createPublicUrlResolver(contentIndex);
-  const hits: InternalLinkHit[] = [];
-  findInternalLinks(data, hits);
   const out = new Set<string>();
-  for (const hit of hits) {
-    const norm = normalizeOutboundPath(hit.link, publicUrls, locale);
-    if (norm) out.add(norm);
+  for (const hit of extractInternalLinkHits(data)) {
+    out.add(hit.path.replace(/\/$/, "") || "/");
   }
   return [...out].sort();
 }

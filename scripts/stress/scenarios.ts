@@ -511,6 +511,14 @@ export const SCENARIOS: Scenario[] = [
     buildArgs: (ctx) => withSite(ctx, { mode: "leaderboard" }),
   },
   {
+    id: "get_organic_traffic_clusters",
+    tool: "get_organic_traffic",
+    about:
+      "Clicks plus organic-search leads for one discovered hub and its members (mode=clusters): day cache plus one grouped lead-ledger query. Read-only.",
+    buildArgs: (ctx) => withSite(ctx, { mode: "clusters", hub_ids: [ctx.seoClusterId!] }),
+    skipIf: needCluster,
+  },
+  {
     id: "get_analytics_report_site_summary",
     tool: "get_analytics_report",
     about:
@@ -575,6 +583,21 @@ export const SCENARIOS: Scenario[] = [
     about:
       "Google Ads diagnostics (28-day KPIs): saved Google report window + transfer / matching / network blocks + saved Google issue rows and run state. Read-only. Returns not_connected quickly when Google isn't set up.",
     buildArgs: (ctx) => withSite(ctx, { mode: "diagnostics", platform: "google" }),
+  },
+  {
+    id: "get_leads_breakdown_30d",
+    tool: "get_leads_breakdown",
+    about:
+      "Leads page numbers for the last 30 days (defaults): one stats call over the lead ledger — KPIs, channel and source / medium breakdowns, pages, experiments, time to lead. Read-only; also in burst.",
+    buildArgs: (ctx) => withSite(ctx, {}),
+    phase: "both",
+  },
+  {
+    id: "get_leads_breakdown_90d_full",
+    tool: "get_leads_breakdown",
+    about:
+      "Heaviest leads read: 90 days with the timeline series and the latest 20 matching leads (stats call + list call in parallel). Read-only.",
+    buildArgs: (ctx) => withSite(ctx, { range: "90d", include_timeline: true, include_leads: true }),
   },
   {
     id: "list_proposals",

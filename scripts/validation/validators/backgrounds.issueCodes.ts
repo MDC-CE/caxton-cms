@@ -16,4 +16,7 @@ export const BACKGROUNDS_ISSUE_CODES: Record<string, IssueCodeDefinition> = {
   NO_THEME_CONFIG: {
     title: "No Theme Config",
   },
+  MISSING_BASE_PALETTE: {
+    title: "Theme Missing Shared Base Palette Color",
+  },
 };

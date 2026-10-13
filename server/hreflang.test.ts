@@ -65,6 +65,61 @@ describe("generateHreflangTags", () => {
     );
     expect(tags).toEqual([]);
   });
+
+  it("does not invent the other locale for a one-locale entry when _hreflangs is empty", () => {
+    vi.mocked(getHreflangsSource).mockReturnValue(null);
+    vi.mocked(getContentTypeConfig).mockReturnValue({
+      url_pattern: { en: "/en/blog/:category/:slug", es: "/es/blog/:category/:slug" },
+    } as any);
+
+    const ci = {
+      getLocaleUrls: () => ({ en: "/en/blog/software-engineer/ai-software-engineer" }),
+    } as any;
+
+    const tags = generateHreflangTags(
+      "blog",
+      "ai-software-engineer",
+      "en",
+      { slug: "ai-software-engineer", category: "software-engineer" },
+      undefined,
+      ci,
+    );
+    expect(tags).toEqual([]);
+  });
+
+  it("does not invent the EN alternate for an ES-only entry when _hreflangs is empty", () => {
+    vi.mocked(getHreflangsSource).mockReturnValue(null);
+    vi.mocked(getContentTypeConfig).mockReturnValue({
+      url_pattern: { en: "/en/blog/:category/:slug", es: "/es/blog/:category/:slug" },
+    } as any);
+
+    const ci = {
+      getLocaleUrls: () => ({ es: "/es/blog/herramientas-ia/que-es-buzz" }),
+    } as any;
+
+    const tags = generateHreflangTags(
+      "blog",
+      "que-es-buzz",
+      "es",
+      { slug: "que-es-buzz", category: "herramientas-ia" },
+      undefined,
+      ci,
+    );
+    expect(tags).toEqual([]);
+  });
+
+  it("keeps the same-slug fallback when the resolver knows nothing about the entry", () => {
+    vi.mocked(getHreflangsSource).mockReturnValue(null);
+    vi.mocked(getContentTypeConfig).mockReturnValue({
+      url_pattern: { en: "/en/page/:slug", es: "/es/page/:slug" },
+    } as any);
+
+    const ci = { getLocaleUrls: () => ({}) } as any;
+
+    const tags = generateHreflangTags("page", "foo", "en", undefined, undefined, ci);
+    expect(tags.some((t) => t.includes('hreflang="en"') && t.includes("/en/page/foo"))).toBe(true);
+    expect(tags.some((t) => t.includes('hreflang="es"') && t.includes("/es/page/foo"))).toBe(true);
+  });
 });
 
 describe("generateHomepageHreflangTags", () => {

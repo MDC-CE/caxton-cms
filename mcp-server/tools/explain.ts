@@ -78,7 +78,7 @@ const TOPIC_DESC: Record<string, string> = {
     "Entry proposals hub — omit subtopic for index; subtopics: overview, reading, situations, internal-links, serp-title-description, funnel-classification, idea-opportunity-harm, existing-demand, broken-url, translations",
   analytics:
     "GA4 BigQuery reports via get_analytics_report; vs get_organic_traffic (GSC) and get_product_funnel_analytics (journey)",
-  ads: "Paid traffic via get_paid_traffic: Meta spend, paid landing pages, lead credit, consent limits, ad tracking diagnostics",
+  ads: "Paid traffic via get_paid_traffic: Meta spend, paid landing pages, lead credit, consent limits, ad tracking diagnostics; leads by channel vs UTM source / medium via get_leads_breakdown",
   design:
     "Designing a page: get_page_recipe → get_component_variant → create_page_demo → review_page_render; theme IDs, layout traits, learned rules, publish gate",
 };

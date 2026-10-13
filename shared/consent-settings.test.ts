@@ -134,22 +134,21 @@ describe("consentCardChannels", () => {
     "consent_ghfdsffdsa",
   ];
 
-  it("lists every Settings consent except the Default", () => {
+  it("lists every Settings consent, including the Default", () => {
     expect(consentCardChannels(keys, "consent_sms").map((c) => c.yamlField)).toEqual([
       "marketing",
+      "sms",
       "whatsapp",
       "email",
       "general",
       "ghfdsffdsa",
     ]);
-  });
-
-  it("omits General when it is the Default", () => {
     expect(consentCardChannels(keys, "consent_general").map((c) => c.yamlField)).toEqual([
       "marketing",
       "sms",
       "whatsapp",
       "email",
+      "general",
       "ghfdsffdsa",
     ]);
   });
@@ -238,6 +237,7 @@ describe("shouldShowFallbackConsent", () => {
     expect(shouldShowFallbackConsent({ sms: true }, "consent_general")).toBe(false);
     expect(shouldShowFallbackConsent({ terms: true }, "consent_general")).toBe(false);
     expect(shouldShowFallbackConsent({ general: true }, "consent_sms")).toBe(false);
+    expect(shouldShowFallbackConsent({ general: true, marketing: true }, "consent_general")).toBe(false);
   });
 
   it("is false when no fallback key is set", () => {

@@ -108,6 +108,7 @@ export const TOOL_GATES: Record<string, ToolGate> = {
   get_organic_traffic: { kind: "anyCap", caps: ["metrics_view", "seo_edit"] },
   get_analytics_report: { kind: "anyCap", caps: ["metrics_view"] },
   get_paid_traffic: { kind: "anyCap", caps: ["metrics_view"] },
+  get_leads_breakdown: { kind: "anyCap", caps: ["metrics_view"] },
   update_ads_issue: { kind: "anyCap", caps: ["metrics_view"] },
   get_runtime_issues: { kind: "anyCap", caps: ["metrics_view", "proposals_review"] },
   update_issue: { kind: "anyCap", caps: ["content_edit_text", "seo_edit"] },

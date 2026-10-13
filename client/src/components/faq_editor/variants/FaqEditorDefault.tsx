@@ -304,7 +304,7 @@ export function FaqEditor({ data }: FaqEditorProps) {
 
   if (!isEditMode) {
     return (
-      <section className="py-12">
+      <section>
         <div className="max-w-4xl mx-auto px-4">
           <h2 className="text-3xl font-bold text-center mb-8" data-testid="text-faq-editor-title">
             {data?.title || "Frequently Asked Questions"}
@@ -347,7 +347,7 @@ export function FaqEditor({ data }: FaqEditorProps) {
 
   if (isLoading) {
     return (
-      <section className="py-12">
+      <section>
         <div className="max-w-6xl mx-auto px-4">
           <div className="animate-pulse space-y-4">
             <div className="h-8 w-64 bg-muted rounded mx-auto" />
@@ -361,7 +361,7 @@ export function FaqEditor({ data }: FaqEditorProps) {
 
   if (error) {
     return (
-      <section className="py-12">
+      <section>
         <div className="max-w-6xl mx-auto px-4 text-center">
           <p className="text-destructive">Failed to load FAQs. Please try again.</p>
         </div>
@@ -370,7 +370,7 @@ export function FaqEditor({ data }: FaqEditorProps) {
   }
 
   return (
-    <section className="py-12" data-testid="section-faq-editor">
+    <section data-testid="section-faq-editor">
       <div className="max-w-6xl mx-auto px-4">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">

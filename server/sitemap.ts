@@ -334,11 +334,15 @@ function buildMapKey(entry: CanonicalSitemapEntry): string {
 // CANONICAL BUILDER - Single Source of Truth
 // ============================================================================
 
-function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, CanonicalSitemapEntry> {
+function buildCanonicalSitemapEntries(
+  ctx?: ActiveSiteCtx,
+  opts?: { ignoreSiteBlock?: boolean },
+): Map<string, CanonicalSitemapEntry> {
   _activeSiteCtx = ctx ?? null;
   try {
   const contentRoot = resolveSitemapContentRoot(ctx);
-  if (isIndexingBlocked(contentRoot)) {
+  const ignoreSiteBlock = opts?.ignoreSiteBlock === true;
+  if (isIndexingBlocked(contentRoot) && !ignoreSiteBlock) {
     log.info(`[Sitemap] Indexing blocked — returning empty sitemap (${ctx?.contentRootName ?? "__global__"})`);
     return new Map();
   }
@@ -358,7 +362,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
   // Dynamic career program pages
   const programs = getAvailablePrograms(ci);
   for (const program of programs) {
-    if (!shouldIndex(program.meta.robots, contentRoot)) {
+    if (!ignoreSiteBlock && !shouldIndex(program.meta.robots, contentRoot)) {
       log.info(
         `[Sitemap] Skipping noindex program: ${program.slug} (${program.locale})`,
       );
@@ -380,7 +384,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
   // Dynamic location pages
   const locations = getAvailableLocations(ci);
   for (const location of locations) {
-    if (!shouldIndex(location.meta.robots, contentRoot)) {
+    if (!ignoreSiteBlock && !shouldIndex(location.meta.robots, contentRoot)) {
       log.info(
         `[Sitemap] Skipping noindex location: ${location.slug} (${location.locale})`,
       );
@@ -402,7 +406,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
   // Dynamic template pages
   const templatePages = getAvailableTemplatePages(ci, cf);
   for (const page of templatePages) {
-    if (!shouldIndex(page.meta.robots, contentRoot)) {
+    if (!ignoreSiteBlock && !shouldIndex(page.meta.robots, contentRoot)) {
       log.info(
         `[Sitemap] Skipping noindex template page: ${page.slug} (${page.locale})`,
       );
@@ -444,7 +448,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
           continue;
         }
         const robots = resolveDbItemRobots(item, typeName, cf);
-        if (!shouldIndex(robots, contentRoot)) {
+        if (!ignoreSiteBlock && !shouldIndex(robots, contentRoot)) {
           log.info(
             `[Sitemap] Skipping noindex ${typeName}: ${String(item.slug || item.id || "")} (${locale})`,
           );
@@ -506,7 +510,7 @@ function buildCanonicalSitemapEntries(ctx?: ActiveSiteCtx): Map<string, Canonica
           if (!merged) continue;
 
           const meta = (merged.meta as ContentMeta) || {};
-          if (!shouldIndex(meta.robots, contentRoot)) {
+          if (!ignoreSiteBlock && !shouldIndex(meta.robots, contentRoot)) {
             log.info(`[Sitemap] Skipping noindex ${typeName}: ${slug} (${locale})`);
             continue;
           }
@@ -679,14 +683,18 @@ export function getSitemap(ctx?: ActiveSiteCtx): string {
   return entriesToXml(Array.from(entriesMap.values()));
 }
 
-export function getSitemapUrls(ctx?: ActiveSiteCtx): Array<{
+export function getSitemapUrls(ctx?: ActiveSiteCtx, ignoreSiteBlock = false): Array<{
   loc: string;
   label: string;
   locale?: string;
   content_type?: string;
   slug?: string;
 }> {
-  const entriesMap = getCanonicalEntries(ctx);
+  // The ignored walk is not cached: it must not replace the empty public sitemap.
+  // It also keeps page-level noindex URLs so the HTML warm list can store them.
+  const entriesMap = ignoreSiteBlock
+    ? buildCanonicalSitemapEntries(ctx, { ignoreSiteBlock: true })
+    : getCanonicalEntries(ctx);
   return entriesToHumanReadable(Array.from(entriesMap.values()));
 }
 

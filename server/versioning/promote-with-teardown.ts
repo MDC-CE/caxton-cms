@@ -46,7 +46,6 @@ import { ensurePublishedAtOnce } from "../published-at";
 import { clearSsrSchemaCache } from "../ssr-schema";
 import { invalidateContentCaches } from "../routes/_helpers";
 import { buildEntryKey } from "../../scripts/validation/shared/entryKey";
-import { scheduleOnSaveValidation } from "../services/onSaveValidation";
 import { emitEntryLocalePromoted } from "../content-events";
 import { refreshSitemapEntriesForContentKey } from "../sitemap";
 import { findTopLevelKeySpan, surgicalRemoveTopLevelKey } from "../seo-fields";
@@ -522,6 +521,28 @@ export async function promoteVariantWithOptionalTeardown(
       return { ok: false, code: "seo_gate", error: `Cannot promote: ${seoGate.message}` };
     }
     if (!templateMode) {
+      const { runInternalLinkGate } = await import("../internal-link-gate");
+      const linkGate = runInternalLinkGate({
+        pageData: mergedForGate,
+        locale,
+        contentRoot,
+        ci,
+        pageIsDraft: true,
+        intent: "publish",
+      });
+      if (linkGate.failure) {
+        return {
+          ok: false,
+          code: linkGate.failure.code,
+          error: `Cannot promote: ${linkGate.failure.message}`,
+          details: { broken_internal_links: linkGate.failure.broken_internal_links },
+        };
+      }
+      for (const w of linkGate.warnings) {
+        warnings.push({ code: w.code, message: w.message, fields: w.links.map((l) => l.field_path) });
+      }
+    }
+    if (!templateMode) {
       const urlCheck = assertLocaleUrlAvailable({
         contentType,
         entryIdentity: slug,
@@ -782,16 +803,6 @@ export async function promoteVariantWithOptionalTeardown(
       refreshSitemapEntriesForContentKey(contentType, slug, [locale]);
     }
 
-    scheduleOnSaveValidation({
-      contentRoot,
-      contentRootName,
-      ci,
-      cache,
-      contentType,
-      slug,
-      locale,
-      filePath: defaultFilePath,
-    });
     await cache.flush();
 
     emitEntryLocalePromoted({

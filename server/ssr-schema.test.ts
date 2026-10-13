@@ -490,4 +490,18 @@ describe("injectSsrSchemaHtml", () => {
     expect(html).toContain('content="article"');
     expect(html).not.toContain("Shell default description");
   });
+
+  it("inserts fragments containing `$` replacement patterns literally", () => {
+    const shell = `<!DOCTYPE html><html><head><title>Shell</title></head><body></body></html>`;
+    const fragment = [
+      `<meta name="description" content="$95K–$135K range, $1 $2 $&amp; $\` $' $$" />`,
+      `<script type="application/ld+json">{"description":"regex \\\\.(jpg|png)$\` and $&"}</script>`,
+    ].join("\n");
+
+    const html = injectSsrSchemaHtml(shell, fragment);
+
+    expect(html).toContain(fragment);
+    expect(countOccurrences(html, "<!DOCTYPE html>")).toBe(1);
+    expect(countOccurrences(html, "</head>")).toBe(1);
+  });
 });

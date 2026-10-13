@@ -18,6 +18,7 @@ import {
 } from "./respond.js";
 import { TEXT_LIMITS_EXCEEDED_CODE } from "../../shared/component-text-limits.js";
 import { textLimitsExceededResult } from "./text-limits-mcp.js";
+import { brokenInternalLinksResult, isBrokenInternalLinksError } from "./internal-links-mcp.js";
 import { THEME_COLORS_CODE } from "../../shared/theme-palette.js";
 import { themeColorsRequiredResult } from "./theme-colors-mcp.js";
 
@@ -192,6 +193,9 @@ export function editApiErrorResult(
   }
   if (data.code === TEXT_LIMITS_EXCEEDED_CODE) {
     return textLimitsExceededResult(errMsg, data, ctx);
+  }
+  if (isBrokenInternalLinksError(data.code)) {
+    return brokenInternalLinksResult(errMsg, data, ctx);
   }
   if (data.code === THEME_COLORS_CODE) {
     return themeColorsRequiredResult(errMsg, data, ctx);

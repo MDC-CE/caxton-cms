@@ -20,6 +20,13 @@ vi.mock("./html-page-cache", () => ({
   invalidateHtmlPageCacheForPath: vi.fn(),
   invalidateHtmlPageCache: vi.fn(),
 }));
+vi.mock("./html-rebuild", () => ({
+  scheduleSavedHtmlPaths: vi.fn(),
+  scheduleHotHtmlRebuild: vi.fn(),
+  scheduleContentTypeListingRebuild: vi.fn(),
+  scheduleDatabaseReaderRebuild: vi.fn(),
+  scheduleCachedSlugHtmlRebuild: vi.fn(),
+}));
 
 import { clearRedirectCache } from "./redirects";
 import {
@@ -28,10 +35,12 @@ import {
 } from "./sitemap";
 import { invalidateContentCachesWithoutHtml } from "./routes/_helpers";
 import { invalidateHtmlPageCacheForPath, invalidateHtmlPageCache } from "./html-page-cache";
+import { scheduleSavedHtmlPaths, scheduleHotHtmlRebuild, scheduleContentTypeListingRebuild } from "./html-rebuild";
 import {
   flushAfterContentWrites,
   yamlMentionsRedirects,
   collectEntryHtmlPaths,
+  classifyTouchedContentFiles,
 } from "./content-write-flush";
 import {
   validateBulkMetaUpdates,
@@ -73,10 +82,26 @@ describe("flushAfterContentWrites", () => {
     expect(refreshSitemapEntriesForContentKey).not.toHaveBeenCalled();
 
     await vi.waitFor(() => {
-      expect(invalidateHtmlPageCacheForPath).toHaveBeenCalled();
+      expect(scheduleSavedHtmlPaths).toHaveBeenCalled();
     });
-    expect(invalidateHtmlPageCacheForPath).toHaveBeenCalledWith("site_test", "/en/home");
+    expect(scheduleSavedHtmlPaths).toHaveBeenCalledWith(
+      "site_test",
+      ["/en/home", "/en/blog/post"],
+      undefined,
+    );
+    expect(invalidateHtmlPageCacheForPath).not.toHaveBeenCalled();
     expect(invalidateHtmlPageCache).not.toHaveBeenCalled();
+    expect(scheduleHotHtmlRebuild).not.toHaveBeenCalled();
+    expect(scheduleContentTypeListingRebuild).toHaveBeenCalledWith({
+      siteId: "site_test",
+      contentRoot: undefined,
+      contentType: "page",
+    });
+    expect(scheduleContentTypeListingRebuild).toHaveBeenCalledWith({
+      siteId: "site_test",
+      contentRoot: undefined,
+      contentType: "blog",
+    });
   });
 
   it("passes syncSlow true when requested", () => {
@@ -87,6 +112,7 @@ describe("flushAfterContentWrites", () => {
       syncSlow: true,
     });
     expect(ci.refresh).toHaveBeenCalledWith({ syncSlow: true });
+    expect(scheduleHotHtmlRebuild).not.toHaveBeenCalled();
   });
 
   it("uses content-key sitemap refresh when commonMetaTouched", () => {
@@ -110,6 +136,34 @@ describe("flushAfterContentWrites", () => {
   });
 });
 
+describe("classifyTouchedContentFiles", () => {
+  it("splits a blog entry and a database file", () => {
+    const ci = {
+      contentRoot: "/tmp/site_test",
+      getContentTypeConfig: (folder: string) => (folder === "blog" ? { directory: "blog" } : undefined),
+      normalizeType: (folder: string) => (folder === "blog" ? "blog" : folder),
+      getAlternateUrls: (slug: string) => ({
+        en: `/en/blog/news/${slug}`,
+        es: `/es/blog/noticias/${slug}`,
+      }),
+      buildUrl: (_type: string, locale: string, slug: string) =>
+        locale === "es" ? `/es/blog/noticias/${slug}` : `/en/blog/news/${slug}`,
+    };
+    expect(
+      classifyTouchedContentFiles(ci as any, [
+        "site_test/blog/post/en.yml",
+        "site_test/db/testimonials/testimonials.yml",
+        "site_test/blog/_common.template.yml",
+        "site_test/blog/template.en.yml",
+      ]),
+    ).toEqual({
+      contentTypes: ["blog"],
+      htmlPaths: ["/en/blog/news/post"],
+      databaseNames: ["testimonials"],
+    });
+  });
+});
+
 describe("yamlMentionsRedirects", () => {
   it("detects redirects keys", () => {
     expect(yamlMentionsRedirects("meta:\n  redirects:\n    - /old\n")).toBe(true);
@@ -118,18 +172,30 @@ describe("yamlMentionsRedirects", () => {
 });
 
 describe("collectEntryHtmlPaths", () => {
-  it("returns alternate paths", () => {
+  it("returns only the locale that was written", () => {
     const paths = collectEntryHtmlPaths(
       {
-        getAlternateUrls: () => ({ en: "/en/home", es: "/es/inicio" }),
-        buildUrl: () => "/en/home",
+        getAlternateUrls: () => ({ en: "/en/outcomes", es: "/es/resultados" }),
+        buildUrl: () => "/en/outcomes",
       } as any,
       "page",
-      "home",
+      "outcomes",
       "en",
     );
-    expect(paths).toContain("/en/home");
-    expect(paths).toContain("/es/inicio");
+    expect(paths).toEqual(["/en/outcomes"]);
+  });
+
+  it("returns every locale when the file is not one locale", () => {
+    const paths = collectEntryHtmlPaths(
+      {
+        getAlternateUrls: () => ({ en: "/en/outcomes", es: "/es/resultados" }),
+        buildUrl: () => "/en/outcomes",
+      } as any,
+      "page",
+      "outcomes",
+    );
+    expect(paths).toContain("/en/outcomes");
+    expect(paths).toContain("/es/resultados");
   });
 });
 

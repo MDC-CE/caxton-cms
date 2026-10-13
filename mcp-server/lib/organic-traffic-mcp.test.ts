@@ -30,6 +30,7 @@ import {
   LEADERBOARD_DEFAULT_LIMIT,
   LEADERBOARD_MAX_LIMIT,
   ORGANIC_MAX_SPAN_DAYS,
+  organicLeadsWarnings,
 } from "./organic-traffic-mcp";
 import type { PathTrafficStats } from "../../server/gsc-organic-path-traffic";
 
@@ -312,5 +313,29 @@ describe("leaderboard helpers", () => {
     expect(page.total).toBe(0);
     expect(page.items).toEqual([]);
     expect(page.next_offset).toBeNull();
+  });
+});
+
+describe("organicLeadsWarnings (clusters leads)", () => {
+  const window = { start: "2026-09-01", end: "2026-09-28" };
+  const codes = (w: { code: string }[]) => w.map((x) => x.code);
+
+  it("is silent without a window and when the whole window is tracked", () => {
+    expect(organicLeadsWarnings({ leads: null, window: null })).toEqual([]);
+    const leads = { byPath: {}, tracking_since: Date.parse("2026-08-01T00:00:00Z"), estimated: false };
+    expect(organicLeadsWarnings({ leads, window })).toEqual([]);
+  });
+
+  it("flags a partly tracked window and estimates", () => {
+    const leads = { byPath: {}, tracking_since: Date.parse("2026-09-15T10:00:00Z"), estimated: true };
+    expect(codes(organicLeadsWarnings({ leads, window }))).toEqual(["organic_leads_partly_tracked", "organic_leads_estimated"]);
+  });
+
+  it("flags no tracking yet and unavailable ledger", () => {
+    expect(codes(organicLeadsWarnings({ leads: { byPath: {}, tracking_since: null, estimated: true }, window }))).toEqual([
+      "organic_leads_not_tracked",
+      "organic_leads_estimated",
+    ]);
+    expect(codes(organicLeadsWarnings({ leads: null, leadsError: "boom", window }))).toEqual(["organic_leads_unavailable"]);
   });
 });

@@ -24,8 +24,11 @@ import {
 } from "./live-entry-seo-gate";
 import {
   getEntryContentDir,
+  isDraftEntry,
   listLiveLocales,
 } from "./draft-entry";
+import { runInternalLinkGate } from "./internal-link-gate";
+import type { BrokenInternalLink, InternalLinkWarning } from "@shared/internalLinkGate";
 import {
   clampSchemaOrgSectionsLeading,
   isSchemaOrgSection,
@@ -137,13 +140,58 @@ function applySeoUpdatesAfterWrite<T extends { success: boolean; error?: string;
   return result;
 }
 
+type LinkGateBlocked = {
+  success: false;
+  error: string;
+  errorCode: string;
+  brokenInternalLinks: BrokenInternalLink[];
+  linkWarnings?: InternalLinkWarning[];
+};
+
 /**
- * Draft/variant section saves: only identity-check touched section indexes.
- * Live locale / full-list rewrites: omit onlyValidateIndexes (full document).
+ * Internal-link gate for one page about to be written. Live pages check every link on the
+ * page (not only the touched field); draft writes only collect warnings.
+ */
+function internalLinkGateForWrite(opts: {
+  pageData: Record<string, unknown>;
+  locale: string;
+  contentRoot?: string;
+  ci?: ContentIndex;
+  pageIsDraft: boolean;
+  intent?: "publish" | "save";
+}): { blocked: LinkGateBlocked | null; linkWarnings: InternalLinkWarning[] } {
+  const res = runInternalLinkGate({
+    pageData: opts.pageData,
+    locale: opts.locale,
+    contentRoot: opts.contentRoot,
+    ci: opts.ci,
+    pageIsDraft: opts.pageIsDraft,
+    intent: opts.intent ?? "save",
+  });
+  if (res.failure) {
+    return {
+      blocked: {
+        success: false,
+        error: res.failure.message,
+        errorCode: res.failure.code,
+        brokenInternalLinks: res.failure.broken_internal_links,
+        ...(res.warnings.length > 0 ? { linkWarnings: res.warnings } : {}),
+      },
+      linkWarnings: res.warnings,
+    };
+  }
+  return { blocked: null, linkWarnings: res.warnings };
+}
+
+/**
+ * Section saves (live, draft, variant) only identity-check the section indexes
+ * the operations touch, plus newly inserted sections (`skipIdentityIndexes`),
+ * so problems in untouched sections never block an unrelated edit. An empty
+ * set means no section was touched and nothing is checked. Reorder /
+ * replace-all omit onlyValidateIndexes (full document).
  * Publish/promote never passes this (always full via validateYamlIdentity).
  */
-function identityValidateOptsForWrite(opts: {
-  isDraftOrVariantWrite: boolean;
+export function identityValidateOptsForWrite(opts: {
   operations: EditOperation[];
   skipIdentityIndexes?: Set<number>;
   contentType: string;
@@ -159,11 +207,13 @@ function identityValidateOptsForWrite(opts: {
     contentSlug: opts.contentSlug,
     skipIdentityIndexes: opts.skipIdentityIndexes,
   };
-  if (!opts.isDraftOrVariantWrite) return base;
   const touched = collectTouchedSectionIndexes(opts.operations);
-  if (!touched || touched.size === 0) return base;
+  if (!touched) return base;
+  opts.skipIdentityIndexes?.forEach((idx) => touched.add(idx));
   return { ...base, onlyValidateIndexes: touched };
-}import {
+}
+
+import {
   isEntryDetached,
   isSharedLayoutType,
   isTemplateVersioningSlug,
@@ -669,6 +719,10 @@ export async function editContent(request: ContentEditRequest): Promise<{
   deprecated?: DeprecatedFieldErrorInfo;
   /** New `{{ entry.X }}` references to deprecated fields (warning only). */
   deprecatedTemplateRefs?: DeprecatedTemplateRef[];
+  /** Set when errorCode === "broken_internal_links". */
+  brokenInternalLinks?: BrokenInternalLink[];
+  /** Non-blocking internal-link findings (redirects, draft targets, not-yet-enforced). */
+  linkWarnings?: InternalLinkWarning[];
 }> {
   const { contentType, slug, locale: rawLocale, operations: requestOperations, variant, version, contentRoot } = request;
   // Use per-site ContentIndex when provided (avoids resolving files against default site)
@@ -856,7 +910,6 @@ export async function editContent(request: ContentEditRequest): Promise<{
         ci,
         // Draft template variants must not fan out onto live sibling shells
         skipSharedLayoutFanOut: hasVariant || request.skipSharedLayoutFanOut,
-        isDraftOrVariantWrite: hasVariant,
       }),
         seoUpdates,
         {
@@ -915,7 +968,6 @@ export async function editContent(request: ContentEditRequest): Promise<{
           database: request.database,
           ci,
           skipSharedLayoutFanOut: request.skipSharedLayoutFanOut,
-          isDraftOrVariantWrite: hasVariant,
         }),
         seoUpdates,
         {
@@ -1158,7 +1210,6 @@ export async function editContent(request: ContentEditRequest): Promise<{
               database: request.database,
               ci,
               skipSharedLayoutFanOut: request.skipSharedLayoutFanOut,
-              isDraftOrVariantWrite: hasVariant,
             });
             if (!templateResult.success) {
               return { success: false, error: templateResult.error };
@@ -1404,8 +1455,8 @@ export async function editContent(request: ContentEditRequest): Promise<{
       }
       if (typeof opResult.insertedSectionIndex === "number") {
         // Newly duplicated sections may be invalid until staff re-sets conversion/ecommerce.
-        // Allow the duplicate write itself; draft later saves scope to touched sections;
-        // live saves + publish still validate the full document.
+        // Allow the duplicate write itself; later saves scope to touched sections;
+        // publish still validates the full document.
         skipIdentityValidationIndexes.add(opResult.insertedSectionIndex);
       }
     }
@@ -1423,13 +1474,12 @@ export async function editContent(request: ContentEditRequest): Promise<{
     }
 
     // Validate conversion / CTA / product-scope identity before writing to disk.
-    // Draft/variant: only touched sections (avoids circular trap after duplicate wipe).
-    // Live locale: full document. Publish/promote always full (versioning routes).
+    // Only touched sections (live, draft, variant); publish/promote always full
+    // (versioning routes).
     if (Array.isArray(localeData.sections)) {
       const identityErr = validateDocIdentity(
         localeData,
         identityValidateOptsForWrite({
-          isDraftOrVariantWrite: hasVariant,
           operations: resolvedOperations,
           skipIdentityIndexes: skipIdentityValidationIndexes,
           contentType,
@@ -1469,9 +1519,9 @@ export async function editContent(request: ContentEditRequest): Promise<{
 
     // Live locale writes: require resolved meta + editor.required fields.
     // Draft variant files and shared template.*.yml (legacy single.*) edits skip this gate.
-    const writingLiveLocale =
-      !hasVariant &&
-      !isSharedTemplateBasename(path.basename(filePath));
+    const writingSharedTemplate = isSharedTemplateBasename(path.basename(filePath));
+    const writingLiveLocale = !hasVariant && !writingSharedTemplate;
+    let linkWarnings: InternalLinkWarning[] = [];
     if (writingLiveLocale) {
       const commonForGate = ci.loadCommonData(contentType, slug) || {};
       const mergedForGate = deepMerge(commonForGate, localeData) as Record<
@@ -1499,6 +1549,25 @@ export async function editContent(request: ContentEditRequest): Promise<{
           missingFields: seoGateErr.missing_fields,
         };
       }
+      const linkGate = internalLinkGateForWrite({
+        pageData: mergedForGate,
+        locale,
+        contentRoot,
+        ci,
+        pageIsDraft: false,
+        intent: gateIntent === "publish" ? "publish" : "save",
+      });
+      if (linkGate.blocked) return linkGate.blocked;
+      linkWarnings = linkGate.linkWarnings;
+    } else if (hasVariant && !writingSharedTemplate) {
+      const commonForGate = ci.loadCommonData(contentType, slug) || {};
+      linkWarnings = internalLinkGateForWrite({
+        pageData: deepMerge(commonForGate, localeData) as Record<string, unknown>,
+        locale,
+        contentRoot,
+        ci,
+        pageIsDraft: true,
+      }).linkWarnings;
     }
 
     // Write locale data back to file (without _common.yml content)
@@ -1576,6 +1645,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
       updatedSections,
       ...(clearedFields.length > 0 ? { clearedFields } : {}),
       ...(deprecatedTemplateRefs.length > 0 ? { deprecatedTemplateRefs } : {}),
+      ...(linkWarnings.length > 0 ? { linkWarnings } : {}),
     };
   } catch (error) {
     log.error({ err: error }, "Content edit error:");
@@ -1759,8 +1829,6 @@ function writeStructuralChangesToTemplate(opts: {
   requesterId?: string;
   ci?: ContentIndex;
   skipSharedLayoutFanOut?: boolean;
-  /** When true (draft/variant template), identity-check only touched sections. */
-  isDraftOrVariantWrite?: boolean;
 }): {
   success: boolean;
   error?: string;
@@ -1863,7 +1931,6 @@ function writeStructuralChangesToTemplate(opts: {
       const identityErr = validateDocIdentity(
         templateData,
         identityValidateOptsForWrite({
-          isDraftOrVariantWrite: Boolean(opts.isDraftOrVariantWrite),
           operations: annotatedOps,
           skipIdentityIndexes,
           contentType,
@@ -1987,7 +2054,14 @@ function writeTopLevelFieldsToPerEntryFile(opts: {
   operations: EditOperation[];
   author?: string;
   contentRoot?: string;
-}): { success: boolean; error?: string; errorCode?: string; missingFields?: string[] } {
+}): {
+  success: boolean;
+  error?: string;
+  errorCode?: string;
+  missingFields?: string[];
+  brokenInternalLinks?: BrokenInternalLink[];
+  linkWarnings?: InternalLinkWarning[];
+} {
   const { contentType, slug, locale, operations, author } = opts;
   const rawRoot = opts.contentRoot ?? getDefaultContentRootName();
   const rootPath = path.isAbsolute(rawRoot) ? rawRoot : path.join(process.cwd(), rawRoot);
@@ -2058,6 +2132,14 @@ function writeTopLevelFieldsToPerEntryFile(opts: {
         missingFields: seoGateErr.missing_fields,
       };
     }
+    const linkGate = internalLinkGateForWrite({
+      pageData: mergedForGate,
+      locale,
+      contentRoot: opts.contentRoot,
+      ci: ciGate,
+      pageIsDraft: isDraftEntry(contentType, slug, opts.contentRoot),
+    });
+    if (linkGate.blocked) return linkGate.blocked;
 
     stampLocaleYamlBeforeWrite({
       data: entryData,
@@ -2073,7 +2155,10 @@ function writeTopLevelFieldsToPerEntryFile(opts: {
     const dumped = safeYamlDump(entryData, { lineWidth: -1, noRefs: true });
     fs.writeFileSync(perEntryPath, dumped, "utf-8");
     markFileAsModified(perEntryPath, author, undefined, opts.contentRoot);
-    return { success: true };
+    return {
+      success: true,
+      ...(linkGate.linkWarnings.length > 0 ? { linkWarnings: linkGate.linkWarnings } : {}),
+    };
   } catch (err) {
     log.error({ err: err }, "[writeTopLevelFieldsToPerEntryFile] Error:");
     return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
@@ -2092,7 +2177,14 @@ function writeEntryOverlayOps(opts: {
   author?: string;
   contentRoot?: string;
   ci?: ContentIndex;
-}): { success: boolean; error?: string; errorCode?: string; updatedSections?: unknown[] } {
+}): {
+  success: boolean;
+  error?: string;
+  errorCode?: string;
+  updatedSections?: unknown[];
+  brokenInternalLinks?: BrokenInternalLink[];
+  linkWarnings?: InternalLinkWarning[];
+} {
   const { contentType, slug, locale, operations, author } = opts;
   const ci = opts.ci ?? contentIndex;
   const rawRoot = opts.contentRoot ?? getDefaultContentRootName();
@@ -2123,6 +2215,14 @@ function writeEntryOverlayOps(opts: {
     if (legacySinglePerEntry) {
       return { success: false, error: legacySinglePerEntry, errorCode: "legacy_single_template_var" };
     }
+    const linkGate = internalLinkGateForWrite({
+      pageData: deepMerge(ci.loadCommonData(contentType, slug) || {}, entryData) as Record<string, unknown>,
+      locale,
+      contentRoot: opts.contentRoot,
+      ci,
+      pageIsDraft: isDraftEntry(contentType, slug, opts.contentRoot),
+    });
+    if (linkGate.blocked) return linkGate.blocked;
     stampLocaleYamlBeforeWrite({
       data: entryData,
       previous: previousEntryData,
@@ -2144,6 +2244,7 @@ function writeEntryOverlayOps(opts: {
     return {
       success: true,
       updatedSections: Array.isArray(entryData.sections) ? (entryData.sections as unknown[]) : [],
+      ...(linkGate.linkWarnings.length > 0 ? { linkWarnings: linkGate.linkWarnings } : {}),
     };
   } catch (err) {
     log.error({ err }, "[writeEntryOverlayOps] Error:");
@@ -2172,8 +2273,6 @@ function handleSharedTemplateEdit(opts: {
   ci?: ContentIndex;
   requesterId?: string;
   skipSharedLayoutFanOut?: boolean;
-  /** Draft/variant template writes scope identity to touched sections. */
-  isDraftOrVariantWrite?: boolean;
 }): {
   success: boolean;
   error?: string;
@@ -2220,7 +2319,6 @@ function handleSharedTemplateEdit(opts: {
       requesterId,
       ci,
       skipSharedLayoutFanOut: opts.skipSharedLayoutFanOut,
-      isDraftOrVariantWrite: opts.isDraftOrVariantWrite,
     });
   }
 
@@ -2548,12 +2646,41 @@ export function evaluateCommonContentLiveGate(opts: {
   return null;
 }
 
+/** Internal-link gate for _common.yml writes: each live locale page (common + locale) is checked. */
+function evaluateCommonContentLinkGate(opts: {
+  contentType: string;
+  slug: string;
+  commonData: Record<string, unknown>;
+  ci: ContentIndex;
+  contentRootName?: string;
+}): { blocked: LinkGateBlocked | null; linkWarnings: InternalLinkWarning[] } {
+  const { contentType, slug, commonData, ci, contentRootName } = opts;
+  const pageIsDraft = isDraftEntry(contentType, slug, contentRootName);
+  const linkWarnings: InternalLinkWarning[] = [];
+  for (const gateLocale of getCommonEditGateLocales(contentType, slug, contentRootName)) {
+    const localeLoaded = ci.loadLocaleData(contentType, slug, gateLocale);
+    const localeData = (localeLoaded.data as Record<string, unknown> | null) || {};
+    const gate = internalLinkGateForWrite({
+      pageData: deepMerge(commonData, localeData) as Record<string, unknown>,
+      locale: gateLocale,
+      contentRoot: contentRootName,
+      ci,
+      pageIsDraft,
+    });
+    if (gate.blocked) return gate;
+    linkWarnings.push(...gate.linkWarnings);
+  }
+  return { blocked: null, linkWarnings };
+}
+
 export function editCommonContent(request: CommonEditRequest): {
   success: boolean;
   error?: string;
   errorCode?: string;
   missingFields?: string[];
   deprecated?: DeprecatedFieldErrorInfo;
+  brokenInternalLinks?: BrokenInternalLink[];
+  linkWarnings?: InternalLinkWarning[];
 } {
   const { contentType, slug, operations, author } = request;
   const ci = request.ci ?? contentIndex;
@@ -2636,6 +2763,14 @@ export function editCommonContent(request: CommonEditRequest): {
         missingFields: seoGateErr.missing_fields,
       };
     }
+    const linkGate = evaluateCommonContentLinkGate({
+      contentType,
+      slug,
+      commonData,
+      ci,
+      contentRootName,
+    });
+    if (linkGate.blocked) return linkGate.blocked;
 
     const updatedYaml = safeYamlDump(commonData, {
       lineWidth: -1,
@@ -2647,7 +2782,10 @@ export function editCommonContent(request: CommonEditRequest): {
     fs.writeFileSync(commonPath, updatedYaml, "utf-8");
     markFileAsModified(commonPath, author, undefined, contentRootName);
 
-    return { success: true };
+    return {
+      success: true,
+      ...(linkGate.linkWarnings.length > 0 ? { linkWarnings: linkGate.linkWarnings } : {}),
+    };
   } catch (error) {
     log.error({ err: error }, "Common content edit error:");
     return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
@@ -2780,9 +2918,6 @@ function normalizeUrlParamInput(value: unknown): string | null {
 function invalidateContentCaches(contentType?: string): void {
   if (contentType) contentIndex.invalidateCommonFields(contentType);
   clearSsrSchemaCache();
-  void import("./html-page-cache").then(({ invalidateHtmlPageCache }) => {
-    invalidateHtmlPageCache();
-  }).catch(() => {});
 }
 
 type ContentLifecycleResult<T extends Record<string, unknown>> =

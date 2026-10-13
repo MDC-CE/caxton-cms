@@ -2,10 +2,9 @@
  * When component-registry schema.yml changes, section-variants cached issues can
  * become stale (e.g. new variants: keys added). Debounced site-wide refresh.
  */
-import { ValidationService } from "../scripts/validation/service";
-import { applyValidationRunToCache } from "./services/validationCachePostProcess";
 import type { SiteContext } from "./site-manager";
 import { getSiteContextMap } from "./site-manager";
+import { startDiagnosticsJob } from "./services/diagnosticsJobService";
 import { child } from "./logger";
 
 const log = child({ module: "registrySchemaValidationRefresh" });
@@ -22,19 +21,26 @@ export function isComponentRegistrySchemaPath(filePath: string): boolean {
 
 async function refreshSectionVariants(ctx: SiteContext): Promise<void> {
   try {
-    const service = new ValidationService();
-    const context = await service.buildContext({
+    const result = await startDiagnosticsJob({
       contentRoot: ctx.contentRoot,
+      contentRootName: ctx.contentRootName,
       ci: ctx.contentIndex,
+      cache: ctx.validationCache,
+      freshness: "hard",
+      confirm: true,
+      kind: "section-variants",
+      validators: ["section-variants"],
     });
-    const result = await service.runValidators({ validators: ["section-variants"] });
-    await applyValidationRunToCache(ctx.validationCache, result, context, {
-      markSiteWide: true,
-    });
-    await ctx.validationCache.flush();
+    if (result.status === "busy") {
+      log.info(
+        { site: ctx.contentRootName, job_id: result.job_id },
+        "section-variants refresh skipped — site-wide diagnostics already running",
+      );
+      return;
+    }
     log.info(
-      { site: ctx.contentRootName, errors: result.validators[0]?.errors.length ?? 0 },
-      "Refreshed section-variants after registry schema change",
+      { site: ctx.contentRootName, job_id: "job_id" in result ? result.job_id : undefined },
+      "Queued section-variants refresh after registry schema change",
     );
   } catch (err) {
     log.warn({ err, site: ctx.contentRootName }, "section-variants refresh failed");

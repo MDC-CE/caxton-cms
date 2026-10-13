@@ -1232,6 +1232,36 @@ export class DatabaseManager {
     return Array.from(keys).sort();
   }
 
+  /**
+   * One row changed. The shared flush keeps the page whose URL contains that
+   * slug and rebuilds pages that read this database.
+   */
+  private dropHtmlForSlug(dbName: string, slug: string): void {
+    const siteId = path.basename(this.contentRoot);
+    const contentRoot = this.contentRoot;
+    void import("./content-write-flush")
+      .then(async ({ flushAfterContentWrites }) => {
+        const { getSiteContextMap } = await import("./site-manager");
+        const base = path.basename(contentRoot);
+        const site = Array.from(getSiteContextMap().values()).find(
+          (ctx) =>
+            ctx.contentRoot === contentRoot ||
+            ctx.contentRootName === base ||
+            ctx.contentRoot.endsWith(`/${base}`),
+        );
+        if (!site?.contentIndex) return;
+        flushAfterContentWrites({
+          ci: site.contentIndex,
+          contentTypes: [],
+          sitemapEntries: [],
+          siteId: site.contentRootName || siteId,
+          databaseNames: dbName ? [dbName] : [],
+          htmlSlugs: slug ? [slug] : [],
+        });
+      })
+      .catch(() => {});
+  }
+
   clearCache(name: string): void {
     this.memoryCache.delete(name);
     this.cache.clear(name);
@@ -1304,6 +1334,7 @@ export class DatabaseManager {
 
       this.memoryCache.delete(dbName);
       this.clearMappedMemo(dbName);
+      this.dropHtmlForSlug(dbName, slugValue);
       return patchedIdx !== -1;
     } catch {
       return false;
@@ -1361,6 +1392,7 @@ export class DatabaseManager {
       this.memoryCache.delete(dbName);
       this.cache.clear(dbName);
       this.clearMappedMemo(dbName);
+      this.dropHtmlForSlug(dbName, slugValue);
 
       return true;
     } catch {
@@ -1372,15 +1404,6 @@ export class DatabaseManager {
   getMappedItemsFromCacheSync(contentType: string): Record<string, unknown>[] {
     return this.getListingItems(contentType)?.items ?? [];
   }
-}
-
-/** Cached mapped row count for a database (0 when configured but not yet fetched). */
-export function getCachedDatabaseEntryCount(dbm: DatabaseManager, dbName: string): number {
-  if (!dbName) return 0;
-  const stats = dbm.getCacheStats().perDb[dbName];
-  if (stats) return stats.item_count;
-  if (!dbm.exists(dbName)) return 0;
-  return dbm.getMappedItems(dbName)?.length ?? 0;
 }
 
 export const databaseManager = new DatabaseManager();

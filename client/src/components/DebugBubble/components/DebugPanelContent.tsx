@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, ArrowRight, BarChart2, Blocks, Book, Bot, Brain, Braces, Check, ChevronDown, ChevronRight, ClipboardList, Cookie, Database, Github, Globe, Home, Image, Languages, LogOut, Map, Megaphone, Menu, MessageCircle, Moon, Palette, Pencil, Plus, RefreshCw, Route, Search, Settings, Stethoscope, Sun, Unlink, Link2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BarChart2, Blocks, Book, Bot, Brain, Braces, Check, ChevronDown, ChevronRight, ClipboardList, Cookie, Database, Github, Globe, Home, Image, Languages, LogOut, Map, Megaphone, Menu, MessageCircle, Moon, Palette, Pencil, Plus, RefreshCw, Route, Search, Settings, Stethoscope, Sun, Unlink, Link2, Users, X } from "lucide-react";
 import { IconServer, IconShoppingBag, IconTargetArrow, IconShield, IconAlertTriangle, IconLayersIntersect, IconInfoCircle, IconSwitchHorizontal } from "@tabler/icons-react";
 import { useDebugAuth } from "@/hooks/useDebugAuth";
 import { useTranslation } from "react-i18next";
@@ -1204,6 +1204,15 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
                   href="/private/store/conversions"
                   indicator="arrow"
                   testId="link-store-conversions"
+                />
+              )}
+              {canViewMetrics && (
+                <MenuItem
+                  icon={Users}
+                  label="Leads"
+                  href="/private/store/leads"
+                  indicator="arrow"
+                  testId="link-store-leads"
                 />
               )}
             </ExpandableMenuItem>

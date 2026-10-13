@@ -9,6 +9,7 @@ import {
   validateDocumentSectionsIdentity,
   validateSectionIdentity,
 } from "@shared/validateSectionIdentity";
+import { identityValidateOptsForWrite } from "./content-editor";
 
 const resolveProduct = (id: string) =>
   id === "full-stack"
@@ -262,5 +263,74 @@ describe("validateDocumentSectionsIdentity (publish-shaped)", () => {
       },
     );
     expect(err).toMatch(/sections\[0\].*conversion_name/);
+  });
+
+  it("live swap of section 0 ignores an invalid conversion_name in untouched section 1", () => {
+    const doc = {
+      sections: [
+        { type: "pricing_plans", conversion: null },
+        {
+          type: "sticky_cta",
+          form: {
+            variant: "inline",
+            conversion_name: "business_partner_lead",
+            fields: { email: { visible: true } },
+          },
+        },
+      ],
+    };
+    const opts = {
+      ...baseDocOpts,
+      funnel: { products: ["full-stack"], stage: "decision" as const },
+      conversionNames: ["request_more_info", "partner_application"],
+    };
+    const scoped = identityValidateOptsForWrite({
+      operations: [{ action: "update_section", index: 0, section: doc.sections[0] }],
+      contentType: "page",
+      contentSlug: "home",
+    });
+    expect(
+      validateDocumentSectionsIdentity(doc, { ...opts, onlyValidateIndexes: scoped.onlyValidateIndexes }),
+    ).toBeNull();
+    expect(validateDocumentSectionsIdentity(doc, opts)).toMatch(
+      /sections\[1\].*business_partner_lead/,
+    );
+  });
+});
+
+describe("identityValidateOptsForWrite (live and draft section saves)", () => {
+  const base = { contentType: "page", contentSlug: "home" };
+
+  it("scopes update_section to the touched index", () => {
+    const opts = identityValidateOptsForWrite({
+      ...base,
+      operations: [{ action: "update_section", index: 0, section: { type: "hero" } }],
+    });
+    expect([...(opts.onlyValidateIndexes ?? [])]).toEqual([0]);
+  });
+
+  it("checks the full document for reorder_sections", () => {
+    const opts = identityValidateOptsForWrite({
+      ...base,
+      operations: [{ action: "reorder_sections", from: 0, to: 2 }],
+    });
+    expect(opts.onlyValidateIndexes).toBeUndefined();
+  });
+
+  it("checks no sections for a meta-only update_field", () => {
+    const opts = identityValidateOptsForWrite({
+      ...base,
+      operations: [{ action: "update_field", path: "meta.page_title", value: "x" }],
+    });
+    expect(opts.onlyValidateIndexes?.size).toBe(0);
+  });
+
+  it("includes newly inserted sections in the checked set", () => {
+    const opts = identityValidateOptsForWrite({
+      ...base,
+      operations: [{ action: "duplicate_section", index: 1 }],
+      skipIdentityIndexes: new Set([2]),
+    });
+    expect([...(opts.onlyValidateIndexes ?? [])]).toEqual([2]);
   });
 });

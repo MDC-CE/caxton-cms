@@ -27,6 +27,8 @@ import {
   type PendingChange,
 } from './sync-state';
 import { child } from "./logger";
+import type { ContentIndex } from "./content-index";
+import { isSharedTemplateBasename } from "./shared-layout-paths";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
 import {
   contentFolderFromRegistryPath,
@@ -35,6 +37,36 @@ import {
   mirrorComponentRegistryToPersistentForFile,
 } from "./component-registry-persistent";
 const log = child({ module: "github" });
+
+/**
+ * Public URLs of entries that still use a shared template present in a pull.
+ * Imported after the pull: content-write-flush loads site Zod schemas, and those
+ * files are not on disk yet when content:pull starts on a fresh release.
+ */
+async function publicPathsForPulledSharedTemplates(
+  ci: ContentIndex,
+  files: string[],
+): Promise<{ htmlPaths: string[]; contentTypes: string[] }> {
+  const { collectAttachedHtmlPaths } = await import("./content-write-flush");
+  const rootName = path.basename(ci.contentRoot);
+  const types = new Set<string>();
+  const htmlPaths: string[] = [];
+  for (const file of files) {
+    let rel = file.split("\\").join("/");
+    const prefix = `${rootName}/`;
+    if (rel.startsWith(prefix)) rel = rel.slice(prefix.length);
+    else if (path.isAbsolute(rel)) rel = path.relative(ci.contentRoot, rel).split("\\").join("/");
+    const parts = rel.split("/").filter(Boolean);
+    if (parts.length !== 2) continue;
+    if (!ci.getContentTypeConfig(parts[0])) continue;
+    if (!isSharedTemplateBasename(parts[1])) continue;
+    const contentType = ci.normalizeType(parts[0]);
+    if (types.has(contentType)) continue;
+    types.add(contentType);
+    htmlPaths.push(...collectAttachedHtmlPaths(ci, contentType));
+  }
+  return { htmlPaths: [...new Set(htmlPaths)], contentTypes: [...types] };
+}
 
 const FORCE_PULL_TMP_PREFIX = 'website-v3-force-pull-';
 const ARCHIVE_DOWNLOAD_STALL_MS = 120_000;
@@ -1353,7 +1385,7 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
       ? (path.isAbsolute(opts.contentRoot) ? path.relative(process.cwd(), opts.contentRoot) : opts.contentRoot)
       : getDefaultContentFolder();
 
-    const refreshAfterPull = async (pulledCount: number) => {
+    const refreshAfterPull = async (pulledCount: number, files: string[]) => {
       if (pulledCount <= 0) return;
       try {
         const { getSiteContextMap } = await import("./site-manager");
@@ -1362,9 +1394,20 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
           (ctx) => ctx.contentRootName === contentFolder || ctx.contentRoot.endsWith(contentFolder),
         );
         if (siteCtx?.contentIndex) {
-          siteCtx.contentIndex.refresh({ syncSlow: true });
+          const { flushAfterContentWrites } = await import("./content-write-flush");
+          const spread = await publicPathsForPulledSharedTemplates(siteCtx.contentIndex, files);
+          flushAfterContentWrites({
+            ci: siteCtx.contentIndex,
+            contentTypes: spread.contentTypes,
+            sitemapEntries: [],
+            siteId: siteCtx.contentRootName,
+            syncSlow: true,
+            touchedFiles: files,
+            htmlPaths: spread.htmlPaths,
+          });
+        } else {
+          clearRedirectCache();
         }
-        clearRedirectCache();
       } catch (e) {
         log.warn({ err: e }, "[SyncReconcile] Failed to refresh ContentIndex after stale pull");
       }
@@ -1444,7 +1487,7 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
           "RECONCILE",
           `Pulled ${pulledCount} stale file(s) from GitHub: ${short}${staleFiles.length > 5 ? ` (+${staleFiles.length - 5} more)` : ""}`,
         );
-        await refreshAfterPull(pulledCount);
+        await refreshAfterPull(pulledCount, staleFiles);
       }
       if (pullErrors.length > 0) {
         logSync("ERROR", `Failed to pull ${pullErrors.length} stale file(s): ${pullErrors.join("; ")}`);
@@ -3073,6 +3116,7 @@ function pruneLocalFilesMissingFromRemote(
 async function refreshContentAfterBootstrapPull(
   contentFolder: string,
   pulledCount: number,
+  files: string[] = [],
 ): Promise<void> {
   if (pulledCount <= 0) return;
   try {
@@ -3082,8 +3126,17 @@ async function refreshContentAfterBootstrapPull(
       (ctx) => ctx.contentRootName === contentFolder || ctx.contentRoot.endsWith(contentFolder),
     );
     if (siteCtx?.contentIndex) {
-      siteCtx.contentIndex.refresh({ syncSlow: true });
-      clearRedirectCache();
+      const { flushAfterContentWrites } = await import("./content-write-flush");
+      const spread = await publicPathsForPulledSharedTemplates(siteCtx.contentIndex, files);
+      flushAfterContentWrites({
+        ci: siteCtx.contentIndex,
+        contentTypes: spread.contentTypes,
+        sitemapEntries: [],
+        siteId: siteCtx.contentRootName,
+        syncSlow: true,
+        touchedFiles: files,
+        htmlPaths: spread.htmlPaths,
+      });
       log.info(
         `[GitHub] Refreshed ContentIndex + redirect cache for ${siteCtx.contentRootName} after bootstrap pull of ${pulledCount} file(s)`,
       );
@@ -3284,7 +3337,10 @@ export async function bootstrapContentFromRemote(opts?: {
       syncedRemotePaths,
     });
     writeBootstrapCompleteFlag(opts?.contentRoot);
-    await refreshContentAfterBootstrapPull(contentFolder, pulled + pruneResult.deleted);
+    await refreshContentAfterBootstrapPull(contentFolder, pulled + pruneResult.deleted, [
+      ...pulledFiles,
+      ...pruneResult.deletedFiles,
+    ]);
     if (pulledFiles.length > 0 || pruneResult.deletedFiles.length > 0) {
       try {
         const { emitSiteBulkSynced } = await import("./content-events");
@@ -3502,7 +3558,7 @@ export async function bootstrapContentFromRemote(opts?: {
       syncedRemotePaths: remoteEntries.map((e) => e.path),
     });
     writeBootstrapCompleteFlag(opts?.contentRoot);
-    await refreshContentAfterBootstrapPull(contentFolder, pulled);
+    await refreshContentAfterBootstrapPull(contentFolder, pulled, pulledFiles);
     logSync(
       'AUTO-PULL',
       `Bootstrap: pulled=${pulled} skipped=${skipped} — sync state updated to ${headSha.slice(0, 7)}`,

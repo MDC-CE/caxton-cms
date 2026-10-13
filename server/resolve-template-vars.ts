@@ -191,54 +191,113 @@ export interface ResolveAllTemplateVarsOptions {
  * Editors keep unresolved templates on write paths — call this only at delivery boundaries.
  * Site vars are skipped by default; see `skipSiteVars`.
  */
+type NamespaceStep =
+  | { kind: "single"; bag: Record<string, unknown> }
+  | { kind: "bag"; prefix: "meta" | "seo" | "param"; bag: Record<string, unknown> };
+
+function mentionsNamespace(str: string, step: NamespaceStep): boolean {
+  if (step.kind === "single") {
+    return (
+      str.includes("{{ single") ||
+      str.includes("{{single") ||
+      str.includes("{{ entry") ||
+      str.includes("{{entry")
+    );
+  }
+  return str.includes(`{{ ${step.prefix}`) || str.includes(`{{${step.prefix}`);
+}
+
+function applyNamespace(value: string, step: NamespaceStep): unknown {
+  if (step.kind === "single") return resolveSingleVars(value, step.bag);
+  return resolveBagVars(value, step.prefix, step.bag);
+}
+
+/**
+ * One tree walk. Namespaces run in order on each string. A replacement that
+ * inserts a later placeholder is filled before the walk moves on. Bags are
+ * prepared first so {{ meta.x }} can expand a value that was itself {{ single.* }}.
+ */
+function walkNamespaces(value: unknown, steps: NamespaceStep[], fromIndex: number): unknown {
+  if (typeof value === "string") {
+    if (!value.includes("{{")) return value;
+    let current: unknown = value;
+    for (let i = fromIndex; i < steps.length; i++) {
+      if (typeof current !== "string") return walkNamespaces(current, steps, i);
+      if (!current.includes("{{")) return current;
+      const step = steps[i];
+      if (!mentionsNamespace(current, step)) continue;
+      const next = applyNamespace(current, step);
+      if (next === current) continue;
+      if (typeof next !== "string") return walkNamespaces(next, steps, i + 1);
+      current = next;
+    }
+    return current;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => walkNamespaces(item, steps, fromIndex));
+  }
+
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      if (key.startsWith("_") || key === "item_template") {
+        result[key] = val;
+        continue;
+      }
+      result[key] = walkNamespaces(val, steps, fromIndex);
+    }
+    return result;
+  }
+
+  return value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
 export function resolveAllTemplateVars(
   data: unknown,
   opts: ResolveAllTemplateVarsOptions = {},
 ): unknown {
-  let result = data;
   const singleEntry = finalizeSingleEntryForTemplates(opts.singleEntry, {
     slug: typeof opts.singleEntry?.slug === "string" ? opts.singleEntry.slug : undefined,
     locale: opts.context?.locale,
   });
+  const hasSingle = !!singleEntry && Object.keys(singleEntry).length > 0;
+  const singleStep: NamespaceStep[] = hasSingle ? [{ kind: "single", bag: singleEntry }] : [];
 
-  if (singleEntry && Object.keys(singleEntry).length > 0) {
-    result = resolveSingleVars(result, singleEntry);
+  const page = asRecord(data);
+  const metaSource = opts.meta ?? (page ? asRecord(page.meta) : undefined);
+  const metaBag = metaSource
+    ? asRecord(walkNamespaces(metaSource, singleStep, 0))
+    : undefined;
+
+  const steps: NamespaceStep[] = [...singleStep];
+  if (metaBag && Object.keys(metaBag).length > 0) {
+    steps.push({ kind: "bag", prefix: "meta", bag: metaBag });
   }
 
-  let resolvedMeta: Record<string, unknown> | undefined;
-  if (opts.meta) {
-    resolvedMeta =
-      singleEntry && Object.keys(singleEntry).length > 0
-        ? (resolveSingleVars(opts.meta, singleEntry) as Record<string, unknown>)
-        : opts.meta;
-  } else if (result !== null && typeof result === "object" && !Array.isArray(result)) {
-    const m = (result as Record<string, unknown>).meta;
-    if (m !== null && typeof m === "object" && !Array.isArray(m)) {
-      resolvedMeta = m as Record<string, unknown>;
-    }
-  }
-
-  if (resolvedMeta) {
-    result = resolveBagVars(result, "meta", resolvedMeta);
-  }
-
-  let resolvedSeo: Record<string, unknown> | undefined;
+  let seoBag: Record<string, unknown> | undefined;
   if (opts.seo) {
-    resolvedSeo = opts.seo;
-  } else if (result !== null && typeof result === "object" && !Array.isArray(result)) {
-    const s = (result as Record<string, unknown>).seo;
-    if (s !== null && typeof s === "object" && !Array.isArray(s)) {
-      resolvedSeo = s as Record<string, unknown>;
-    }
+    seoBag = opts.seo;
+  } else if (page) {
+    const seoSource = asRecord(page.seo);
+    if (seoSource) seoBag = asRecord(walkNamespaces(seoSource, steps, 0));
   }
-  if (resolvedSeo) {
-    result = resolveBagVars(result, "seo", resolvedSeo);
+  if (seoBag && Object.keys(seoBag).length > 0) {
+    steps.push({ kind: "bag", prefix: "seo", bag: seoBag });
   }
 
-  const paramBag = opts.param;
-  if (paramBag && Object.keys(paramBag).length > 0) {
-    result = resolveBagVars(result, "param", paramBag);
+  if (opts.param && Object.keys(opts.param).length > 0) {
+    steps.push({ kind: "bag", prefix: "param", bag: opts.param });
   }
+
+  let result = steps.length > 0 ? walkNamespaces(data, steps, 0) : data;
 
   const skipSiteVars = opts.skipSiteVars ?? true;
   if (!skipSiteVars) {

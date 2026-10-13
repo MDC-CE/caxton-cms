@@ -57,6 +57,14 @@ export function buildLeadAdContext(
     out[`${prefix}_paid_landing_adset_id`] = ref.adset_id ?? undefined;
     out[`${prefix}_paid_landing_ad_id`] = ref.ad_id ?? undefined;
   }
+  const ec = session.entry_channel;
+  const touch = ec?.last ?? ec?.first;
+  if (touch) {
+    out.channel = touch.channel;
+    out.channel_landing_path = touch.path;
+    out.referrer_host = touch.referrer_host;
+  }
+  if (ec?.first) out.first_channel = ec.first.channel;
   const pv = getCurrentPageVersion();
   if (pv) out.page_experiment_id = pv.experiment_id;
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ''));

@@ -14,16 +14,27 @@ describe("activateHashTarget", () => {
   let locationHash: string;
   let locationSearch: string;
   let locationPathname: string;
-  let hashChangeCount: number;
+  let hashAssignments: number;
+  let hashChangeEvents: number;
   let replaceStateCalls: string[];
+  let pushStateCalls: string[];
   let elements: Map<string, { dataset: { sectionType?: string } }>;
+
+  function applyHistoryUrl(url: string): void {
+    const u = new URL(url, "http://localhost");
+    locationPathname = u.pathname;
+    locationSearch = u.search;
+    locationHash = u.hash;
+  }
 
   beforeEach(() => {
     locationHash = "";
     locationSearch = "";
     locationPathname = "/programs/ai-engineering";
-    hashChangeCount = 0;
+    hashAssignments = 0;
+    hashChangeEvents = 0;
     replaceStateCalls = [];
+    pushStateCalls = [];
     elements = new Map();
     scrollToSectionWhenReady.mockClear();
 
@@ -38,10 +49,11 @@ describe("activateHashTarget", () => {
     vi.stubGlobal("history", {
       replaceState: (_a: unknown, _b: unknown, url: string) => {
         replaceStateCalls.push(url);
-        const u = new URL(url, "http://localhost");
-        locationPathname = u.pathname;
-        locationSearch = u.search;
-        if (u.hash) locationHash = u.hash;
+        applyHistoryUrl(url);
+      },
+      pushState: (_a: unknown, _b: unknown, url: string) => {
+        pushStateCalls.push(url);
+        applyHistoryUrl(url);
       },
     });
 
@@ -60,11 +72,14 @@ describe("activateHashTarget", () => {
           const next = v.startsWith("#") ? v : `#${v}`;
           if (next !== locationHash) {
             locationHash = next;
-            hashChangeCount += 1;
+            hashAssignments += 1;
           }
         },
       },
-      dispatchEvent: vi.fn(),
+      dispatchEvent: (event: Event) => {
+        if (event.type === "hashchange") hashChangeEvents += 1;
+        return true;
+      },
     });
   });
 
@@ -72,17 +87,19 @@ describe("activateHashTarget", () => {
     vi.unstubAllGlobals();
   });
 
-  it("fires hashchange for modal targets without replaceState hash first", () => {
+  it("opens a modal with pushState and a manual hashchange, without assigning location.hash", () => {
     elements.set("modal-ubwgcj", { dataset: { sectionType: "modal" } });
 
     activateHashTarget("modal-ubwgcj", "");
 
     expect(locationHash).toBe("#modal-ubwgcj");
-    expect(hashChangeCount).toBe(1);
+    expect(hashAssignments).toBe(0);
+    expect(hashChangeEvents).toBe(1);
+    expect(pushStateCalls).toEqual(["/programs/ai-engineering#modal-ubwgcj"]);
     expect(replaceStateCalls).toEqual([]);
   });
 
-  it("merges search before assigning modal hash", () => {
+  it("merges search into the modal pushState url", () => {
     elements.set("modal-ubwgcj", { dataset: { sectionType: "modal" } });
 
     activateHashTarget("modal-ubwgcj", "?cohort=1713");
@@ -90,7 +107,18 @@ describe("activateHashTarget", () => {
     expect(locationPathname).toBe("/programs/ai-engineering");
     expect(locationSearch).toBe("?cohort=1713");
     expect(locationHash).toBe("#modal-ubwgcj");
-    expect(replaceStateCalls).toEqual(["/programs/ai-engineering?cohort=1713"]);
+    expect(hashAssignments).toBe(0);
+    expect(pushStateCalls).toEqual(["/programs/ai-engineering?cohort=1713#modal-ubwgcj"]);
+  });
+
+  it("does not push a duplicate history entry when the modal url is already current", () => {
+    elements.set("modal-ubwgcj", { dataset: { sectionType: "modal" } });
+    locationHash = "#modal-ubwgcj";
+
+    activateHashTarget("modal-ubwgcj", "");
+
+    expect(pushStateCalls).toEqual([]);
+    expect(hashChangeEvents).toBe(1);
   });
 
   it("uses replaceState with hash for non-modal sections", () => {

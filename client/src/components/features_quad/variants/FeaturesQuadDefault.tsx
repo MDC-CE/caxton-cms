@@ -129,7 +129,7 @@ export default function FeaturesQuadDefault({ data }: FeaturesQuadDefaultProps) 
 
   return (
     <section 
-      className={`py-14 ${backgroundClass}`}
+      className={backgroundClass}
       data-testid="section-features-quad"
     >
       <div className="max-w-6xl mx-auto px-4">

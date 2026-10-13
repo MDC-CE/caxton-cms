@@ -14,6 +14,7 @@ import { findEntryItem, findEntryPresence, itemLocales, loadItemsForType } from 
 import { applyPerEntryLayer } from "./section-merge";
 import { applySectionLayoutDefaults } from "./section-layout-defaults";
 import { invalidateStaticListingCache } from "./static-listing-cache";
+import { loadYamlWithTemplateVars } from "./yaml-parse-cache";
 import { isEntryDetached } from "./shared-layout-entry";
 import { isEmptyDetachedLocaleEntry } from "./empty-locale";
 import { isReservedContentSlug } from "../shared/safe-href";
@@ -618,10 +619,9 @@ export class ContentIndex {
   }
 
   safeYamlLoad(raw: string): Record<string, unknown> | null {
-    const { escaped, map } = escapeTemplateVars(raw);
-    const parsed = yaml.load(escaped) as Record<string, unknown> | null;
-    if (!parsed) return null;
-    return unescapeObjectVars(parsed, map) as Record<string, unknown>;
+    const parsed = loadYamlWithTemplateVars(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
   }
 
   private addImageRef(ref: string, filePath: string): void {
@@ -1865,6 +1865,7 @@ export class ContentIndex {
    * scanSlow (same as the file-watcher path). Pass `{ syncSlow: true }` when
    * redirects/index must be correct before the caller returns (GitHub pull,
    * rename-with-redirect, raw YAML save, explicit refresh-cache).
+   * Does not rebuild public HTML. Callers enqueue the pages that changed.
    */
   refresh(opts?: { syncSlow?: boolean }): void {
     const syncSlow = opts?.syncSlow === true;
@@ -1891,9 +1892,6 @@ export class ContentIndex {
       this.refreshRunning = false;
     }
     invalidateStaticListingCache(undefined, this.contentRoot);
-    void import("./html-page-cache")
-      .then(({ invalidateHtmlPageCache }) => invalidateHtmlPageCache())
-      .catch(() => {});
   }
 
   getStats(): { total: number; byType: Record<string, number> } {

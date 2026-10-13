@@ -15,6 +15,7 @@ import {
   IconChartBar,
   IconClick,
   IconCurrencyDollar,
+  IconDots,
 } from "@tabler/icons-react";
 import { Link, useParams } from "wouter";
 import { ChevronDown, Plus } from "lucide-react";
@@ -37,7 +38,15 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useDebugAuth } from "@/hooks/useDebugAuth";
+import { leadsQueryToSearchParams } from "@shared/leads-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SitemapSearch } from "@/components/menus/SitemapSearch";
 import { useToast } from "@/hooks/use-toast";
@@ -367,6 +376,7 @@ function KpiCard({
   testId,
   valueClassName,
   className,
+  menu,
 }: {
   label: string;
   value: ReactNode;
@@ -375,13 +385,18 @@ function KpiCard({
   testId: string;
   valueClassName?: string;
   className?: string;
+  /** Actions shown top right of the card (e.g. a three-dot menu). */
+  menu?: ReactNode;
 }) {
   return (
     <Card data-testid={testId} className={cn("min-w-0", className)}>
       <CardContent className="pt-4 pb-3 space-y-1">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
-          <Icon className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate" title={label}>{label}</span>
+        <div className="flex items-center justify-between gap-1">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
+            <Icon className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate" title={label}>{label}</span>
+          </div>
+          {menu}
         </div>
         <p className={cn("text-sm font-medium truncate", valueClassName)}>{value}</p>
         {hint != null && (
@@ -762,6 +777,8 @@ export default function StoreProductDetailPage() {
   const params = useParams<{ slug: string }>();
   const slug = params.slug ?? "";
   const queryClient = useQueryClient();
+  const { hasCapability } = useDebugAuth();
+  const canViewLeads = hasCapability("metrics_view");
   const [educationOpen, setEducationOpen] = useState(false);
   const [journeyView, setJourneyView] = useState<"strategy" | "page_performance" | "stage_flow">(
     "strategy",
@@ -968,6 +985,7 @@ export default function StoreProductDetailPage() {
                     </CollapsibleTrigger>
                     <CollapsibleContent className="mt-1 text-xs text-muted-foreground font-mono space-y-1">
                       <p>_product.yml → actively_selling</p>
+                      <p>Paused stops promoting; leads and analytics still count.</p>
                       <p>Lead-form catalogs use purchasable=true — not actively_selling.</p>
                     </CollapsibleContent>
                   </Collapsible>
@@ -994,6 +1012,39 @@ export default function StoreProductDetailPage() {
                 icon={IconChartBar}
                 testId="card-kpi-conversions"
                 valueClassName="tabular-nums"
+                menu={
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-5 w-5 -my-0.5 shrink-0 text-muted-foreground"
+                        aria-label="Lead conversion actions"
+                        data-testid="button-kpi-conversions-menu"
+                      >
+                        <IconDots className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      {canViewLeads ? (
+                        <DropdownMenuItem asChild>
+                          <Link
+                            href={`/private/store/leads?${leadsQueryToSearchParams({ filters: { product: data.product.product_id } })}`}
+                            data-testid="link-kpi-conversions-check-leads"
+                          >
+                            Check Leads
+                          </Link>
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem disabled className="flex-col items-start gap-0" data-testid="link-kpi-conversions-check-leads">
+                          <span>Check Leads</span>
+                          <span className="text-xs text-muted-foreground">Requires metrics access</span>
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                }
               />
               <KpiCard
                 label="Purchases (28d)"

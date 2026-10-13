@@ -82,7 +82,7 @@ import {
 } from "../content-editor";
 import { api } from "../rate-limit/api";
 import { findNewDeprecatedVarRefs, getDeprecatedFieldsForType } from "../deprecated-field-guard";
-import { flushAfterContentWrites, collectEntryHtmlPaths, fileMentionsRedirects } from "../content-write-flush";
+import { flushAfterContentWrites, collectEntryHtmlPaths, collectAttachedHtmlPaths, fileMentionsRedirects } from "../content-write-flush";
 import {
   bulkUpdateMeta,
   validateBulkMetaUpdates,
@@ -178,6 +178,7 @@ import {
   resolveRegistryReference,
 } from "../../scripts/validation/shared/imageRegistrySrc";
 import type { ProgressEvent } from "../../scripts/validation/fixers/types";
+import type { InternalLinkWarning } from "@shared/internalLinkGate";
 import { gcs } from "../gcs";
 import { z } from "zod";
 import {
@@ -1402,7 +1403,7 @@ export function registerSectionsRoutes(app: Express): void {
         }
 
         const ci = getCI(res);
-        const htmlPaths = collectEntryHtmlPaths(ci, contentType, slug, normalizeLocale(locale));
+        let htmlPaths = collectEntryHtmlPaths(ci, contentType, slug, normalizeLocale(locale));
         const normalizedLocale = normalizeLocale(locale);
 
         let syncSlow = false;
@@ -1437,6 +1438,7 @@ export function registerSectionsRoutes(app: Express): void {
           try {
             pruneStaleSectionAliases(contentType, locale, getContentRoot(res));
           } catch { /* non-fatal */ }
+          htmlPaths = [...htmlPaths, ...collectAttachedHtmlPaths(ci, contentType)];
         }
 
         flushAfterContentWrites({
@@ -1460,10 +1462,14 @@ export function registerSectionsRoutes(app: Express): void {
           deprecated_template_refs?: unknown;
           text_limit_warnings?: TextLimitViolation[];
           theme_color_warnings?: ThemeViolation[];
+          link_warnings?: InternalLinkWarning[];
         } = {
           success: true,
           updatedSections: result.updatedSections,
         };
+        if (result.linkWarnings?.length) {
+          response.link_warnings = result.linkWarnings;
+        }
         if (textLimitWarnings.length > 0) {
           response.text_limit_warnings = textLimitWarnings;
         }
@@ -1478,7 +1484,7 @@ export function registerSectionsRoutes(app: Express): void {
         }
         if (wroteSharedTemplate) {
           response.shared_template_html_cache =
-            "Shared-template save: this page (and bound pages) had path-scoped HTML cache bust. Other URLs that share template.*.yml may keep previous anonymous HTML until TTL (~5 min). Slow content-index scan is async/coalesced. See server/content-write-flush.ts, server/html-page-cache.ts, server/content-index.ts.";
+            "Shared-template save: cached public pages keep the previous HTML until a background rebuild replaces them. Pages that were not cached render the new template on the next visit.";
         }
         if (result.warning) {
           response.warning = result.warning;
@@ -1502,6 +1508,9 @@ export function registerSectionsRoutes(app: Express): void {
             ? { missing_fields: result.missingFields }
             : {}),
           ...(result.deprecated ? { deprecated: result.deprecated } : {}),
+          ...(result.brokenInternalLinks?.length
+            ? { broken_internal_links: result.brokenInternalLinks }
+            : {}),
         });
       }
     } catch (error) {
@@ -1858,7 +1867,10 @@ export function registerSectionsRoutes(app: Express): void {
           htmlPaths: collectEntryHtmlPaths(ci, contentType, slug),
           syncSlow: false,
         });
-        res.json({ success: true });
+        res.json({
+          success: true,
+          ...(result.linkWarnings?.length ? { link_warnings: result.linkWarnings } : {}),
+        });
       } else {
         res.status(400).json({
           error: result.error,
@@ -1867,6 +1879,9 @@ export function registerSectionsRoutes(app: Express): void {
             ? { missing_fields: result.missingFields }
             : {}),
           ...(result.deprecated ? { deprecated: result.deprecated } : {}),
+          ...(result.brokenInternalLinks?.length
+            ? { broken_internal_links: result.brokenInternalLinks }
+            : {}),
         });
       }
     } catch (error) {

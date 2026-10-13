@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {AlertTriangle, ArrowUpDown, Check, CheckCheck, ChevronDown, Cloud, Copy, Eye, FileText, Film, Folder, Image, Layers, Link as LinkIcon, ListChecks, Loader2, MoreHorizontal, Replace, Search, Settings, Square, SquareCheck, Stethoscope, Tags, Terminal, Trash2, Upload, Wand2, Wrench, X} from "lucide-react";
+import {AlertTriangle, ArrowUpDown, Check, CheckCheck, ChevronDown, Cloud, Copy, ExternalLink, Eye, FileText, Film, Folder, Image, Layers, Link as LinkIcon, ListChecks, Loader2, MoreHorizontal, Replace, Search, Settings, Square, SquareCheck, Stethoscope, Tags, Terminal, Trash2, Upload, Wand2, Wrench, X} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -741,6 +741,26 @@ export default function MediaGallery() {
         apiRequest("POST", "/api/validation/run", {
           validators: IMAGE_HEALTH_VALIDATORS,
           includeArtifacts: true,
+        }).then(async (validationRes) => {
+          const started = await validationRes.json();
+          if (
+            typeof started.job_id === "string" &&
+            (started.status === "queued" || started.status === "running")
+          ) {
+            const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+            const done = await pollDiagnosticsJob(started.job_id);
+            return new Response(JSON.stringify({
+              summary: {
+                total: Array.isArray(done.validators) ? done.validators.length : 0,
+                passed: 0,
+                failed: done.summary?.errorCount ?? 0,
+                warnings: done.summary?.warningCount ?? 0,
+                duration: 0,
+              },
+              validators: done.validators ?? [],
+            }));
+          }
+          return new Response(JSON.stringify(started));
         }),
       ]);
       const scanData: ScanResult = await scanRes.json();
@@ -759,7 +779,25 @@ export default function MediaGallery() {
       validators: IMAGE_HEALTH_VALIDATORS,
       includeArtifacts: true,
     });
-    const validationData: ValidationRunResult = await validationRes.json();
+    const started = await validationRes.json();
+    let validationData: ValidationRunResult = started;
+    if (
+      typeof started.job_id === "string" &&
+      (started.status === "queued" || started.status === "running")
+    ) {
+      const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+      const done = await pollDiagnosticsJob(started.job_id);
+      validationData = {
+        summary: {
+          total: Array.isArray(done.validators) ? done.validators.length : 0,
+          passed: 0,
+          failed: done.summary?.errorCount ?? 0,
+          warnings: done.summary?.warningCount ?? 0,
+          duration: 0,
+        },
+        validators: (done.validators ?? []) as ValidationRunResult["validators"],
+      };
+    }
     setValidationResult(validationData);
   };
 
@@ -2460,6 +2498,12 @@ export default function MediaGallery() {
                             >
                               <LinkIcon className="h-4 w-4 mr-2" />
                               Copy URL
+                            </DropdownMenuItem>
+                            <DropdownMenuItem asChild data-testid={`button-open-new-tab-${id}`}>
+                              <a href={img.src} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-4 w-4 mr-2" />
+                                Open in new tab
+                              </a>
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={() => openReplacePicker(id)}

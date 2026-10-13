@@ -1,0 +1,8 @@
+name: Spacer - default
+description: Large gap on desktop that shrinks to small on mobile
+
+yaml: |
+  type: spacer
+  version: "1.0"
+  size: lg
+  mobile_size: sm

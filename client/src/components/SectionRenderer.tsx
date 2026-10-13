@@ -22,7 +22,7 @@ import {
 } from "@/components/sectionRegistry";
 import { SectionRenderErrorBoundary } from "@/components/editing/SectionRenderErrorBoundary";
 import { isSchemaOrgSection } from "@shared/schema-org-sections";
-import { sectionBackgroundPaint } from "@shared/theme-palette";
+import { sectionBackgroundPaint, sectionCoverPaint } from "@shared/theme-palette";
 
 // Spacing presets in pixels (top, bottom)
 const SPACING_PRESETS: Record<string, { top: string; bottom: string }> = {
@@ -1554,12 +1554,14 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
           const isFirstVisibleSection = isVisible && !hasAppliedTopCover && !isSchemaOrg;
           if (isFirstVisibleSection) hasAppliedTopCover = true;
 
-          const topCoverBackground = typeof wrapperStyles.background === "string" ? wrapperStyles.background : undefined;
+          const topCoverPaint = sectionCoverPaint(wrapperStyles);
           const hasTopCover = isFirstVisibleSection
             && sectionBackgroundOverlapsMenu
-            && !!topCoverBackground
+            && !!topCoverPaint
             && (topChromeHeightDesktop > 0 || topChromeHeightMobile > 0);
-          const sectionWrapperStyles = hasTopCover ? { ...wrapperStyles, background: "transparent" } : wrapperStyles;
+          const sectionWrapperStyles = hasTopCover
+            ? { ...wrapperStyles, background: undefined, backgroundColor: "transparent", backgroundImage: undefined }
+            : wrapperStyles;
           const contentLayerStyles: CSSProperties = hasTopCover ? { ...innerStyles, position: "relative" } : innerStyles;
           const sectionId = (rawSection as SectionLayout).section_id || `${sectionType}-${index}`;
           const isPriority = loadStrategy === "eager";
@@ -1602,14 +1604,14 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
                     <div
                       aria-hidden="true"
                       className="pointer-events-none absolute inset-x-0 bottom-0 z-0 hidden md:block"
-                      style={{ top: `${-topChromeHeightDesktop}px`, background: topCoverBackground }}
+                      style={{ top: `${-topChromeHeightDesktop}px`, ...topCoverPaint }}
                     />
                   )}
                   {topChromeHeightMobile > 0 && (
                     <div
                       aria-hidden="true"
                       className="pointer-events-none absolute inset-x-0 bottom-0 z-0 md:hidden"
-                      style={{ top: `${-topChromeHeightMobile}px`, background: topCoverBackground }}
+                      style={{ top: `${-topChromeHeightMobile}px`, ...topCoverPaint }}
                     />
                   )}
                 </>

@@ -22,6 +22,14 @@ import {
 } from "./gsc-organic-path-traffic";
 import { buildSiteOrganicTraffic } from "./gsc-organic-site-traffic";
 import {
+  ORGANIC_LEADS_BASIS,
+  buildOrganicLeadsByPath,
+  lookupPathLeads,
+  sumPathLeads,
+  type OrganicLeadsByPath,
+  type PathLeadStats,
+} from "./seo-organic-leads";
+import {
   buildOtherHighTraffic,
   clusteredPathsFromSeoIndex,
 } from "./gsc-organic-other-traffic";
@@ -98,6 +106,8 @@ function badgeForPath(
 
 export async function buildTrafficClusterMetrics(opts: {
   seoIndex: SeoIndex;
+  /** Pipeline site id (lead ledger database). */
+  site: string;
   contentRoot: string;
   contentFolder: string;
   market: string;
@@ -109,6 +119,13 @@ export async function buildTrafficClusterMetrics(opts: {
     market: opts.market,
     kpiPaths: clusteredPathsFromSeoIndex(opts.seoIndex),
   });
+  let leads: OrganicLeadsByPath | null = null;
+  try {
+    leads = buildOrganicLeadsByPath({ site: opts.site, window: organic.window, market: organic.market });
+  } catch (err) {
+    console.warn("cluster metrics: organic leads unavailable", err);
+  }
+  const leadsByPath = leads?.byPath ?? {};
   const siteOrganicTraffic = await buildSiteOrganicTraffic({
     contentRoot: opts.contentRoot,
     contentFolder: opts.contentFolder,
@@ -125,18 +142,25 @@ export async function buildTrafficClusterMetrics(opts: {
     const hub = opts.seoIndex.entries[hubId];
     const hubPath = cluster.path || hub?.path || "";
     const hubTraffic = lookupPathTraffic(organic.byPath, hubPath);
+    const hubLeads = lookupPathLeads(leadsByPath, hubPath);
     const memberTraffics: Array<PathTrafficStats | undefined> = [];
+    const memberLeads: Array<PathLeadStats | undefined> = [];
     const members = cluster.members.map((id) => {
       const base = memberFromEntry(id, opts.seoIndex.entries[id]);
       const traffic = lookupPathTraffic(organic.byPath, base.path);
+      const leadStats = lookupPathLeads(leadsByPath, base.path);
       memberTraffics.push(traffic);
-      return traffic ? { id, traffic } : { id };
+      memberLeads.push(leadStats);
+      return { id, ...(traffic ? { traffic } : {}), ...(leadStats ? { leads: leadStats } : {}) };
     });
     const clusterTraffic = sumPathTraffic([hubTraffic, ...memberTraffics]);
+    const clusterLeads = sumPathLeads([hubLeads, ...memberLeads]);
     return {
       hubId,
       ...(hubTraffic ? { hubTraffic } : {}),
+      ...(hubLeads ? { hubLeads } : {}),
       ...(clusterTraffic ? { clusterTraffic } : {}),
+      ...(clusterLeads ? { clusterLeads } : {}),
       members,
     };
   });
@@ -156,6 +180,12 @@ export async function buildTrafficClusterMetrics(opts: {
       market_warning: organic.market_warning,
       totals: organic.totals,
       series: organic.series,
+    },
+    organicLeads: {
+      available: leads != null,
+      tracking_since: leads?.tracking_since ?? null,
+      estimated: leads?.estimated ?? false,
+      basis: ORGANIC_LEADS_BASIS,
     },
     siteOrganicTraffic: {
       window: siteOrganicTraffic.window,

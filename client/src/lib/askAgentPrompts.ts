@@ -10,6 +10,7 @@ import organicMissingSerp from "@shared/ask-agent-prompts/organic-missing-serp.m
 import organicLinkGaps from "@shared/ask-agent-prompts/organic-link-gaps.md?raw";
 import pageDiagnostics from "@shared/ask-agent-prompts/page-diagnostics.md?raw";
 import draftFeedback from "@shared/ask-agent-prompts/draft-feedback.md?raw";
+import sectionVariantSwap from "@shared/ask-agent-prompts/section-variant-swap.md?raw";
 import redirectOverwritesContent from "@shared/ask-agent-prompts/redirect-overwrites-content.md?raw";
 import resolvedIssueContext from "@shared/ask-agent-prompts/resolved-issue-context.md?raw";
 import proposalBadOutcome from "@shared/ask-agent-prompts/proposal-bad-outcome.md?raw";
@@ -22,6 +23,7 @@ const RAW: Record<AskAgentPromptId, string> = {
   "organic-link-gaps": organicLinkGaps,
   "page-diagnostics": pageDiagnostics,
   "draft-feedback": draftFeedback,
+  "section-variant-swap": sectionVariantSwap,
   "redirect-overwrites-content": redirectOverwritesContent,
   "resolved-issue-context": resolvedIssueContext,
   "proposal-bad-outcome": proposalBadOutcome,

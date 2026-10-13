@@ -169,8 +169,12 @@ const PAGE_SHEET: SheetTable = {
     { name: "statusCounts", sql: "TEXT NOT NULL", json: "object" },
     { name: "ssrCounts", sql: "TEXT NOT NULL", json: "object" },
     { name: "slowestPath", sql: "TEXT" },
+    { name: "samplePaths", sql: "TEXT", json: "array" },
   ],
 };
+
+/** How many distinct unmatched paths one window keeps. Not every call. */
+export const UNMATCHED_SAMPLE_LIMIT = 8;
 
 /** Who reports. Two workers with the same name are separated by pid, not by this string. */
 export type ProcessName = "web" | "sidequest" | "mcp" | "diagnostics-worker";
@@ -190,6 +194,7 @@ type DurationRow = {
 type PageRow = DurationRow & {
   ssrCounts: Record<string, number>;
   slowestPath: string | null;
+  samplePaths: string[];
   route: string;
 };
 
@@ -369,6 +374,16 @@ export function matchUrlPattern(pathname: string, patterns: readonly string[]): 
     if (!best || literals > best.literals) best = { pattern: stored, literals };
   }
   return best ? best.pattern : "unmatched";
+}
+
+/**
+ * Route label for the performance sheet. Staff URLs are their own row.
+ * Anything else is the public url_pattern, or "unmatched".
+ */
+export function pagePatternForStats(pathname: string, contentRoot?: string): string {
+  const clean = pathname.split("?")[0].split("#")[0] || "/";
+  if (clean === "/private" || clean.startsWith("/private/")) return "private";
+  return pageRouteForPath(clean, contentRoot);
 }
 
 /** Collects url_pattern values from content-types.yml and passes them to matchUrlPattern. */
@@ -722,6 +737,7 @@ const pages = {
         durationBoundsId: durationBoundsId(buckets),
         ssrCounts: {},
         slowestPath: null,
+        samplePaths: [],
       };
       this.rows.set(pattern, row);
     }
@@ -729,6 +745,9 @@ const pages = {
     addDuration(row, ms, status, buckets);
     row.ssrCounts[outcome] = (row.ssrCounts[outcome] ?? 0) + 1;
     if (isSlowest) row.slowestPath = cleanPath;
+    if (pattern === "unmatched" && !row.samplePaths.includes(cleanPath) && row.samplePaths.length < UNMATCHED_SAMPLE_LIMIT) {
+      row.samplePaths.push(cleanPath);
+    }
   },
 
   take(): PageRow[] {
@@ -1432,6 +1451,8 @@ export type DetailRoute = {
   durationCounts: number[];
   ssrCounts?: Record<string, number>;
   path?: string | null;
+  /** A few unmatched paths from this span. Not every call. */
+  samplePaths?: string[];
 };
 
 export type DetailStats = {
@@ -1524,6 +1545,7 @@ type HistRow = {
   statusCounts: Record<string, number>;
   ssrCounts?: Record<string, number>;
   slowestPath?: string | null;
+  samplePaths?: string[];
   kind: "api" | "pages";
 };
 
@@ -1550,6 +1572,30 @@ function parseOpenCalls(raw: unknown): OpenCallRow[] | null {
     out.push({ method, route, count, maxMs });
   }
   return out.length > 0 ? out : null;
+}
+
+function parseStringList(raw: unknown): string[] {
+  if (raw == null || raw === "") return [];
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function mergeSamplePaths(current: string[] | undefined, more: string[]): string[] | undefined {
+  if (more.length === 0) return current;
+  const out = current ? [...current] : [];
+  for (const pathName of more) {
+    if (out.length >= UNMATCHED_SAMPLE_LIMIT) break;
+    if (!out.includes(pathName)) out.push(pathName);
+  }
+  return out.length > 0 ? out : current;
 }
 
 function parseCounts(raw: string): number[] {
@@ -1861,7 +1907,7 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
     `SELECT method, route, count, sumMs, maxMs, durationBoundsId, durationCounts, statusCounts FROM api_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
   ).all(...params) as Array<Record<string, unknown>>;
   const pageRows = opened.prepare(
-    `SELECT route, count, sumMs, maxMs, durationBoundsId, durationCounts, statusCounts, ssrCounts, slowestPath FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
+    `SELECT route, count, sumMs, maxMs, durationBoundsId, durationCounts, statusCounts, ssrCounts, slowestPath, samplePaths FROM document_samples WHERE timestamp >= ? AND timestamp <= ?${filter.sql}`,
   ).all(...params) as Array<Record<string, unknown>>;
 
   const boundsIds = [...new Set([...apiRows, ...pageRows].map((row) => String(row.durationBoundsId ?? "")).filter(Boolean))];
@@ -1882,6 +1928,7 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
     const durationCounts = parseCounts(String(row.durationCounts ?? "[]"));
     const ssrCounts = kind === "pages" ? parseRecord(String(row.ssrCounts ?? "{}")) : undefined;
     const slowestPath = kind === "pages" ? (row.slowestPath == null ? null : String(row.slowestPath)) : undefined;
+    const samplePaths = kind === "pages" ? parseStringList(row.samplePaths) : [];
     let acc = byKey.get(key);
     if (!acc) {
       acc = {
@@ -1905,6 +1952,7 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
       acc.maxMs = maxMs;
       if (kind === "pages") acc.path = slowestPath ?? acc.path;
     }
+    if (kind === "pages") acc.samplePaths = mergeSamplePaths(acc.samplePaths, samplePaths);
     addRecord(acc.statusCounts, statusCounts);
     if (!mixedBounds) addCounts(acc.durationCounts, durationCounts);
     if (acc.ssrCounts && ssrCounts) addRecord(acc.ssrCounts, ssrCounts);
@@ -1926,6 +1974,7 @@ export function readProcessStatsDetail(opts: { from?: number; to?: number; now?:
     if (acc.kind === "pages") {
       route.ssrCounts = acc.ssrCounts ?? {};
       route.path = acc.path ?? null;
+      if (acc.samplePaths && acc.samplePaths.length > 0) route.samplePaths = acc.samplePaths;
     }
     return route;
   }).sort((a, b) => b.maxMs - a.maxMs || b.count - a.count);

@@ -97,13 +97,10 @@ export function resolveConversionProduct(
     // No funnel on non-program page: still allow purchasable map hit
   }
 
+  // Paused products (active: false) still resolve: paused stops promotion, not sales.
   const product = input.productLookup?.(candidate);
-  if (!product || product.active === false) {
-    return {
-      ok: false,
-      reason: product ? "no_purchasable" : "no_purchasable",
-      program_id: candidate,
-    };
+  if (!product) {
+    return { ok: false, reason: "no_purchasable", program_id: candidate };
   }
 
   return {

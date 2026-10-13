@@ -16,6 +16,15 @@ import {
 } from "../../server/gsc-organic-path-traffic.js";
 import { buildSiteOrganicTraffic } from "../../server/gsc-organic-site-traffic.js";
 import {
+  ORGANIC_LEADS_BASIS,
+  buildOrganicLeadsByPath,
+  lookupPathLeads,
+  sumPathLeads,
+  windowBoundsMs,
+  type OrganicLeadsByPath,
+  type PathLeadStats,
+} from "../../server/seo-organic-leads.js";
+import {
   getClusterFromIndex,
   loadSeoIndex,
   type SeoIndex,
@@ -515,33 +524,39 @@ function memberPathsFromIndex(
   });
 }
 
+type ClusterPayloadItem = {
+  hubId: string;
+  path: string;
+  hubTraffic?: PathTrafficStats;
+  hubLeads?: PathLeadStats;
+  clusterTraffic?: PathTrafficStats;
+  clusterLeads?: PathLeadStats;
+  members: Array<{ id: string; path: string; traffic?: PathTrafficStats; leads?: PathLeadStats }>;
+};
+
+const ZERO_LEADS: PathLeadStats = { organic_search: 0, not_paid: 0, tracked: 0 };
+
 export function buildClustersPayload(opts: {
   organic: OrganicPathTraffic;
   hub_ids: string[];
   contentRoot: string;
   include_series: boolean;
+  /** When set, every hub, member and cluster gets `leads` (zeros when none). */
+  leadsByPath?: Record<string, PathLeadStats> | null;
 }): {
-  items: Array<{
-    hubId: string;
-    path: string;
-    hubTraffic?: PathTrafficStats;
-    clusterTraffic?: PathTrafficStats;
-    members: Array<{ id: string; path: string; traffic?: PathTrafficStats }>;
-  }>;
+  items: ClusterPayloadItem[];
   unknown_hubs: string[];
   selection_totals: OrganicSiteTotals;
+  selection_leads?: PathLeadStats;
   series?: OrganicDayPoint[];
 } {
   const index = loadSeoIndex(opts.contentRoot);
-  const items: Array<{
-    hubId: string;
-    path: string;
-    hubTraffic?: PathTrafficStats;
-    clusterTraffic?: PathTrafficStats;
-    members: Array<{ id: string; path: string; traffic?: PathTrafficStats }>;
-  }> = [];
+  const items: ClusterPayloadItem[] = [];
   const unknown_hubs: string[] = [];
   const unique_paths = new Set<string>();
+  const leadsByPath = opts.leadsByPath ?? null;
+  const leadsFor = (p: string): PathLeadStats =>
+    (p ? lookupPathLeads(leadsByPath ?? {}, p) : undefined) ?? { ...ZERO_LEADS };
 
   for (const raw of opts.hub_ids) {
     const cluster = getClusterFromIndex(raw, opts.contentRoot);
@@ -555,19 +570,26 @@ export function buildClustersPayload(opts: {
     const hubTraffic = hubPath ? lookupPathTraffic(opts.organic.byPath, hubPath) : undefined;
     const memberRows = memberPathsFromIndex(index, cluster.members);
     const memberTraffics: Array<PathTrafficStats | undefined> = [];
+    const memberLeads: PathLeadStats[] = [];
     const members = memberRows.map((m) => {
       const key = m.path ? pathKeyFromUrlOrPath(m.path) : null;
       if (key) unique_paths.add(key);
       const traffic = m.path ? lookupPathTraffic(opts.organic.byPath, m.path) : undefined;
       memberTraffics.push(traffic);
-      return traffic ? { id: m.id, path: m.path, traffic } : { id: m.id, path: m.path };
+      const leads = leadsByPath ? leadsFor(m.path) : undefined;
+      if (leads) memberLeads.push(leads);
+      return { id: m.id, path: m.path, ...(traffic ? { traffic } : {}), ...(leads ? { leads } : {}) };
     });
     const clusterTraffic = sumPathTraffic([hubTraffic, ...memberTraffics]);
+    const hubLeads = leadsByPath ? leadsFor(hubPath) : undefined;
+    const clusterLeads = hubLeads ? sumPathLeads([hubLeads, ...memberLeads]) : undefined;
     items.push({
       hubId: cluster.hubId,
       path: hubPath,
       ...(hubTraffic ? { hubTraffic } : {}),
+      ...(hubLeads ? { hubLeads } : {}),
       ...(clusterTraffic ? { clusterTraffic } : {}),
+      ...(clusterLeads ? { clusterLeads } : {}),
       members,
     });
   }
@@ -577,8 +599,12 @@ export function buildClustersPayload(opts: {
     items: typeof items;
     unknown_hubs: string[];
     selection_totals: OrganicSiteTotals;
+    selection_leads?: PathLeadStats;
     series?: OrganicDayPoint[];
   } = { items, unknown_hubs, selection_totals };
+  if (leadsByPath) {
+    result.selection_leads = sumPathLeads([...unique_paths].map((p) => leadsFor(p))) ?? { ...ZERO_LEADS };
+  }
   if (opts.include_series) {
     result.series = opts.organic.series;
   }
@@ -788,6 +814,50 @@ export function assemblePathsMode(opts: {
   };
 }
 
+/** Warnings for the clusters-mode `leads` fields (partly tracked window, missing country, unavailable). */
+export function organicLeadsWarnings(opts: {
+  leads: OrganicLeadsByPath | null;
+  leadsError?: string | null;
+  window: { start: string; end: string } | null;
+}): McpWarning[] {
+  if (!opts.window) return [];
+  if (!opts.leads) {
+    return [
+      warn(
+        "organic_leads_unavailable",
+        `Lead counts unavailable (${opts.leadsError ?? "lead ledger not readable"}); leads fields omitted. Clicks are unaffected.`,
+      ),
+    ];
+  }
+  const out: McpWarning[] = [];
+  const bounds = windowBoundsMs(opts.window);
+  const since = opts.leads.tracking_since;
+  if (since == null) {
+    out.push(
+      warn(
+        "organic_leads_not_tracked",
+        "No lead has a traffic channel yet: leads.*.organic_search is 0 and not_paid counts every non-paid lead by first landing page (upper bound).",
+      ),
+    );
+  } else if (bounds && since > bounds.startMs) {
+    out.push(
+      warn(
+        "organic_leads_partly_tracked",
+        `Channel tracking started ${new Date(since).toISOString().slice(0, 10)}, inside the window. Leads before it have no channel: use leads.*.not_paid (est., upper bound) over organic_search for this window.`,
+      ),
+    );
+  }
+  if (opts.leads.estimated) {
+    out.push(
+      warn(
+        "organic_leads_estimated",
+        "leads.estimated=true: some leads in the window are untracked or (market set) have no country. not_paid is the estimate the Cluster Map shows with 'est.'.",
+      ),
+    );
+  }
+  return out;
+}
+
 export function assembleClustersMode(opts: {
   contentRoot: string;
   contentFolder: string;
@@ -821,11 +891,20 @@ export function assembleClustersMode(opts: {
     end: window.end,
   });
 
+  let leads: OrganicLeadsByPath | null = null;
+  let leadsError: string | null = null;
+  try {
+    leads = buildOrganicLeadsByPath({ site: opts.contentFolder, window: organic.window, market: organic.market });
+  } catch (err) {
+    leadsError = err instanceof Error ? err.message : String(err);
+  }
+
   let clustersPayload = buildClustersPayload({
     organic,
     hub_ids: unique,
     contentRoot: opts.contentRoot,
     include_series: false,
+    leadsByPath: leads?.byPath ?? null,
   });
 
   if (seriesGate.include) {
@@ -846,6 +925,7 @@ export function assembleClustersMode(opts: {
         hub_ids: unique,
         contentRoot: opts.contentRoot,
         include_series: true,
+        leadsByPath: leads?.byPath ?? null,
       }),
     };
   }
@@ -875,12 +955,21 @@ export function assembleClustersMode(opts: {
     );
   }
 
+  warnings.push(...organicLeadsWarnings({ leads, leadsError, window: organic.window }));
+
   const configured = pathDayCacheConfigured(organic);
   const next_actions: NextAction[] = configured ? [] : unconfiguredNextActions(opts.site);
 
   return {
     payload: {
       mode: "clusters",
+      leads: {
+        available: leads != null,
+        tracking_since: leads?.tracking_since ?? null,
+        estimated: leads?.estimated ?? false,
+        basis: ORGANIC_LEADS_BASIS,
+        ...(clustersPayload.selection_leads ? { selection_totals: clustersPayload.selection_leads } : {}),
+      },
       configured,
       source: configured ? "day_cache" : "none",
       window: organic.window,

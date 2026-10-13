@@ -206,11 +206,14 @@ Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server
 | `ad_platform` | paid/unclear visits | `meta` \| `google` \| … |
 | `page_experiment_id` / `page_variant` | page has an active version test | Variant from the versioning cookie. |
 | `consent_state` | always | `granted` \| `denied` \| `unset` (tracking banner). |
+| `channel` `first_channel` `channel_landing_path` `referrer_host` | sent by current pages (session `entry_channel`) | Ledger-only: saved on `lead_submissions` (plus `last_organic_channel`, `country`, `traffic_status`), **stripped before the CRM**. Rules → topic `ads` (Lead channel). |
 
 - Source precedence: HttpOnly `4g_ads` cookie (only after tracking consent) → in-memory session in the request body (same-visit leads before consent).
 - The server ledger (`lead_submissions` in pipeline SQLite) stores **no** name / email / phone; 25-month retention. CRM owns personal data.
 - Non-effects: YAML `fields.*` defaults with the same key win only when enrichment has no value (enrichment keys override raw body keys).
 - UTM checks: the latest `utm_*` per non-test ledger row (with an `ad_platform`) feed the Ads UTM checks as observed evidence (topic `ads` → UTM convention and checks). Values are never rewritten on the lead or in the CRM.
+- Internal UTMs (`utm_source` = this host or its parent domain, e.g. `4geeks.com` on `4geeks.com`) are now ignored by the visitor session: they no longer replace stored campaign tags or click ids. Other org sites still count as ordinary referrals.
+- Lead counts by channel, source / medium, page, experiment or product: `get_leads_breakdown` (topic `ads` → Leads breakdown).
 - Same-site links with `utm_*` in content YAML raise `INTERNAL_LINK_HAS_UTM` (validator `internal-link-utm`, warning): they restart the GA4 session and overwrite the visitor's real source, so paid visits and leads can be credited to the wrong source. Links to other domains (including the org's other sites) are not flagged.
 
 ## Paths

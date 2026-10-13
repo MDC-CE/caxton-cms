@@ -21,11 +21,11 @@ export function injectGtmWebContainerId(html: string, contentRoot?: string): str
   // Fallback for HTML that already had a concrete ID baked in (e.g. older cache entries).
   let out = html.replace(
     /window\.__GTM_CONTAINER_ID__\s*=\s*"[^"]*"/,
-    `window.__GTM_CONTAINER_ID__ = "${safeId}"`,
+    () => `window.__GTM_CONTAINER_ID__ = "${safeId}"`,
   );
   out = out.replace(
     /(https:\/\/www\.googletagmanager\.com\/ns\.html\?id=)[^"&\s]*/g,
-    `$1${safeId}`,
+    (_m, prefix: string) => prefix + safeId,
   );
   return out;
 }

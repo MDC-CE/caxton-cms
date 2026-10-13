@@ -1,4 +1,4 @@
-import type { ValidationRunResult, ValidationContext } from "../../scripts/validation/shared/types";
+import type { ValidationRunResult, ValidationContext, ValidatorResult } from "../../scripts/validation/shared/types";
 import type { ValidationCacheService } from "./validationCacheService";
 import { entryKeyFromContentFile } from "../../scripts/validation/shared/entryKey";
 import { isDatabaseValidator } from "../../scripts/validation/shared/runClass";
@@ -100,4 +100,45 @@ export async function applyValidationRunToCache(
     cache.markFullRunAt(nowIso);
   }
   await cache.flush();
+}
+
+/** Per-database index only. Does not write the issues file. */
+export function indexDatabaseHealthResults(
+  cache: ValidationCacheService,
+  validators: ValidatorResult[],
+): void {
+  const nowIso = new Date().toISOString();
+  for (const dbHealth of validators) {
+    if (dbHealth.name !== "database-health") continue;
+    const byDb = new Map<
+      string,
+      { errors: typeof dbHealth.errors; warnings: typeof dbHealth.warnings }
+    >();
+    for (const issue of dbHealth.errors) {
+      if (!issue.file) continue;
+      const dbName = dbNameFromIssueFile(issue.file);
+      if (!dbName) continue;
+      if (!byDb.has(dbName)) byDb.set(dbName, { errors: [], warnings: [] });
+      byDb.get(dbName)!.errors.push({ ...issue, validator: "database-health" });
+    }
+    for (const issue of dbHealth.warnings) {
+      if (!issue.file) continue;
+      const dbName = dbNameFromIssueFile(issue.file);
+      if (!dbName) continue;
+      if (!byDb.has(dbName)) byDb.set(dbName, { errors: [], warnings: [] });
+      byDb.get(dbName)!.warnings.push({ ...issue, validator: "database-health" });
+    }
+    const artifacts = dbHealth.artifacts?.databases as
+      | Record<string, { errorCount: number; warningCount: number }>
+      | undefined;
+    const dbNames = artifacts ? Object.keys(artifacts) : [...byDb.keys()];
+    for (const dbName of dbNames) {
+      const issues = byDb.get(dbName) ?? { errors: [], warnings: [] };
+      cache.setByDatabase(dbName, {
+        lastRunAt: nowIso,
+        errors: issues.errors,
+        warnings: issues.warnings,
+      });
+    }
+  }
 }

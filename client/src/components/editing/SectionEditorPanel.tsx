@@ -146,7 +146,7 @@ import {
   joinFormSettingsPath,
   normalizeFormSettingsPath,
 } from "@shared/joinFormSettingsPath";
-import { collectExtraConsentYamlFields, consentCardChannels, consentKeyFromYamlField, parseConsentSettingsResponse } from "@shared/consent-settings";
+import { collectExtraConsentYamlFields, consentCardChannels, parseConsentSettingsResponse } from "@shared/consent-settings";
 import { resolveBoundCtaPaths } from "@shared/validateCtaTracking";
 import { showEcommerceEditorTab } from "@shared/wipeOnDuplicate";
 
@@ -260,6 +260,12 @@ function buildOriginalTemplatePaths(
 import { usePageHistoryOptional } from "@/contexts/PageHistoryContext";
 import { useImagePickerContext } from "@/contexts/ImagePickerContext";
 import type { ImagePickerTarget } from "@/contexts/ImagePickerContext";
+import {
+  BROKEN_LINKS_STAFF_MESSAGE,
+  BrokenInternalLinksNotice,
+  linkWarningsToastText,
+} from "@/components/editing/BrokenInternalLinksNotice";
+import { BROKEN_INTERNAL_LINKS_CODE, type BrokenInternalLink } from "@shared/internalLinkGate";
 
 const TECHNICAL_SUFFIXES = new Set(["src", "url", "id", "href"]);
 const POSITIONAL_LABELS: Record<string, string> = {
@@ -593,6 +599,7 @@ export function SectionEditorPanel({
   const [hasChanges, setHasChanges] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [brokenLinks, setBrokenLinks] = useState<BrokenInternalLink[]>([]);
   const [activeTab, setActiveTab] = useState("code");
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [templateSaveConfirmOpen, setTemplateSaveConfirmOpen] = useState(false);
@@ -2579,6 +2586,7 @@ export function SectionEditorPanel({
     success: boolean;
     warning?: string;
     shared_template_html_cache?: string;
+    link_warning?: string;
   }> => {
     if (!contentType || !slug || !locale) {
       return { success: false };
@@ -2600,6 +2608,7 @@ export function SectionEditorPanel({
 
     setIsSaving(true);
     setSaveError(null);
+    setBrokenLinks([]);
 
     // Save page snapshot for undo before making changes
     if (pageHistory && allSections) {
@@ -2679,7 +2688,12 @@ export function SectionEditorPanel({
           success: true,
           warning: result.warning,
           shared_template_html_cache: result.shared_template_html_cache,
+          link_warning: linkWarningsToastText(result.link_warnings) ?? undefined,
         };
+      } else if (result.code === BROKEN_INTERNAL_LINKS_CODE && result.broken_internal_links?.length) {
+        setBrokenLinks(result.broken_internal_links);
+        setSaveError(BROKEN_LINKS_STAFF_MESSAGE);
+        return { success: false };
       } else {
         setSaveError(result.error || "Failed to save changes");
         return { success: false };
@@ -2761,6 +2775,12 @@ export function SectionEditorPanel({
   const executeSave = async () => {
     const result = await saveToServer();
     if (result && result.success) {
+      if (result.link_warning) {
+        toast({
+          title: "Check the links on this page",
+          description: result.link_warning,
+        });
+      }
       if (result.warning) {
         toast({
           title: "Changes saved with warning",
@@ -8869,7 +8889,7 @@ export function SectionEditorPanel({
                           ? (rawConsent as Record<string, unknown>)
                           : undefined,
                         convEvent?.consent,
-                      ).filter((f) => consentKeyFromYamlField(f) !== consentFallback),
+                      ),
                     ]),
                   ];
 
@@ -9334,6 +9354,10 @@ export function SectionEditorPanel({
         <div className="p-2 bg-destructive/10 text-destructive text-sm border-t">
           {parseError}
         </div>
+      )}
+
+      {brokenLinks.length > 0 && (
+        <BrokenInternalLinksNotice links={brokenLinks} className="mx-4 mb-0 mt-2 max-h-48 overflow-y-auto" />
       )}
 
       {/* Footer */}

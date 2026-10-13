@@ -17,7 +17,7 @@ import { clearSiteSqliteCacheForTests } from "../db";
 import { resetPipelineDbCache } from "../pipeline-db/runner";
 import { insertLedgerRow, listLedgerRows } from "./lead-ledger";
 import { listConsentDaily, recordConsentEvent } from "./consent-store";
-import { buildLeadsExport, pullProductionLeads } from "./leads-pull-production";
+import { buildLeadsExport, pullProductionLeads, readLeadsPullState } from "./leads-pull-production";
 
 const SITE = `site_leads-pull-test-${process.pid}`;
 const SINCE = Date.parse("2026-09-01T00:00:00.000Z");
@@ -107,6 +107,9 @@ describe("pullProductionLeads", () => {
     const consent = listConsentDaily(SITE, "2000-01-01");
     expect(consent.map((c) => `${c.date}:${c.country}:${c.shown}`)).toEqual(["2026-08-31:ES:1", "2026-09-01:US:40", "2026-09-02:ES:10"]);
     expect(buildLeadsExport(SITE, SINCE).leads.map((x) => x.submission_id).sort()).toEqual(["local-test", "prod-1", "prod-2"]);
+    const pulled = readLeadsPullState(SITE);
+    expect(pulled).toMatchObject({ since: SINCE, origin: "https://prod.test" });
+    expect(typeof pulled.pulled_at).toBe("number");
   });
 
   it("explains a 404 as 'not deployed yet' and leaves local rows alone", async () => {
@@ -116,5 +119,6 @@ describe("pullProductionLeads", () => {
     });
     expect(r).toMatchObject({ success: false, not_supported: true, imported_leads: 0 });
     expect(listLedgerRows(SITE, 0).map((x) => x.submission_id)).toEqual(["local-real"]);
+    expect(readLeadsPullState(SITE)).toEqual({ pulled_at: null, since: null, origin: null });
   });
 });

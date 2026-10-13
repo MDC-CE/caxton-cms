@@ -10,7 +10,6 @@ vi.mock("../live-entry-seo-gate", () => ({
   evaluateLiveEntrySeoAndRequiredFields: () => seoGateMock.result,
 }));
 vi.mock("../locale-url-slug", () => ({ assertLocaleUrlAvailable: () => ({ ok: true }) }));
-vi.mock("../services/onSaveValidation", () => ({ scheduleOnSaveValidation: () => {} }));
 vi.mock("../routes/_helpers", () => ({ invalidateContentCaches: () => {} }));
 vi.mock("../content-events", () => ({ emitEntryLocalePromoted: () => {} }));
 vi.mock("../sitemap", () => ({ refreshSitemapEntriesForContentKey: () => {} }));

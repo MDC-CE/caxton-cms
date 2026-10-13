@@ -7,7 +7,9 @@ alwaysApply: false
 
 ## Colors
 
-Use only semantic tokens from [design_guidelines.md](design_guidelines.md) and [tailwind.config.ts](tailwind.config.ts): `bg-background`, `bg-card`, `text-foreground`, `text-muted-foreground`, `bg-primary`, `text-destructive`, etc.
+Use only semantic tokens (defined in [tailwind.config.cjs](tailwind.config.cjs)): `bg-background`, `bg-card`, `text-foreground`, `text-muted-foreground`, `bg-primary`, `text-destructive`, etc.
+
+- **Theme layering:** values come from the site's `site_<name>/theme.json` (or its `inherit_components_from` parent's), which overrides the fallback defaults in `client/src/index.css`. In section YAML, colors are theme IDs (`background: light-blue-5`), never raw CSS.
 
 **NEVER use**: `bg-blue-500`, `text-red-600`, or `#...` in class names.
 
@@ -29,4 +31,8 @@ Visual contract: light muted track, grey border (`border-muted-foreground/20`), 
 
 ## Section Rendering
 
-Section types map to components via [SectionRenderer](client/src/components/SectionRenderer.tsx); respect lazy vs eager loading and existing registries.
+Section types map to components via [sectionRegistry.ts](client/src/components/sectionRegistry.ts): files in `client/src/components/{type}/variants/{PascalType}{Variant}.tsx` register automatically. [SectionRenderer](client/src/components/SectionRenderer.tsx) renders them; respect lazy vs eager loading.
+
+- **Wrapper owns section background and vertical spacing:** `getSectionWrapperStyles` applies the section's `background`, `paddingY` and `marginY`. Components must not add outer `py-*` / `pt-*` / `pb-*` or paint `data.background`.
+- **Icons:** Lucide via `getIcon(name)` from `@/lib/icons` (`"rocket"`); legacy `IconRocket`-style names still render. Fixed UI chrome may import from `lucide-react`.
+- New components: follow [.agents/skills/internal-new-component/SKILL.md](.agents/skills/internal-new-component/SKILL.md).

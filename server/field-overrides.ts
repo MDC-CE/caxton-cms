@@ -35,6 +35,8 @@ import { getDefaultContentRoot } from "./site-config";
 import { mappedFieldsStorageFor, type MappedFieldsStorage } from "./mapped-fields-storage";
 import { contentIndex } from "./content-index";
 import { markFileAsModified } from "./sync-state";
+import { runInternalLinkGate } from "./internal-link-gate";
+import type { BrokenInternalLink, InternalLinkWarning } from "@shared/internalLinkGate";
 import { resolveFieldValue } from "./transform";
 import type { DatabaseManager } from "./database";
 import { ecommerceManager, PURCHASABLE_FIELD } from "./ecommerce/ecommerce-manager";
@@ -116,6 +118,10 @@ export type WriteMappedFieldsResult = {
   noop?: boolean;
   /** Set when code === "deprecated_field". */
   deprecated?: { field: string; replaced_by: string | null; reason: string | null };
+  /** Set when code === "broken_internal_links". */
+  brokenInternalLinks?: BrokenInternalLink[];
+  /** Non-blocking internal-link findings (redirects, draft targets, not-yet-enforced). */
+  linkWarnings?: InternalLinkWarning[];
 };
 
 function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
@@ -711,6 +717,29 @@ export function writeMappedFields(
       return { success: false, error: seoGateErr, statusCode: 400, isVariantLayer: layer.isVariantLayer };
     }
 
+    let linkWarnings: InternalLinkWarning[] = [];
+    if (isStatic) {
+      const linkGate = runInternalLinkGate({
+        pageData: pageForGate,
+        locale,
+        contentRoot,
+        pageIsDraft: layer.isVariantLayer,
+        intent: "save",
+      });
+      if (linkGate.failure) {
+        return {
+          success: false,
+          error: linkGate.failure.message,
+          code: linkGate.failure.code,
+          statusCode: 400,
+          isVariantLayer: layer.isVariantLayer,
+          brokenInternalLinks: linkGate.failure.broken_internal_links,
+          ...(linkGate.warnings.length > 0 ? { linkWarnings: linkGate.warnings } : {}),
+        };
+      }
+      linkWarnings = linkGate.warnings;
+    }
+
     if (isStatic && Object.keys(commonOnlyUpdates).length > 0) {
       const commonPath = path.join(path.dirname(filePath), "_common.yml");
       try {
@@ -751,7 +780,11 @@ export function writeMappedFields(
       ? writeStaticRootKeysBag(filePath, entryData, pendingUpdates, author, contentRoot)
       : writeDbFieldOverridesBag(filePath, entryData, pendingUpdates, author, contentRoot);
 
-    return { ...written, isVariantLayer: layer.isVariantLayer };
+    return {
+      ...written,
+      isVariantLayer: layer.isVariantLayer,
+      ...(linkWarnings.length > 0 ? { linkWarnings } : {}),
+    };
   } catch (err) {
     return {
       success: false,

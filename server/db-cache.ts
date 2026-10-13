@@ -148,9 +148,14 @@ export class SqliteCache implements IDatabaseCache {
         fetched_at TEXT NOT NULL,
         raw_count  INTEGER NOT NULL,
         payload    TEXT NOT NULL,
+        item_count INTEGER,
         PRIMARY KEY (db_name, variant)
       )
     `);
+    const columns = this.db.prepare("PRAGMA table_info(cache_entries)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "item_count")) {
+      this.db.exec("ALTER TABLE cache_entries ADD COLUMN item_count INTEGER");
+    }
   }
 
   read(dbName: string, ttlMinutes: number, raw = false): CacheEntry | null {
@@ -186,14 +191,15 @@ export class SqliteCache implements IDatabaseCache {
     const variant = raw ? "raw" : "";
     this.db
       .prepare(
-        `INSERT INTO cache_entries (db_name, variant, fetched_at, raw_count, payload)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO cache_entries (db_name, variant, fetched_at, raw_count, payload, item_count)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(db_name, variant) DO UPDATE SET
            fetched_at = excluded.fetched_at,
            raw_count  = excluded.raw_count,
-           payload    = excluded.payload`
+           payload    = excluded.payload,
+           item_count = excluded.item_count`
       )
-      .run(dbName, variant, entry.fetched_at, entry.raw_count, JSON.stringify(entry.items));
+      .run(dbName, variant, entry.fetched_at, entry.raw_count, JSON.stringify(entry.items), entry.items.length);
   }
 
   clear(dbName: string): void {
@@ -246,11 +252,18 @@ export class SqliteCache implements IDatabaseCache {
 
           this.db
             .prepare(
-              `INSERT INTO cache_entries (db_name, variant, fetched_at, raw_count, payload)
-               VALUES (?, ?, ?, ?, ?)
+              `INSERT INTO cache_entries (db_name, variant, fetched_at, raw_count, payload, item_count)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(db_name, variant) DO NOTHING`
             )
-            .run(dbName, variant, entry.fetched_at, entry.raw_count, JSON.stringify(entry.items));
+            .run(
+              dbName,
+              variant,
+              entry.fetched_at,
+              entry.raw_count,
+              JSON.stringify(entry.items),
+              entry.items.length,
+            );
 
           fs.unlinkSync(jsonPath);
           anyMigrated = true;
@@ -269,16 +282,26 @@ export class SqliteCache implements IDatabaseCache {
   }
 
   getCacheStats(): CacheStats {
+    const missing = this.db
+      .prepare("SELECT 1 FROM cache_entries WHERE variant = '' AND item_count IS NULL LIMIT 1")
+      .get();
+    if (missing) {
+      this.db
+        .prepare(
+          "UPDATE cache_entries SET item_count = json_array_length(payload) WHERE variant = '' AND item_count IS NULL",
+        )
+        .run();
+    }
     const rows = this.db
       .prepare(
-        "SELECT db_name, json_array_length(payload) AS item_count, fetched_at FROM cache_entries WHERE variant = ''"
+        "SELECT db_name, item_count, fetched_at FROM cache_entries WHERE variant = ''"
       )
-      .all() as { db_name: string; item_count: number; fetched_at: string }[];
+      .all() as { db_name: string; item_count: number | null; fetched_at: string }[];
 
     const perDb: Record<string, CacheDbStats> = {};
     for (const row of rows) {
       perDb[row.db_name] = {
-        item_count: row.item_count,
+        item_count: row.item_count ?? 0,
         fetched_at: row.fetched_at,
       };
     }

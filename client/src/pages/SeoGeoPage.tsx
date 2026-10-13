@@ -271,11 +271,19 @@ function ctrRatioFromStats(stats: PathTrafficStats): number {
   return stats.clicks / stats.impressions;
 }
 
+type OrganicLeadsMeta = {
+  available: boolean;
+  tracking_since: number | null;
+  estimated: boolean;
+  basis?: string;
+};
+
 type OrganicTrafficMeta = {
   window: { start: string; end: string } | null;
   incomplete?: boolean;
   days_in_window?: number;
   days_expected?: number;
+  leads?: OrganicLeadsMeta;
 };
 
 type OrganicMetricKind = "clicks" | "position" | "ctr";
@@ -511,18 +519,122 @@ function ClusterOrganicNoDataBadge({
   );
 }
 
+/** Below this many clicks the leads-per-click rate is too noisy to show. */
+const LEADS_RATE_MIN_CLICKS = 50;
+
+function fmtLeadsDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function ClusterOrganicLeadsBadge({
+  leads,
+  clicks,
+  role,
+  testId,
+  meta,
+}: {
+  leads: PathLeadStats | null;
+  clicks: number;
+  role: "hub" | "spoke" | "cluster";
+  testId: string;
+  meta: OrganicTrafficMeta;
+}) {
+  const estimated = Boolean(meta.leads?.estimated);
+  const count = leads ? (estimated ? leads.not_paid : leads.organic_search) : 0;
+  const rate = clicks >= LEADS_RATE_MIN_CLICKS ? `${((count / clicks) * 100).toFixed(1)}%` : null;
+  const since = meta.leads?.tracking_since != null ? fmtLeadsDate(meta.leads.tracking_since) : null;
+  const roleLabel =
+    role === "hub" ? "this hub page" : role === "cluster" ? "this whole cluster" : "this page";
+  const windowPart = meta.window ? ` (${meta.window.start} → ${meta.window.end})` : "";
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="shrink-0"
+          data-testid={testId}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Badge
+            variant="secondary"
+            className={cn(
+              "text-[10px] font-medium px-1.5 py-0 h-5 cursor-pointer gap-1 underline-offset-2 hover:underline",
+              "bg-muted text-muted-foreground border border-border shadow-none tabular-nums",
+            )}
+          >
+            <span className="text-foreground">{count.toLocaleString()}</span>
+            <span>{count === 1 ? "lead" : "leads"}</span>
+            {rate ? <span>· {rate}</span> : null}
+            {estimated ? <span className="text-status-away">est.</span> : null}
+          </Badge>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-72 space-y-2 bg-popover text-popover-foreground"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-xs text-foreground font-medium">
+          {count.toLocaleString()} {count === 1 ? "lead" : "leads"} from search
+          {rate ? ` · ${rate} of clicks` : ""}
+        </p>
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          Leads from people a search engine (mostly Google) sent to {roleLabel}, in the same days{windowPart} and
+          market as the clicks.
+          {rate ? "" : ` The rate shows once there are at least ${LEADS_RATE_MIN_CLICKS} clicks.`}
+        </p>
+        {estimated ? (
+          <p className="text-xs text-status-away leading-relaxed" data-testid="organic-leads-estimated">
+            Estimated{since ? ` before ${since}` : ""}: leads recorded before tracking started (or without a country)
+            count when they were not from an ad, so this can be a little high.
+          </p>
+        ) : null}
+        <Collapsible>
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="px-0 h-auto text-[11px]" onClick={(e) => e.stopPropagation()}>
+              Read more (advanced)
+              <ChevronDown className="h-3 w-3 ml-1" />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-1 space-y-1 text-[11px] text-muted-foreground leading-relaxed">
+            <p>Credited page: where the search visit landed, not the page with the form.</p>
+            <p>Country comes from the visitor&apos;s connection. Test and repeat leads are excluded.</p>
+            <p>
+              Tracked leads: {leads?.tracked.toLocaleString() ?? 0} on this {role === "cluster" ? "cluster" : "page"}. Source:{" "}
+              <code className="font-mono text-[10px]">lead_submissions.channel_landing_path</code>.
+            </p>
+          </CollapsibleContent>
+        </Collapsible>
+        <Link
+          href="/private/store/leads?channel=organic_search"
+          className="inline-flex items-center gap-1 text-xs text-primary underline underline-offset-2 hover:text-primary/80"
+          data-testid="link-organic-leads"
+          onClick={(e) => e.stopPropagation()}
+        >
+          Open organic search leads
+          <ExternalLink className="h-3 w-3" aria-hidden />
+        </Link>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function ClusterOrganicTrafficBadges({
   stats,
   role,
   prefix,
   testIdPrefix,
   meta,
+  leads,
 }: {
   stats: PathTrafficStats | undefined;
   role: "hub" | "spoke" | "cluster";
   prefix?: string;
   testIdPrefix: string;
   meta?: OrganicTrafficMeta;
+  /** undefined = no leads badge; null = zero leads for this page. */
+  leads?: PathLeadStats | null;
 }) {
   if (stats == null) {
     return <ClusterOrganicNoDataBadge role={role} testId={testIdPrefix} meta={meta} />;
@@ -551,6 +663,15 @@ function ClusterOrganicTrafficBadges({
         meta={meta}
         testId={`${testIdPrefix}-ctr`}
       />
+      {leads !== undefined && meta?.leads?.available ? (
+        <ClusterOrganicLeadsBadge
+          leads={leads}
+          clicks={stats.clicks}
+          role={role}
+          meta={meta}
+          testId={`${testIdPrefix}-leads`}
+        />
+      ) : null}
     </span>
   );
 }
@@ -689,11 +810,14 @@ type TrafficMetricsPayload = {
   organicTraffic?: SeoOverview["organicTraffic"];
   siteOrganicTraffic?: SeoOverview["siteOrganicTraffic"];
   otherHighTraffic?: SeoOverview["otherHighTraffic"];
+  organicLeads?: OrganicLeadsMeta;
   clusters: Array<{
     hubId: string;
     hubTraffic?: PathTrafficStats;
+    hubLeads?: PathLeadStats;
     clusterTraffic?: PathTrafficStats;
-    members: Array<{ id: string; traffic?: PathTrafficStats }>;
+    clusterLeads?: PathLeadStats;
+    members: Array<{ id: string; traffic?: PathTrafficStats; leads?: PathLeadStats }>;
   }>;
 };
 
@@ -1004,6 +1128,12 @@ type PathTrafficStats = {
   clicks: number;
   impressions: number;
   position: number;
+};
+
+type PathLeadStats = {
+  organic_search: number;
+  not_paid: number;
+  tracked: number;
 };
 
 type ClusterMember = {
@@ -4628,6 +4758,7 @@ export function SeoTab({
     incomplete: trafficMetrics?.organicTraffic?.incomplete,
     days_in_window: trafficMetrics?.organicTraffic?.days_in_window,
     days_expected: trafficMetrics?.organicTraffic?.days_expected ?? 28,
+    leads: trafficMetrics?.organicLeads,
   };
   const marketRollups = (trafficMetrics?.organicTraffic?.markets ?? []).filter((m) => m.kind === "rollup");
   const marketCountries = (trafficMetrics?.organicTraffic?.markets ?? []).filter((m) => m.kind === "country");
@@ -5040,6 +5171,9 @@ export function SeoTab({
                   const memberTraffic = new Map(
                     (trafficOverlay?.members ?? []).map((m) => [m.id, m.traffic] as const),
                   );
+                  const memberLeads = new Map(
+                    (trafficOverlay?.members ?? []).map((m) => [m.id, m.leads ?? null] as const),
+                  );
                   const memberPotential = new Map(
                     (potentialOverlay?.members ?? []).map((m) => [m.id, m] as const),
                   );
@@ -5076,6 +5210,7 @@ export function SeoTab({
                           stats={trafficOverlay?.hubTraffic}
                           role="hub"
                           meta={organicMeta}
+                          leads={trafficOverlay ? trafficOverlay.hubLeads ?? null : undefined}
                           testIdPrefix={`cluster-hub-clicks-${hubId}`}
                         />
                         <ClusterHubAveragesBadge
@@ -5240,6 +5375,7 @@ export function SeoTab({
                                 stats={memberTraffic.get(member.id) ?? member.traffic}
                                 role="spoke"
                                 meta={organicMeta}
+                                leads={trafficOverlay ? memberLeads.get(member.id) ?? null : undefined}
                                 testIdPrefix={`cluster-member-clicks-${member.slug}`}
                               />
                             );

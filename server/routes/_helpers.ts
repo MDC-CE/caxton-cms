@@ -86,10 +86,9 @@ import {
   renameContentSlug,
 } from "../content-editor";
 import { bindingManager } from "../bindings";
+import { loadYamlWithTemplateVars } from "../yaml-parse-cache";
 import {
-  escapeTemplateVars,
   escapeObjectVars,
-  unescapeObjectVars,
   unescapeYamlDump,
 } from "@shared/templateVars";
 import {
@@ -762,9 +761,7 @@ export function markContentFileModified(
 }
 
 export function safeYamlLoad(yamlStr: string): unknown {
-  const { escaped, map } = escapeTemplateVars(yamlStr);
-  const parsed = yaml.load(escaped);
-  return unescapeObjectVars(parsed, map);
+  return loadYamlWithTemplateVars(yamlStr);
 }
 
 /**
@@ -918,10 +915,13 @@ export function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
 
 export function invalidateContentCaches(contentType?: string, ci: typeof contentIndex = contentIndex): void {
   invalidateContentCachesWithoutHtml(contentType, ci);
-  // Drop rendered HTML pages so anonymous visitors get fresh SSR after edits/sync.
-  void import("../html-page-cache").then(({ invalidateHtmlPageCache }) => {
-    invalidateHtmlPageCache();
-  }).catch(() => {});
+  // A typed edit must not wipe every public page. Broad calls (no type) are
+  // shared config: rebuild only URLs already cached.
+  if (!contentType) {
+    void import("../html-rebuild")
+      .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild("content-caches", ci.contentRoot))
+      .catch(() => {});
+  }
 }
 
 /** Common-fields + SSR schema only — no HTML page cache clear (path-scoped bust lives in flush). */

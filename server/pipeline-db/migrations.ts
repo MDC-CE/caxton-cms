@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 32;
+export const PIPELINE_SCHEMA_VERSION = 36;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -677,6 +677,59 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_data_migration_runs_file
           ON data_migration_runs (filename, started_at);
+      `);
+    },
+  },
+  {
+    version: 33,
+    name: "lead_submissions_traffic_channel",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      for (const name of [
+        "channel",
+        "first_channel",
+        "last_organic_channel",
+        "channel_landing_path",
+        "referrer_host",
+        "country",
+        "traffic_status",
+      ]) {
+        if (!tableHasColumn(db, "lead_submissions", name)) {
+          db.exec(`ALTER TABLE lead_submissions ADD COLUMN ${name} TEXT`);
+        }
+      }
+    },
+  },
+  {
+    version: 34,
+    name: "lead_submissions_channel_landing_index",
+    up(db) {
+      if (!tableHasColumn(db, "lead_submissions", "channel_landing_path")) return;
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_lead_submissions_channel_landing ON lead_submissions (channel_landing_path, created_at)",
+      );
+    },
+  },
+  {
+    version: 35,
+    name: "lead_submissions_product",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      for (const name of ["product_id", "product_slug"]) {
+        if (!tableHasColumn(db, "lead_submissions", name)) {
+          db.exec(`ALTER TABLE lead_submissions ADD COLUMN ${name} TEXT`);
+        }
+      }
+    },
+  },
+  {
+    version: 36,
+    name: "lead_submissions_product_indexes",
+    up(db) {
+      if (!tableHasColumn(db, "lead_submissions", "product_id")) return;
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_lead_submissions_product_id ON lead_submissions (product_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_lead_submissions_product_slug ON lead_submissions (product_slug, created_at);
       `);
     },
   },

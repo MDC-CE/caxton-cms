@@ -109,11 +109,7 @@ export function ConsentCard({
     );
     const known = new Set(fromSettings.map((c) => c.yamlField));
     const extraOnly = extras
-      .filter((field) => {
-        const settingsKey = consentKeyFromYamlField(field);
-        if (consentFallback && settingsKey === consentFallback) return false;
-        return !known.has(field);
-      })
+      .filter((field) => !known.has(field))
       .map((yamlField) => {
         const settingsKey = consentKeyFromYamlField(yamlField);
         return {
@@ -180,10 +176,10 @@ export function ConsentCard({
       <details className="text-[11px] text-muted-foreground">
         <summary className="cursor-pointer select-none">Read more (advanced)</summary>
         <p className="mt-1 leading-snug">
-          Switches are every Settings consent except Default (
+          Switches include every Settings consent, including Default (
           <code className="font-mono text-[10px] bg-muted px-1 rounded">settings.yml</code>
           {" "}→ <code className="font-mono text-[10px]">consent.fallback</code>
-          ). If none are on, the form shows that Default checkbox. Form YAML uses{" "}
+          ). Turning that switch on shows its checkbox next to the others. If every switch is off, the form still shows the Default checkbox. Form YAML uses{" "}
           <code className="font-mono text-[10px] bg-muted px-1 rounded">consent.marketing</code>,{" "}
           <code className="font-mono text-[10px] bg-muted px-1 rounded">consent.general</code>, etc. (
           <code className="font-mono text-[10px] bg-muted px-1 rounded">shared/consent-settings.ts</code>

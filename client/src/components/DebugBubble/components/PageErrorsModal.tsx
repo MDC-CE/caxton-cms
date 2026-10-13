@@ -929,7 +929,7 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
     setTogglingIssueId(issue.id);
     try {
       const token = getDebugToken();
-      const res = await fetch("/api/validation/cache-issues/update", {
+      let res = await fetch("/api/validation/cache-issues/update", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -942,7 +942,42 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
           ...(report ? { report } : {}),
         }),
       });
-      const body = await res.json().catch(() => ({}));
+      let body = await res.json().catch(() => ({}));
+      if (
+        action === "complete" &&
+        res.status === 409 &&
+        body?.code === "diagnostics_busy"
+      ) {
+        toast({
+          title: "Try again in a moment",
+          description: "A full-site check is already running, so this duplicate stays open.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (
+        action === "complete" &&
+        typeof body.job_id === "string" &&
+        (body.status === "queued" || body.status === "running")
+      ) {
+        const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+        await pollDiagnosticsJob(body.job_id);
+        res = await fetch("/api/validation/cache-issues/update", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getSessionHeaders(),
+            ...(token ? { Authorization: `Token ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            issueId: issue.id,
+            action,
+            job_id: body.job_id,
+            ...(report ? { report } : {}),
+          }),
+        });
+        body = await res.json().catch(() => ({}));
+      }
       if (!res.ok) {
         throw new Error(typeof body.error === "string" ? body.error : "Update failed");
       }
@@ -1063,7 +1098,7 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
       if (url) {
         const token = getDebugToken();
         const variant = pageDiagnostics?.variant;
-        await fetch("/api/validation/run-page", {
+        const startedRes = await fetch("/api/validation/run-page", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1076,6 +1111,14 @@ export function PageErrorsModal(props: PageErrorsModalProps) {
             ...(variant ? { variant } : {}),
           }),
         });
+        const started = await startedRes.json().catch(() => ({}));
+        if (
+          typeof started.job_id === "string" &&
+          (started.status === "queued" || started.status === "running")
+        ) {
+          const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+          await pollDiagnosticsJob(started.job_id);
+        }
       }
       if (onRefreshDiagnostics) {
         await onRefreshDiagnostics();

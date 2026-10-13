@@ -34,6 +34,33 @@ export const LEGACY_BACKGROUND_TOKENS: Record<string, string> = {
   destructive: "hsl(var(--destructive))",
 };
 
+/**
+ * Background IDs every site theme must keep. Shared components
+ * (`shared/component-registry/`, used by every site) and their examples may
+ * only use these; values can differ per site.
+ */
+export const SHARED_BASE_PALETTE = [
+  "background",
+  "muted",
+  "card",
+  "primary",
+  "secondary",
+  "accent",
+  "light-blue-5",
+  "light-blue-5-gradient",
+  "hero-orbit-gradient",
+] as const;
+
+export function isSharedBasePaletteId(id: string): boolean {
+  return (SHARED_BASE_PALETTE as readonly string[]).includes(id);
+}
+
+/** Base palette IDs missing from a theme's backgrounds (in base palette order). */
+export function missingBasePaletteIds(backgrounds: ThemePaletteEntry[] | undefined): string[] {
+  const have = new Set((backgrounds ?? []).map((e) => e.id));
+  return SHARED_BASE_PALETTE.filter((id) => !have.has(id));
+}
+
 const THEME_ID_SHAPE = /^[a-z][a-z0-9-]*$/;
 
 /** True for strings shaped like a palette ID (not CSS, not a Tailwind class). */
@@ -155,6 +182,10 @@ function isGradientCss(value: string): boolean {
   );
 }
 
+function isFileImageCss(value: string): boolean {
+  return /url\s*\(/i.test(value);
+}
+
 function isSolidColorCss(value: string): boolean {
   return (
     value.startsWith("hsl(") ||
@@ -210,6 +241,43 @@ export function sectionBackgroundStyle(value: string | undefined): {
   return sectionBackgroundPaint(value);
 }
 
+function cssBackgroundString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+export type SectionCoverPaint = {
+  backgroundColor?: string;
+  backgroundImage?: string;
+};
+
+/**
+ * Fill to extend behind a transparent navbar.
+ * Solid colors and gradients lift. A file image (`url(...)`) stays on the section.
+ */
+export function sectionCoverPaint(paint: {
+  background?: unknown;
+  backgroundColor?: unknown;
+  backgroundImage?: unknown;
+}): SectionCoverPaint | undefined {
+  const backgroundImage = cssBackgroundString(paint.backgroundImage);
+  if (backgroundImage && backgroundImage !== "none" && isFileImageCss(backgroundImage)) return undefined;
+
+  const cover: SectionCoverPaint = {};
+  if (backgroundImage && backgroundImage !== "none") cover.backgroundImage = backgroundImage;
+  const backgroundColor = cssBackgroundString(paint.backgroundColor);
+  if (backgroundColor && backgroundColor !== "transparent") cover.backgroundColor = backgroundColor;
+  if (!cover.backgroundImage && !cover.backgroundColor) {
+    const shorthand = cssBackgroundString(paint.background)?.trim();
+    if (shorthand && shorthand !== "none" && shorthand !== "transparent" && shorthand !== "inherit") {
+      if (isFileImageCss(shorthand)) return undefined;
+      if (isGradientCss(shorthand)) cover.backgroundImage = shorthand;
+      else cover.backgroundColor = shorthand;
+    }
+  }
+  if (!cover.backgroundColor && !cover.backgroundImage) return undefined;
+  return cover;
+}
+
 /** `:root` / `.dark` blocks declaring `--theme-bg-<id>` for every background entry. */
 export function buildThemeBackgroundCss(theme: ThemePalettes | null | undefined): string {
   const entries = theme?.backgrounds ?? [];
@@ -230,6 +298,41 @@ export function buildThemeBackgroundCss(theme: ThemePalettes | null | undefined)
 }
 
 export const THEME_BG_STYLE_ID = "__theme_bg_vars__";
+
+/** Server-injected site theme (`colors` + backgrounds) on page-rendering HTML. */
+export const THEME_OVERRIDES_STYLE_ID = "__theme_overrides__";
+
+/** Client-applied site colors after a client navigation into a page-rendering private route. */
+export const THEME_COLORS_CLIENT_STYLE_ID = "__theme_colors_client__";
+
+/** `:root` / `.dark` blocks for theme.json `colors.light` / `colors.dark` CSS variables. */
+export function buildThemeColorVarsCss(
+  colors: { light?: Record<string, string>; dark?: Record<string, string> } | null | undefined,
+): string {
+  let css = "";
+  if (colors?.light && Object.keys(colors.light).length > 0) {
+    css += `:root {\n${Object.entries(colors.light).map(([k, v]) => `  ${k}: ${v};`).join("\n")}\n}\n`;
+  }
+  if (colors?.dark && Object.keys(colors.dark).length > 0) {
+    css += `.dark {\n${Object.entries(colors.dark).map(([k, v]) => `  ${k}: ${v};`).join("\n")}\n}\n`;
+  }
+  return css;
+}
+
+/** Private routes that render the site's pages (preview, section demos, render review capture). */
+export const SITE_THEMED_PRIVATE_ROUTES = ["/private/page-preview", "/private/demo"] as const;
+
+/**
+ * True where the site's theme colors apply: every public page (including the
+ * in-page editor on public URLs) and the page-rendering private routes.
+ * Admin-only screens under /private keep the default colors.
+ */
+export function isSiteThemedPath(pathname: string): boolean {
+  const clean = pathname.split("?")[0].split("#")[0];
+  if (clean.startsWith("/api/")) return false;
+  if (clean !== "/private" && !clean.startsWith("/private/")) return true;
+  return SITE_THEMED_PRIVATE_ROUTES.some((route) => clean === route || clean.startsWith(`${route}/`));
+}
 
 /** Server/MCP code when an agent write or publish introduces off-theme colors. */
 export const THEME_COLORS_CODE = "theme_colors_required";

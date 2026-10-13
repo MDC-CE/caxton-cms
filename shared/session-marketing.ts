@@ -6,8 +6,9 @@
  * - `first_touch` is write-once. Paid landings: `first` write-once, `last` overwritten.
  */
 
-import type { PaidLandingRef, Session, UTMParams } from "./session";
+import type { ChannelTouch, PaidLandingRef, Session, UTMParams } from "./session";
 import { MARKETING_UTM_KEYS } from "./session";
+import { classifyChannel, isInternalUtmSource, referrerHost } from "./traffic-channel";
 import {
   adIdFromTag,
   CLICK_ID_PARAMS,
@@ -36,11 +37,13 @@ const QUERY_KEYS: (keyof UTMParams)[] = [
 
 export function parseMarketingParams(
   search: string,
-  opts: { fbp?: string; fbc?: string; now?: number } = {},
+  opts: { fbp?: string; fbc?: string; now?: number; ownHosts?: readonly string[] } = {},
 ): UTMParams {
   const params = new URLSearchParams(search);
+  const internal = !!opts.ownHosts && isInternalUtmSource(params.get("utm_source"), opts.ownHosts);
   const utm: UTMParams = {};
   for (const key of QUERY_KEYS) {
+    if (internal && key.startsWith("utm_")) continue;
     const value = params.get(key);
     if (value) (utm as Record<string, string>)[key] = value;
   }
@@ -119,4 +122,41 @@ export function nextPaidLanding(
 ): Session["paid_landing"] {
   if (!landing) return previous;
   return { first: previous?.first ?? landing, last: landing };
+}
+
+/**
+ * Channel touch for one page load. `incoming` must come from `parseMarketingParams`
+ * with `ownHosts` (internal UTMs already dropped). Null = no new information.
+ */
+export function channelTouchFor(
+  incoming: UTMParams,
+  where: { referrer?: string | null; ownHosts: readonly string[]; path: string; now?: number },
+): ChannelTouch | null {
+  const click_ids: Partial<Record<ClickIdParam, string>> = {};
+  for (const c of CLICK_ID_PARAMS) {
+    const v = incoming[c as keyof UTMParams];
+    if (v) click_ids[c] = v;
+  }
+  const channel = classifyChannel({
+    utm: incoming,
+    click_ids,
+    referrer: where.referrer,
+    ownHosts: where.ownHosts,
+  });
+  if (!channel) return null;
+  const touch: ChannelTouch = { channel, path: normalizeLandingPath(where.path), at: where.now ?? Date.now() };
+  const host = referrerHost(where.referrer);
+  if (host && channel !== "direct") touch.referrer_host = host;
+  return touch;
+}
+
+/** `first` is write-once; `last` is replaced by any touch except direct (last non-direct). */
+export function nextEntryChannel(
+  previous: Session["entry_channel"],
+  touch: ChannelTouch | null,
+): Session["entry_channel"] {
+  if (!touch) return previous;
+  const first = previous?.first ?? touch;
+  const last = touch.channel === "direct" ? previous?.last : touch;
+  return last ? { first, last } : { first };
 }

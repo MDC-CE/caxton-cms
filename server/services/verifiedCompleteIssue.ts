@@ -34,6 +34,7 @@ import {
   completionToApiRow,
 } from "./validationCacheService";
 import type { ResolvedIssuesArchiveService } from "./resolvedIssuesArchiveService";
+import { emitValidationIssueWorkflowEvent, resolveSiteForIssue } from "../validation-events";
 import { child } from "../logger";
 
 const log = child({ module: "verifiedCompleteIssue" });
@@ -248,10 +249,27 @@ export async function verifiedCompleteIssue(args: {
   actor?: ValidationIssueActor;
   report?: string;
   agent_session_id?: string;
+  /** Job already applied validator results. Only archive or reject. */
+  skipRevalidation?: boolean;
 }): Promise<VerifiedCompleteResult> {
   const { cache, archive, issueId, author, actor, report, agent_session_id } = args;
   const issue = cache.getIssueById(issueId);
   if (!issue) {
+    if (args.skipRevalidation) {
+      const completion = {
+        completedBy: author,
+        completedAt: new Date().toISOString(),
+        ...(actor ? { actor } : {}),
+        ...(report ? { report } : {}),
+      };
+      return {
+        ok: true,
+        action: "complete",
+        completed: completionToApiRow(completion),
+        claimed: null,
+        auto_completed_ids: [issueId],
+      };
+    }
     return { ok: false, error: `Unknown issue id: ${issueId}`, code: "unknown_issue", status: 404 };
   }
 
@@ -265,7 +283,9 @@ export async function verifiedCompleteIssue(args: {
   const openBefore = openBeforeIssues.map((i) => i.id);
   const legacyKey = Boolean(primaryEntryKey && isLegacySyntheticEntryKey(primaryEntryKey));
 
-  if (DUPLICATE_CODES.has(issue.code)) {
+  if (args.skipRevalidation) {
+    // Results were applied when the job completed. Fall through to the verdict.
+  } else if (DUPLICATE_CODES.has(issue.code)) {
     const dup = await applySeoDuplicatesRevalidation({
       contentRoot: args.contentRoot,
       ci: args.ci,
@@ -431,6 +451,117 @@ export async function verifiedCompleteIssue(args: {
 
   await writeArchive();
 
+  return {
+    ok: true,
+    action: "complete",
+    completed: completionToApiRow(completion),
+    claimed: null,
+    auto_completed_ids,
+  };
+}
+
+/** Issue row and its entry siblings, copied before this job writes the cache. */
+export function captureCompleteSnapshot(
+  cache: ValidationCacheService,
+  issueId: string,
+): { issueBefore: StoredValidationIssue | null; openBefore: StoredValidationIssue[] } {
+  const issue = cache.getIssueById(issueId);
+  if (!issue) return { issueBefore: null, openBefore: [] };
+  const issueBefore = structuredClone(issue);
+  const primary = entryKeysForIssue(issue)[0];
+  const open = primary != null ? cache.getOpenIssuesByEntryKey(primary) : [issue];
+  return { issueBefore, openBefore: open.map((row) => structuredClone(row)) };
+}
+
+/**
+ * Verdict after the diagnostics job has already applied its cache.
+ * Archives when the issue is gone. Records a refused attempt when it is still open.
+ */
+export async function settleAppliedCompleteIssue(args: {
+  cache: ValidationCacheService;
+  archive?: ResolvedIssuesArchiveService | null;
+  issueId: string;
+  author: string;
+  actor?: ValidationIssueActor;
+  report?: string;
+  agent_session_id?: string;
+  site?: string;
+  issueBefore: StoredValidationIssue | null;
+  openBefore: StoredValidationIssue[];
+}): Promise<VerifiedCompleteResult> {
+  const { cache, archive, issueId, author, actor, report, agent_session_id } = args;
+  const stillPresent = cache.getIssueById(issueId);
+  if (stillPresent) {
+    const existingClaim = cache.getActiveClaim(issueId);
+    const attempt = cache.recordCompleteRejectedAttempt(issueId, {
+      by: author,
+      claimedBy: existingClaim?.claimedBy,
+      actor,
+      report,
+      claimedAt: existingClaim?.claimedAt,
+      claimReport: existingClaim?.report,
+      agent_session_id,
+    });
+    await cache.flush();
+    return {
+      ok: false,
+      error: "Issue still present after revalidation — complete refused",
+      code: "complete_rejected_still_open",
+      status: 409,
+      attempt,
+      issue: stillPresent,
+    };
+  }
+
+  const completion: ValidationIssueCompletion = {
+    completedBy: author,
+    completedAt: new Date().toISOString(),
+    ...(actor ? { actor } : {}),
+    ...(report ? { report } : {}),
+  };
+  if (!args.issueBefore) {
+    return {
+      ok: true,
+      action: "complete",
+      completed: completionToApiRow(completion),
+      claimed: null,
+      auto_completed_ids: [issueId],
+    };
+  }
+
+  const primaryEntryKey = entryKeysForIssue(args.issueBefore)[0];
+  const openAfter = new Set(
+    primaryEntryKey != null ? cache.getOpenIssuesByEntryKey(primaryEntryKey).map((i) => i.id) : [],
+  );
+  const auto_completed_ids = clearedSiblingIds(
+    args.openBefore.map((i) => i.id),
+    openAfter,
+    issueId,
+  );
+  if (archive) {
+    const cleared = args.openBefore.filter((i) => !openAfter.has(i.id) && !cache.getIssueById(i.id));
+    const issues = cleared.length > 0 ? cleared : [args.issueBefore];
+    const archiveReport = report ?? (actor?.type !== "mcp" ? "Marked fixed in UI." : undefined);
+    await archive.appendResolvedBatch(issues, {
+      resolvedBy: author,
+      actor,
+      report: archiveReport,
+      agent_session_id,
+      resolution: "verified_gone",
+    });
+  }
+  const site = resolveSiteForIssue(args.issueBefore, args.site);
+  if (site) {
+    emitValidationIssueWorkflowEvent({
+      type: "validation_issue_completed",
+      site,
+      issue: args.issueBefore,
+      author,
+      actor,
+      report,
+      agent_session_id,
+    });
+  }
   return {
     ok: true,
     action: "complete",

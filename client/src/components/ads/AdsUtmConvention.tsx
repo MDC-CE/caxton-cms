@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, Clock, FileWarning } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -107,15 +107,29 @@ function Values({ values }: { values: string[] }) {
   );
 }
 
+export function utmConventionAnchor(platform: UtmConventionPlatform): string {
+  return `utm-convention-${platform}`;
+}
+
+/** Settings → Ads page that shows one platform's tagging rules, scrolled to the rules card. */
+export function utmConventionHref(platform: UtmConventionPlatform): string {
+  return `/private/settings/ads/${platform}#${utmConventionAnchor(platform)}`;
+}
+
 /** Settings → Ads: the active UTM convention for one platform, read-only. */
 export function AdsUtmConventionCard({ view, platform }: { view: AdsUtmConventionView | undefined; platform: UtmConventionPlatform }) {
   const [open, setOpen] = useState(false);
+  const anchor = utmConventionAnchor(platform);
+  const loaded = !!view;
+  useEffect(() => {
+    if (loaded && window.location.hash === `#${anchor}`) document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [loaded, anchor]);
   if (!view) return null;
   const c = view.convention;
   const source = c.sources[platform];
   const label = PLATFORM_LABEL[platform];
   return (
-    <Card data-testid={`card-utm-convention-${platform}`}>
+    <Card id={anchor} className="scroll-mt-20" data-testid={`card-utm-convention-${platform}`}>
       <CardHeader className="pb-3">
         <CardTitle className="flex flex-wrap items-center gap-2 text-base">
           Tagging rules for {label} ads

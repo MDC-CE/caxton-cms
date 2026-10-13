@@ -82,7 +82,7 @@ export const contentQualityValidator: Validator = {
     let emptyFields = 0;
     let brokenLinks = 0;
 
-    const publicUrls = createPublicUrlResolver(contentIndex);
+    const publicUrls = createPublicUrlResolver(context.contentIndex ?? contentIndex);
     const liveFileSet = new Set(liveFilesForSeo(context));
 
     for (const file of context.contentFiles) {
@@ -199,7 +199,7 @@ export const contentQualityValidator: Validator = {
       findInternalLinks(parsed, internalLinks);
       const locale = file.locale === "_common" ? "en" : file.locale;
       for (const hit of internalLinks) {
-        if (!publicUrls.isLive(hit.link, locale)) {
+        if (!publicUrls.isLive(hit.path, locale)) {
           brokenLinks++;
           const where = hit.component
             ? ` in component "${hit.component}"`

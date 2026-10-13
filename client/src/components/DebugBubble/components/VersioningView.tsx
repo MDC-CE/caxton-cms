@@ -3,6 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "wouter";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
 import { TEXT_LIMITS_EXCEEDED_CODE, type TextLimitViolation } from "@shared/component-text-limits";
+import { BROKEN_INTERNAL_LINKS_CODE, type BrokenInternalLink } from "@shared/internalLinkGate";
+import {
+  BROKEN_LINKS_STAFF_MESSAGE,
+  BrokenInternalLinksNotice,
+  promoteLinkWarningsText,
+} from "@/components/editing/BrokenInternalLinksNotice";
 import { TextLimitsIssue } from "@/components/TextLimitsIssue";
 import { deslugify } from "../utils/debugHelpers";
 import { IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
@@ -315,6 +321,7 @@ export function VersioningView({
     code: string;
     message: string;
     violations?: TextLimitViolation[];
+    brokenLinks?: BrokenInternalLink[];
   } | null>(null);
   const [promoteConfirms, setPromoteConfirms] = useState<{ overwrite: boolean; source: boolean; textLimits: boolean }>({
     overwrite: false,
@@ -470,9 +477,17 @@ export function VersioningView({
   const holdForPromoteConfirm = (data: {
     code?: string;
     error?: string;
-    details?: { violations?: TextLimitViolation[] };
+    details?: { violations?: TextLimitViolation[]; broken_internal_links?: BrokenInternalLink[] };
   }): boolean => {
     const code = data.code;
+    if (code === BROKEN_INTERNAL_LINKS_CODE) {
+      setPromoteIssue({
+        code,
+        message: BROKEN_LINKS_STAFF_MESSAGE,
+        brokenLinks: Array.isArray(data.details?.broken_internal_links) ? data.details.broken_internal_links : [],
+      });
+      return true;
+    }
     if (code === TEXT_LIMITS_EXCEEDED_CODE) {
       setPromoteIssue({
         code,
@@ -498,6 +513,8 @@ export function VersioningView({
     if (Array.isArray(warnings) && warnings.some((w) => (w as { code?: string })?.code === "draft_rebuilt")) {
       toast({ title: "Published combined with the live changes made after the draft was created." });
     }
+    const linkText = promoteLinkWarningsText(warnings);
+    if (linkText) toast({ title: "Check the links on this page", description: linkText });
   };
 
   const handlePromote = async (confirms = promoteConfirms) => {
@@ -726,21 +743,43 @@ export function VersioningView({
       const body: {
         variants: typeof variants;
         confirm_publish_variants?: boolean;
+        validation_job_id?: string;
+        validation_job_ids?: string[];
       } = { variants };
       if (opts?.confirmPublish) {
         body.confirm_publish_variants = true;
       }
 
-      const res = await fetch(
-        `/api/versioning/${contentInfo.type}/${versioningWriteSlug}/${editingLocale}`,
-        {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify(body),
-        }
-      );
+      const send = () =>
+        fetch(
+          `/api/versioning/${contentInfo.type}/${versioningWriteSlug}/${editingLocale}`,
+          {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify(body),
+          },
+        );
 
-      const data = await res.json().catch(() => ({}));
+      let res = await send();
+      let data = await res.json().catch(() => ({}));
+      const jobIds: string[] = Array.isArray(data.validation_job_ids)
+        ? data.validation_job_ids
+        : data.job_id
+          ? [data.job_id]
+          : [];
+      if (
+        opts?.confirmPublish &&
+        jobIds.length > 0 &&
+        (data.status === "queued" || data.status === "running")
+      ) {
+        const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+        for (const id of jobIds) {
+          await pollDiagnosticsJob(id);
+        }
+        body.validation_job_ids = jobIds;
+        res = await send();
+        data = await res.json().catch(() => ({}));
+      }
 
       if (!res.ok) {
         if (
@@ -1868,8 +1907,9 @@ export function VersioningView({
             <DialogTitle>Publish variants with traffic?</DialogTitle>
             <DialogDescription className="space-y-2">
               <span className="block">
-                Assigning traffic publishes these variants and runs validation. Redirects
-                cannot live on variants — only on the live locale file.
+                This checks the version before anyone can see it. A full-site diagnostics
+                run does not block this button. Redirects cannot live on variants — only
+                on the live locale file.
               </span>
               <ul className="list-disc pl-4 text-sm">
                 {(publishConfirmVariants ?? []).map((slug) => (
@@ -1881,12 +1921,11 @@ export function VersioningView({
               <details className="text-xs text-muted-foreground pt-1">
                 <summary className="cursor-pointer">Read more (advanced)</summary>
                 <p className="mt-1">
+                  The check runs in the background and this dialog stays on Validating
+                  until it finishes. Job id is returned on the save request
+                  (<code className="bg-muted px-1 rounded">validation_job_id</code>).
                   Published variants use entry key{" "}
                   <code className="bg-muted px-1 rounded">type/slug/locale@variant</code>.
-                  Files:{" "}
-                  <code className="bg-muted px-1 rounded">scripts/validation/shared/entryKey.ts</code>
-                  ,{" "}
-                  <code className="bg-muted px-1 rounded">server/routes/versioning.ts</code>.
                 </p>
               </details>
             </DialogDescription>
@@ -2016,7 +2055,18 @@ export function VersioningView({
               )}
             </DialogDescription>
           </DialogHeader>
-          {promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE ? (
+          {promoteIssue?.code === BROKEN_INTERNAL_LINKS_CODE ? (
+            promoteIssue.brokenLinks?.length ? (
+              <BrokenInternalLinksNotice links={promoteIssue.brokenLinks} className="max-h-60 overflow-y-auto" />
+            ) : (
+              <p
+                className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+                data-testid="text-promote-issue"
+              >
+                {promoteIssue.message}
+              </p>
+            )
+          ) : promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE ? (
             <TextLimitsIssue message={promoteIssue.message} violations={promoteIssue.violations ?? []} />
           ) : promoteIssue ? (
             <p
@@ -2027,6 +2077,7 @@ export function VersioningView({
             </p>
           ) : null}
           <DialogFooter className="flex-col gap-2 sm:flex-col">
+            {promoteIssue?.code !== BROKEN_INTERNAL_LINKS_CODE && (
             <Button
               variant="destructive"
               onClick={() => {
@@ -2061,6 +2112,7 @@ export function VersioningView({
                   ? "Yes, publish now"
                   : "Yes, promote and replace original"}
             </Button>
+            )}
             <Button
               variant="outline"
               onClick={() => { setPromoteTarget(null); resetPromoteIssue(); }}
@@ -2069,7 +2121,7 @@ export function VersioningView({
               data-testid="button-cancel-promote"
             >
               <IconX className="h-4 w-4" />
-              {promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE
+              {promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE || promoteIssue?.code === BROKEN_INTERNAL_LINKS_CODE
                 ? "Go back"
                 : isDraftEntry
                   ? "Cancel"

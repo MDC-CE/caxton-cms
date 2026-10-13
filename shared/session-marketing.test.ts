@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  channelTouchFor,
   mergeUtmSets,
+  nextEntryChannel,
   nextFirstTouch,
   nextPaidLanding,
   paidLandingFor,
@@ -75,6 +77,51 @@ describe("first touch and paid landing", () => {
   });
 });
 
+describe("internal UTMs", () => {
+  const ownHosts = ["4geeks.com", ".4geeks.com"];
+
+  it("an internal UTM link keeps the earlier gclid and campaign", () => {
+    const prev = mergeUtmSets(undefined, parseMarketingParams("?utm_source=google&utm_medium=cpc&gclid=G1", { ownHosts }));
+    const incoming = parseMarketingParams("?utm_source=4geeks.com&utm_medium=dropdown&coupon=X", { ownHosts });
+    expect(incoming).toEqual({ coupon: "X" });
+    const merged = mergeUtmSets(prev, incoming);
+    expect(merged).toMatchObject({ utm_source: "google", utm_medium: "cpc", gclid: "G1", coupon: "X" });
+    expect(nextFirstTouch(undefined, incoming)).toBeUndefined();
+    expect(paidLandingFor(incoming, { host: "4geeks.com", path: "/en/x", now: 1 })).toBeNull();
+  });
+
+  it("utm_source of another site is kept", () => {
+    const fl = ["fl.4geeksacademy.com", ".4geeksacademy.com"];
+    expect(parseMarketingParams("?utm_source=4geeks.com&utm_medium=dropdown", { ownHosts: fl })).toEqual({
+      utm_source: "4geeks.com",
+      utm_medium: "dropdown",
+    });
+  });
+});
+
+describe("entry channel", () => {
+  const ownHosts = ["4geeks.com", ".4geeks.com"];
+
+  it("records channel, landing path and referrer host", () => {
+    const touch = channelTouchFor({}, { referrer: "https://www.google.com/", ownHosts, path: "/en/blog/x/?q=1", now: 5 });
+    expect(touch).toEqual({ channel: "organic_search", referrer_host: "google.com", path: "/en/blog/x", at: 5 });
+    expect(channelTouchFor({}, { referrer: "https://4geeks.com/en", ownHosts, path: "/en/x", now: 5 })).toBeNull();
+    expect(channelTouchFor({}, { referrer: "", ownHosts, path: "/", now: 5 })?.channel).toBe("direct");
+  });
+
+  it("first is write-once; last is the latest non-direct touch", () => {
+    const direct = { channel: "direct" as const, path: "/", at: 1 };
+    const search = { channel: "organic_search" as const, path: "/en/blog/x", at: 2, referrer_host: "google.com" };
+    const one = nextEntryChannel(undefined, direct);
+    expect(one).toEqual({ first: direct });
+    const two = nextEntryChannel(one, search);
+    expect(two).toEqual({ first: direct, last: search });
+    const three = nextEntryChannel(two, { channel: "direct", path: "/apply", at: 3 });
+    expect(three).toEqual({ first: direct, last: search });
+    expect(nextEntryChannel(three, null)).toBe(three);
+  });
+});
+
 describe("stripMarketingFields", () => {
   it("removes campaign data but keeps functional fields", () => {
     const session: Session = {
@@ -83,8 +130,10 @@ describe("stripMarketingFields", () => {
       landing_page: "/en/x",
       first_touch: { utm_source: "google" },
       paid_landing: { last: { host: "h", path: "/", at: 1 } },
+      entry_channel: { first: { channel: "organic_search", path: "/en/x", at: 1 } },
     };
     const stripped = stripMarketingFields(session);
+    expect(stripped.entry_channel).toBeUndefined();
     expect(stripped.utm).toEqual({ coupon: "SAVE", referral: "abc" });
     expect(stripped.landing_page).toBeUndefined();
     expect(stripped.first_touch).toBeUndefined();

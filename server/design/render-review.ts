@@ -200,23 +200,21 @@ async function writeIssues(
 ): Promise<RenderReviewJob["issue_store"]> {
   const p = job.source;
   if (p.source !== "entry") return { written: false, reason: "page demos are not stored as issues" };
-  const [{ ValidationService }, { filterContentFilesForEntry }, { entryKeyFromContentFile }] = await Promise.all([
-    import("../../scripts/validation/service"),
-    import("../jobs/definitions/on-save-validation"),
-    import("../../scripts/validation/shared/entryKey"),
-  ]);
-  const service = new ValidationService();
-  await service.buildContext({ contentRoot: ctx.contentRoot, ci: ctx.ci });
-  const context = service.getContext();
-  if (!context) return { written: false, reason: "no validation context" };
-  const files = filterContentFilesForEntry(context.contentFiles, {
-    contentType: p.contentType,
+  const { entryKeyFromContentFile } = await import("../../scripts/validation/shared/entryKey");
+  const merged = ctx.ci.loadMergedContent(p.contentType, p.slug, p.locale, p.variant);
+  if (!merged.data) {
+    return { written: false, reason: "entry file not indexed for validation (unpublished draft variants are not tracked)" };
+  }
+  const urls = ctx.ci.getLocaleUrls(p.slug, p.contentType);
+  const target = {
     slug: p.slug,
+    title: typeof merged.data.title === "string" ? merged.data.title : p.slug,
+    type: p.contentType,
     locale: p.locale,
-    ...(p.variant ? { variant: p.variant } : {}),
-  });
-  const target = files.find((f) => f.locale === p.locale) ?? files[0];
-  if (!target) return { written: false, reason: "entry file not indexed for validation (unpublished draft variants are not tracked)" };
+    filePath: merged.filePath,
+    url: urls[p.locale] || ctx.ci.buildUrl(p.contentType, p.locale, p.slug),
+    variant: p.variant,
+  };
   const entryKey = entryKeyFromContentFile(target);
   const issues = (job.findings ?? []).map((f) => toIssue(f, target.filePath));
   ctx.cache.applyValidatorResults(
@@ -231,7 +229,7 @@ async function writeIssues(
         category: "design",
       },
     ],
-    { contentFiles: context.contentFiles, entryKeys: [entryKey], markSiteWide: false },
+    { contentFiles: [target], entryKeys: [entryKey], markSiteWide: false },
   );
   await ctx.cache.flush();
   return { written: true, entry_key: entryKey };

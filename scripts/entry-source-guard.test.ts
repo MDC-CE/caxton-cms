@@ -14,7 +14,7 @@ const CREATE = "creatability: new database items are made in the source, not as 
  */
 const ENTRY_SOURCE_ALLOWLIST: Record<string, Allowed> = {
   "server/entry-layer.ts": { count: 5, reason: "the one place that finds a type's database (items, status, listing fetch, delivery refresh)" },
-  "server/database.ts": { count: 6, reason: "defines the database readers" },
+  "server/database.ts": { count: 5, reason: "defines the database readers" },
   "shared/sharedLayoutPaths.ts": { count: 1, reason: "typeUsesSharedTemplate: database types always use a shared template" },
   "server/content-types.ts": { count: 13, reason: "content type registry: getDatabaseName/hasDatabaseSingle definitions + field_mapping reserved keys" },
 
@@ -57,7 +57,7 @@ const ENTRY_SOURCE_ALLOWLIST: Record<string, Allowed> = {
   "server/content-editor.ts": { count: 2, reason: "Phase 2 delivery" },
 
   "server/routes/content.ts": { count: 28, reason: "content type manage API: database config, listings, field override writes" },
-  "server/initial-data-middleware.ts": { count: 3, reason: "content types payload: has_database flag and entry counts" },
+  "server/initial-data-middleware.ts": { count: 2, reason: "content types payload: has_database flag and database slug" },
   "server/routes/seo.ts": { count: 2, reason: "SEO preview: database pages show merged live meta (no entry file holds it), live-only contexts" },
 };
 

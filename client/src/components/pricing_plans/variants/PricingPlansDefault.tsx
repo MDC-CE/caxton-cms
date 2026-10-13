@@ -221,7 +221,7 @@ export default function PricingPlansDefault({ data }: PricingPlansDefaultProps) 
   if (plans.length === 0) {
     if (isEditMode) {
       return (
-        <section className="w-full px-4 py-12" data-testid="section-pricing-plans-empty">
+        <section className="w-full px-4" data-testid="section-pricing-plans-empty">
           <p className="text-sm text-muted-foreground text-center max-w-lg mx-auto">
             No content-owned <code className="bg-muted px-1 rounded">plans</code> on this section.
             Add plan cards in the section YAML (CMS no longer injects a global plan catalog).
@@ -242,7 +242,7 @@ export default function PricingPlansDefault({ data }: PricingPlansDefaultProps) 
   return (
     <section
       ref={rootRef}
-      className="w-full px-4 py-12"
+      className="w-full px-4"
       data-testid="section-pricing-plans"
     >
       <div className="max-w-5xl mx-auto">

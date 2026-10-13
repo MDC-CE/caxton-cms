@@ -11,27 +11,32 @@
 import * as fs from "fs";
 import * as path from "path";
 import { fork, type ChildProcess } from "child_process";
-import type { ValidatorResult } from "../../scripts/validation/shared/types";
+import type { StoredValidationIssue, ValidatorResult } from "../../scripts/validation/shared/types";
 import {
   effectiveValidatorNames,
   issuesBySlugFromTargets,
-  resolveUrlTargets,
   type MappedIssue,
 } from "../../scripts/validation/runDiagnosticsJob";
 import type {
   DiagnosticsFreshness,
+  DiagnosticsJobKind,
+  DiagnosticsJobPurpose,
   DiagnosticsJobResultsFile,
+  DiagnosticsLane,
   DiagnosticsWorkerOutboundMessage,
   DiagnosticsWorkerStartMessage,
 } from "../../scripts/validation/diagnosticsIpc";
 import { CROSS_ENTRY_VALIDATOR_NAMES } from "../../scripts/validation/shared/runClass";
 import type { ContentIndex } from "../content-index";
-import { listEntryKeys } from "../entry-layer";
 import type { ValidationCacheService } from "./validationCacheService";
 import { listCacheIssuesFromStore } from "./validationCacheService";
-import { isUrlStaleForFullRun } from "./validationCacheMerge";
 import { getPackageRoot, getProjectRoot } from "@shared/paths";
 import { child } from "../logger";
+import {
+  applyDeferredDiagnosticsCache,
+  enqueueCacheApply,
+} from "./applyDeferredDiagnostics";
+import type { VerifiedCompleteResult } from "./verifiedCompleteIssue";
 
 const log = child({ module: "diagnosticsJobService" });
 
@@ -84,6 +89,15 @@ export interface DiagnosticsJobRequest {
    * Staff username / MCP author (audit / future use). Optional.
    */
   callerId?: string;
+  /** Overrides lane classification. Routes for images, traffic, complete set this. */
+  kind?: DiagnosticsJobKind;
+  purpose?: DiagnosticsJobPurpose;
+  entry?: {
+    contentType: string;
+    slug: string;
+    locale: string;
+    variant?: string;
+  };
 }
 
 export interface LastFullSiteWideDiagnosticsStats {
@@ -114,7 +128,12 @@ export interface DiagnosticsJobEnvelope {
   urlCount: number;
   summary?: { errorCount: number; warningCount: number };
   error?: string;
+  code?: string;
   partial: boolean;
+  lane?: DiagnosticsLane;
+  kind?: DiagnosticsJobKind;
+  purpose?: DiagnosticsJobPurpose;
+  reportPath?: string;
 }
 
 export interface DiagnosticsJobRecord extends DiagnosticsJobEnvelope {
@@ -122,6 +141,25 @@ export interface DiagnosticsJobRecord extends DiagnosticsJobEnvelope {
   resultIssuesBySlug?: Record<string, MappedIssue[]>;
   /** In-memory only — not written to disk envelopes */
   log?: DiagnosticsJobLogLine[];
+  /** Copy of the issue before this complete job writes the cache. Not written to disk. */
+  completeSnapshot?: { issueBefore: StoredValidationIssue | null; openBefore: StoredValidationIssue[] };
+  completeVerdict?: VerifiedCompleteResult;
+  completeSettle?: Promise<VerifiedCompleteResult>;
+}
+
+function countMapped(issuesBySlug: Record<string, MappedIssue[]>): {
+  errorCount: number;
+  warningCount: number;
+} {
+  let errorCount = 0;
+  let warningCount = 0;
+  for (const issues of Object.values(issuesBySlug)) {
+    for (const issue of issues) {
+      if (issue.severity === "error") errorCount += 1;
+      else warningCount += 1;
+    }
+  }
+  return { errorCount, warningCount };
 }
 
 function appendJobLog(
@@ -172,8 +210,23 @@ export type StartDiagnosticsResult =
       scoped: boolean;
     } & LastFullSiteWideDiagnosticsStats);
 
+const IMAGE_VALIDATOR_NAMES = new Set([
+  "images",
+  "image-tags",
+  "hero-image-tags",
+  "image-optimization",
+]);
+
+type SharedSlot = {
+  child: ChildProcess | null;
+  currentJobId: string | null;
+  queue: string[];
+  starts: Map<string, DiagnosticsWorkerStartMessage>;
+};
+
 const jobsById = new Map<string, DiagnosticsJobRecord>();
 const runningByContentRoot = new Map<string, string>();
+const sharedByRoot = new Map<string, SharedSlot>();
 const jobCache = new Map<string, ValidationCacheService>();
 const jobContentRoot = new Map<string, string>();
 const jobChildren = new Map<string, ChildProcess>();
@@ -326,10 +379,16 @@ export async function getPartialIssuesForRunningJob(opts: {
   cache: ValidationCacheService;
   job: DiagnosticsJobEnvelope | DiagnosticsJobRecord;
 }): Promise<Record<string, MappedIssue[]>> {
-  const { contentRoot, ci, cache, job } = opts;
-  maybeReloadValidationCache(contentRoot, cache);
-  const targets = await resolveUrlTargets(contentRoot, ci, job.slugs, job.urls);
-  return issuesFlushedSinceJobStart(cache, job, targets, job.categories);
+  const { cache, job } = opts;
+  // The child does not flush the issues file mid-run. Partial polls stay empty
+  // until the web process applies the results file on completed.
+  if (!job.urls?.length) return {};
+  return issuesFlushedSinceJobStart(
+    cache,
+    job,
+    job.urls.map((url) => ({ url, slug: url })),
+    job.categories,
+  );
 }
 
 function jobsDir(contentRoot: string): string {
@@ -456,21 +515,36 @@ function toEnvelope(job: DiagnosticsJobRecord): DiagnosticsJobEnvelope {
     urlCount: job.urlCount,
     summary: job.summary,
     error: job.error,
+    code: job.code,
     partial: job.partial,
+    lane: job.lane,
+    kind: job.kind,
+    purpose: job.purpose,
+    reportPath: job.reportPath,
   };
 }
 
+function jobIsActive(jobId: string | undefined): DiagnosticsJobRecord | undefined {
+  if (!jobId) return undefined;
+  const job = jobsById.get(jobId);
+  if (!job) return undefined;
+  if (job.status !== "queued" && job.status !== "running") return undefined;
+  return job;
+}
+
 export function isDiagnosticsRunning(contentRoot: string): boolean {
-  const id = runningByContentRoot.get(contentRoot);
-  if (!id) return false;
-  const job = jobsById.get(id);
-  return !!(job && (job.status === "queued" || job.status === "running"));
+  if (jobIsActive(runningByContentRoot.get(contentRoot))) return true;
+  const shared = sharedByRoot.get(contentRoot);
+  if (!shared) return false;
+  if (jobIsActive(shared.currentJobId ?? undefined)) return true;
+  return shared.queue.some((id) => !!jobIsActive(id));
 }
 
 /** Test helper — clear async job maps. */
 export function clearDiagnosticsRuntimeForTests(): void {
   jobsById.clear();
   runningByContentRoot.clear();
+  sharedByRoot.clear();
 }
 
 /** Test helper — pretend an async site job holds the contentRoot lock. */
@@ -555,6 +629,11 @@ function clearRunningLock(contentRoot: string, jobId: string): void {
   if (runningByContentRoot.get(contentRoot) === jobId) {
     runningByContentRoot.delete(contentRoot);
   }
+  const shared = sharedByRoot.get(contentRoot);
+  if (!shared) return;
+  if (shared.currentJobId === jobId) shared.currentJobId = null;
+  shared.queue = shared.queue.filter((id) => id !== jobId);
+  shared.starts.delete(jobId);
 }
 
 async function finalizeJob(
@@ -568,9 +647,11 @@ async function finalizeJob(
   jobTerminalHandled.add(jobId);
 
   clearIdleTimer(jobId);
+  const finished = jobsById.get(jobId);
   const childProc = jobChildren.get(jobId);
   jobChildren.delete(jobId);
-  if (outcome.status === "failed" && childProc && !childProc.killed) {
+  const sharedLane = finished?.lane === "shared";
+  if (!sharedLane && outcome.status === "failed" && childProc && !childProc.killed) {
     try {
       childProc.kill("SIGTERM");
     } catch {
@@ -591,10 +672,32 @@ async function finalizeJob(
       if (results) {
         job.resultIssuesBySlug = results.issuesBySlug as Record<string, MappedIssue[]>;
         job.validatorResults = results.validatorResults as ValidatorResult[] | undefined;
+        if (results.outcome === "not_found") {
+          job.status = "failed";
+          job.error = results.message || "Scope not found";
+          job.code = results.code;
+        } else if (results.outcome === "cached" && results.targets?.length && cache) {
+          const mapped = issuesBySlugFromTargets(cache, results.targets, job.categories);
+          job.resultIssuesBySlug = mapped.issuesBySlug;
+          job.summary = countMapped(mapped.issuesBySlug);
+        } else if (results.cacheApply && cache && !results.cacheApply.hold) {
+          await enqueueCacheApply(contentRoot, async () => {
+            await applyDeferredDiagnosticsCache(cache, results.cacheApply!);
+          });
+          if (results.targets?.length) {
+            const mapped = issuesBySlugFromTargets(cache, results.targets, job.categories);
+            job.resultIssuesBySlug = mapped.issuesBySlug;
+            job.summary = countMapped(mapped.issuesBySlug);
+          }
+        }
+        if (results.reportPath) job.reportPath = results.reportPath;
       }
       appendJobLog(
         job,
-        `Completed — ${outcome.summary.errorCount} errors, ${outcome.summary.warningCount} warnings`,
+        job.status === "failed"
+          ? `Failed — ${job.error ?? "Scope not found"}`
+          : `Completed — ${outcome.summary.errorCount} errors, ${outcome.summary.warningCount} warnings`,
+        job.status === "failed" ? "error" : "info",
       );
     } else {
       job.status = "failed";
@@ -613,32 +716,34 @@ async function finalizeJob(
     }
   }
 
+  const lane = jobsById.get(jobId)?.lane;
   clearRunningLock(contentRoot, jobId);
   jobCache.delete(jobId);
+  if (lane === "shared") pumpShared(contentRoot);
+}
 
-  if (cache) {
-    try {
-      cache.reloadFromDisk();
-      // Parent owns GCS upload after worker local flush
-      await cache.flush();
-    } catch (err) {
-      log.warn({ err, jobId }, "Failed to reload validation cache after diagnostics job");
-    }
-  }
+function forkDiagnosticsChild(): ChildProcess {
+  const workerFile = path.join(getPackageRoot(), "scripts/validation/diagnostics-worker.ts");
+  return fork(workerFile, [], {
+    cwd: getProjectRoot(),
+    env: process.env,
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+    execArgv: ["--import", "tsx", "--perf-basic-prof-only-functions"],
+  });
 }
 
 function attachChildHandlers(
   contentRoot: string,
-  jobId: string,
   childProc: ChildProcess,
+  lane: DiagnosticsLane,
 ): void {
   childProc.on("message", (raw: DiagnosticsWorkerOutboundMessage) => {
+    if (!raw || typeof raw !== "object" || !("jobId" in raw)) return;
+    const jobId = raw.jobId;
     const job = jobsById.get(jobId);
     if (!job) return;
-    if (!raw || typeof raw !== "object") return;
 
     if (raw.type === "progress") {
-      if (raw.jobId && raw.jobId !== jobId) return;
       job.status = "running";
       if (typeof raw.processed === "number") job.processed = raw.processed;
       if (typeof raw.total === "number" && raw.total > 0) job.total = raw.total;
@@ -674,7 +779,12 @@ function attachChildHandlers(
   });
 
   childProc.on("error", (err) => {
-    log.error({ err, jobId }, "Diagnostics worker process error");
+    log.error({ err }, "Diagnostics worker process error");
+    const jobId =
+      lane === "shared"
+        ? sharedByRoot.get(contentRoot)?.currentJobId ?? undefined
+        : [...jobChildren.entries()].find(([, proc]) => proc === childProc)?.[0];
+    if (!jobId) return;
     void finalizeJob(contentRoot, jobId, {
       status: "failed",
       error: err.message || "Worker process error",
@@ -682,26 +792,92 @@ function attachChildHandlers(
   });
 
   childProc.on("exit", (code, signal) => {
-    if (jobTerminalHandled.has(jobId)) return;
     const msg =
       signal != null
         ? `Worker exited from signal ${signal}`
         : `Worker exited with code ${code ?? "unknown"}`;
-    log.warn({ jobId, code, signal }, msg);
-    void finalizeJob(contentRoot, jobId, { status: "failed", error: msg });
+    if (lane === "shared") {
+      const slot = sharedByRoot.get(contentRoot);
+      if (!slot || slot.child !== childProc) return;
+      slot.child = null;
+      const current = slot.currentJobId;
+      const queued = [...slot.queue];
+      slot.currentJobId = null;
+      slot.queue = [];
+      log.warn({ code, signal }, msg);
+      if (current && !jobTerminalHandled.has(current)) {
+        void finalizeJob(contentRoot, current, { status: "failed", error: msg });
+      }
+      for (const id of queued) {
+        if (!jobTerminalHandled.has(id)) {
+          void finalizeJob(contentRoot, id, { status: "failed", error: msg });
+        }
+      }
+      return;
+    }
+    for (const [jobId, proc] of jobChildren) {
+      if (proc !== childProc || jobTerminalHandled.has(jobId)) continue;
+      log.warn({ jobId, code, signal }, msg);
+      void finalizeJob(contentRoot, jobId, { status: "failed", error: msg });
+    }
   });
 }
 
+function pumpShared(contentRoot: string): void {
+  const slot = sharedByRoot.get(contentRoot);
+  if (!slot || slot.currentJobId) return;
+  const nextId = slot.queue.shift();
+  if (!nextId) {
+    if (slot.child?.connected) {
+      try {
+        slot.child.send({ type: "stop" });
+      } catch {
+        /* ignore */
+      }
+    }
+    slot.child = null;
+    return;
+  }
+  const start = slot.starts.get(nextId);
+  if (!start) return;
+  slot.currentJobId = nextId;
+  if (!slot.child?.connected) {
+    try {
+      slot.child = forkDiagnosticsChild();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      slot.currentJobId = null;
+      void finalizeJob(contentRoot, nextId, {
+        status: "failed",
+        error: `Failed to spawn diagnostics worker: ${message}`,
+      });
+      return;
+    }
+    attachChildHandlers(contentRoot, slot.child, "shared");
+  }
+  jobChildren.set(nextId, slot.child);
+  resetIdleTimer(contentRoot, nextId);
+  const job = jobsById.get(nextId);
+  if (job) {
+    job.status = "running";
+    appendJobLog(job, "Sent to shared worker");
+    writeEnvelope(contentRoot, toEnvelope(job));
+  }
+  try {
+    slot.child.send(start);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    void finalizeJob(contentRoot, nextId, {
+      status: "failed",
+      error: `Failed to send start message to worker: ${message}`,
+    });
+  }
+}
+
 function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorkerStartMessage): void {
-  const workerFile = path.join(getPackageRoot(), "scripts/validation/diagnostics-worker.ts");
   let childProc: ChildProcess;
   try {
-    childProc = fork(workerFile, [], {
-      cwd: getProjectRoot(),
-      env: process.env,
-      stdio: ["inherit", "inherit", "inherit", "ipc"],
-      execArgv: ["--import", "tsx", "--perf-basic-prof-only-functions"],
-    });
+    childProc = forkDiagnosticsChild();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error({ err, jobId }, "Failed to fork diagnostics worker");
@@ -713,7 +889,7 @@ function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorke
   }
 
   jobChildren.set(jobId, childProc);
-  attachChildHandlers(contentRoot, jobId, childProc);
+  attachChildHandlers(contentRoot, childProc, "site");
   resetIdleTimer(contentRoot, jobId);
 
   const job = jobsById.get(jobId);
@@ -735,6 +911,48 @@ function spawnWorker(contentRoot: string, jobId: string, start: DiagnosticsWorke
   }
 }
 
+function inferDiagnosticsKind(req: DiagnosticsJobRequest): DiagnosticsJobKind {
+  if (req.kind) return req.kind;
+  const names = req.validators ?? [];
+  const scoped = !!(req.slugs?.length || req.urls?.length || req.file);
+  if (!scoped && names.length > 0 && names.every((n) => n === "redirects")) return "redirects";
+  if (!scoped && names.length > 0 && names.every((n) => IMAGE_VALIDATOR_NAMES.has(n))) return "images";
+  if (!scoped && names.length === 1 && names[0] === "seo-duplicates") return "seo-duplicates";
+  return "diagnostics";
+}
+
+function classifyDiagnosticsJob(req: DiagnosticsJobRequest): {
+  lane: DiagnosticsLane;
+  kind: DiagnosticsJobKind;
+} {
+  const kind = inferDiagnosticsKind(req);
+  if (kind === "seo-duplicates" || kind === "save-report" || kind === "section-variants") {
+    return { lane: "site", kind };
+  }
+  if (kind !== "diagnostics") return { lane: "shared", kind };
+  const scoped = !!(req.slugs?.length || req.urls?.length || req.file);
+  return { lane: scoped ? "shared" : "site", kind };
+}
+
+function activeJobWithScope(
+  contentRoot: string,
+  key: string,
+  lane: DiagnosticsLane,
+): DiagnosticsJobRecord | undefined {
+  if (lane === "site") {
+    const job = jobIsActive(runningByContentRoot.get(contentRoot));
+    return job?.scopeKey === key ? job : undefined;
+  }
+  const slot = sharedByRoot.get(contentRoot);
+  if (!slot) return undefined;
+  const ids = [...(slot.currentJobId ? [slot.currentJobId] : []), ...slot.queue];
+  for (const id of ids) {
+    const job = jobIsActive(id);
+    if (job?.scopeKey === key) return job;
+  }
+  return undefined;
+}
+
 /** Requested slugs/file match no page. Not retryable; the route answers 404. */
 export class DiagnosticsScopeError extends Error {
   constructor(
@@ -747,6 +965,10 @@ export class DiagnosticsScopeError extends Error {
   }
 }
 
+export function diagnosticsHttpStatus(result: StartDiagnosticsResult): number {
+  return result.status === "busy" ? 409 : 200;
+}
+
 export async function startDiagnosticsJob(
   req: DiagnosticsJobRequest,
 ): Promise<StartDiagnosticsResult> {
@@ -755,154 +977,52 @@ export async function startDiagnosticsJob(
     typeof req.max_age_seconds === "number" && req.max_age_seconds > 0
       ? req.max_age_seconds
       : 86400;
-  const hasUrlOrSlugScope = !!(req.slugs?.length || req.urls?.length);
-  // Prefer URL/slug scoping whenever available. File scoping is a fallback only.
-  let filePaths = !hasUrlOrSlugScope && req.file ? [req.file] : undefined;
-  let validatorOnly = false;
-  const slugFiltered = !!(req.slugs?.length || req.urls?.length || filePaths?.length);
-  const { pageValidators, siteWideValidators, partial } = effectiveValidatorNames(req.validators, {
-    slugFiltered,
-  });
-
-  if (req.slugs && req.slugs.length > 0) {
-    const targetsProbe = await resolveUrlTargets(
-      req.contentRoot,
-      req.ci,
-      req.slugs,
-      req.urls,
-    );
-    if (targetsProbe.length === 0) {
-      throw new DiagnosticsScopeError(
-        `No page found for slugs: ${req.slugs.join(", ")}`,
-        "diagnostics_slug_not_found",
-        { slugs: req.slugs, empty_databases: listEntryKeys(req.ci).emptyDatabases },
-      );
-    }
-  }
-
-  let allTargets = await resolveUrlTargets(
-    req.contentRoot,
-    req.ci,
-    req.slugs,
-    req.urls,
-    filePaths,
-  );
-  if (filePaths && allTargets.length === 0) {
-    const isSharedTemplateFile = /\/((?:template|single)\.[^/]+\.ya?ml|_common\.(?:template|single)\.ya?ml)$/i.test(
-      req.file ?? "",
-    );
-    if (!isSharedTemplateFile) {
-      throw new DiagnosticsScopeError(
-        `No page found for file: ${req.file}`,
-        "diagnostics_file_not_found",
-        { file: req.file, empty_databases: listEntryKeys(req.ci).emptyDatabases },
-      );
-    }
-    validatorOnly = true;
-    filePaths = undefined;
-    allTargets = [];
-  }
-
+  const { lane, kind } = classifyDiagnosticsJob(req);
+  const slugFiltered = !!(req.slugs?.length || req.urls?.length || req.file);
+  const { partial } = effectiveValidatorNames(req.validators, { slugFiltered });
   const key = scopeKey({
     slugs: req.slugs,
     urls: req.urls,
-    files: filePaths,
+    files: req.file ? [req.file] : undefined,
     validators: req.validators,
     freshness,
     max_age_seconds: maxAge,
-    validator_only: validatorOnly,
+    validator_only: false,
   });
 
-  // When scoping by a YAML file, resolve it to canonical URL targets so the worker
-  // validates only that single entry (instead of the whole site).
-  const scopedSlugs = validatorOnly
-    ? undefined
-    : req.slugs ?? (filePaths ? allTargets.map((t) => t.slug) : undefined);
-  const scopedUrls = validatorOnly
-    ? undefined
-    : req.urls ?? (filePaths ? allTargets.map((t) => t.url) : undefined);
-
-  let staleTargets = allTargets;
-  if (!partial && freshness === "max_age") {
-    staleTargets = allTargets.filter((t) =>
-      isUrlStaleForFullRun(req.cache.getByUrl(t.url), maxAge),
-    );
-  }
-
-  const needsWork =
-    (validatorOnly && pageValidators.length > 0) ||
-    (pageValidators.length > 0 && (partial || freshness === "hard" || staleTargets.length > 0)) ||
-    (siteWideValidators.length > 0 && (partial || freshness === "hard" || staleTargets.length > 0));
-
-  if (
-    !validatorOnly &&
-    !partial &&
-    freshness === "max_age" &&
-    staleTargets.length === 0 &&
-    allTargets.length > 0
-  ) {
-    const { issuesBySlug, lastFullRunAtBySlug, cacheMisses } = issuesBySlugFromTargets(
-      req.cache,
-      allTargets,
-      req.categories,
-    );
+  const reused = activeJobWithScope(req.contentRoot, key, lane);
+  if (reused) {
     return {
-      status: "cached",
-      issuesBySlug,
-      lastFullRunAtBySlug,
-      cacheMisses,
-      retry_after_seconds: 0,
+      status: reused.status === "running" ? "running" : "queued",
+      job_id: reused.jobId,
+      reused: true,
+      retry_after_seconds: retryAfterSeconds(reused.urlCount || 1),
+      scope: {
+        urlCount: reused.urlCount,
+        staleUrlCount: reused.staleUrlCount,
+        slugs: reused.slugs,
+        validators: reused.validators,
+        partial: reused.partial,
+      },
     };
   }
 
-  if (!needsWork && allTargets.length === 0 && siteWideValidators.length === 0 && !validatorOnly) {
-    return {
-      status: "cached",
-      issuesBySlug: {},
-      lastFullRunAtBySlug: {},
-      cacheMisses: [],
-      retry_after_seconds: 0,
-    };
-  }
-
-  const runningId = runningByContentRoot.get(req.contentRoot);
-  if (runningId) {
-    const running = jobsById.get(runningId);
-    if (running && (running.status === "queued" || running.status === "running")) {
-      if (running.scopeKey === key) {
-        return {
-          status: running.status,
-          job_id: running.jobId,
-          reused: true,
-          retry_after_seconds: retryAfterSeconds(running.urlCount || 1),
-          scope: {
-            urlCount: running.urlCount,
-            staleUrlCount: running.staleUrlCount,
-            slugs: running.slugs,
-            validators: running.validators,
-            partial: running.partial,
-          },
-        };
-      }
+  if (lane === "site") {
+    const siteJob = jobIsActive(runningByContentRoot.get(req.contentRoot));
+    if (siteJob) {
       return {
         status: "busy",
         code: "diagnostics_busy",
-        job_id: running.jobId,
-        retry_after_seconds: retryAfterSeconds(running.urlCount || 1),
+        job_id: siteJob.jobId,
+        retry_after_seconds: retryAfterSeconds(siteJob.urlCount || 1),
         message:
-          "Another diagnostics job is already running for this site. Poll that job_id or wait and retry.",
+          "A site-wide diagnostics job is already running. Poll that job_id or wait and retry.",
       };
     }
   }
 
-  // Real job would start — require confirm for full-site / unscoped runs only.
-  // Slug- or URL-scoped (and shared-template validator_only) jobs skip confirm.
-  const scoped = !!(
-    (scopedSlugs && scopedSlugs.length > 0) ||
-    (scopedUrls && scopedUrls.length > 0) ||
-    validatorOnly
-  );
-  if (req.confirm !== true && !scoped) {
+  const scoped = slugFiltered || kind !== "diagnostics";
+  if (lane === "site" && req.confirm !== true && !scoped) {
     return buildNeedsConfirmResult(req.contentRoot, false);
   }
 
@@ -912,8 +1032,8 @@ export async function startDiagnosticsJob(
     status: "queued",
     contentRootName: req.contentRootName,
     scopeKey: key,
-    slugs: scopedSlugs,
-    urls: scopedUrls,
+    slugs: req.slugs,
+    urls: req.urls,
     freshness,
     max_age_seconds: maxAge,
     validators: req.validators,
@@ -921,31 +1041,21 @@ export async function startDiagnosticsJob(
     categories: req.categories,
     startedAt: Date.now(),
     processed: 0,
-    total: validatorOnly
-      ? Math.max(
-          (pageValidators.length > 0 ? 1 : 0) + (siteWideValidators.length > 0 ? 1 : 0),
-          1,
-        )
-      : Math.max(
-          (pageValidators.length > 0
-            ? partial || freshness === "hard"
-              ? allTargets.length
-              : staleTargets.length
-            : 0) + (siteWideValidators.length > 0 ? 1 : 0),
-          1,
-        ),
-    staleUrlCount: validatorOnly ? 0 : staleTargets.length,
-    urlCount: validatorOnly ? 0 : allTargets.length,
+    total: 1,
+    staleUrlCount: 0,
+    urlCount: req.slugs?.length || req.urls?.length || (req.file ? 1 : 0),
     partial,
+    lane,
+    kind,
+    purpose: req.purpose,
     log: [],
   };
 
   jobsById.set(jobId, job);
   jobCache.set(jobId, req.cache);
   jobContentRoot.set(jobId, req.contentRoot);
-  runningByContentRoot.set(req.contentRoot, jobId);
   jobTerminalHandled.delete(jobId);
-  appendJobLog(job, "Job queued");
+  appendJobLog(job, lane === "site" ? "Job queued (site)" : "Job queued (shared)");
   writeEnvelope(req.contentRoot, toEnvelope(job));
 
   const startMsg: DiagnosticsWorkerStartMessage = {
@@ -953,27 +1063,42 @@ export async function startDiagnosticsJob(
     jobId,
     contentRoot: req.contentRoot,
     contentRootName: req.contentRootName,
-    slugs: scopedSlugs,
-    urls: scopedUrls,
+    slugs: req.slugs,
+    urls: req.urls,
+    file: req.file,
     freshness,
     max_age_seconds: maxAge,
     validators: req.validators,
     include_artifacts: !!req.include_artifacts,
     categories: req.categories,
-    validator_only: validatorOnly,
+    kind,
+    reusable: lane === "shared",
+    entry: req.entry,
     resultsPath: resultsFilePath(req.contentRoot, jobId),
   };
 
-  spawnWorker(req.contentRoot, jobId, startMsg);
+  if (lane === "site") {
+    runningByContentRoot.set(req.contentRoot, jobId);
+    spawnWorker(req.contentRoot, jobId, startMsg);
+  } else {
+    let slot = sharedByRoot.get(req.contentRoot);
+    if (!slot) {
+      slot = { child: null, currentJobId: null, queue: [], starts: new Map() };
+      sharedByRoot.set(req.contentRoot, slot);
+    }
+    slot.starts.set(jobId, startMsg);
+    slot.queue.push(jobId);
+    pumpShared(req.contentRoot);
+  }
 
   return {
     status: "queued",
     job_id: jobId,
-    retry_after_seconds: retryAfterSeconds(validatorOnly ? 1 : allTargets.length),
+    retry_after_seconds: retryAfterSeconds(job.urlCount || 1),
     scope: {
-      urlCount: validatorOnly ? 0 : allTargets.length,
-      staleUrlCount: validatorOnly ? 0 : staleTargets.length,
-      slugs: scopedSlugs,
+      urlCount: job.urlCount,
+      staleUrlCount: 0,
+      slugs: req.slugs,
       validators: req.validators,
       partial,
     },

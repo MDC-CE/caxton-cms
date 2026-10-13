@@ -198,6 +198,68 @@ export function buildProposalBadOutcomePrompt(p: ProposalBadOutcomePromptInput):
   });
 }
 
+const SECTION_HEADING_KEYS = ["title", "heading", "headline"] as const;
+const SECTION_HEADING_MAX = 80;
+
+/** First non-empty title / heading / headline on a section, trimmed for prompts. */
+export function getSectionHeadingForPrompt(section: unknown): string {
+  if (section && typeof section === "object") {
+    const record = section as Record<string, unknown>;
+    for (const key of SECTION_HEADING_KEYS) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) {
+        const text = value.replace(/\s+/g, " ").trim();
+        return text.length > SECTION_HEADING_MAX
+          ? `${text.slice(0, SECTION_HEADING_MAX - 1).trimEnd()}…`
+          : text;
+      }
+    }
+  }
+  return "(no heading)";
+}
+
+export function buildSectionSwapAiPrompt(opts: {
+  url: string;
+  contentType: string;
+  slug: string;
+  locale: string;
+  pageVariant?: string | null;
+  sectionIndex: number;
+  sectionHeading: string;
+  component: string;
+  fromVersion?: string | null;
+  fromVariant?: string | null;
+  toVersion: string;
+  toVariant: string;
+  isSharedTemplate?: boolean;
+}): string {
+  const mcpUrl = typeof window !== "undefined" ? getMcpServerUrl() : "/mcp";
+  const pageVariant =
+    opts.pageVariant && opts.pageVariant !== "default"
+      ? `draft variant ${opts.pageVariant}`
+      : "live";
+
+  const prompt = renderAskAgentPrompt("section-variant-swap", {
+    url: opts.url,
+    content_type: opts.contentType,
+    slug: opts.slug,
+    locale: opts.locale,
+    page_variant: pageVariant,
+    section_index: String(opts.sectionIndex),
+    section_heading: opts.sectionHeading,
+    component: opts.component,
+    from_version: opts.fromVersion || "(unknown version)",
+    from_variant: opts.fromVariant || "default",
+    to_version: opts.toVersion,
+    to_variant: opts.toVariant,
+    shared_template_line: opts.isSharedTemplate
+      ? "- Shared template: this section is used by many pages. Confirm with me before writing."
+      : "",
+    mcp_url: mcpUrl,
+  });
+  return prompt.replace(/\n{3,}/g, "\n\n");
+}
+
 export function buildDraftFeedbackAiPrompt(opts: {
   shareUrl: string;
   contentType: string;

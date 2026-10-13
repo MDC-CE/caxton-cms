@@ -1257,20 +1257,6 @@ export function registerGithubRoutes(app: Express): void {
         const ci = site?.contentIndex ?? contentIndex;
         ci.refresh();
 
-        const contentRoot = site?.contentRoot;
-        if (contentRoot && site?.validationCache) {
-          const { scheduleOnSaveValidation } = await import("../services/onSaveValidation");
-          for (const filePath of result.restoredFiles) {
-            if (!/\.ya?ml$/i.test(filePath) || filePath.endsWith("/versioning.yml")) continue;
-            scheduleOnSaveValidation({
-              contentRoot,
-              contentRootName,
-              ci,
-              cache: site.validationCache,
-              filePath: path.join(process.cwd(), filePath),
-            });
-          }
-        }
       }
 
       const { ok: _ok, ...body } = result;

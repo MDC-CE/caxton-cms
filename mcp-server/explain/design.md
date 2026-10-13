@@ -21,6 +21,7 @@ Component fields / variants → `get_component_schema`, `get_component_variant`.
 ## Theme colors (blocking for agents)
 
 - Section `background` must be a **theme ID** from the site theme (e.g. `light-blue-5`), never CSS (`#fff`, `hsl(...)`, Tailwind classes).
+- Site theme = the site's own `theme.json`; a site without one uses its `inherit_components_from` parent's file (whole file, no merge). Allowed IDs come from that file. Shared components (`shared/component-registry/`) only use the shared base palette (`SHARED_BASE_PALETTE`: background, muted, card, primary, secondary, accent, light-blue-5, light-blue-5-gradient, hero-orbit-gradient).
 - Rich text must not hardcode inline `color`, `font-size`, `letter-spacing` outside the theme text palette / sizes.
 - Agent writes or publishes that **add or change** an off-theme value fail with `theme_colors_required` (`property_path`, allowed IDs). Values already on the page (staff overrides) never block you. Staff edits only warn.
 
@@ -29,8 +30,10 @@ Component fields / variants → `get_component_schema`, `get_component_variant`.
 | Trait | Meaning | What to do |
 |---|---|---|
 | `flow: out` | Floats outside the page (schema_org, modal, sticky bar, contact bubble) | Ignore it for spacing/adjacency; never give it `background` / `paddingY` / `marginY` (paints an empty strip) |
-| `self_padded` (true or variant list) | Variant paints its own vertical padding | No wrapper `paddingY` (double padding); use `marginY` for distance |
+| `self_padded` (true or variant list, matched ignoring `-`/`_`/case) | Variant paints its own vertical padding | No wrapper `paddingY` (double padding); use `marginY` for distance |
 | `edge: top_of_page` | Designed to be the first visible section (heroes) | Put it first |
+
+Section vertical padding is wrapper-owned: variants no longer add their own outer `py-*` (only `self_padded` variants do). A new section has 0 padding unless you set `paddingY` (or insert from a registry example, which carries it). Values: preset (`none` 0, `sm` 16, `md` 32, `lg` 64, `xl` 96), px, or `"top bottom"`; `mobile` inherits `desktop` when missing. The rule is enforced in code (`npm run check:section-spacing` on commit, build and tests): variant files that pad themselves carry `// section-spacing: self-padded`, overlays `// section-spacing: overlay`.
 
 Spacing taste is **not** hardcoded: it is learned (below) and checked by screenshots.
 

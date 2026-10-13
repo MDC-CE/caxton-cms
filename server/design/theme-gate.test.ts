@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluatePageThemeColors } from "./theme-gate";
-import { classifyThemeValue, resolveSectionBackgroundCss, buildThemeBackgroundCss, sectionBackgroundPaint, setThemePaint } from "@shared/theme-palette";
+import { classifyThemeValue, resolveSectionBackgroundCss, buildThemeBackgroundCss, sectionBackgroundPaint, sectionCoverPaint, setThemePaint } from "@shared/theme-palette";
 import { findOffThemeInlineStyles } from "@shared/rich-text-inline-styles";
 import type { SiteThemeConfig } from "../theme-config";
 
@@ -62,6 +62,35 @@ describe("resolveSectionBackgroundCss", () => {
     const css = buildThemeBackgroundCss(theme);
     expect(css).toContain("--theme-bg-muted: hsl(var(--muted));");
     expect(css).toContain("--theme-bg-light-blue-5: hsl(210 100% 50% / 0.05);");
+  });
+});
+
+describe("sectionCoverPaint", () => {
+  it("lifts a solid color or a gradient and leaves a file image on the section", () => {
+    expect(sectionCoverPaint({ backgroundColor: "hsl(0 0% 96%)" })).toEqual({
+      backgroundColor: "hsl(0 0% 96%)",
+    });
+    expect(sectionCoverPaint({ background: "var(--theme-bg-muted, hsl(var(--muted)))" })).toEqual({
+      backgroundColor: "var(--theme-bg-muted, hsl(var(--muted)))",
+    });
+    expect(sectionCoverPaint({
+      backgroundImage: "linear-gradient(to bottom, hsl(0 0% 96%), transparent)",
+    })).toEqual({
+      backgroundImage: "linear-gradient(to bottom, hsl(0 0% 96%), transparent)",
+    });
+    expect(sectionCoverPaint({ background: "url(/hero.png)" })).toBeUndefined();
+    expect(sectionCoverPaint({ backgroundImage: "url(/hero.png)" })).toBeUndefined();
+    expect(sectionCoverPaint({
+      backgroundColor: "hsl(0 0% 96%)",
+      backgroundImage: "url(/hero.png)",
+    })).toBeUndefined();
+    expect(sectionCoverPaint({
+      backgroundColor: "hsl(0 0% 96%)",
+      backgroundImage: "linear-gradient(to bottom, red, blue)",
+    })).toEqual({
+      backgroundColor: "hsl(0 0% 96%)",
+      backgroundImage: "linear-gradient(to bottom, red, blue)",
+    });
   });
 });
 

@@ -31,7 +31,7 @@ export function validateDocIdentity(
     contentType: string;
     contentSlug: string;
     skipIdentityIndexes?: Set<number>;
-    /** Draft/variant section saves: only check these indexes. Live/publish omit. */
+    /** Section saves: only check these indexes. Publish/full-list rewrites omit. */
     onlyValidateIndexes?: Set<number>;
     contentRoot?: string;
   },

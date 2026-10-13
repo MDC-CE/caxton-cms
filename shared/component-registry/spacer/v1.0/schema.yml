@@ -1,0 +1,40 @@
+name: Spacer
+version: "1.0"
+component: SpacerDefault
+file: client/src/components/spacer/variants/SpacerDefault.tsx
+description: >-
+  An empty section that only adds vertical space between the sections above and below it. Renders nothing visible except
+  its optional background color.
+when_to_use: |
+  Use when two sections sit too close together and you want extra breathing room without
+  editing either neighbor's spacing. Also useful for a band of background color between sections.
+  Prefer setting marginY/paddingY on a neighbor when only one page needs the gap and the neighbor
+  is already being edited — a spacer is a separate section staff must remember to move with it.
+  Do not set paddingY on a spacer; use size (and mobile_size) instead.
+layout:
+  self_padded: true
+props:
+  size:
+    type: string
+    required: true
+    description: "Height of the space: sm (16px), md (32px, default), lg (64px), xl (96px)."
+    example: md
+  mobile_size:
+    type: string
+    required: false
+    options:
+      - sm
+      - md
+      - lg
+      - xl
+    description: Height below 768px. Omit to use size on every screen.
+    example: sm
+variants:
+  default:
+    description: Empty block of vertical space
+    content_shape:
+      image: unused
+      icon: unused
+    best_for: Adding breathing room or a colored band between two sections without changing either neighbor.
+    avoid_when: You need a visible divider line, or the gap should belong to a section that is already being edited.
+    metadata_status: draft

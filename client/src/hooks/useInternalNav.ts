@@ -116,18 +116,21 @@ function dispatchScrollToSection(targetId: string): void {
 
 /**
  * Same-page hash: wake deferred sections, then one smooth scroll (or open modal).
- * Modals must assign `location.hash` without a prior `replaceState` that includes `#id`
- * — otherwise hashchange never fires and eager modals stay closed.
+ * Modals update the URL with pushState. Assigning `location.hash` would scroll to the
+ * section node before the dialog opens. pushState does not fire `hashchange`, so the
+ * modal listeners are notified manually.
  */
 export function activateHashTarget(id: string, mergedSearch: string): void {
   const el = document.getElementById(id);
   if (el?.dataset.sectionType === "modal") {
     dispatchScrollToSection(id);
     const path = window.location.pathname;
-    if (mergedSearch !== window.location.search) {
-      history.replaceState(null, "", `${path}${mergedSearch}`);
+    const nextUrl = `${path}${mergedSearch}#${id}`;
+    const currentUrl = `${path}${window.location.search}${window.location.hash}`;
+    if (nextUrl !== currentUrl) {
+      history.pushState(null, "", nextUrl);
     }
-    window.location.hash = id;
+    window.dispatchEvent(new Event("hashchange"));
     return;
   }
   history.replaceState(null, "", `${window.location.pathname}${mergedSearch}#${id}`);

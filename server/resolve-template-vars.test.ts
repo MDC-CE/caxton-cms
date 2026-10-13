@@ -84,6 +84,17 @@ describe("resolveAllTemplateVars", () => {
     expect(result).toEqual({ heading: "Learn javascript" });
   });
 
+  it("fills a later placeholder that an earlier namespace just inserted", () => {
+    const result = resolveAllTemplateVars(
+      { headline: "{{ entry.blurb }}" },
+      {
+        singleEntry: { blurb: "Learn {{ meta.topic }}" },
+        meta: { topic: "SQL" },
+      },
+    );
+    expect(result).toEqual({ headline: "Learn SQL" });
+  });
+
   it("resolves single → meta → param; leaves site vars for the client by default", () => {
     const data = {
       meta: {

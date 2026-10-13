@@ -20,8 +20,20 @@ import { hasTrackingConsentCookie, readAdContext, type AdContext } from "./ad-co
 import { pruneConsentDaily } from "./consent-store";
 import { CONSENT_COOKIE_NAME, isGrantedDecision, parseConsentCookie } from "@shared/consent";
 import { emailMatchesPattern } from "@shared/ads-settings";
-import { adIdFromTag, CLICK_ID_PARAMS, classifyTraffic, normalizeLandingPath, type ClickIdParam } from "@shared/paid-traffic";
+import { LEAD_ID_PATTERN } from "@shared/leads-query";
+import {
+  adIdFromTag,
+  CLICK_ID_PARAMS,
+  classifyTraffic,
+  normalizeLandingPath,
+  PAID_LOOKBACK_DAYS,
+  type ClickIdParam,
+  type PaidStatus,
+} from "@shared/paid-traffic";
 import type { PaidLandingRef } from "@shared/session";
+import { isTrafficChannel, type TrafficChannel } from "@shared/traffic-channel";
+import { resolveVisitorCountry } from "./visitor-country";
+import { findCatalogProduct } from "./lead-product";
 import { child } from "../logger";
 
 const log = child({ module: "ads/lead-ledger" });
@@ -75,7 +87,49 @@ export type LedgerRow = {
   is_repeat: 0 | 1;
   repeat_of: string | null;
   consent_state: ConsentState;
+  /** Traffic channel (null on rows recorded before migration 33 or from clients that sent none). */
+  channel?: TrafficChannel | null;
+  first_channel?: TrafficChannel | null;
+  /** Session's latest non-paid channel, kept when the lead itself counts as paid. */
+  last_organic_channel?: TrafficChannel | null;
+  /** Page the visit that set `channel` landed on. */
+  channel_landing_path?: string | null;
+  referrer_host?: string | null;
+  /** ISO 3166-1 alpha-2 from the request (best-effort). */
+  country?: string | null;
+  /** classifyTraffic status of the lead's tags; non-null marks rows recorded after migration 33. */
+  traffic_status?: PaidStatus | null;
+  /** Catalog product the form resolved (paused included); null when unresolved, not in the catalog, or before migration 35. */
+  product_id?: string | null;
+  product_slug?: string | null;
 };
+
+/** True when the lead had a paid landing within the paid lookback before `now`. */
+export function paidWithinLookback(lastPaidAt: number | null | undefined, now: number): boolean {
+  if (lastPaidAt == null) return false;
+  const age = now - lastPaidAt;
+  return age >= -60 * 60 * 1000 && age <= PAID_LOOKBACK_DAYS * 86_400_000;
+}
+
+/**
+ * Channel stored on the lead. Paid (by tags or a paid landing within the lookback) always wins;
+ * a session "paid" channel older than the lookback falls back to direct.
+ */
+export function resolveLeadChannel(opts: {
+  sessionChannel: TrafficChannel | null;
+  status: PaidStatus;
+  paidByLookback: boolean;
+}): { channel: TrafficChannel | null; last_organic_channel: TrafficChannel | null } {
+  const { sessionChannel, status, paidByLookback } = opts;
+  const organic = sessionChannel && sessionChannel !== "paid" && sessionChannel !== "meta_unclear" ? sessionChannel : null;
+  if (!sessionChannel) return { channel: null, last_organic_channel: null };
+  if (status === "paid" || paidByLookback) return { channel: "paid", last_organic_channel: organic };
+  if (status === "unclear") return { channel: "meta_unclear", last_organic_channel: organic };
+  if (sessionChannel === "paid") return { channel: "direct", last_organic_channel: null };
+  return { channel: sessionChannel, last_organic_channel: organic };
+}
+
+const HOST_RE = /^[a-z0-9.-]{1,120}$/;
 
 function str(v: unknown, max = 300): string | null {
   return typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
@@ -154,7 +208,7 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
 
   const submissionId = (() => {
     const raw = str(body.submission_id, 64);
-    return raw && /^[A-Za-z0-9-]{8,64}$/.test(raw) ? raw : crypto.randomUUID();
+    return raw && LEAD_ID_PATTERN.test(raw) ? raw : crypto.randomUUID();
   })();
 
   const clickIds: Partial<Record<ClickIdParam, string>> = {};
@@ -211,6 +265,27 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
   const firstClick = CLICK_ID_PARAMS.find((c) => clickIds[c]) ?? null;
   const idPlatform = cls.platform === "meta" || cls.platform === "google";
 
+  const sessionChannel = isTrafficChannel(body.channel) ? body.channel : null;
+  const paidByLookback = paidWithinLookback(lastPaid?.at, now);
+  const { channel, last_organic_channel } = resolveLeadChannel({
+    sessionChannel,
+    status: cls.status,
+    paidByLookback,
+  });
+  const channelPath = str(body.channel_landing_path);
+  const referrer = str(body.referrer_host, 120)?.toLowerCase() ?? null;
+  let country: string | null = null;
+  try {
+    country = await resolveVisitorCountry(req);
+  } catch {
+    country = null;
+  }
+  const product = findCatalogProduct({
+    contentRoot,
+    productId: str(body.ledger_product_id, 120),
+    productSlug: str(body.ledger_product_slug, 120),
+  });
+
   const row: LedgerRow = {
     submission_id: submissionId,
     created_at: now,
@@ -252,6 +327,16 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
     is_repeat: repeatOf ? 1 : 0,
     repeat_of: repeatOf,
     consent_state: consentState,
+    channel,
+    first_channel: isTrafficChannel(body.first_channel) ? body.first_channel : null,
+    last_organic_channel,
+    channel_landing_path:
+      channel === "paid" && lastPaid ? lastPaid.path : channelPath ? normalizeLandingPath(channelPath).slice(0, 300) : null,
+    referrer_host: referrer && HOST_RE.test(referrer) ? referrer : null,
+    country,
+    traffic_status: cls.status,
+    product_id: product?.product_id ?? null,
+    product_slug: product?.product_slug ?? null,
   };
 
   const wire: Record<string, string | number | boolean> = {
@@ -304,6 +389,12 @@ export const LEDGER_ONLY_BODY_KEYS = new Set([
     ["platform", "campaign_id", "adset_id", "ad_id"].map((k) => `${p}_paid_landing_${k}`),
   ),
   "page_experiment_id",
+  "channel",
+  "first_channel",
+  "channel_landing_path",
+  "referrer_host",
+  "ledger_product_id",
+  "ledger_product_slug",
 ]);
 
 /** Incoming body + enrichment, ready for buildLeadPayload. Enrichment wins over raw body keys. */
@@ -369,7 +460,7 @@ export async function recordLeadSubmission(
     return enrichLeadBody(body, prepared.wire);
   } catch (err) {
     log.warn({ err }, "[lead-ledger] enrichment failed; delivering raw lead");
-    return body;
+    return enrichLeadBody(body, {});
   }
 }
 
@@ -392,6 +483,8 @@ const LEDGER_COLUMNS: (keyof LedgerRow)[] = [
   "first_paid_platform", "first_paid_campaign_id", "first_paid_adset_id", "first_paid_ad_id",
   "last_paid_platform", "last_paid_campaign_id", "last_paid_adset_id", "last_paid_ad_id",
   "experiment_id", "variant", "is_test", "test_reason", "is_repeat", "repeat_of", "consent_state",
+  "channel", "first_channel", "last_organic_channel", "channel_landing_path", "referrer_host", "country", "traffic_status",
+  "product_id", "product_slug",
 ];
 
 /**

@@ -34,7 +34,7 @@ import { markFileAsModified } from "../sync-state";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { SECTION_LAYOUT_DEFAULT_KEYS } from "../section-layout-defaults";
-import { databaseManager, DatabaseManager, getCachedDatabaseEntryCount } from "../database";
+import { databaseManager, DatabaseManager } from "../database";
 import { TESTIMONIALS_DATABASE } from "@shared/testimonials-listing";
 import { commonYmlPath, readFunnelBlockFromFile } from "../funnel-fields";
 import type { FunnelBlock } from "@shared/funnel";
@@ -1435,8 +1435,10 @@ export function registerContentRoutes(app: Express): void {
     try {
       const cr = getContentRoot(res);
       const configs = getAllConfigs(cr);
+      const cacheStats = getDB(res).getCacheStats();
       const result: Record<string, unknown>[] = [];
       for (const [type, config] of Object.entries(configs)) {
+        const dbSlug = config.database?.slug;
         result.push({
           name: type,
           label: getLabel(type, cr),
@@ -1457,8 +1459,8 @@ export function registerContentRoutes(app: Express): void {
           url_pattern: config.url_pattern,
           locale_key: config.field_mapping?._locale || null,
           static_entry_count: getCI(res).findByType(type).length,
-          database_entry_count: config.database?.slug
-            ? getCachedDatabaseEntryCount(getDB(res), config.database.slug)
+          database_entry_count: dbSlug
+            ? (cacheStats.perDb[dbSlug]?.item_count ?? 0)
             : null,
           layout: getLayout(type, cr),
         });
@@ -5121,6 +5123,9 @@ export function registerContentRoutes(app: Express): void {
           path: result.relativePath,
           isVariantLayer: result.isVariantLayer,
           ...(result.deprecated ? { deprecated: result.deprecated } : {}),
+          ...(result.brokenInternalLinks?.length
+            ? { broken_internal_links: result.brokenInternalLinks }
+            : {}),
         });
         return;
       }
@@ -5129,6 +5134,7 @@ export function registerContentRoutes(app: Express): void {
         storage: result.storage,
         path: result.relativePath,
         isVariantLayer: result.isVariantLayer,
+        ...(result.linkWarnings?.length ? { link_warnings: result.linkWarnings } : {}),
       });
     } catch (err) {
       res.status(500).json({ error: String(err) });

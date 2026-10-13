@@ -3,7 +3,7 @@
  * Parent Express process must not call this on the hot path.
  */
 
-import type { PageCacheEntry, ValidatorResult } from "./shared/types";
+import type { ContentFile, PageCacheEntry, ValidatorResult } from "./shared/types";
 import { ValidationService } from "./service";
 import { getCanonicalUrl } from "./shared/canonicalUrls";
 import { entryKeyFromContentFile } from "./shared/entryKey";
@@ -12,7 +12,7 @@ import { validators as defaultValidators, getValidator } from "./validators";
 import type { ContentIndex } from "../../server/content-index";
 import type { ValidationCacheService } from "../../server/services/validationCacheService";
 import { isUrlStaleForFullRun } from "../../server/services/validationCacheMerge";
-import type { DiagnosticsFreshness } from "./diagnosticsIpc";
+import type { DiagnosticsFreshness, DeferredCacheApply, SlimContentFile } from "./diagnosticsIpc";
 import type { DiagnosticsJobResultsFile } from "./diagnosticsIpc";
 import {
   diagnosticsNeedsSeoIndex,
@@ -168,12 +168,49 @@ export function issuesBySlugFromTargets(
 /** Sentinel entry key — partial apply clears file-only issues without touching real entries. */
 export const VALIDATOR_ONLY_ENTRY_KEY = "__validator_only__";
 
+function slimContentFiles(files: ContentFile[]): SlimContentFile[] {
+  return files.map((f) => ({
+    slug: f.slug,
+    title: f.title || f.slug,
+    type: f.type,
+    locale: f.locale,
+    filePath: f.filePath,
+    url: f.url ?? getCanonicalUrl(f),
+    variant: f.variant,
+    isDraft: f.isDraft,
+  }));
+}
+
+function emptyDiagnosticsOutput(args: {
+  outcome: "cached" | "not_found";
+  code?: string;
+  message: string;
+  targets?: DiagnosticsUrlTarget[];
+}): RunDiagnosticsJobOutput {
+  const resultsPayload: DiagnosticsJobResultsFile = {
+    summary: { errorCount: 0, warningCount: 0 },
+    outcome: args.outcome,
+    code: args.code,
+    message: args.message,
+    targets: args.targets,
+    validatorResults: [],
+    issuesBySlug: {},
+  };
+  return {
+    summary: resultsPayload.summary,
+    validatorResults: [],
+    issuesBySlug: {},
+    resultsPayload,
+  };
+}
+
 export type RunDiagnosticsJobInput = {
   contentRoot: string;
   ci: ContentIndex;
   cache: ValidationCacheService;
   slugs?: string[];
   urls?: string[];
+  files?: string[];
   freshness: DiagnosticsFreshness;
   max_age_seconds: number;
   validators?: string[];
@@ -206,6 +243,7 @@ export async function runDiagnosticsJob(
     cache,
     slugs,
     urls,
+    files,
     freshness,
     max_age_seconds,
     validators,
@@ -224,7 +262,7 @@ export async function runDiagnosticsJob(
 
   const allTargets = validatorOnly
     ? []
-    : await resolveUrlTargets(contentRoot, ci, slugs, urls);
+    : await resolveUrlTargets(contentRoot, ci, slugs, urls, files);
 
   const allValidatorNames = [...pageValidators, ...siteWideValidators];
   if (diagnosticsNeedsSeoIndex(allValidatorNames)) {
@@ -246,6 +284,32 @@ export async function runDiagnosticsJob(
     );
   }
 
+  const scopedRequest = !!(slugs?.length || urls?.length || files?.length);
+  if (!validatorOnly && scopedRequest && allTargets.length === 0) {
+    const missingFile = !slugs?.length && !urls?.length && !!files?.length;
+    return emptyDiagnosticsOutput({
+      outcome: "not_found",
+      code: missingFile ? "diagnostics_file_not_found" : "diagnostics_slug_not_found",
+      message: missingFile
+        ? `No page found for file: ${files?.[0] ?? ""}`
+        : `No page found for slugs: ${(slugs ?? []).join(", ")}`,
+    });
+  }
+
+  if (
+    !validatorOnly &&
+    !partial &&
+    freshness === "max_age" &&
+    allTargets.length > 0 &&
+    staleTargets.length === 0
+  ) {
+    return emptyDiagnosticsOutput({
+      outcome: "cached",
+      message: "Cache is still fresh for this scope.",
+      targets: allTargets,
+    });
+  }
+
   const workUnits =
     (validatorOnly && pageValidators.length > 0 ? 1 : 0) +
     (!validatorOnly && pageValidators.length > 0 ? staleTargets.length : 0) +
@@ -264,6 +328,25 @@ export async function runDiagnosticsJob(
   const allValidatorResults: ValidatorResult[] = [];
   const allContentFiles = context.contentFiles;
   const nowIso = () => new Date().toISOString();
+  const cacheApply: DeferredCacheApply = { batches: [] };
+
+  const persistValidators = (
+    validators: ValidatorResult[],
+    opts: {
+      contentFiles: ContentFile[];
+      entryKeys?: string[];
+      markSiteWide?: boolean;
+      skippedContentTypes?: string[];
+    },
+  ) => {
+    cacheApply.batches.push({
+      validators,
+      entryKeys: opts.entryKeys,
+      markSiteWide: opts.markSiteWide,
+      skippedContentTypes: opts.skippedContentTypes,
+      contentFiles: slimContentFiles(opts.contentFiles),
+    });
+  };
 
   if (validatorOnly && pageValidators.length > 0) {
     context.contentFiles = [];
@@ -273,7 +356,7 @@ export async function runDiagnosticsJob(
         includeArtifacts,
       });
       allValidatorResults.push(...result.validators);
-      cache.applyValidatorResults(result.validators, {
+      persistValidators(result.validators, {
         contentFiles: allContentFiles,
         entryKeys: [VALIDATOR_ONLY_ENTRY_KEY],
         markSiteWide: false,
@@ -283,7 +366,6 @@ export async function runDiagnosticsJob(
       context.contentFiles = allContentFiles;
     }
     processed = 1;
-    await cache.flush();
     onProgress({
       processed,
       total,
@@ -308,7 +390,7 @@ export async function runDiagnosticsJob(
       allValidatorResults.push(...result.validators);
 
       const entryKeys = filteredFiles.map((f) => entryKeyFromContentFile(f));
-      cache.applyValidatorResults(result.validators, {
+      persistValidators(result.validators, {
         contentFiles: allContentFiles,
         entryKeys,
         markSiteWide: false,
@@ -318,9 +400,6 @@ export async function runDiagnosticsJob(
       context.contentFiles = allContentFiles;
     }
     processed += 1;
-    if (processed % 5 === 0 || processed === total) {
-      await cache.flush();
-    }
     onProgress({
       processed,
       total,
@@ -338,26 +417,15 @@ export async function runDiagnosticsJob(
     });
     allValidatorResults.push(...result.validators);
 
-    cache.applyValidatorResults(result.validators, {
+    persistValidators(result.validators, {
       contentFiles: allContentFiles,
       markSiteWide: true,
       skippedContentTypes: context.skippedContentTypes,
     });
 
-    const { applyValidationRunToCache } = await import(
-      "../../server/services/validationCachePostProcess"
-    );
     const dbOnly = result.validators.filter((v) => getValidatorRunClass(v.name) === "database");
     if (dbOnly.length > 0) {
-      await applyValidationRunToCache(
-        cache,
-        {
-          summary: { total: dbOnly.length, passed: 0, failed: 0, warnings: 0, duration: 0 },
-          validators: dbOnly,
-        },
-        context,
-        { partial: true },
-      );
+      cacheApply.databaseValidators = dbOnly;
     }
 
     processed += 1;
@@ -375,12 +443,9 @@ export async function runDiagnosticsJob(
   // apply path (markSiteWide), which can be skipped when that phase does not run.
   if (!partial) {
     const ts = nowIso();
-    cache.markFullRunAt(ts);
-    if (!slugFiltered) {
-      cache.markSiteWideRunAt(ts);
-    }
+    cacheApply.markFullRunAt = ts;
+    if (!slugFiltered) cacheApply.markSiteWideRunAt = true;
   }
-  await cache.flush();
 
   const byName = new Map<string, ValidatorResult>();
   for (const v of allValidatorResults) {
@@ -414,6 +479,9 @@ export async function runDiagnosticsJob(
 
   const resultsPayload: DiagnosticsJobResultsFile = {
     summary,
+    outcome: "ran",
+    targets: allTargets,
+    cacheApply,
     validatorResults: includeArtifacts ? validatorResults : validatorResults.map((v) => ({
       name: v.name,
       status: v.status,

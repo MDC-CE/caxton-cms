@@ -38,6 +38,8 @@ import {
   useThemeBackgroundUsage,
   type BackgroundOption,
 } from "@/components/theme/ThemeBackgroundUsage";
+import { InheritedThemeBanner } from "@/components/theme/InheritedThemeBanner";
+import { SHARED_BASE_PALETTE } from "@shared/theme-palette";
 
 interface PreviewExample {
   component: string;
@@ -96,6 +98,9 @@ interface ThemeData {
   backgrounds?: PaletteEntry[];
   text?: PaletteEntry[];
   accents?: PaletteEntry[];
+  /** Parent content folder when this site uses its parent's theme (read-only here). */
+  inherited_from?: string | null;
+  inherited_from_domain?: string | null;
 }
 
 interface MoleculesData {
@@ -412,6 +417,43 @@ function ColorRow({ tokenId, label, value, onChange, isOpen, onToggle }: ColorRo
   );
 }
 
+const BASE_PALETTE_IDS: ReadonlySet<string> = new Set(SHARED_BASE_PALETTE);
+
+function BackgroundsIntro() {
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  return (
+    <div className="text-xs text-muted-foreground pb-2 space-y-1">
+      <p>
+        Page sections can only use these colors. The number shows how many sections use each one; removing a used
+        color asks what to switch those sections to.
+      </p>
+      <button
+        type="button"
+        className="text-primary underline-offset-2 hover:underline"
+        onClick={() => setShowAdvanced((v) => !v)}
+        data-testid="button-backgrounds-read-more"
+      >
+        {showAdvanced ? "Hide advanced" : "Read more (advanced)"}
+      </button>
+      {showAdvanced && (
+        <ul className="list-disc pl-4 text-[11px] space-y-1" data-testid="backgrounds-advanced">
+          <li>
+            Required colors (shared base palette): <code className="text-[10px]">{SHARED_BASE_PALETTE.join(", ")}</code>.
+            Defined in <code className="text-[10px]">shared/theme-palette.ts</code>.
+          </li>
+          <li>
+            Components in <code className="text-[10px]">shared/component-registry/</code> render on every site and may
+            only use these IDs, so every theme keeps them. Saving a theme without one is refused.
+          </li>
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const REQUIRED_BASE_TOOLTIP =
+  "Components shared by every site use this color. You can change its value, but not remove it.";
+
 interface PaletteEntryRowProps {
   entry: PaletteEntry;
   index: number;
@@ -423,6 +465,8 @@ interface PaletteEntryRowProps {
   onMoveUp: (index: number) => void;
   onMoveDown: (index: number) => void;
   usageCount?: number;
+  /** Base palette entry: value editable, delete disabled. */
+  required?: boolean;
 }
 
 function resolveSwatchColor(entry: PaletteEntry, previewMode: "light" | "dark"): string {
@@ -443,6 +487,7 @@ function PaletteEntryRow({
   onMoveUp,
   onMoveDown,
   usageCount,
+  required,
 }: PaletteEntryRowProps) {
   const mode: "cssVar" | "value" = entry.cssVar ? "cssVar" : "value";
   const isUnknownVar = mode === "cssVar" && entry.cssVar && !knownCssVars.has(entry.cssVar);
@@ -472,6 +517,16 @@ function PaletteEntryRow({
           placeholder="Label"
           data-testid={`input-palette-label-${index}`}
         />
+        {required && (
+          <Badge
+            variant="outline"
+            className="text-[10px] px-1.5 py-0 shrink-0 font-normal text-muted-foreground"
+            title={REQUIRED_BASE_TOOLTIP}
+            data-testid={`badge-required-${entry.id}`}
+          >
+            Required by shared components
+          </Badge>
+        )}
         {usageCount !== undefined && (
           <span
             className="text-[10px] text-muted-foreground shrink-0 tabular-nums"
@@ -520,7 +575,9 @@ function PaletteEntryRow({
         <button
           type="button"
           onClick={() => onDelete(index)}
-          className="text-muted-foreground hover:text-destructive hover-elevate p-0.5 rounded"
+          disabled={required}
+          title={required ? REQUIRED_BASE_TOOLTIP : undefined}
+          className="text-muted-foreground hover:text-destructive hover-elevate p-0.5 rounded disabled:opacity-30 disabled:hover:text-muted-foreground"
           data-testid={`button-delete-entry-${index}`}
         >
           <Trash2 className="h-3.5 w-3.5" />
@@ -620,9 +677,11 @@ interface PaletteAccordionProps {
   /** Called instead of deleting when the entry is still used by sections. */
   onDeleteUsed?: (index: number) => void;
   intro?: ReactNode;
+  /** Entry IDs that cannot be deleted (shared base palette). */
+  requiredIds?: ReadonlySet<string>;
 }
 
-function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, onChange, usage, onDeleteUsed, intro }: PaletteAccordionProps) {
+function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, onChange, usage, onDeleteUsed, intro, requiredIds }: PaletteAccordionProps) {
   const handleEntryChange = (index: number, updated: PaletteEntry) => {
     const next = [...entries];
     next[index] = updated;
@@ -630,6 +689,7 @@ function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, 
   };
 
   const handleDelete = (index: number) => {
+    if (requiredIds?.has(entries[index]?.id)) return;
     const used = usage?.[entries[index]?.id]?.count ?? 0;
     if (used > 0 && onDeleteUsed) {
       onDeleteUsed(index);
@@ -686,6 +746,7 @@ function PaletteAccordion({ palette, label, entries, knownCssVars, previewMode, 
                 onMoveUp={handleMoveUp}
                 onMoveDown={handleMoveDown}
                 usageCount={usage ? usage[entry.id]?.count ?? 0 : undefined}
+                required={requiredIds?.has(entry.id)}
               />
               {i < entries.length - 1 && <Separator />}
             </div>
@@ -1332,6 +1393,8 @@ export default function ThemeEditor() {
   const { data: themeData, isLoading: themeLoading } = useQuery<ThemeData>({
     queryKey: ["/api/theme"],
   });
+  const inheritedFrom = themeData?.inherited_from ?? null;
+  const readOnly = !!inheritedFrom;
 
   const { data: moleculesData, isLoading: moleculesLoading } = useQuery<MoleculesData>({
     queryKey: ["/api/molecules"],
@@ -1379,6 +1442,7 @@ export default function ThemeEditor() {
   }, [themeData]);
 
   const savePreviewExamples = async (examples: PreviewExample[]) => {
+    if (readOnly) return;
     try {
       const toSave = examples.filter((e) => !e.pageUrl);
       await apiRequest("PUT", "/api/theme/preview-examples", toSave);
@@ -1431,6 +1495,7 @@ export default function ThemeEditor() {
   })();
 
   const handleColorChange = (token: string, value: string) => {
+    if (readOnly) return;
     if (previewMode === "light") {
       setLightColors((prev) => ({ ...prev, [token]: value }));
     } else {
@@ -1450,6 +1515,7 @@ export default function ThemeEditor() {
   const radiusValue = parseFloat(activeColors["--radius"] || "0.75") || 0.75;
 
   const handleRadiusChange = (v: number) => {
+    if (readOnly) return;
     const val = `${v}rem`;
     if (previewMode === "light") {
       setLightColors((prev) => ({ ...prev, "--radius": val }));
@@ -1510,6 +1576,7 @@ export default function ThemeEditor() {
   };
 
   const handlePaletteChange = (palette: "backgrounds" | "text" | "accents", entries: PaletteEntry[]) => {
+    if (readOnly) return;
     if (palette === "backgrounds") setBackgrounds(entries);
     else if (palette === "text") setTextPalette(entries);
     else if (palette === "accents") setAccents(entries);
@@ -1617,6 +1684,13 @@ export default function ThemeEditor() {
             </button>
           </div>
         </div>
+
+        {inheritedFrom && (
+          <InheritedThemeBanner
+            parentFolder={inheritedFrom}
+            parentName={themeData?.inherited_from_domain || inheritedFrom}
+          />
+        )}
 
         <div className="flex border-b border-border shrink-0">
           <button
@@ -1726,6 +1800,7 @@ export default function ThemeEditor() {
                 variant="outline"
                 size="sm"
                 onClick={handleReset}
+                disabled={readOnly}
                 className="flex-1"
                 data-testid="button-reset-theme"
               >
@@ -1735,7 +1810,7 @@ export default function ThemeEditor() {
               <Button
                 size="sm"
                 onClick={handleSave}
-                disabled={isSaving}
+                disabled={isSaving || readOnly}
                 className="flex-1"
                 data-testid="button-save-theme"
               >
@@ -1767,6 +1842,7 @@ export default function ThemeEditor() {
                       onChange={handlePaletteChange}
                       usage={bgUsage?.by_id}
                       onDeleteUsed={(index) => {
+                        if (readOnly) return;
                         const entry = backgrounds[index];
                         if (!entry) return;
                         setReplaceDialog({
@@ -1776,12 +1852,8 @@ export default function ThemeEditor() {
                           deleteIndex: index,
                         });
                       }}
-                      intro={
-                        <p className="text-xs text-muted-foreground pb-2">
-                          Page sections can only use these colors. The number shows how many sections use each one;
-                          removing a used color asks what to switch those sections to.
-                        </p>
-                      }
+                      requiredIds={BASE_PALETTE_IDS}
+                      intro={<BackgroundsIntro />}
                     />
                     <PaletteAccordion
                       palette="text"
@@ -1801,12 +1873,12 @@ export default function ThemeEditor() {
                     />
                   </Accordion>
                   <Separator />
-                  <OffThemeBackgroundsPanel
+                  {!readOnly && <OffThemeBackgroundsPanel
                     usage={bgUsage}
                     loading={bgUsageLoading}
                     onAdd={(value, count) => setAddDialog({ value, count })}
                     onReplace={(value, count) => setReplaceDialog({ from: value, fromLabel: value, count })}
-                  />
+                  />}
                 </div>
               )}
             </ScrollArea>
@@ -1816,6 +1888,7 @@ export default function ThemeEditor() {
                 variant="outline"
                 size="sm"
                 onClick={handlePaletteReset}
+                disabled={readOnly}
                 className="flex-1"
                 data-testid="button-reset-palettes"
               >
@@ -1825,7 +1898,7 @@ export default function ThemeEditor() {
               <Button
                 size="sm"
                 onClick={handlePaletteSave}
-                disabled={isPaletteSaving}
+                disabled={isPaletteSaving || readOnly}
                 className="flex-1"
                 data-testid="button-save-palettes"
               >

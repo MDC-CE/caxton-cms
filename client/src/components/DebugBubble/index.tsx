@@ -600,7 +600,7 @@ export function DebugBubble() {
       }
 
       try {
-        await fetch("/api/validation/run-page", {
+        const startedRes = await fetch("/api/validation/run-page", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify({
@@ -609,6 +609,12 @@ export function DebugBubble() {
             ...(variant ? { variant } : {}),
           }),
         });
+        const started = await startedRes.json().catch(() => ({}));
+        const jobId = typeof started.job_id === "string" ? started.job_id : "";
+        if (jobId && (started.status === "queued" || started.status === "running")) {
+          const { pollDiagnosticsJob } = await import("@/lib/pollDiagnosticsJob");
+          await pollDiagnosticsJob(jobId);
+        }
         if (cancelled) return data;
         const next = await fetchPageDiagnostics(url, variant);
         const stampAfter = cacheValidationStamp(next.cached);

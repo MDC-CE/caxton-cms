@@ -140,7 +140,7 @@ export function HorizontalBars({ data }: HorizontalBarsProps) {
     return (
       <section
         ref={containerRef}
-        className={`py-6 ${data.background || "bg-background"}`}
+        className={data.background || "bg-background"}
         data-testid="section-horizontal-bars"
       >
         <div className="max-w-6xl mx-auto px-4">
@@ -155,7 +155,7 @@ export function HorizontalBars({ data }: HorizontalBarsProps) {
   return (
     <section
       ref={containerRef}
-      className={`py-12 ${data.background || "bg-background"}`}
+      className={data.background || "bg-background"}
       data-testid="section-horizontal-bars"
     >
       <div className="max-w-4xl mx-auto px-4">

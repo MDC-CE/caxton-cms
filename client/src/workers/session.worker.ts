@@ -2,12 +2,15 @@ import type { Session, Location, GeoData, UTMParams, DeviceData, WorkerMessage, 
 import { defaultSession, SESSION_VERSION } from '@shared/session';
 import { locations } from '../lib/locations';
 import {
+  channelTouchFor,
   mergeUtmSets,
+  nextEntryChannel,
   nextFirstTouch,
   nextPaidLanding,
   paidLandingFor,
   parseMarketingParams,
 } from '@shared/session-marketing';
+import { normalizeLandingPath } from '@shared/paid-traffic';
 
 const GEO_API_URL = '/api/geo';
 
@@ -273,13 +276,23 @@ async function initSession(message: WorkerMessage['payload']): Promise<Session> 
   
   const browserLang = getBrowserLanguage(navigator);
   const now = Date.now();
-  const newUtm = parseMarketingParams(search, { fbp: message.fbp, fbc: message.fbc, now });
+  const ownHosts = message.ownHosts ?? (message.host ? [message.host] : []);
+  const newUtm = parseMarketingParams(search, { fbp: message.fbp, fbc: message.fbc, now, ownHosts });
   const mergedUtm: UTMParams = mergeUtmSets(cachedSession?.utm, newUtm);
   const first_touch = nextFirstTouch(cachedSession?.first_touch, newUtm);
   const paid_landing = nextPaidLanding(
     cachedSession?.paid_landing,
     paidLandingFor(newUtm, { host: message.host || '', path, now }),
   );
+  let entry_channel = cachedSession?.entry_channel;
+  if (message.referrer !== undefined) {
+    const touch = channelTouchFor(newUtm, { referrer: message.referrer, ownHosts, path, now });
+    // A self-referral on a browser with no channel yet still marks the lead as tracked (direct).
+    entry_channel = nextEntryChannel(
+      entry_channel,
+      touch ?? (entry_channel ? null : { channel: 'direct', path: normalizeLandingPath(path), at: now }),
+    );
+  }
   
   let geo: GeoData | null = cachedSession?.geo || null;
   let location: Location | null = cachedSession?.location || null;
@@ -334,6 +347,7 @@ async function initSession(message: WorkerMessage['payload']): Promise<Session> 
     conversion_page,
     first_touch,
     paid_landing,
+    entry_channel,
     consent: cachedSession?.consent || { geolocation: null },
     timestamp: now,
   };

@@ -36,6 +36,7 @@ import { consentLegacyKeysValidator } from "./consent-legacy-keys";
 import { bindingIntegrityValidator } from "./binding-integrity";
 import { brokenAnchorsValidator } from "./broken-anchors";
 import { sectionVariantsValidator } from "./section-variants";
+import { listingSortValidator } from "./listing-sort";
 import { componentBehaviorsValidator } from "./component-behaviors";
 import { ctaTrackingValidator } from "./cta-tracking";
 import { internalLinkUtmValidator } from "./internal-link-utm";
@@ -67,6 +68,7 @@ export const validators: Validator[] = [
   sitemapValidator,
   componentsValidator,
   sectionVariantsValidator,
+  listingSortValidator,
   textLimitsValidator,
   backgroundsValidator,
   richTextStylesValidator,

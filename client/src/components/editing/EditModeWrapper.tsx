@@ -36,6 +36,12 @@ import type { McpSetupTabId } from "@/components/mcp/mcpUrlHelpers";
 import { buildContentUrlFromPattern } from "@/lib/locale";
 import { cn } from "@/lib/utils";
 import type { Section } from "@shared/schema";
+import { BROKEN_INTERNAL_LINKS_CODE } from "@shared/internalLinkGate";
+import {
+  BROKEN_LINKS_STAFF_MESSAGE,
+  brokenLinksToastDescription,
+  promoteLinkWarningsText,
+} from "@/components/editing/BrokenInternalLinksNotice";
 
 interface EditModeWrapperProps {
   children: React.ReactNode;
@@ -233,6 +239,15 @@ function FirstEditGate({ children }: { children: React.ReactNode }) {
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        const broken = data.code === BROKEN_INTERNAL_LINKS_CODE ? data.details?.broken_internal_links : undefined;
+        if (Array.isArray(broken) && broken.length > 0) {
+          toast({
+            title: BROKEN_LINKS_STAFF_MESSAGE,
+            description: <span className="whitespace-pre-line">{brokenLinksToastDescription(broken)}</span>,
+            variant: "destructive",
+          });
+          return;
+        }
         toast({ title: data.error || "Failed to publish draft", variant: "destructive" });
         return;
       }
@@ -240,6 +255,8 @@ function FirstEditGate({ children }: { children: React.ReactNode }) {
         title: `Published "${activeVariantFromUrl}"`,
         description: `Live for locale(s): ${(data.locales || []).join(", ") || "all"}`,
       });
+      const linkText = promoteLinkWarningsText(data.warnings);
+      if (linkText) toast({ title: "Check the links on this page", description: linkText });
       emitVariantPromoted({
         contentType: contentInfo.type,
         slug: contentInfo.slug,

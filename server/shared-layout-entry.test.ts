@@ -14,7 +14,7 @@ import {
   versioningContentSlug,
 } from "./shared-layout-entry";
 import { applyPerEntryLayer } from "./section-merge";
-import { buildHtmlCacheKey } from "./html-page-cache";
+import { buildHtmlCacheKey, setHtmlBuildIdForTests } from "./html-page-cache";
 import { resetRegistry } from "./content-types";
 
 describe("shared-layout-entry helpers", () => {
@@ -94,10 +94,11 @@ describe("applyPerEntryLayer dataOnly", () => {
 });
 
 describe("html-page-cache variant keys", () => {
-  it("includes variant in cache key", () => {
-    expect(buildHtmlCacheKey("site", "/blog/post")).toBe("site::/blog/post::live");
-    expect(buildHtmlCacheKey("site", "/blog/post", "draft")).toBe("site::/blog/post::draft");
-    expect(buildHtmlCacheKey("site", "/blog/post?x=1", "default")).toBe("site::/blog/post::live");
+  it("includes build id and variant in the cache key", () => {
+    setHtmlBuildIdForTests("testbuild");
+    expect(buildHtmlCacheKey("site", "/blog/post")).toBe("testbuild::site::/blog/post::live");
+    expect(buildHtmlCacheKey("site", "/blog/post", "draft")).toBe("testbuild::site::/blog/post::draft");
+    expect(buildHtmlCacheKey("site", "/blog/post?x=1", "default")).toBe("testbuild::site::/blog/post::live");
   });
 });
 

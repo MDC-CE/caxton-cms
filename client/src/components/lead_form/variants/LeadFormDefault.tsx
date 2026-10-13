@@ -1,4 +1,4 @@
-
+// section-spacing: self-padded
 import { useState, useEffect, useMemo } from "react";
 import { Check, Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
@@ -1528,13 +1528,8 @@ export default function LeadForm({ data: dataProp, termsStyle, landingLocations:
     return resolved;
   };
 
-  /** Same dataLayer body for signup and every other form conversion. */
-  const trackLeadConversion = async (
-    eventName: ConversionName,
-    formValues: FormValues,
-    fields: Record<string, LeadFormFieldDefault>,
-    submissionId: string,
-  ) => {
+  /** Ecommerce product for this submit: GA4 item_id and the lead ledger use the same result. */
+  const resolveSubmitProduct = async (fields: Record<string, LeadFormFieldDefault>) => {
     await ensureEcommerceProductLookup();
     const productField =
       (typeof data.ecommerce_product_field === "string" && data.ecommerce_product_field.trim()) ||
@@ -1546,19 +1541,30 @@ export default function LeadForm({ data: dataProp, termsStyle, landingLocations:
         : typeof fields.program === "string"
           ? fields.program
           : "";
-    const resolvedProduct = resolveConversionProduct({
+    const resolved = resolveConversionProduct({
       funnel: pageFunnel,
       contentType,
       contentSlug: slug,
       fieldValue,
       productLookup: getEcommerceProductLookup(),
     });
-    if (!resolvedProduct.ok) {
+    if (!resolved.ok) {
       console.warn(
-        `[LeadForm] ecommerce product not resolved for analytics (${resolvedProduct.reason}). CRM program unchanged.`,
+        `[LeadForm] ecommerce product not resolved for analytics (${resolved.reason}). CRM program unchanged.`,
         { productField, fieldValue },
       );
     }
+    return resolved;
+  };
+
+  /** Same dataLayer body for signup and every other form conversion. */
+  const trackLeadConversion = async (
+    eventName: ConversionName,
+    formValues: FormValues,
+    fields: Record<string, LeadFormFieldDefault>,
+    submissionId: string,
+  ) => {
+    const resolvedProduct = await resolveSubmitProduct(fields);
     const tracking: FormSubmissionTrackingData = {
       email: formValues.email,
       first_name: formValues.first_name,
@@ -1617,6 +1623,7 @@ export default function LeadForm({ data: dataProp, termsStyle, landingLocations:
         ),
       );
       const submissionId = newSubmissionId();
+      const submitProduct = await resolveSubmitProduct(fields);
       const payload = {
         ...restValues,
         ...fieldScalars,
@@ -1651,6 +1658,9 @@ export default function LeadForm({ data: dataProp, termsStyle, landingLocations:
         conversion_name: effective.conversion_name,
         token: turnstileToken,
         ...buildLeadAdContext(session, submissionId),
+        ...(submitProduct.ok
+          ? { ledger_product_id: submitProduct.item_id, ledger_product_slug: submitProduct.program_id }
+          : {}),
       };
 
       // Token written during this submit (signup) — cookie may lag React state; prefer this.

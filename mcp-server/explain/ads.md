@@ -1,6 +1,6 @@
 # Ads (paid traffic)
 
-Call this topic before answering “what are ads doing for us?” or “why do Meta / Google Ads numbers not match the site?”. Tools: **`get_paid_traffic`** (`metrics_view`, read-only) and **`update_ads_issue`** (`metrics_view`, mutating: Run checks / Re-check / Mark as fixed / Undo — see Ads issues lifecycle). Organic search → topic `seo` / `get_organic_traffic`. General GA4 behavior → topic `analytics` / `get_analytics_report`.
+Call this topic before answering “what are ads doing for us?” or “why do Meta / Google Ads numbers not match the site?”. Tools: **`get_paid_traffic`** (`metrics_view`, read-only), **`get_leads_breakdown`** (`metrics_view`, read-only: the staff Leads page — leads by channel vs UTM source / medium) and **`update_ads_issue`** (`metrics_view`, mutating: Run checks / Re-check / Mark as fixed / Undo — see Ads issues lifecycle). Organic search → topic `seo` / `get_organic_traffic`. General GA4 behavior → topic `analytics` / `get_analytics_report`.
 
 ## Sources (never summed)
 
@@ -268,6 +268,36 @@ Each page / destination row (and `totals`) now carries Meta-side fields derived 
 - Repeats (same browser + same form within 24h) are **submissions**, not leads. Test leads (staff session / test email pattern) are excluded from counts but still delivered to the CRM.
 - `last_visit_organic`: lead credited to paid, but the visit where they converted came organically (>30 min gap). Shown, not re-credited.
 - Journeys are **per browser** (`attribution.basis: browser_observed`) — cross-device paths are invisible.
+
+## Lead channel (ledger, staff Leads page)
+
+- Every lead row now stores `channel` (`paid` | `meta_unclear` | `organic_search` | `organic_social` | `ai_assistant` | `email` | `referral` | `direct` | `tagged_other`), `first_channel`, `last_organic_channel`, `channel_landing_path` (page that channel's visit landed on), `referrer_host`, `country` (ISO2 from the visitor's connection) and `traffic_status` (paid / unclear / organic at submit). `NULL` channel = recorded before tracking or by an old cached page.
+- Order: internal UTMs (`utm_source` = this host or its parent domain) are ignored → paid → `fbclid` only = `meta_unclear` → other UTM tags → referrer host (search / social / AI / webmail) → `referral` → no referrer = `direct`. Last non-direct wins; `first_channel` is write-once. Without tracking consent the channel only covers the converting visit.
+- **Paid wins:** an ad click within 30 days (`PAID_LOOKBACK_DAYS`) before the lead keeps `channel: paid`; `last_organic_channel` keeps the later non-paid visit. On the staff Leads page this 30-day rule applies only to rows with `traffic_status` (recorded after launch), so earlier paid counts are unchanged; Meta unclear is a separate bucket there.
+- Non-effects: `get_paid_traffic`, the Ads report and lead credit are unchanged (Meta unclear still handled as before). Channel fields are **not** sent to the CRM. `utm_*` on the lead are never synthesized or rewritten — Source / medium and Channel can disagree for the same lead.
+- Agents read these counts with **`get_leads_breakdown`** (next section).
+
+## Leads breakdown (`get_leads_breakdown`)
+
+Same numbers as the staff Leads page (`/private/store/leads`), read-only, `metrics_view`. Use it for "how many leads by channel / by source / medium / by page / by experiment?". Spend, campaigns, cost per lead → `get_paid_traffic`. Search Console clicks → `get_organic_traffic`.
+
+- **One site per call.** Multi-site installs get `single_site` naming the sites left out; call again per site and never sum silently.
+- **Args:** `range` `7d` | `30d` (default) | `90d` | `all` (UTC days, no custom dates); `include_test` (test + repeat leads, default off); filters `channel`, `source`, `medium`, `conversion_path`, `landing_path`, `experiment`, `variant`, `ttl`, `product` — exact values, `"(none)"` = empty. Copy values from any breakdown row's `filter` to drill down.
+- **Payload:** `site`, `range`, `start_ms` / `end_ms`, `collecting_since`, `tracking_since` (first lead with a channel), `product_since`, `kpis` (`in_range`, `previous`, `delta_pct`, `paid` / `paid_share`, `meta_unclear`, `tagged`, `tracked`, `organic_search` / `organic_share` over tracked leads, `no_consent`, `total_all_time`), `breakdowns` (`channels`, `source_medium` with `off_convention`, `conversion_paths`, `landing_paths`, `experiments`, `time_to_lead`). Opt-in: `include_timeline` → `timeline` (day ≤ 120 days, else week; series paid, meta_unclear, organic_search, ai_assistant, other_organic, not_tracked); `include_leads` → `leads { total, shown, rows, note }` — the **latest 20** matching leads only (newest first, no paging, no name / email / phone). Narrow filters to see others.
+- **Channel vs source / medium:** two views of the same leads. `source_medium` groups by UTM tags on the link; `channels` uses tags first, then the referring site for untagged visits (warning `source_medium_differs_from_channel`, always present).
+- **Warnings:** `single_site`; `not_production_data` (dev machines: with the date of the last download from production, or "never downloaded" — do not report those as real numbers); `filters_match_nothing` (+ one `next_action` retrying without the most specific filter: variant → experiment → product → conversion_path → landing_path → ttl → source → medium → channel); `paid_count_differs_from_paid_traffic` (always); `channel_tracking_partial` (tracking started inside the range or not at all: earlier leads are "Not tracked yet", `organic_share` covers tracked only); `paid_rule_change_in_range` (the 30-day paid rule starts mid-range); `no_consent_leads`.
+
+### Paid leads: this tool vs `get_paid_traffic`
+
+`kpis.paid` here = paid platform, or (for leads recorded since channel tracking) an ad click within 30 days; `fbclid` alone is `meta_unclear`, not paid. `get_paid_traffic` credits each lead to one paid landing with its own model (`last_paid` / `first_paid`) and window. The two counts differ by design — say which one you quote. Neither tool changes the other.
+
+## Lead product (ledger, staff Leads page)
+
+- Lead rows store `product_id` (catalog `product_id` from `_product.yml`) and `product_slug` (product page slug). Source: the lead form's `resolveConversionProduct` (`ecommerce_product_field`, page `funnel.products`, product page) — the same result sent to GA4 as `item_id`. The form posts `ledger_product_id` / `ledger_product_slug`; both are ledger-only keys (stripped before CRM delivery).
+- The server keeps a value only if it is in the site's product catalog (paused included); otherwise both are `NULL`. `NULL` also = unresolved, a site without a catalog, or recorded before pipeline migration 35. Staff see "recorded from {date}" (`product_since` on `/api/ads/leads/stats`).
+- **Paused products resolve:** paused (`actively_selling: false`) stops promotion, not counting. Since 2026-10-08, GA4 `item_id` (and dataLayer consumers via GTM) also include leads for paused products, so a paused product's "Lead conversions (28d)" can rise.
+- Staff Leads page: `/private/store/leads?product=<product_id or slug>` matches either column. The product card's "Lead conversions (28d)" (GA4 events, test/repeat included, 28 days) will not match the ledger count (unique, test/repeat hidden, 30-day default).
+- Non-effects: no CRM field added; `program` on the CRM payload unchanged. Agents filter by product with `get_leads_breakdown` (`product`).
 
 ## Limits agents must state
 

@@ -1,6 +1,13 @@
 # Design Guidelines: MDC Learning (learning.mdc.edu)
 
-## Design Approach
+This file is a pointer. Design values live in code and per-site content, so they cannot drift from what renders.
+
+## Colors and palettes (per site)
+
+- Source: the site's `site_<name>/theme.json` — `backgrounds`, `text`, `accents`, `courses` palettes and `colors.light` / `colors.dark` CSS variables.
+- A site without its own `theme.json` uses the theme of its `inherit_components_from` parent in [sites.yml](sites.yml) (whole file).
+- Section YAML uses theme IDs (`background: light-blue-5`), never raw CSS colors. Components use semantic Tailwind tokens (`bg-card`, `text-muted-foreground`).
+- Shared components (`shared/component-registry/`) may only use the shared base palette (`SHARED_BASE_PALETTE` in [shared/theme-palette.ts](shared/theme-palette.ts)).
 
 **Source of truth**: Figma MDC Design System (Color Palette, Typography, MediaQuery / Grid System v0.1). Tokens live in `site_learning-mdc-edu/theme.json` and are applied via CSS variables + Theme Editor.
 
@@ -11,11 +18,13 @@
 - Clean layouts on the Figma grid (4 / 8 / 12 columns, 20px gutters)
 - Semantic tokens only — never raw Tailwind palette colors
 
----
+## App-wide (same on every site)
 
-## Color System (STRICT - No Exceptions)
+- Fonts, type scale (`text-h1`, `text-h2`, `text-body`), radius, card shadow and spacing tokens: [tailwind.config.cjs](tailwind.config.cjs).
+- Section spacing presets (`none`, `sm`, `md`, `lg`, `xl`) and the section wrapper (background, `paddingY`, `marginY`): `SPACING_PRESETS` / `getSectionWrapperStyles` in [client/src/components/SectionRenderer.tsx](client/src/components/SectionRenderer.tsx).
+- Icons: Lucide names via `getIcon` in [client/src/lib/icons.ts](client/src/lib/icons.ts).
 
-**IMPORTANT**: Only use the semantic color tokens defined below. NEVER use hardcoded colors like `bg-blue-500`, `text-[#ff0000]`, `text-red-600`, or any Tailwind color palette classes. All colors MUST come from CSS variables via semantic class names.
+## Fallback layer
 
 ### Brand Colors (Figma)
 
@@ -261,3 +270,9 @@ Icon buttons on the bar: white fill, 1px border `#E5E7EB`. Their hit area is sti
 - **Base Theme**: semantic CSS variables (live site via `__theme_overrides__`)
 - **Custom Theme**: approved backgrounds / text / accents from Figma scales
 - Source file: `site_learning-mdc-edu/theme.json` (content GitHub)
+
+[client/src/index.css](client/src/index.css) holds default CSS variables and shared utilities. A site's `theme.json` overrides it; do not treat its values as the brand source of truth.
+
+## Building components
+
+Follow [.agents/skills/internal-new-component/SKILL.md](.agents/skills/internal-new-component/SKILL.md) (reuse check, written spec, build, verify, plus the design rules for 4geeks sites).

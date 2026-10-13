@@ -20,6 +20,7 @@ import {
   matchUrlPattern,
   noteApi,
   notePage,
+  pagePatternForStats,
   pageRouteForPath,
   parseStatCpuTicks,
   readThreadTicks,
@@ -190,12 +191,17 @@ describe("counters", () => {
     expect(matchUrlPattern("/en/home", ["/en/:slug", "/en/blog/:slug"])).toBe("/en/:slug");
     expect(matchUrlPattern("/nope", ["/en/:slug"])).toBe("unmatched");
     expect(pageRouteForPath("/this/does/not/match/anything")).toBe("unmatched");
+    expect(pagePatternForStats("/private/preview/page/home")).toBe("private");
+    expect(pagePatternForStats("/nope")).toBe("unmatched");
 
     notePage("/en/blog/:slug", "/en/blog/mi-post?x=1", 80, 200, "ssr_ok");
     notePage("/en/blog/:slug", "/en/blog/otro", 70, 200, "ssr_ok");
     notePage("/en/:slug", "/en/home", 2_000, 200, "ssr_empty_fallback");
     notePage("/es/:slug", "/es/lento", 60_000, 200, "ssr_ok");
     notePage("unmatched", "/solo", 100, 200, "client_fallback");
+    notePage("unmatched", "/solo?q=1", 90, 404, "ssr_skipped_non_200");
+    notePage("private", "/private/preview/page/home", 40, 200, "client_fallback");
+    for (let i = 0; i < 10; i++) notePage("unmatched", `/scan/${i}`, 30, 404, "ssr_skipped_non_200");
     const closedAt = Date.now();
     flushTick(closedAt);
     const pages = detail(closedAt - 1, closedAt + 1).routes.filter((row) => row.kind === "pages");
@@ -209,6 +215,22 @@ describe("counters", () => {
     expect(slow).toMatchObject({ count: 1, maxMs: 60_000, path: "/es/lento", ssrCounts: { ssr_ok: 1 } });
     expect(slow?.durationCounts[DURATION_BUCKETS_MS.length]).toBe(1);
     expect(pages.find((row) => row.route === "unmatched")?.path).toBeNull();
+    expect(pages.find((row) => row.route === "unmatched")?.samplePaths).toEqual([
+      "/solo",
+      "/scan/0",
+      "/scan/1",
+      "/scan/2",
+      "/scan/3",
+      "/scan/4",
+      "/scan/5",
+      "/scan/6",
+    ]);
+    expect(pages.find((row) => row.route === "private")).toMatchObject({
+      count: 1,
+      ssrCounts: { client_fallback: 1 },
+    });
+    expect(pages.find((row) => row.route === "private")?.samplePaths).toBeUndefined();
+    expect(blog?.samplePaths).toBeUndefined();
   });
 
   it("counts a call in the window where it finishes, not the window where it started", () => {

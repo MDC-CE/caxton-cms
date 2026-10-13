@@ -18,7 +18,7 @@ export interface ContentTypeApiItem {
   unique_fields: string[];
   field_mapping_keys: string[];
   static_entry_count: number;
-  database_entry_count: number | null;
+  database_entry_count?: number | null;
 }
 
 type ContentTypesMap = Record<string, ContentTypeEntry>;

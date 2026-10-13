@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { AlertTriangle, ArrowRight, Award, BarChart2, Blocks, Book, Brain, Building2, Check, ClipboardList, Columns, Columns2, CreditCard, FolderCode, HelpCircle, Image, Info, List, ListFilter, MessageSquare, MousePointerClick, PanelBottom, RefreshCw, Rocket, ScatterChart, Search, Sparkles, Star, Table, Trophy, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Award, BarChart2, Blocks, Book, Brain, Building2, Check, ClipboardList, Columns, Columns2, CreditCard, FolderCode, HelpCircle, Image, Info, List, ListFilter, MessageSquare, MousePointerClick, MoveVertical, PanelBottom, RefreshCw, Rocket, ScatterChart, Search, Sparkles, Star, Table, Trophy, Users, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import jsYaml from "js-yaml";
 import type { ComponentPairing } from "@shared/schema";
@@ -132,6 +132,7 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   modal: MousePointerClick,
   cards_deck: Columns2,
   trust_cards: Star,
+  spacer: MoveVertical,
 };
 
 const variantLabels: Record<string, string> = {

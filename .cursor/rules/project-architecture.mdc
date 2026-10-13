@@ -5,11 +5,14 @@ alwaysApply: true
 
 # Project Architecture and Path Aliases
 
-This is a content-driven marketing site: Vite + React (client), Express (server), Drizzle + PostgreSQL, YAML content in `marketing-content/`.
+This is a multi-site, content-driven marketing platform: Vite + React (client), Express (server), YAML content per site in `site_<name>/` folders listed in [sites.yml](sites.yml) (gitignored here, synced to content GitHub repos).
 
-Content is the source of truth in YAML; DB stores users/sessions only.
+Page content is the source of truth in YAML. The app SQLite databases (Drizzle) hold users, sessions, conversations, logs and pipeline/migration state, not page content.
 
-Use [cursor-instructions.mdc](.cursor/rules/cursor-instructions.mdc) and [design_guidelines.md](design_guidelines.md) as canonical references for architecture, content model, and design tokens.
+Canonical references:
+- Architecture and content model: [cursor-instructions.mdc](.cursor/rules/cursor-instructions.mdc)
+- Building components: [.agents/skills/internal-new-component/SKILL.md](.agents/skills/internal-new-component/SKILL.md)
+- Colors: the site's `site_<name>/theme.json` (or its `inherit_components_from` parent's); app-wide type and spacing tokens in `tailwind.config.cjs`
 
 ## Path Aliases
 

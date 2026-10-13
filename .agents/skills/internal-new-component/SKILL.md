@@ -1,501 +1,229 @@
 ---
-name: new-section-component
-description: "End-to-end workflow for creating a new section component: canvas design first, then codebase implementation following 4Geeks architecture and design system."
+name: internal-new-component
+description: "Workflow for adding a section component or variant to this multi-site marketing platform: reuse check, written spec approved in chat, registry + variant TSX build, verification. Use when asked to build, add or create a section/component/variant, or to build one from a picture, screenshot, mockup or Figma frame."
 ---
 
-# New Section Component Skill
+# New section component
 
-This skill defines the two-phase workflow for creating any new section component in the 4Geeks marketing platform. Every new component **must** be designed visually on the canvas first, approved by the user, and then built into the codebase following the architecture and design system documented below.
+Four steps, in order. Do not write code before step 2 is approved.
 
----
-
-## Phase 1: Canvas Design (Mockup Sandbox)
-
-Before writing any production code, prototype the component visually in a mockup sandbox so the user can review and approve the design.
-
-### Steps
-
-1. **Clarify requirements** — Ask the user what the section should accomplish, what content it displays, and any layout preferences (e.g., number of columns, card vs. flat, image placement).
-2. **Create a mockup sandbox artifact** — Use `createArtifact()` with `artifactType: "mockup-sandbox"`. Build a self-contained HTML/CSS/JS prototype that:
-   - Uses the 4Geeks design tokens (colors, typography, spacing, radius) listed in the Design System Reference below.
-   - Shows realistic placeholder content (never lorem ipsum — use marketing-appropriate copy).
-   - Demonstrates responsive behavior (desktop and mobile).
-   - If the component has variants, show each variant.
-3. **Present to the user** — Let the user review in the preview pane. Iterate on feedback until they approve.
-4. **Lock the design** — Once approved, document the final layout decisions (variant names, props, content structure) before moving to Phase 2.
+1. **Reuse check** — can existing types already do this?
+2. **Shape** — written spec in chat; the user approves it.
+3. **Build** — registry files, variant TSX, examples.
+4. **Verify** — schema sync, build, tests, preview.
 
 ---
 
-## Phase 2: Codebase Implementation
+## 1. Reuse check
 
-After the user approves the mockup, build the component into the codebase. Every new section component requires **all** of the following files and registrations.
+Read what exists before proposing anything new:
 
-### File Checklist
+- Registry metadata: `shared/component-registry/<type>/v1.0/schema.yml` and `site_<name>/component-registry/<type>/v1.0/schema.yml` (`when_to_use`, `variants.*.best_for` / `avoid_when` / `content_shape`).
+- Or MCP: `list_components`, `get_component_schema`, `get_component_variant`.
 
-#### 1. Component Registry — shared vs site
+Decide one of:
 
-Choose **one** home (never both — boot fails on duplicate type names):
-
-| Kind | Path |
+| Outcome | When |
 |---|---|
-| **Shared** (all sites, ≤~12 platform types) | `shared/component-registry/<component_name>/v1.0/` (app repo) |
-| **Site-only** | `site_<name>/component-registry/<component_name>/v1.0/` (content folder from `sites.yml`) |
+| **YAML only** | An existing type + variant already renders the picture with the right props. Write the section YAML; no code. |
+| **New variant of an existing type** | The layout family exists (hero, features grid, testimonials, pricing…) but the arrangement differs. Preferred over a new type. |
+| **New type** | No existing family fits. |
 
-| File | Purpose |
+### Shared library or site library
+
+| | Shared (`shared/component-registry/`, app repo) | Site (`site_<name>/component-registry/`, content repo) |
+|---|---|---|
+| Who sees it | Every site's picker | That site, plus sites with `inherit_components_from: <that site>` in `sites.yml` |
+| Use for | Simple platform components every site needs (spacer, breadcrumb, faq, text_block, article…) | Anything brand- or site-specific |
+| Colors | **Base palette IDs only** (see Design system) | Any ID in the target site's theme |
+| Examples | Must render on any site (no single-site image without fallback) | Site content |
+
+- Never both: the same type in both trees fails at boot (`assertNoRegistryCollisions`).
+- A new variant of a shared type appears on every site.
+- TSX lives in `client/src/components/<type>/variants/` for both.
+- **Hero exception:** the shared `hero` holds many 4geeks-specific variants today. Do **not** add new variants to the shared hero; in the spec, propose them as site variants (pending the hero extension plan).
+
+---
+
+## 2. Shape (written spec, approved before code)
+
+Post this in chat and wait for approval. For a picture, map everything to tokens; never copy pixel colors.
+
+1. **Type and variant** — `type: snake_case`, `variant: camelCase`; shared or site (which site); reuse decision from step 1.
+2. **Props table** — field, type, required, example. Every visible string, image, icon, URL comes from a prop.
+3. **Media and actions** — image fields (`image-picker` / `image-with-style-picker`), CTAs (`cta-picker`, tracking if ecommerce), icons (Lucide names).
+4. **Colors** — each color in the picture mapped to an ID in the target site's `theme.json` (`backgrounds`, `text`, `accents`, `courses`). If the site has no `theme.json`, use its `inherit_components_from` parent's file. Section background is a section setting, not a component prop.
+5. **Typography** — headings to `text-h1` / `text-h2`, body to `text-body` / `text-base`, metadata to `text-sm` / `text-xs`.
+6. **Spacing** — outer spacing via the section's `paddingY` / `marginY` (presets `none` 0, `sm` 16, `md` 32, `lg` 64, `xl` 96 px); only inner gaps live in the component.
+7. **Mismatches** — anything in the picture that cannot match the brand (off-palette colors, custom fonts, effects) and what you will use instead.
+
+---
+
+## 3. Build
+
+### Files
+
+| File | Notes |
 |---|---|
-| `schema.ts` | Zod validation schemas and TypeScript types. Export the unified section schema (use `z.discriminatedUnion` / `z.union` for multi-variant components) plus all sub-schemas and types. **Source of truth for fields/variants.** Shared packages may import only `shared/component-registry/_common` — never site helpers. |
-| `schema.yml` | Human-readable metadata for MCP / AI / admin: name, description, `when_to_use`, variants, props. Generated/updated by schema-sync from `schema.ts` (preserve hand-authored docs). |
-| `field-editors.ts` | Optional. Maps prop names to custom inline-editor types (e.g., `"font-size-picker"`). Export `fieldEditors: Record<string, EditorType>`. |
-| `examples/` | One or more `.yml` files with realistic YAML examples. Each file has `name`, `description`, and `yaml` (a YAML string showing the section in a `sections` array). **Every variant must have at least one example.** |
-| `screenshots/` | Shared types only: tracked WebP thumbs in the app repo. Site types use site-scoped cache/GCS. |
-| `<name>.css` | Only when Tailwind cannot express the rule (mask, clip, critical-path radius). Same folder and same repo as the component. Import it from the top of `client/src/index.css`, above `@font-face` and `@tailwind`. Do not paste the rules into `index.css`, and do not use a `<style>` tag in the section chunk. |
+| `<registry>/<type>/v1.0/schema.ts` | Zod. One schema per variant, unified with `z.union` / `z.discriminatedUnion`. Include `type: z.literal(...)`, `version: z.string().optional()`, `variant`. Source of truth for fields. Shared schemas may import only `shared/component-registry/_common`. |
+| `<registry>/<type>/v1.0/schema.yml` | Metadata for MCP, picker and validators. Synced from `schema.ts`; hand-written docs are preserved. |
+| `<registry>/<type>/v1.0/field-editors.ts` | A file (not a folder). `fieldEditors: Record<string, EditorType>`. |
+| `<registry>/<type>/v1.0/examples/*.yml` | `name`, `description`, `yaml` (a `sections:` string). At least one per variant; set `paddingY` here, not in the TSX. |
+| `<registry>/<type>/v1.0/screenshots/` | Shared types only: tracked WebP thumbs in the app repo. Site types use site-scoped cache/GCS. |
+| `<registry>/<type>/<name>.css` | Only when Tailwind cannot express the rule (mask, clip, critical-path radius). Same folder and same repo as the component. Import it from the top of `client/src/index.css`, above `@font-face` and `@tailwind`. Do not paste the rules into `index.css`, and do not use a `<style>` tag in the section chunk. |
+| Variant TSX | Site-only: `site_<name>/component-registry/<type>/variants/<PascalType><Variant>.tsx`. Shared platform: `client/src/components/<type>/variants/<PascalType><Variant>.tsx`. Default variant = `<PascalType>Default.tsx`. |
 
-After writing or changing `schema.ts`, keep `schema.yml` current:
+`<registry>` is `shared/component-registry` or `site_<name>/component-registry`.
 
-- `predev` / `prebuild` run `npm run ensure:schema-yml` (check → sync → re-check) so agents cannot leave drift unnoticed.
-- Manual while iterating: `npm run schema:sync -- --component=<type>`
-- Check only: `npm run schema:sync:check`
+**Registration is automatic.** `client/src/components/sectionRegistry.ts` globs `site_*/component-registry/*/variants/*.tsx` and `client/src/components/*/variants/*.tsx` and maps `HeroCourse.tsx` → `type: hero`, `variant: course` (variant matching ignores case, `-` and `_`). Do not edit `SectionRenderer.tsx` to register sections. The "Add component" picker reads `/api/component-registry`, so a valid `schema.yml` is enough to appear there.
 
-**Non-effects:** ensure/sync does **not** push the content GitHub, does not update React, and does not fan out locales. Shared edits are app commits; site registry edits ship via DebugBubble Sync. Another site cannot use a site-only type — promote to shared or duplicate into that site's registry.
+**New type only:**
 
-**schema.yml template:**
+- `client/src/components/DebugBubble/utils/componentCatalog.ts` — add `{ type, label, icon, description }` (lucide icon import).
+- `client/src/components/editing/ComponentPickerModal.tsx` — add the type to `iconMap` (lucide import; falls back to `Blocks`).
+- Types for the TSX: shared types re-export from `shared/schema.ts`. Site types declare their prop interfaces locally in the TSX (as `VerticalBarsCardsDefault.tsx` does); do not add new re-exports to `shared/schema.ts` / `shared/site-component-schemas.ts` (legacy bridge, see `.cursor/rules/registry-content-sync.mdc`). Never import `site_*` paths from client code.
+
+### schema.yml shape
+
+Template: `shared/component-registry/spacer/v1.0/schema.yml`.
 
 ```yaml
 name: My Component
 version: "1.0"
-component: MyComponent
-file: client/src/components/MyComponent.tsx
-description: Short description of the component purpose.
+component: MyComponentDefault
+file: client/src/components/my_component/variants/MyComponentDefault.tsx
+description: One sentence.
 when_to_use: |
-  Guidance on when to pick this component.
-# Declare behaviors when the component participates in platform patterns:
-# behaviors:
-#   conversion:
-#     via: form-settings
-#   ecommerce:
-#     role: funnel   # or catalog
-#     events: [view_item, add_to_cart]
-#   listing:
-#     source: dynamic_entries
-#   schema_org:
-#     handler: faq
-# CTA ecommerce intent is NOT on behaviors — bind paths in field-editors.ts as "cta-tracking".
-# Optional — only if this component needs non-default section-level behavior:
-# section_defaults:
-#   load: eager
+  When to pick it, and when a sibling type is better.
+layout:
+  # flow: out          # only for fixed/floating sections (modal, sticky bar)
+  # self_padded: true  # only if the component must paint its own vertical padding (true | [variant names])
+  # edge: top_of_page  # only for sections that must sit first on the page
+# behaviors:           # when applicable, see "Behaviors" below
 variants:
   default:
-    description: Default layout
-    best_for: General use
+    description: Short layout description
+    content_shape:
+      image: required   # required | optional | unused
+      icon: unused
+      items:
+        cards: { min: 3, max: 6 }
+    best_for: The job this variant does best.
+    avoid_when: When another type/variant fits better.
+    metadata_status: draft
 props:
   title:
     type: string
     required: true
-    description: Main heading text
-    example: "Why Choose Us"
-  items:
-    type: array
-    required: true
-    description: List of items
-    items:
-      icon:
-        type: string
-        required: false
-        description: Tabler icon name (e.g., IconRocket)
-      label:
-        type: string
-        required: true
+    description: Main heading
+    example: "Why choose us"
 ```
 
-### Behaviors + CTA tracking (required when applicable)
+### Section wrapper owns background and vertical spacing
 
-- If `field-editors.ts` includes `form-settings` → declare `behaviors.conversion`.
-- If listing / `dynamic_entries` → declare `behaviors.listing`.
-- If SSR schema.org → declare `behaviors.schema_org`.
-- If ecommerce funnel/catalog or `cta-tracking` editors → declare `behaviors.ecommerce`.
-- Bind ecommerce CTAs with `"path.to.cta": "cta-tracking"` (required `tracking`: `none` | `add_to_cart` | `click_begin_checkout`).
-- See `docs/component-behaviors.md` and `.cursor/rules/component-behaviors.mdc`. Schema-sync preserves `behaviors`.
+`getSectionWrapperStyles` in `client/src/components/SectionRenderer.tsx` applies the section's `background`, `paddingY` and `marginY` (default 0) around every component.
 
-### Wipe on duplicate (think hard — keep the list tiny)
+- Do **not** put section-level `py-*` / `pt-*` / `pb-*` / `my-*` / `mt-*` / `mb-*` on the component root (or on its first child unless that child is a card), and do not paint `data.background` in the TSX. Inner spacing (gaps, card padding) is fine.
+- `npm run check:section-spacing` enforces this on commit, build and `npm test`. If the design truly needs its own vertical padding, add `// section-spacing: self-padded` to the variant file and list the variant under `layout.self_padded` in schema.yml (overlays use `// section-spacing: overlay` with `layout.flow: out`).
+- Examples and page YAML carry `paddingY` (preset or px, `"lg xl"` = top/bottom, or `{ mobile, desktop }` switching at 768px).
+- Leave `layout.self_padded` unset unless the component truly paints its own vertical padding.
+- Reference: `client/src/components/vertical_bars_cards/variants/VerticalBarsCardsDefault.tsx` (no outer padding; spacing comes from the section).
 
-Page/section duplicate **automatically** clears conversion/ecommerce identity fields derived from field-editors (no `reset_on_duplicate` key on schema):
+### TSX rules
 
-- Any `conversion_name` under the section (incl. routes)
-- `ecommerce_products`
-- CTA `tracking` on `cta-tracking` binds
+- One `data` prop typed to the section schema. **No hardcoded content** — all visible text, images, icons, URLs come from props.
+- Semantic Tailwind tokens only (`bg-card`, `text-foreground`, `text-muted-foreground`, `bg-primary`…). No `bg-blue-500`, no hex.
+- Icons: Lucide via `getIcon(name)` from `@/lib/icons` for YAML-driven icons (`"rocket"`, `"brain"`); `lucide-react` imports for fixed UI chrome (chevrons, close). Legacy `IconRocket`-style YAML names still render, but write Lucide names in new content. No emoji.
+- Images: `UniversalImage` (registry `image_id`). Video: `UniversalVideo`. No raw `<img>` / `<video>`.
+- Buttons: shadcn `<Button>` (`default`, `secondary`, `outline`, `ghost`, `destructive`; YAML `primary` maps to `default`), default `rounded-md`. Badges `rounded-full`.
+- Hover: `hover-elevate` / `active-elevate-2` on non-Button elements; no custom hover on Button/Badge.
+- Any box with a visual background has inner padding (`p-card-padding` 24px or `p-4`/`p-6`).
+- `data-testid` on interactive and meaningful display elements.
 
-When you add `form-settings`, `cta-tracking`, or `ecommerce-products`, assume staff must re-set those values after every duplicate. Do **not** wipe ordinary copy/layout props. Do not invent parallel schema metadata for this.
+### Field editors
 
-**schema.ts template:**
-
-```ts
-import { z } from "zod";
-
-export const myItemSchema = z.object({
-  icon: z.string().optional(),
-  label: z.string(),
-});
-
-export const myComponentSectionSchema = z.object({
-  type: z.literal("my_component"),
-  version: z.string().optional(),
-  variant: z.enum(["default"]).optional(),
-  title: z.string(),
-  items: z.array(myItemSchema),
-  background: z.string().optional(),
-});
-
-export type MyItem = z.infer<typeof myItemSchema>;
-export type MyComponentSection = z.infer<typeof myComponentSectionSchema>;
-```
-
-For multi-variant components, define one schema per variant and combine with `z.union([...])`.
-
-#### 2. Re-export in `shared/schema.ts`
-
-Add a re-export block so the rest of the app can import the schema and types:
-
-```ts
-// ============================================
-// Re-export My Component Schemas from Component Registry
-// ============================================
-export {
-  myComponentSectionSchema,
-  type MyComponentSection,
-} from "../shared/component-registry/my_component/v1.0/schema";
-```
-
-(Use `site_*/…` only for temporary legacy re-exports — prefer shared for platform types.)
-
-Also add the new section schema to the `Section` union type if one exists, or ensure it is included in the validation pipeline.
-
-#### 3. React Component — `client/src/components/<ComponentName>.tsx`
-
-(or a folder with `index.ts` + variant files for multi-variant components)
-
-- Import types from the component registry schema (e.g., `import type { MyComponentSection } from "..."` or from `@shared/schema`).
-- Accept a single `data` prop typed to the section schema.
-- **No hardcoded content** — every piece of visible text, image, icon, URL, label, etc. MUST come from a YAML prop. The component renders only what the `data` prop provides. Never hardcode strings, labels, or placeholder content inside the component itself.
-- Use **only semantic Tailwind tokens** (`bg-primary`, `text-foreground`, `bg-muted`, etc.) — never hardcoded colors like `bg-blue-500`.
-- Use **`@tabler/icons-react`** for all icons — never `lucide-react`.
-- Use **`UniversalImage`** for images (reference by `image_id` from the image registry).
-- Use **`UniversalVideo`** for video content.
-- **Buttons** use `rounded-md` (the default) — do not override button border radius.
-- **Badges** use `rounded-full` so they render as proper pill-shaped badges.
-- **Container/wrapper padding** — when using any box element with a visual background (cards, panels, colored wrappers), always include inner padding so child elements never touch the wrapper borders. Most components use `p-card-padding` (24px) or at minimum `p-4`/`p-6`.
-- Follow the 4Geeks Design System rules below.
-
-#### 4. Register in `SectionRenderer.tsx`
-
-In `client/src/components/SectionRenderer.tsx`:
-
-1. Add an **import** at the top (in the appropriate eager/lazy section):
-   ```ts
-   import { MyComponent } from "@/components/MyComponent";
-   ```
-
-2. Add a **case** in the `renderSection` switch:
-   ```ts
-   case "my_component":
-     return <MyComponent data={section as Parameters<typeof MyComponent>[0]["data"]} />;
-   ```
-
-#### 5. Register in DebugBubble Component Catalog
-
-Add the new component to `client/src/components/DebugBubble/utils/componentCatalog.ts` so it appears in the DebugBubble's component section:
-
-```ts
-import { IconMyIcon } from "@tabler/icons-react"; // add to existing imports
-
-// add to componentsList array:
-{ type: "my_component", label: "My Component", icon: IconMyIcon, description: "Short description" },
-```
-
-#### 6. ComponentPickerModal (Automatic)
-
-The "Add Component" modal (`client/src/components/editing/ComponentPickerModal.tsx`) reads from the `/api/component-registry` API endpoint, which scans the site `component-registry/` folder automatically. As long as the component registry folder (step 1) exists with a valid `schema.yml`, the component will appear in the modal with no extra code changes.
-
-#### 7. YAML Content Example
-
-Create at least one example page section in an existing page YAML (or the component's `examples/` folder) so the component can be previewed:
-
-```yaml
-- type: my_component
-  title: "Why Choose Us"
-  items:
-    - icon: IconRocket
-      label: "Fast-track your career"
-```
-
----
-
-## 4Geeks Design System Reference
-
-All values below come from `client/src/index.css` and `tailwind.config.ts`. Components **must** use these tokens — never raw hex/rgb values.
-
-### Brand Colors (Light Mode)
-
-| Token | CSS Variable | Hex | Usage |
-|---|---|---|---|
-| `bg-background` / `text-foreground` | `--background` / `--foreground` | `#FFFFFF` / `#00041A` | Page background, default text |
-| `bg-primary` / `text-primary-foreground` | `--primary` / `--primary-foreground` | `#005EAA` / `#FFFFFF` | Primary buttons, links, accents |
-| `bg-accent` / `text-accent-foreground` | `--accent` / `--accent-foreground` | `#FFD400` / `#232529` | Secondary highlight, badges |
-| `bg-muted` / `text-muted-foreground` | `--muted` / `--muted-foreground` | `#FBFBFB` / `#767676` | Subtle backgrounds, secondary text |
-| `bg-card` / `text-card-foreground` | `--card` / `--card-foreground` | `#FFFFFF` / `#232529` | Card surfaces |
-| `bg-secondary` / `text-secondary-foreground` | `--secondary` / `--secondary-foreground` | `#F3F3F3` / `#232529` | Outline buttons, secondary actions |
-| `bg-destructive` | `--destructive` | `#EA1239` | Errors, destructive actions |
-
-Dark mode tokens are defined in `.dark {}` — components automatically adapt via semantic classes.
-
-### Typography
-
-| Element | Font | Size | Weight | Line Height | Letter Spacing |
-|---|---|---|---|---|---|
-| H1 / `.text-h1` | Plus Jakarta Sans (`font-heading`) | 45px (35px mobile) | 700 | 45px (35px) | 0 |
-| H2 / `.text-h2` | Plus Jakarta Sans (`font-heading`) | 35px (30px mobile) | 700 | 35px (30px) | 0 |
-| Body / `.text-body` | Plus Jakarta Sans (`font-sans`) | 16px | 400 | 20px | 0 |
-| Stats/Numbers | Plus Jakarta Sans (`.font-inter` alias) | varies | varies | — | — |
-
-Tailwind shortcuts: `text-h1`, `text-h2`, `text-body`, `font-heading`, `font-sans`.
-
-### Spacing
-
-| Token | Value | Usage |
-|---|---|---|
-| Base unit | 8px (`--spacing: 0.5rem`) | Minimum spacing increment |
-| Section spacing | 64px (`spacing-section`) | Vertical padding between sections |
-| Card padding | 24px (`spacing-card-padding`) | Internal card padding |
-
-### Border Radius
-
-| Token | Value |
-|---|---|
-| `rounded-card` | 12px (0.75rem) — brand standard for cards |
-| `rounded-lg` | 9px |
-| `rounded-md` | 6px |
-| `rounded-sm` | 3px |
-
-### Shadows
-
-Use `shadow-card` for cards. Shadows are disabled in dark mode.
-
-### Icons
-
-- **Library**: `@tabler/icons-react` — NEVER use `lucide-react`.
-- **Allowed icons**: See `4geeks-com/theme.json` `icons` array for the full approved list.
-
-### Allowed Backgrounds
-
-`4geeks-com/theme.json` is the **single source of truth** for all allowed background colors. Never use a background color that is not in this file — not even a color that "looks like" a brand color.
-
-| ID | CSS Variable / Value | Hex equivalent (for mockup sandbox) |
-|---|---|---|
-| `background` | `--background` | `#FFFFFF` |
-| `muted` | `--muted` | `#FAFAFA` |
-| `card` | `--card` | `#FFFFFF` |
-| `secondary` | `--secondary` | `#F5F5F5` |
-| `accent` | `--accent` | `#FFD400` |
-| `primary` | `--primary` | `#005EAA` |
-| `sidebar` | `--sidebar-background` | matches sidebar token |
-| `light-blue-5` | `hsl(210 100% 50% / 0.05)` | ~`#F0F7FF` |
-| `light-blue-5-gradient` | gradient to transparent | — |
-| `light-blue-diagonal-gradient` | diagonal gradient | — |
-
-**Never use a text/foreground color as a background.** `--foreground` (`#00041A`) is a text token — it has no entry in the `backgrounds` list and must not be applied to `background-color` on any element.
-
-**Why this matters:** Using off-list backgrounds — even ones that look close — breaks consistency across pages and makes dark mode adaptation unpredictable. The approved list was chosen to always look correct in both light and dark mode.
-
-### Allowed Text Colors
-
-Text colors must also come from `theme.json` under `text`. Use solid values only — **never apply `opacity` or `rgba(...)` to text elements**.
-
-| ID | CSS Variable | Usage |
-|---|---|---|
-| `foreground` | `--foreground` | Default body text, headings |
-| `muted-foreground` | `--muted-foreground` | Secondary/supporting text |
-| `primary-foreground` | `--primary-foreground` | Text on primary blue backgrounds |
-| `secondary-foreground` | `--secondary-foreground` | Text on secondary backgrounds |
-| `primary` | `--primary` | Colored links, CTAs, accent labels |
-
-**Why no transparency on text:** Applying `opacity: 0.35` or `rgba(255,255,255,0.6)` to text produces colors that are not part of the design system. They can clash with different backgrounds, break in dark mode, and create visual inconsistency across components. If you need a softer text color, use `muted-foreground` — it exists exactly for that purpose.
-
-### Transparency on Backgrounds
-
-Transparency is acceptable **only on backgrounds**, and only using the predefined opacity levels already codified in `theme.json` under `courses`:
-
-| Pattern | Value | When to use |
-|---|---|---|
-| `primary/40` | `hsl(var(--primary) / 0.4)` | Stronger tinted bg |
-| `primary/30` | `hsl(var(--primary) / 0.3)` | Medium tinted bg |
-| `primary/20` | `hsl(var(--primary) / 0.2)` | Light tinted bg (icon wrappers when needed) |
-| `primary/5` | `hsl(210 100% 50% / 0.05)` | Very subtle section wash (`light-blue-5`) |
-
-Do not invent new rgba levels (e.g., `rgba(0,132,255,0.15)`, `rgba(0,0,0,0.06)`). Use the closest approved value.
-
-### Color Philosophy — Formal, Near-Monochromatic
-
-4Geeks components lean almost entirely on **blue and muted/neutral tones**. The goal is a professional, restrained design that reads as credible and serious — not colorful or consumer-facing.
-
-**Default approach:**
-- Backgrounds: `background`, `muted`, `card`, or `light-blue-5`
-- Text: `foreground` and `muted-foreground`
-- Accents: `primary` (blue) — used for interactive elements, links, icons, thin highlights
-- Visual elevation/differentiation: use `primary/5` (a very subtle blue wash) rather than bold or dark backgrounds — this applies broadly, not just to "featured" cards. Use it whenever you want a section, card, or element to stand out slightly or to add background variety without making it feel like a highlighted call-to-action
-
-**Accent yellow (`--accent` / `#FFD400`):** Use very sparingly — one deliberate use per component at most, such as a badge or a single highlight. Never use it as a repeating element across multiple items in a list or grid.
-
-**Why restraint matters:** Too many colors in UI elements signals consumer/casual design. Mono-chromatic blue + muted tones communicates professionalism and focus, which aligns with 4Geeks as a serious tech education brand. When in doubt, reach for `primary/5` before reaching for any other color.
-
-### Exception — Program / Course Color Identities
-
-When a component renders the 4 academy **programs or courses as distinct side-by-side items** that need visual differentiation, each program may be assigned one color identity from this fixed palette:
-
-| Program | Color | Token | Hex (sandbox) |
-|---|---|---|---|
-| Full Stack Development with AI | Blue | `--primary` | `#005EAA` |
-| AI Engineering | Gray | `--muted-foreground` | `#737373` |
-| Data Science & ML | Yellow | `--accent` | `#FFD400` |
-| Cybersecurity | Red | `--destructive` | `hsl(0 75% 45%)` ≈ `#C0311B` |
-
-These color identities are used for: icon color, thin accent bars/lines, CTA link text color. They are **not** used as full card background colors (use `card` or `light-blue-5` for card backgrounds). The assignment above is flexible — the important thing is that each program consistently uses one distinct color across all components that reference it.
-
-**Why:** When displaying all 4 programs simultaneously, pure mono-chrome makes them visually indistinguishable. Assigning one color per program lets users scan and remember which card is which — especially useful when the same programs appear in multiple components across a page. The 4-color system (blue, gray, yellow, red) stays within the brand palette without becoming decorative or consumer-feeling.
-
-### Typography Sizing Hierarchy
-
-Use font sizes to convey information hierarchy. There are three levels:
-
-| Size | Tailwind | Usage |
-|---|---|---|
-| `text-base` (16px) | `text-base` | Main body / description text — any paragraph or tagline that carries real meaning. Do not downsize these to `text-sm` to save space. |
-| `text-sm` (14px) | `text-sm` | Supporting metadata — duration badges, secondary labels, pill text, captions that are visually subordinate. |
-| `text-xs` (12px) | `text-xs` | Fine-print labels — uppercase tracking-widest category tags, table column headers, "Avg. salary" type labels above a value. |
-
-**Common mistake to avoid:** Using `text-sm` for a program tagline or card description because the card is small. Description text carries meaning and needs to be readable at normal size. If the card feels too crowded with `text-base`, the fix is to reduce padding or shorten the copy — not to shrink the text.
-
-**Data values** (numbers, salary ranges, durations displayed as standalone facts) should be sized up, not down — they are the information the user came to read.
-
-**Why:** Consistent text sizing creates a predictable reading rhythm across components. When description text is randomly `text-sm` in some components and `text-base` in others, the page feels inconsistent even if the colors and spacing are correct.
-
-### Icon Usage in Components
-
-Icons are effective as visual differentiators for cards, list items, and bullet-like elements. Follow these rules:
-
-- **No background wrapper by default.** Don't wrap icons in a colored circle or square container. The icon itself, rendered in `text-primary` or `text-muted-foreground`, provides enough visual cue without adding visual noise.
-- **Max size: `w-8 h-8`.** Icons in cards and list items should not exceed 32px. Larger icons are reserved for hero/decorative use cases where the icon IS the main visual element.
-- **Exception — sparse content:** If a card or list item has very minimal content (e.g., just an icon and a single line of text, with no description or metadata), a subtle background on the icon (using `primary/20`) can prevent the card from feeling visually empty. This is the only case where an icon background is acceptable.
-
-**Why:** A background behind an icon in a rich card (one that already has a title, description, and CTA) adds unnecessary visual weight and makes the design feel busier. The icon's color alone is sufficient differentiation when the surrounding content provides enough structure.
-
-### Accent Separator Lines
-
-When using a colored vertical bar or horizontal line as a visual differentiator (e.g., a left-side accent stripe on a card or list item):
-
-- Keep it **thin**: `w-0.5` (2px) or `w-1` (4px) for vertical bars, `h-px` or `h-0.5` for horizontal dividers
-- Never use `w-3` (12px) or wider — this turns a subtle signal into a decorative block that competes with the content
-
-**Why:** A thin line is enough to guide the eye and signal differentiation. A thick bar draws too much attention, creates visual imbalance, and undermines the formal, restrained aesthetic.
-
-### Button Variants
-
-Use the shadcn `<Button>` component. The actual `variant` prop values are: `default` (renders as primary blue), `secondary`, `outline`, `ghost`, `destructive`. Note: in YAML content the CTA `variant` field uses `"primary"` which maps to `variant="default"` at the component level. Never implement custom hover/active states — the built-in elevation system handles this.
-
-### Interaction System
-
-- Use `hover-elevate` and `active-elevate-2` utility classes for non-Button/Badge elements.
-- Never add `hover:bg-*` or custom hover states to `<Button>` or `<Badge>`.
-- For toggle states, use `toggle-elevate` + `toggle-elevated`.
-
----
-
-## Naming Conventions
-
-- **Component type** (YAML `type` field): `snake_case` (e.g., `graduates_stats`, `cta_banner`)
-- **Component name** (React): `PascalCase` (e.g., `GraduatesStats`, `CtaBanner`)
-- **Registry folder**: matches the `type` value in `snake_case` (e.g. `site_4geeks-com/component-registry/graduates_stats/`)
-- **Schema exports**: `camelCase` with `Schema` suffix (e.g., `graduatesStatsSectionSchema`)
-- **Type exports**: `PascalCase` with `Section` suffix (e.g., `GraduatesStatsSection`)
-
----
-
-## Multi-Variant Components
-
-When a component supports multiple layout variants:
-
-1. Define a separate Zod schema per variant with a `variant` literal discriminator.
-2. Combine into a unified schema with `z.discriminatedUnion("variant", [...])` (optionally `.or(...)` for backward-compatible default).
-3. Create a main component file that switches on `variant` and delegates to sub-components.
-4. Use a folder structure: `client/src/components/<component_name>/` with `index.ts`, main component, and variant files.
-5. Keep `schema.yml` variants in sync via `npm run schema:sync -- --component=<type>` (or rely on `ensure:schema-yml` on predev). Document `description` / `best_for` in yml after sync if needed.
-
-**Reference implementation**: See `graduates_stats` or `cta_banner` for the complete pattern:
-- `client/src/components/graduates_stats/` — folder with index, main component, and variant files
-- `site_4geeks-com/component-registry/graduates_stats/v1.0/` — schema.yml, schema.ts, field-editors.ts, examples/
-
----
-
-## Common Pitfalls
-
-- **Never hardcode content** — all visible text, labels, images, icons, URLs must come from YAML props. The component is a pure renderer of its `data` prop.
-- **Never use hardcoded colors** — only semantic tokens (`bg-primary`, `text-muted-foreground`, etc.).
-- **Never put component CSS in `client/src/index.css`** — Tailwind classes on the component, or a `.css` file beside it in the registry (content repo for site components). Import that file at the top of `index.css`.
-- **Never use `lucide-react`** — always `@tabler/icons-react`.
-- **Never use raw `<img>` or `<video>` tags** — use `UniversalImage` and `UniversalVideo`.
-- **Never use emoji** — use Tabler icons instead.
-- **Always include `data-testid`** attributes on interactive and meaningful display elements.
-- **Always support the `background` prop** — most section components accept an optional `background` string for the outer wrapper.
-- **Always include `version: z.string().optional()`** in the Zod schema.
-- **Always re-export from `shared/schema.ts`** — so the rest of the app can import types.
-- **Buttons use `rounded-md`** (the default border radius) — never override it.
-- **Badges use `rounded-full`** — so they render as proper pill shapes.
-- **Wrapper elements need padding** — any box with a visual background (card, panel, colored div) must have inner padding so children never touch the borders.
-- **Reuse existing field editors** — when a prop needs a custom inline editor, use one of the existing `EditorType` values listed below. Only create a new editor type if the user explicitly asks for it.
-
-### Existing Field Editor Types
-
-These are already implemented and available for use in `field-editors.ts`:
+Common `EditorType` values (reuse; only add a new editor when the user asks):
 
 | EditorType | Purpose |
 |---|---|
-| `"icon-picker"` | Pick a Tabler icon |
-| `"color-picker"` | Pick a theme color (variants: `"color-picker:text"`, `"color-picker:courses"`, `"color-picker:accent"`) |
-| `"image-picker"` | Pick an image from the registry (variant: `"image-picker:logo"`) |
-| `"image-with-style-picker"` | Pick an image with CSS positioning/style options |
-| `"link-picker"` | Pick/edit a URL link |
-| `"video-picker"` | Pick/edit a video URL |
-| `"rich-text-editor"` | Inline rich text editing |
-| `"markdown"` | Markdown text editing |
-| `"font-size-picker"` | Pick a font size from theme presets |
-| `"boolean-toggle"` | Toggle a boolean value |
-| `"variant-picker"` | Pick from component variants |
-| `"cta-picker"` | Edit a CTA button (text, url, variant) |
-| `"text-input"` | Simple text input |
-| `"string-picker:opt1,opt2,..."` | Pick from a custom list of string options |
+| `icon-picker` | Lucide icon (saves the slug) |
+| `color-picker` | Theme ID from the site theme (`color-picker:text`, `:courses`, `:accent`) |
+| `image-picker` / `image-picker:logo` | Image from the registry |
+| `image-with-style-picker` | Image plus position/style |
+| `link-picker`, `video-picker`, `text-input` | URL, video, plain text |
+| `rich-text-editor`, `markdown` | Formatted text |
+| `boolean-toggle`, `string-picker:a,b,c` | Flags and fixed options |
+| `cta-picker`, `cta-tracking` | CTA button; ecommerce CTA intent |
+| `font-size-picker`, `form-settings` | Theme font size; lead form config |
 
-### Field Editor Key Path Convention
+Key paths: bare key for top-level (`layout`), `"items[].icon"` for array children, `"variant:items[].icon"` or `"variant:title"` to scope to one variant. Dot-star (`items.*.icon`) and plain dots into arrays are silently ignored; array-of-array is unsupported.
 
-The keys in `fieldEditors` follow a convention based on where the prop lives in the data tree. The editor panel parses these paths at runtime — using the wrong format will silently fail (the picker simply won't appear).
+### Behaviors
 
-| Prop location | Key format | Example |
-|---|---|---|
-| Top-level section prop | Bare key | `"layout"`, `"show_salary"` |
-| Child of an array | `"arrayName[].fieldName"` | `"programs[].color"`, `"courses[].icon"` |
-| Variant-scoped array child | `"variant:arrayName[].fieldName"` | `"solid:courses[].course_background"` |
-| Array-of-array grandchild | Not supported — omit | — |
+- `form-settings` editor → `behaviors.conversion`. `dynamic_entries` listing → `behaviors.listing`. SSR schema.org → `behaviors.schema_org`. Ecommerce funnel/catalog or `cta-tracking` → `behaviors.ecommerce`.
+- Duplicating a page/section clears `conversion_name`, `ecommerce_products` and CTA `tracking`; staff re-set them.
+- See `docs/component-behaviors.md` and `.cursor/rules/component-behaviors.mdc`.
 
-**Critical rule:** array children must use `[]` bracket notation, not dot-star (`programs.*.color`) or plain dots (`programs.color`). The editor panel matches paths with the regex `/^([\w.]+)\[\]\.(.+)$/` — anything that doesn't match this pattern is ignored silently.
+---
 
-```ts
-// CORRECT
-export const fieldEditors = {
-  layout: "string-picker:grid,stacked_list",   // top-level
-  "programs[].color": "color-picker:courses",  // array child
-  "programs[].icon": "icon-picker",            // array child
-};
+## 4. Verify
 
-// WRONG — silently ignored
-export const fieldEditors = {
-  "programs.*.color": "color-picker:courses",  // dot-star fails
-  "programs.color": "color-picker:courses",    // no brackets, fails
-};
-```
+1. `npm run schema:sync -- --component=<type>` (then fill `best_for` / `avoid_when` / `content_shape` if sync left gaps). `npm run ensure:schema-yml` also runs on `predev` / `prebuild`.
+2. `npm run build` (its `prebuild` runs `check:section-spacing`); related vitest (`npx vitest run <path>`).
+3. Ask the user to check the example in the running app (`npm run dev`); do not start the dev server yourself.
+4. MCP, when the server runs the new code: `create_component_section_demo` for a demo page; `review_page_render` needs a public `SITE_URL`.
+5. Site-registry files (`site_*`) must be pushed to the content repo with a commit SHA (`.cursor/rules/site-content-github.mdc`). Shared-registry and TSX files are app-repo changes (commit only when asked).
+
+---
+
+## Design system
+
+Colors are per site; type, spacing and radius are app-wide.
+
+### Colors — from the site theme
+
+- Source: the target site's `site_<name>/theme.json` (`backgrounds`, `text`, `accents`, `courses`, `colors.light` / `colors.dark`). A site without its own file uses its `inherit_components_from` parent's. Do not assume universal hex values; `client/src/index.css` holds fallback defaults only.
+- In code, use semantic token classes. In YAML, use theme IDs (`background: light-blue-5`); the agent theme gate rejects raw CSS colors.
+- **Shared base palette** (shared components and shared examples may only use these background IDs; every theme keeps them): `background`, `muted`, `card`, `primary`, `secondary`, `accent`, `light-blue-5`, `light-blue-5-gradient`, `hero-orbit-gradient`. Source: `SHARED_BASE_PALETTE` in `shared/theme-palette.ts`.
+- Never use a text color (`foreground`) as a background. No opacity / `rgba` on text; use `muted-foreground` for softer text. Background transparency only via existing theme entries (e.g. `light-blue-5`); do not invent new levels.
+
+### Color philosophy (4geeks sites)
+
+- Formal, near-monochromatic: backgrounds `background` / `muted` / `card` / `light-blue-5`; text `foreground` / `muted-foreground`; `primary` for interactive elements, icons and thin highlights.
+- Prefer a subtle tint (`light-blue-5`) over bold or dark backgrounds to differentiate.
+- `accent` (yellow) at most once per component.
+- Exception: when several programs/courses render side by side, each may take one identity color from the theme's `courses` list (icon, thin bar, link text — not full card backgrounds), consistently across components.
+
+### Typography (app-wide)
+
+- Fonts: `font-heading` (headings) and `font-sans` (body), set by CSS variables in `client/src/index.css`.
+- Scale: `text-h1` (50px), `text-h2`, `text-body` (16px) in `tailwind.config.cjs` (the `.text-h2` utility in `index.css` is 40px; the Tailwind token is 30px — use the one the sibling components use).
+- `text-base` for descriptions (do not shrink meaningful copy to `text-sm`), `text-sm` for supporting metadata, `text-xs` for fine-print labels. Data values (numbers, salaries) are sized up.
+
+### Spacing and radius (app-wide)
+
+- Section spacing presets (`SPACING_PRESETS` in `SectionRenderer.tsx`): `none` 0, `sm` 16, `md` 32, `lg` 64, `xl` 96 px.
+- Tailwind: `section` 64px, `card-padding` 24px.
+- Radius: `rounded-card` 12px for cards, `rounded-lg` 9px, `rounded-md` 6px (buttons), `rounded-sm` 3px. `shadow-card` for cards.
+
+### Icons and accents in layouts
+
+- Icons without a background wrapper by default, max `w-8 h-8` in cards/lists. Exception: sparse items (icon + one line) may use a subtle tinted wrapper.
+- Accent bars stay thin: `w-0.5` / `w-1` vertical, `h-px` / `h-0.5` horizontal.
+
+---
+
+## Naming
+
+- YAML `type` and registry folder: `snake_case` (`graduates_stats`).
+- Variant: `camelCase` in YAML (`fullBleed`); file suffix `PascalCase` (`GraduatesStatsFullBleed.tsx`).
+- Schema exports: `camelCase` + `Schema` (`graduatesStatsSectionSchema`); types `PascalCase` + `Section`.
+
+## Common pitfalls
+
+- Adding outer `py-*` or painting `data.background` in the component (double padding with the section wrapper).
+- Hex / Tailwind palette colors, or color IDs that are not in the target site's theme.
+- Writing code before the spec is approved.
+- Adding a variant to the shared hero.
+- Importing `site_*` registry files from client code, or adding new site re-exports to `shared/schema.ts`.
+- Editing `site_*` files without pushing them to the content repo.

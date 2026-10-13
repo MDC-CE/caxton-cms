@@ -25,7 +25,7 @@ interface ContentTypeSummary {
   has_database: boolean;
   database_slug: string | null;
   single_template?: boolean;
-  database_entry_count: number | null;
+  database_entry_count?: number | null;
   has_field_mapping: boolean;
   static_entry_count: number;
 }
@@ -610,10 +610,10 @@ export function ContentTypesView({ setMenuView, onEditContentTypesYml }: Content
                         <Folder className="h-3 w-3" />
                         {ct.directory}/ · {ct.static_entry_count} static
                       </span>
-                      {ct.has_database && (
+                      {ct.has_database && typeof ct.database_entry_count === "number" && (
                         <span className="inline-flex items-center gap-0.5">
                           <Database className="h-3 w-3" />
-                          {ct.database_entry_count ?? 0} cached
+                          {ct.database_entry_count} cached
                         </span>
                       )}
                     </div>

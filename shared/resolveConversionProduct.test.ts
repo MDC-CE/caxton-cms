@@ -58,6 +58,23 @@ describe("resolveConversionProduct", () => {
     expect(r.program_id).toBe("ai-fluency");
   });
 
+  it("resolves a paused product", () => {
+    const r = resolveConversionProduct({
+      fieldValue: "ai-paused",
+      productLookup: (id) => (id === "ai-paused" ? { product_id: "program-ai-paused", active: false } : undefined),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.program_id).toBe("ai-paused");
+    expect(r.item_id).toBe("program-ai-paused");
+  });
+
+  it("rejects a product missing from the catalog", () => {
+    const r = resolveConversionProduct({ fieldValue: "unknown", productLookup: lookup });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("no_purchasable");
+    expect(r.item_id).toBeUndefined();
+  });
+
   it("maps product_id field value back to funnel slug", () => {
     const r = resolveConversionProduct({
       funnel: { products: ["ai-fluency", "ai-flex"] },

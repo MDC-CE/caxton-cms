@@ -395,7 +395,10 @@ export async function configureJobQueue(opts?: ConfigureJobQueueOpts): Promise<v
     // ("Invalid job class"). Manual registry: enqueue stores script "sidequest.jobs.js".
     manualJobResolution: true,
     jobsFilePath,
-    queues: [{ name: "default", concurrency: 1, priority: 50, state: "active" }],
+    queues: [
+      { name: "default", concurrency: 1, priority: 50, state: "active" },
+      { name: "html_rebuild", concurrency: 2, priority: 40, state: "active" },
+    ],
   });
   configured = true;
   log.info(

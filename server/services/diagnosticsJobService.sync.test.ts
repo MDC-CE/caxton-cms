@@ -95,7 +95,7 @@ describe("startDiagnosticsJob always async (including one slug)", () => {
     expect(isDiagnosticsRunning(contentRoot)).toBe(true);
   });
 
-  it("returns site diagnostics_busy for one slug while async job running", async () => {
+  it("queues a page job on the shared child while a site-wide job is running", async () => {
     markAsyncJobRunningForTests(contentRoot);
     expect(isDiagnosticsRunning(contentRoot)).toBe(true);
 
@@ -109,33 +109,20 @@ describe("startDiagnosticsJob always async (including one slug)", () => {
       callerId: "agent-a",
     });
 
-    expect(result).toMatchObject({
-      status: "busy",
-      code: "diagnostics_busy",
-    });
-    expect(fork).not.toHaveBeenCalled();
+    expect(result.status).toBe("queued");
+    expect(fork).toHaveBeenCalledTimes(1);
   });
 
-  it("returns site diagnostics_busy for multi-slug while async job running", async () => {
-    markAsyncJobRunningForTests(contentRoot);
-    resolveUrlTargets.mockResolvedValue([
-      ...targets,
-      {
-        url: "https://example.com/en/other",
-        slug: "two-page",
-        filePath: "/tmp/other.yml",
-        locale: "en",
-        type: "pages",
-      },
-    ]);
+  it("returns diagnostics_busy for an unscoped run while a site-wide job is running", async () => {
+    markAsyncJobRunningForTests(contentRoot, { scopeKey: "different-site-wide-job" });
 
     const result = await startDiagnosticsJob({
       contentRoot,
       contentRootName: "test",
       ci: {} as any,
       cache: mockCache(),
-      slugs: ["one-page", "two-page"],
       freshness: "hard",
+      confirm: true,
       callerId: "agent-a",
     });
 

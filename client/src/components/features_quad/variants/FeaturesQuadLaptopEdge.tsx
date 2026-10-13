@@ -1,4 +1,4 @@
-
+// section-spacing: self-padded
 import type { FeatureQuadSection } from "@shared/schema";
 import UniversalImage from "@/components/UniversalImage";
 import { UniversalVideo } from "@/components/UniversalVideo";

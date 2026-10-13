@@ -216,6 +216,16 @@ export {
 } from "./site-component-schemas";
 
 // ============================================
+// Re-export Spacer Schemas from Component Registry
+// ============================================
+export {
+  spacerSizeSchema,
+  spacerSectionSchema,
+  type SpacerSize,
+  type SpacerSection,
+} from "./component-registry/spacer/v1.0/schema";
+
+// ============================================
 // Re-export Why Learn AI Schemas from Component Registry
 // ============================================
 export {
@@ -904,6 +914,7 @@ import { whyLearnAISectionSchema } from "./site-component-schemas";
 import { pricingSectionSchema } from "./site-component-schemas";
 import { faqSectionSchema } from "./site-component-schemas";
 import { breadcrumbSectionSchema } from "./site-component-schemas";
+import { spacerSectionSchema } from "./component-registry/spacer/v1.0/schema";
 import { geekchartSectionSchema } from "./site-component-schemas";
 import { schemaOrgSectionSchema } from "./site-component-schemas";
 export { schemaOrgSectionSchema, type SchemaOrgSection } from "./site-component-schemas";
@@ -1344,6 +1355,7 @@ const baseSectionSchema = z.union([
   pricingSectionSchema,
   faqSectionSchema,
   breadcrumbSectionSchema,
+  spacerSectionSchema,
   geekchartSectionSchema,
   schemaOrgSectionSchema,
   testimonialsSectionSchema,
@@ -1594,6 +1606,9 @@ export const versioningUpdateSchema = z.object({
   variants: z.array(versioningVariantSchema).min(1),
   /** Required when any variant transitions from 0% → >0% traffic (publishes). */
   confirm_publish_variants: z.boolean().optional(),
+  /** Completed traffic-check job. The save applies its result only when it matches this variant. */
+  validation_job_id: z.string().optional(),
+  validation_job_ids: z.array(z.string()).optional(),
 }).strict();
 
 export type VersioningUpdate = z.infer<typeof versioningUpdateSchema>;

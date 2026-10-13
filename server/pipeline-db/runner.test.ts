@@ -1218,6 +1218,94 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds traffic channel columns and index to lead_submissions when upgrading from v32", () => {
+    const site = `${TEST_PREFIX}-v32-lead-channel-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 32);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        platform TEXT,
+        landing_path TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0,
+        is_repeat INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, platform, landing_path)
+      VALUES ('s-1', 1, 'google', '/en/x');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db.prepare(`SELECT * FROM lead_submissions WHERE submission_id = 's-1'`).get() as Record<string, unknown>;
+    expect(row.platform).toBe("google");
+    expect(row.landing_path).toBe("/en/x");
+    for (const col of [
+      "channel",
+      "first_channel",
+      "last_organic_channel",
+      "channel_landing_path",
+      "referrer_host",
+      "country",
+      "traffic_status",
+    ]) {
+      expect(row).toHaveProperty(col, null);
+    }
+    const idx = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_lead_submissions_channel_landing'`)
+      .get();
+    expect(idx).toBeTruthy();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds product columns and indexes to lead_submissions when upgrading from v34", () => {
+    const site = `${TEST_PREFIX}-v34-lead-product-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 34);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        conversion_path TEXT,
+        channel TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0,
+        is_repeat INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, conversion_path, channel)
+      VALUES ('s-1', 1, '/en/x', 'direct');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db.prepare(`SELECT * FROM lead_submissions WHERE submission_id = 's-1'`).get() as Record<string, unknown>;
+    expect(row.conversion_path).toBe("/en/x");
+    expect(row).toHaveProperty("product_id", null);
+    expect(row).toHaveProperty("product_slug", null);
+    for (const name of ["idx_lead_submissions_product_id", "idx_lead_submissions_product_slug"]) {
+      const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`).get(name);
+      expect(idx).toBeTruthy();
+    }
+    db.close();
+    rmSite(site);
+  });
+
   it("adds paid-landing platform and id columns to lead_submissions when upgrading from v29", () => {
     const site = `${TEST_PREFIX}-v29-lead-platform-${Date.now()}`;
     rmSite(site);
