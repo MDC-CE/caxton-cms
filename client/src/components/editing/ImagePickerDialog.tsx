@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { Check, CloudUpload, Crop as CropIcon, FileText, Film, Loader2, Search, Sparkles, Tags, Upload, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Check, CloudUpload, Crop as CropIcon, FileText, Film, Loader2, Search, Sparkles, Tags, Upload, X } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactCrop from "react-image-crop";
 import type { Crop } from "react-image-crop";
@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -42,6 +43,11 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ChevronDown } from "lucide-react";
+import {
+  evaluateImageSlotFit,
+  resolveSlotHint,
+  type ImageSlotHint,
+} from "@/lib/imageSlotFit";
 
 interface FamilyUsageEntry {
   filePath: string;
@@ -89,6 +95,11 @@ export interface ImagePickerDialogProps {
   onRemove?: () => void;
   renderPreset?: string;
   renderedSize?: { width: number; height: number };
+  /**
+   * Optional slot fit hint (mins / aspect). Merged with `renderedSize`.
+   * Soft warnings only — never blocks Save.
+   */
+  slotHint?: ImageSlotHint;
   /**
    * Restrict browse/upload to this media type. Defaults to `"image"` (current behavior).
    */
@@ -141,6 +152,7 @@ export function ImagePickerDialog({
   onRemove,
   renderPreset,
   renderedSize,
+  slotHint,
   doctype = "image",
   initialMode = "browse",
   closeOnSuccessfulUpload = false,
@@ -295,6 +307,25 @@ export function ImagePickerDialog({
 
     return suggestions;
   })();
+
+  const resolvedSlotHint = useMemo(
+    () => resolveSlotHint(renderedSize, slotHint),
+    [renderedSize, slotHint],
+  );
+
+  const selectedSlotFit = useMemo(() => {
+    if (doctype !== "image" || uploadOnly || !resolvedSlotHint) {
+      return { ok: true, warnings: [] as ReturnType<typeof evaluateImageSlotFit>["warnings"] };
+    }
+    const entry = selectedRegistryId ? imageRegistry?.images?.[selectedRegistryId] : undefined;
+    return evaluateImageSlotFit(entry, resolvedSlotHint);
+  }, [
+    doctype,
+    uploadOnly,
+    resolvedSlotHint,
+    selectedRegistryId,
+    imageRegistry?.images,
+  ]);
 
   useEffect(() => {
     if (open) {
@@ -1533,7 +1564,21 @@ export function ImagePickerDialog({
 
             {((!uploadOnly && (selectedSrc || selectedDisplaySrc)) ||
               (uploadOnly && pendingAi)) && (
-              <div className="border-t pt-4">
+              <div className="border-t pt-4 space-y-3">
+                {!selectedSlotFit.ok && selectedSlotFit.warnings.length > 0 && (
+                  <Alert
+                    className="border-amber-500/50 bg-amber-500/10 text-foreground"
+                    data-testid="alert-image-slot-fit"
+                  >
+                    <AlertTriangle className="h-4 w-4 text-amber-600" />
+                    <AlertTitle className="text-sm">Photo may not fit this space well</AlertTitle>
+                    <AlertDescription className="text-xs space-y-1.5 text-muted-foreground">
+                      {selectedSlotFit.warnings.map((w) => (
+                        <p key={w.code}>{w.message}</p>
+                      ))}
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <div className="flex gap-3">
                   <div className="w-16 h-16 rounded-md overflow-hidden bg-muted border flex-shrink-0">
                     {selectedDisplaySrc ? (

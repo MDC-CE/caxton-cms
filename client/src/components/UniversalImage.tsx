@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { queryClient } from "@/lib/queryClient";
 import { resolveImageObjectStyle, type ImageFitMode } from "@/lib/imageFit";
+import type { ImageSlotHint } from "@/lib/imageSlotFit";
 
 /** Below this, hover controls sit under the photo so labels stay readable. */
 const COMPACT_EDIT_MAX_EDGE_PX = 140;
@@ -135,6 +136,11 @@ interface UniversalImageProps extends ImageRef {
    * - auto: cover when aspects are close, contain when they diverge a lot
    */
   fit?: ImageFitMode;
+  /**
+   * Optional recommended size/aspect for this slot (soft warn in the picker).
+   * Merged with the on-screen slot size.
+   */
+  slotHint?: ImageSlotHint;
 }
 
 const ASPECT_RATIOS: Record<string, number> = {
@@ -165,6 +171,7 @@ export function UniversalImage({
   fieldContext,
   sizes: sizesProp,
   fit = "cover",
+  slotHint,
 }: UniversalImageProps) {
   const { registry, loading: registryLoading, reverseMap } = useImageRegistry();
   const [isLoaded, setIsLoaded] = useState(false);
@@ -674,9 +681,6 @@ export function UniversalImage({
   const compactEditControls =
     !!slotSize &&
     (slotSize.w < COMPACT_EDIT_MAX_EDGE_PX || slotSize.h < COMPACT_EDIT_MAX_EDGE_PX);
-  // Wide mini thumbs (date-row cards): float to the right. Tall minis: under the photo.
-  const compactEditPlacement =
-    compactEditControls && slotSize && slotSize.w >= slotSize.h ? "beside" : "below";
 
   const openOriginalImage = () => {
     const originalUrl =
@@ -691,12 +695,16 @@ export function UniversalImage({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-background text-foreground shadow-lg ring-2 ring-border"
+          className={
+            compactEditControls
+              ? "inline-flex h-7 w-7 items-center justify-center rounded-md bg-background text-foreground shadow-lg ring-2 ring-border"
+              : "inline-flex h-9 w-9 items-center justify-center rounded-md bg-background text-foreground shadow-lg ring-2 ring-border"
+          }
           data-testid={`button-open-image-${id}`}
           aria-label="More photo actions"
           onClick={(e) => e.stopPropagation()}
         >
-          <MoreHorizontal className="h-4 w-4" aria-hidden />
+          <MoreHorizontal className={compactEditControls ? "h-3.5 w-3.5" : "h-4 w-4"} aria-hidden />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
@@ -742,13 +750,17 @@ export function UniversalImage({
   const changePhotoButton = (
     <button
       type="button"
-      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground shadow-lg ring-2 ring-background"
+      className={
+        compactEditControls
+          ? "inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground shadow-lg ring-2 ring-background"
+          : "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground shadow-lg ring-2 ring-background"
+      }
       data-testid={`button-edit-image-${id}`}
       aria-label="Change photo"
       onClick={handleEditClick}
     >
-      <Pencil className="h-4 w-4 shrink-0" aria-hidden />
-      Change photo
+      <Pencil className={compactEditControls ? "h-3.5 w-3.5 shrink-0" : "h-4 w-4 shrink-0"} aria-hidden />
+      {compactEditControls ? "Change" : "Change photo"}
     </button>
   );
 
@@ -757,44 +769,25 @@ export function UniversalImage({
       className="pointer-events-none absolute inset-0 z-20"
       data-edit-overlay="true"
     >
-      {/* Always-on micro cue: staff can see the photo is editable without hovering */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className="pointer-events-auto absolute top-1.5 right-1.5 z-30 inline-flex h-7 w-7 items-center justify-center rounded-full bg-background/95 text-foreground shadow-md ring-1 ring-border transition-opacity group-hover/editimg:opacity-0 group-focus-within/editimg:opacity-0"
-            data-testid={`button-edit-image-cue-${id}`}
-            aria-label="Change photo"
-            onClick={handleEditClick}
-          >
-            <Pencil className="h-3.5 w-3.5" aria-hidden />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="left" className="text-xs">
-          Change photo
-        </TooltipContent>
-      </Tooltip>
-
-      {/* Dim the photo on hover */}
+      {/* Soft dim on hover — click still opens picker, but the labeled button is the cue */}
       <button
         type="button"
-        className="pointer-events-auto absolute inset-0 bg-black/0 transition-colors group-hover/editimg:bg-black/45 group-focus-within/editimg:bg-black/45"
+        className="pointer-events-auto absolute inset-0 bg-black/0 transition-colors group-hover/editimg:bg-black/35 group-focus-within/editimg:bg-black/35"
         aria-label="Change photo"
         data-testid={`button-edit-image-surface-${id}`}
         onClick={handleEditClick}
       />
 
       {/*
-        Large photos: full buttons centered on the image.
-        Small thumbs: float beside/below so labels are not clipped.
+        Always visible in edit mode (not hover-only).
+        Large photos: top-center so bottom captions (bento titles, CTAs) stay readable.
+        Small thumbs: under the photo so neighboring row copy is not covered.
       */}
       <div
-        className={`pointer-events-auto absolute z-30 flex items-center gap-1.5 opacity-0 transition-opacity group-hover/editimg:opacity-100 group-focus-within/editimg:opacity-100 ${
-          compactEditControls && compactEditPlacement === "beside"
-            ? "left-full top-1/2 ml-1.5 -translate-y-1/2"
-            : compactEditControls
-              ? "left-1/2 top-full mt-1.5 -translate-x-1/2"
-              : "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        className={`pointer-events-auto absolute z-30 flex items-center gap-1 ${
+          compactEditControls
+            ? "left-1/2 top-full mt-1 -translate-x-1/2"
+            : "left-1/2 top-4 -translate-x-1/2"
         }`}
       >
         {changePhotoButton}
@@ -854,9 +847,24 @@ export function UniversalImage({
   );
 
   const dpr = typeof window !== "undefined" ? (window.devicePixelRatio || 1) : 1;
-  const renderedSize = imgRef.current
-    ? { width: Math.round(imgRef.current.getBoundingClientRect().width * dpr), height: Math.round(imgRef.current.getBoundingClientRect().height * dpr) }
-    : undefined;
+  const renderedSize = (() => {
+    if (slotSize && slotSize.w > 0 && slotSize.h > 0) {
+      return {
+        width: Math.round(slotSize.w * dpr),
+        height: Math.round(slotSize.h * dpr),
+      };
+    }
+    if (imgRef.current) {
+      const rect = imgRef.current.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return {
+          width: Math.round(rect.width * dpr),
+          height: Math.round(rect.height * dpr),
+        };
+      }
+    }
+    return undefined;
+  })();
 
   const pickerDialog = canReplace ? (
     <Suspense fallback={null}>
@@ -869,6 +877,7 @@ export function UniversalImage({
         onSave={handlePickerSave}
         renderPreset={preset !== "full" ? preset : undefined}
         renderedSize={renderedSize}
+        slotHint={slotHint}
       />
     </Suspense>
   ) : null;
