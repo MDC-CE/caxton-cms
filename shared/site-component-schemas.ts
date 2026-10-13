@@ -154,18 +154,12 @@ export {
   ctaBannerStripSchema,
   ctaBannerResourceShowcaseSchema,
   ctaBannerPromotionSchema,
-  ctaBannerOverlapFooterSchema,
-  ctaBannerSplitPhotoSchema,
-  ctaBannerEmailCaptureSchema,
   type CtaBannerSection,
   type CtaBannerDefault,
   type CtaBannerForm,
   type CtaBannerStrip,
   type CtaBannerResourceShowcase,
   type CtaBannerPromotion,
-  type CtaBannerOverlapFooter,
-  type CtaBannerSplitPhoto,
-  type CtaBannerEmailCapture,
 } from "../site_learning-mdc-edu/component-registry/cta_banner/v1.0/schema";
 
 // double_cta
@@ -496,17 +490,11 @@ export {
   bulletGroupSchema,
   benefitItemSchema,
   twoColumnColumnSchema,
-  twoColumnDefaultSchema,
-  twoColumnOverlapCardSchema,
-  twoColumnChecklistNoteSchema,
   twoColumnSectionSchema,
   type TwoColumnBullet,
   type BulletGroup,
   type BenefitItem,
   type TwoColumnColumn,
-  type TwoColumnDefaultSection,
-  type TwoColumnOverlapCard,
-  type TwoColumnChecklistNote,
   type TwoColumnSection,
 } from "../site_learning-mdc-edu/component-registry/two_column/v1.0/schema";
 

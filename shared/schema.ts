@@ -329,17 +329,11 @@ export {
   bulletGroupSchema,
   benefitItemSchema,
   twoColumnColumnSchema,
-  twoColumnDefaultSchema,
-  twoColumnOverlapCardSchema,
-  twoColumnChecklistNoteSchema,
   twoColumnSectionSchema,
   type TwoColumnBullet,
   type BulletGroup,
   type BenefitItem,
   type TwoColumnColumn,
-  type TwoColumnDefaultSection,
-  type TwoColumnOverlapCard,
-  type TwoColumnChecklistNote,
   type TwoColumnSection,
 } from "./site-component-schemas";
 
@@ -479,18 +473,12 @@ export {
   ctaBannerStripSchema,
   ctaBannerResourceShowcaseSchema,
   ctaBannerPromotionSchema,
-  ctaBannerOverlapFooterSchema,
-  ctaBannerSplitPhotoSchema,
-  ctaBannerEmailCaptureSchema,
   type CtaBannerSection,
   type CtaBannerDefault,
   type CtaBannerForm,
   type CtaBannerStrip,
   type CtaBannerResourceShowcase,
   type CtaBannerPromotion,
-  type CtaBannerOverlapFooter,
-  type CtaBannerSplitPhoto,
-  type CtaBannerEmailCapture,
 } from "./site-component-schemas";
 
 // Type alias for backward compatibility
