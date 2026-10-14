@@ -295,6 +295,22 @@ function grantHasCapability(
   return true;
 }
 
+/**
+ * Whether the staff session should show Edit mode chrome (Edit|Read, Props panel).
+ * Unlike grantHasCapability without a scope (which only accepts "*"), this is true when
+ * the grant covers any content type — otherwise type-scoped packs hide Edit entirely.
+ */
+export function staffCanEnterEditMode(capabilities: CapabilityGrant[]): boolean {
+  const editCaps = ["content_edit_text", "content_edit_structure", "content_edit_media"] as const;
+  for (const name of editCaps) {
+    const grant = capabilities.find((g) => g.name === name);
+    if (!grant) continue;
+    if (grant.contentTypes === "*" || grant.contentTypes === undefined) return true;
+    if (Array.isArray(grant.contentTypes) && grant.contentTypes.length > 0) return true;
+  }
+  return false;
+}
+
 function applyValidSessionLocally(data: {
   token: string;
   capabilities?: unknown;
@@ -724,9 +740,7 @@ export function DebugAuthProvider({ children }: { children: ReactNode }) {
     return grantHasCapability(capabilities, capability, scope);
   };
 
-  const canEdit = grantHasCapability(capabilities, "content_edit_text") ||
-                  grantHasCapability(capabilities, "content_edit_structure") ||
-                  grantHasCapability(capabilities, "content_edit_media");
+  const canEdit = staffCanEnterEditMode(capabilities);
 
   // Aligns with server userStore.canMutateMetrics: view-only caps do not authorize jobs.
   const canMutateMetrics =

@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { resolveDebugModeActive } from "./useDebugAuth";
+import { resolveDebugModeActive, staffCanEnterEditMode } from "./useDebugAuth";
+
+describe("staffCanEnterEditMode", () => {
+  it("is false with no edit grants", () => {
+    expect(staffCanEnterEditMode([{ name: "content_view", contentTypes: "*" }])).toBe(false);
+  });
+
+  it("is true for wildcard edit grants", () => {
+    expect(staffCanEnterEditMode([{ name: "content_edit_text", contentTypes: "*" }])).toBe(true);
+  });
+
+  it("is true when edit is scoped to specific content types (not only *)", () => {
+    expect(
+      staffCanEnterEditMode([{ name: "content_edit_text", contentTypes: ["page"] }]),
+    ).toBe(true);
+    expect(
+      staffCanEnterEditMode([{ name: "content_edit_structure", contentTypes: ["landing", "page"] }]),
+    ).toBe(true);
+  });
+
+  it("is true for legacy grants that omit contentTypes", () => {
+    expect(staffCanEnterEditMode([{ name: "content_edit_media" }])).toBe(true);
+  });
+
+  it("is false for empty contentTypes lists", () => {
+    expect(staffCanEnterEditMode([{ name: "content_edit_text", contentTypes: [] }])).toBe(false);
+  });
+});
 
 describe("resolveDebugModeActive", () => {
   const off = {
