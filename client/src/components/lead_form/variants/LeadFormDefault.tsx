@@ -314,6 +314,11 @@ interface LeadFormProps {
   termsStyle?: React.CSSProperties;
   /** Optional location slugs for landing-scoped forms (ignored when omitted). */
   landingLocations?: string[];
+  /**
+   * Optional control rendered beside the stacked submit button (e.g. Close at 25% width).
+   * Submit keeps ~75% when this is set.
+   */
+  submitAside?: React.ReactNode;
 }
 
 interface FormOptions {
@@ -737,7 +742,12 @@ function buildEffectiveSubmitConfig(
   };
 }
 
-export default function LeadForm({ data: dataProp, termsStyle, landingLocations: landingLocationsProp }: LeadFormProps) {
+export default function LeadForm({
+  data: dataProp,
+  termsStyle,
+  landingLocations: landingLocationsProp,
+  submitAside,
+}: LeadFormProps) {
   const data = dataProp as LeadFormData;
   const landingLocations = landingLocationsProp;
   const { slug, contentType, singleEntry, locale: sectionLocale } = useSectionContext();
@@ -3024,19 +3034,25 @@ export default function LeadForm({ data: dataProp, termsStyle, landingLocations:
             </p>
           )}
 
-          <Button 
-            type="submit" 
-            variant={formCopy.submit_disabled === true ? "secondary" : "default"}
-            className={`w-full ${data.button_className || ""}`}
-            disabled={submitMutation.isPending || formCopy.submit_disabled === true}
-            data-testid="button-submit"
+          <div
+            className={submitAside ? "flex w-full items-stretch gap-2" : undefined}
+            data-testid={submitAside ? "lead-form-submit-row" : undefined}
           >
-            {submitMutation.isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              formCopy.submit_label
-            )}
-          </Button>
+            <Button
+              type="submit"
+              variant={formCopy.submit_disabled === true ? "secondary" : "default"}
+              className={`${submitAside ? "w-3/4 min-w-0 flex-1" : "w-full"} ${data.button_className || ""}`}
+              disabled={submitMutation.isPending || formCopy.submit_disabled === true}
+              data-testid="button-submit"
+            >
+              {submitMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                formCopy.submit_label
+              )}
+            </Button>
+            {submitAside}
+          </div>
 
           {isSignupRequested && showTerms && showLegalAndConsent && (
             <p className={`text-xs text-center ${data.terms_className || "text-muted-foreground"}`} style={termsStyle} data-testid="text-terms">
