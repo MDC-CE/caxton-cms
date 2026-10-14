@@ -13,11 +13,14 @@ export default function Briefcase({
   style,
   className,
 }: BriefcaseProps) {
+  // When className sets size (e.g. h-5 w-5), omit attributes so Tailwind can shrink it.
+  const sizedByClass = Boolean(className);
   return (
     <svg
-      width={width || "88px"}
-      height={height || "79px"}
+      width={sizedByClass ? undefined : width || "88px"}
+      height={sizedByClass ? undefined : height || "79px"}
       style={style}
+      className={className}
       viewBox="0 0 88 79"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"

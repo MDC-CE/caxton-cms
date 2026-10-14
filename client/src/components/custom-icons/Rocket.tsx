@@ -14,10 +14,12 @@ export default function Rocket({
   className,
 }: RocketProps) {
   // Note: This icon has multiple colors from Flaticon, color prop is accepted but not used
+  // When className sets size (e.g. h-5 w-5), omit attributes so Tailwind can shrink it.
+  const sizedByClass = Boolean(className);
   return (
     <svg
-      width={width}
-      height={height}
+      width={sizedByClass ? undefined : width}
+      height={sizedByClass ? undefined : height}
       style={style}
       className={className}
       viewBox="0 0 511 511.99977"
