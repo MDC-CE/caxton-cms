@@ -57,7 +57,8 @@ function resolveHtmlBuildId(): string {
   try {
     const real = fs.realpathSync(process.cwd());
     const base = path.basename(real);
-    if (/^[0-9a-f]{7,40}$/i.test(base)) return base;
+    // releases/<sha> or same-SHA redeploy releases/<sha>.rebuild-<pid>
+    if (/^[0-9a-f]{7,40}(?:\.rebuild-\d+)?$/i.test(base)) return base;
   } catch {
     /* cwd may be unavailable */
   }

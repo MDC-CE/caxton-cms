@@ -469,6 +469,16 @@ PY
 
 write_env
 
+# Pin HTML page-cache folder to this release dir (incl. .rebuild-<pid>).
+# Without this, basename "sha.rebuild-N" falls through to buildId "dev" and
+# serves stale HTML whose entry JS hash 404s after the flip.
+if [[ -f "$RELEASE/.env" ]]; then
+  grep -v '^HTML_CACHE_BUILD_ID=' "$RELEASE/.env" >"$RELEASE/.env.html-cache-tmp" || true
+  echo "HTML_CACHE_BUILD_ID='${RELEASE_NAME}'" >>"$RELEASE/.env.html-cache-tmp"
+  mv "$RELEASE/.env.html-cache-tmp" "$RELEASE/.env"
+  chmod 640 "$RELEASE/.env" || true
+fi
+
 abort_requested && handle_abort
 
 echo "[deploy] building in $RELEASE"
@@ -480,6 +490,7 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+export HTML_CACHE_BUILD_ID="${HTML_CACHE_BUILD_ID:-$RELEASE_NAME}"
 HEALTH_PORT="${HEALTH_PORT:-${PORT:-5000}}"
 if [[ -z "${TURNSTILE_SITE_KEY:-}" || -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
   echo "ERROR: TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY are required." >&2
