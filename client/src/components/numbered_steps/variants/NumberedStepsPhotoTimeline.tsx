@@ -132,28 +132,6 @@ export default function NumberedStepsPhotoTimeline({ data }: { data: NumberedSte
               />
             ) : null}
           </div>
-          {canRotate ? (
-            <div
-              className="mt-3 flex justify-center gap-1.5"
-              role="tablist"
-              aria-label="Photo slides"
-            >
-              {slides.map((slide, index) => (
-                <button
-                  key={`dot-${slide.image_id}-${index}`}
-                  type="button"
-                  role="tab"
-                  aria-selected={index === safeIndex}
-                  aria-label={data.steps[index]?.title || `Show photo ${index + 1}`}
-                  className={cn(
-                    "h-2.5 w-2.5 rounded-full transition-colors",
-                    index === safeIndex ? "bg-primary" : "bg-border",
-                  )}
-                  onClick={() => setActive(index)}
-                />
-              ))}
-            </div>
-          ) : null}
         </div>
         <div>
           {data.eyebrow ? (
