@@ -510,6 +510,13 @@ echo "[deploy] validating pipeline SQLite migrations (dry-run)"
 npm run ensure:pipeline-db -- --dry-run
 abort_requested && handle_abort
 
+# Same-SHA (or rebuild into an old buildId folder) can leave prior SSR HTML on disk
+# under data/html-page-cache/<buildId>/ — visitors then keep seeing X-HTML-Cache HIT
+# with stale section props (e.g. old carousel dots / image ids) even after content:pull.
+echo "[deploy] clearing HTML page cache for build $RELEASE_NAME"
+rm -rf "$PERSISTENT/data/html-page-cache/$RELEASE_NAME" \
+  "$RELEASE/data/html-page-cache/$RELEASE_NAME" 2>/dev/null || true
+
 echo "[deploy] prebuilding public HTML (before traffic flip)"
 NODE_ENV=production node dist/prebuild-html-cache.js
 abort_requested && handle_abort
