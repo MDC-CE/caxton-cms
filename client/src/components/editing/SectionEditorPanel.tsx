@@ -81,6 +81,7 @@ import { SearchableMultiSelect } from "@/components/ui/searchable-multi-select";
 import { RichTextArea } from "./RichTextArea";
 import { MarkdownEditorField } from "./MarkdownEditorField";
 import { SectionBindingDialog } from "./SectionBindingDialog";
+import { SectionYamlContentFields } from "./SectionYamlContentFields";
 import { LinkPicker } from "./LinkPicker";
 import { ImageWithStylePicker } from "./ImageWithStylePicker";
 import type { Section, SectionLayout, ImageRegistry } from "@shared/schema";
@@ -3384,6 +3385,45 @@ export function SectionEditorPanel({
             </div>
             ) as any}
 
+            <SectionYamlContentFields
+              section={(parsedSection as Record<string, unknown> | null) ?? null}
+              configuredFields={configuredFields}
+              locale={locale || "en"}
+              allSections={allSections}
+              resolveImageSrc={(id) => imageRegistry?.images?.[id]?.src || (id.startsWith("/") || id.startsWith("http") ? id : "")}
+              onChange={(path, value) => updatePropertyWithValue(path, value)}
+              onChangeArrayItem={(arrayPath, index, field, value) =>
+                updateArrayItemField(arrayPath, index, field, value)
+              }
+              onAddArrayItem={addArrayItem}
+              onRemoveArrayItem={removeArrayItem}
+              onPickImage={(target) => {
+                setImagePickerTarget({ ...target, clearFieldOnly: true });
+                setImagePickerOpen(true);
+              }}
+              onPickIcon={(target) => {
+                if (target.fieldPath) {
+                  setIconPickerTarget({
+                    arrayField: "",
+                    index: 0,
+                    field: target.fieldPath,
+                    label: target.label,
+                    currentIcon: target.currentIcon,
+                    simpleFieldPath: target.fieldPath,
+                  });
+                } else if (target.arrayPath != null && target.index != null && target.field) {
+                  setIconPickerTarget({
+                    arrayField: target.arrayPath,
+                    index: target.index,
+                    field: target.field,
+                    label: target.label,
+                    currentIcon: target.currentIcon,
+                  });
+                }
+                setIconPickerOpen(true);
+              }}
+            />
+
             {/* CTA Banner variant picker */}
             {sectionType === "cta_banner" && (
               <VariantPicker
@@ -4470,12 +4510,16 @@ export function SectionEditorPanel({
                 "plain-text",
                 "rich-text-editor",
                 "variant-picker",
+                "icon-picker",
+                "string-picker",
+                "boolean-toggle",
+                "text-input",
               ]);
               const groupedArrayPaths = new Set(
                 Object.entries(arrayFieldGroups)
                   .filter(
                     ([, fields]) =>
-                      fields.length >= 2 &&
+                      fields.length >= 1 &&
                       fields.every((f) =>
                         supportedGroupedTypes.has(f.editorType),
                       ),
@@ -4647,6 +4691,10 @@ export function SectionEditorPanel({
                 const configuredFieldNames = new Set(
                   fields.map((f) => f.fieldName),
                 );
+                if (allItemKeys.includes("image_alt")) hiddenFields.add("alt");
+                if (allItemKeys.includes("image_id") || allItemKeys.includes("src")) {
+                  hiddenFields.add("id");
+                }
                 const textFields = allItemKeys.filter(
                   (k) => !configuredFieldNames.has(k) && !hiddenFields.has(k),
                 );
@@ -5598,11 +5646,14 @@ export function SectionEditorPanel({
                   const supportedTypes = new Set([
                     "color-picker",
                     "image-picker",
-                    "video-picker",
                     "link-picker",
                     "plain-text",
                     "rich-text-editor",
                     "variant-picker",
+                    "icon-picker",
+                    "string-picker",
+                    "boolean-toggle",
+                    "text-input",
                   ]);
                   const allForArr = Object.entries(configuredFields).filter(
                     ([fp]) => fp.startsWith(`${arrPathCheck}[].`),
@@ -5610,7 +5661,7 @@ export function SectionEditorPanel({
                   const allSupported = allForArr.every(([, et]) =>
                     supportedTypes.has(parseEditorType(et).type),
                   );
-                  if (allForArr.length >= 2 && allSupported) return null;
+                  if (allForArr.length >= 1 && allSupported) return null;
                 }
 
                 // Parse editor type with optional variant (e.g., "color-picker:background")
@@ -6254,7 +6305,7 @@ export function SectionEditorPanel({
                 }
 
                 // Handle simple field paths with boolean toggle (e.g., "layout_reversed")
-                if (isSimpleField && editorType === "plain-text") {
+                if (isSimpleField && (editorType === "plain-text" || editorType === "text-input")) {
                   const parentPath = fieldPath.includes(".")
                     ? fieldPath.slice(0, fieldPath.lastIndexOf("."))
                     : "";
