@@ -1945,14 +1945,16 @@ export function SectionEditorPanel({
 
         // Get the array from the final path part
         const arrayField = pathParts[pathParts.length - 1];
-        const array = current[arrayField] as
-          | Record<string, unknown>[]
-          | undefined;
-        if (!Array.isArray(array) || !array[index]) return;
+        const array = current[arrayField] as unknown[] | undefined;
+        if (!Array.isArray(array) || array[index] == null) return;
 
+        if (field === "$item") {
+          array[index] = value;
+        } else {
+        const itemRecord = array[index] as Record<string, unknown>;
         const fieldParts = field.split(".");
         if (fieldParts.length > 1) {
-          let target: Record<string, unknown> = array[index];
+          let target: Record<string, unknown> = itemRecord;
           for (let i = 0; i < fieldParts.length - 1; i++) {
             if (!target[fieldParts[i]] || typeof target[fieldParts[i]] !== "object") {
               target[fieldParts[i]] = {};
@@ -1966,10 +1968,11 @@ export function SectionEditorPanel({
           }
         } else {
           if (value === undefined) {
-            delete array[index][field];
+            delete itemRecord[field];
           } else {
-            array[index][field] = value;
+            itemRecord[field] = value;
           }
+        }
         }
 
         const newYaml = safeYamlDump(parsed, {
@@ -2103,7 +2106,7 @@ export function SectionEditorPanel({
   };
 
   // Add a new item to an array field
-  const addArrayItem = (arrayPath: string, defaultItem: Record<string, unknown>) => {
+  const addArrayItem = (arrayPath: string, defaultItem: Record<string, unknown> | string) => {
       try {
         const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
         if (!parsed || typeof parsed !== "object") return;
@@ -4695,9 +4698,13 @@ export function SectionEditorPanel({
                 if (allItemKeys.includes("image_id") || allItemKeys.includes("src")) {
                   hiddenFields.add("id");
                 }
-                const textFields = allItemKeys.filter(
-                  (k) => !configuredFieldNames.has(k) && !hiddenFields.has(k),
-                );
+                const textFields = allItemKeys.filter((k) => {
+                  if (configuredFieldNames.has(k) || hiddenFields.has(k)) return false;
+                  return arrData.every((item) => {
+                    const val = getNestedValue(item, k);
+                    return val == null || typeof val !== "object";
+                  });
+                });
 
                 const fieldOrder: string[] = [
                   ...textFields,

@@ -31,7 +31,7 @@ interface SectionYamlContentFieldsProps {
     field: string,
     value: string | number | boolean,
   ) => void;
-  onAddArrayItem: (arrayPath: string, item: Record<string, unknown>) => void;
+  onAddArrayItem: (arrayPath: string, item: Record<string, unknown> | string) => void;
   onRemoveArrayItem: (arrayPath: string, index: number) => void;
   onPickImage: (target: {
     fieldPath?: string;
@@ -102,6 +102,52 @@ export function SectionYamlContentFields({
           <Label className="text-sm font-medium">{control.label}</Label>
           <div className="space-y-3">
             {control.fields.map((field) => renderControl(field, array))}
+          </div>
+        </div>
+      );
+    }
+
+    if (control.kind === "strings") {
+      return (
+        <div key={control.path} className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-sm font-medium">
+              {control.label} ({control.values.length})
+            </Label>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7"
+              onClick={() => onAddArrayItem(control.path, "")}
+              data-testid={`${testId}-add`}
+            >
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              Add
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {control.values.map((line, index) => (
+              <div key={index} className="flex items-start gap-2">
+                <Textarea
+                  value={line}
+                  rows={2}
+                  className="text-sm"
+                  onChange={(e) => onChangeArrayItem(control.path, index, "$item", e.target.value)}
+                  data-testid={`${testId}-${index}`}
+                />
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-destructive"
+                  onClick={() => onRemoveArrayItem(control.path, index)}
+                  data-testid={`${testId}-remove-${index}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
           </div>
         </div>
       );

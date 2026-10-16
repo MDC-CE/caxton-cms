@@ -67,6 +67,7 @@ export type ContentControl =
   | { kind: "icon"; path: string; label: string; value: string }
   | { kind: "link"; path: string; label: string; value: string }
   | { kind: "array"; path: string; label: string; items: ContentArrayItem[] }
+  | { kind: "strings"; path: string; label: string; values: string[] }
   | { kind: "group"; path: string; label: string; fields: ContentControl[] };
 
 export interface ContentArrayItem {
@@ -182,7 +183,9 @@ function walkObject(
     if (!basePath && CHROME_KEYS.has(key)) continue;
     if (value == null) continue;
     const path = basePath ? `${basePath}.${key}` : key;
-    if (path in configured) continue;
+    if (path in configured && (value == null || typeof value !== "object" || Array.isArray(value))) {
+      continue;
+    }
 
     if (Array.isArray(value)) {
       if (grouped.has(path)) continue;
@@ -211,8 +214,19 @@ function walkArray(
   configured: Record<string, string>,
   grouped: Set<string>,
 ): ContentControl | null {
+  const picker = configured[`${arrayPath}[]`];
+  if (picker && editorBase(picker) === "cta-picker") return null;
+
   if (value.length === 0) {
     return { kind: "array", path: arrayPath, label: humanLabel(arrayPath), items: [] };
+  }
+  if (value.every((item) => typeof item === "string" || typeof item === "number")) {
+    return {
+      kind: "strings",
+      path: arrayPath,
+      label: humanLabel(arrayPath),
+      values: value.map((item) => String(item)),
+    };
   }
   if (value.some((item) => item == null || typeof item !== "object" || Array.isArray(item))) {
     return null;
@@ -250,6 +264,92 @@ function walkArray(
   });
   if (!items.length) return null;
   return { kind: "array", path: arrayPath, label: humanLabel(arrayPath), items };
+}
+
+function flattenShown(controls: ContentControl[], into: string[]) {
+  for (const control of controls) {
+    if (control.kind === "strings") {
+      into.push(`${control.path}[]`);
+      continue;
+    }
+    if (control.kind === "group") {
+      flattenShown(control.fields, into);
+      continue;
+    }
+    if (control.kind === "array") {
+      for (const item of control.items) {
+        for (const field of item.fields) {
+          if (field.kind === "group" || field.kind === "array" || field.kind === "strings") {
+            flattenShown([field], into);
+          } else {
+            into.push(`${control.path}[].${field.path}`);
+          }
+        }
+      }
+      continue;
+    }
+    into.push(control.path);
+  }
+}
+
+function leafPaths(value: unknown, path: string, into: string[]) {
+  if (Array.isArray(value)) {
+    if (value.every((item) => typeof item === "string" || typeof item === "number")) {
+      into.push(`${path}[]`);
+      return;
+    }
+    value.forEach((item) => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        for (const [key, child] of Object.entries(item as Record<string, unknown>)) {
+          if (isDuplicatePhotoKey(key, item as Record<string, unknown>)) continue;
+          leafPaths(child, `${path}[].${key}`, into);
+        }
+      }
+    });
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      leafPaths(child, path ? `${path}.${key}` : key, into);
+    }
+    return;
+  }
+  if (path) into.push(path);
+}
+
+function leafIsCovered(path: string, configured: Record<string, string>, shown: Set<string>): boolean {
+  if (shown.has(path)) return true;
+  if (configured[path]) return true;
+  const match = path.match(/^(.*?)\[\]\.(.+)$/);
+  if (!match) return false;
+  const arrayPath = match[1];
+  const rest = match[2];
+  if (configured[`${arrayPath}[]`] && editorBase(configured[`${arrayPath}[]`]) === "cta-picker") {
+    return !rest.includes("[]");
+  }
+  if (groupedArrayPaths(configured).has(arrayPath) && !rest.includes("[]")) return true;
+  const nested = rest.match(/^([^[\]]+)\[\]\.(.+)$/);
+  if (nested && !nested[2].includes("[]") && nestedArrayIsConfigured(arrayPath, nested[1], configured)) {
+    return true;
+  }
+  return false;
+}
+
+/** Saved values that still have no Props control. */
+export function contentGaps(
+  section: Record<string, unknown> | null | undefined,
+  configured: Record<string, string>,
+): string[] {
+  if (!section) return [];
+  const shownList: string[] = [];
+  flattenShown(collectVisibleContent(section, configured), shownList);
+  const shown = new Set(shownList);
+  const leaves: string[] = [];
+  for (const [key, value] of Object.entries(section)) {
+    if (CHROME_KEYS.has(key)) continue;
+    leafPaths(value, key, leaves);
+  }
+  return [...new Set(leaves.filter((path) => !leafIsCovered(path, configured, shown)))];
 }
 
 export function collectVisibleContent(
