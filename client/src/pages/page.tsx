@@ -5,7 +5,7 @@ import { IS_SERVER, shouldSuppressFullPageLoader, isSsrHydrateWindow } from "@/l
 import { useParams, useLocation, useSearch } from "wouter";
 import { useTranslation } from "react-i18next";
 import { SectionRenderer } from "@/components/SectionRenderer";
-import { apiFetch } from "@/lib/queryClient";
+import { apiFetch, queryClient } from "@/lib/queryClient";
 import type { TemplatePage } from "@shared/schema";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { useSchemaOrg } from "@/hooks/useSchemaOrg";
@@ -54,6 +54,14 @@ export default function Page() {
       i18n.changeLanguage(i18nLocale);
     }
   }, [i18nLocale, i18n]);
+
+  // Public SSR seeds a per-page image catalog (coming soon has none). Opening a
+  // draft via ?force_variant= keeps that cache (staleTime Infinity), so variant
+  // photos resolve as broken until the full gallery is refetched.
+  useEffect(() => {
+    if (!forceVariant && !isStaff) return;
+    void queryClient.invalidateQueries({ queryKey: ["/api/image-registry"] });
+  }, [forceVariant, slug, locale, isStaff]);
 
   const { data: page, isPending, isLoading, error, refetch } = useQuery<TemplatePage>({
     queryKey: forceVariant

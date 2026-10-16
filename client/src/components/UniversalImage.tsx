@@ -54,7 +54,7 @@ interface ImageRegistryData {
 }
 
 export function useImageRegistry() {
-  const { data, isLoading } = useQuery<ImageRegistryData>({
+  const { data, isLoading, isFetching } = useQuery<ImageRegistryData>({
     queryKey: ["/api/image-registry"],
     staleTime: Infinity,
   });
@@ -70,7 +70,7 @@ export function useImageRegistry() {
     return map;
   })();
 
-  return { registry, loading: isLoading, reverseMap };
+  return { registry, loading: isLoading, fetching: isFetching, reverseMap };
 }
 
 /** Visitor-facing (SSR) image subset for the current public page — edit-mode blank detection. */
@@ -173,7 +173,7 @@ export function UniversalImage({
   fit = "cover",
   slotHint,
 }: UniversalImageProps) {
-  const { registry, loading: registryLoading, reverseMap } = useImageRegistry();
+  const { registry, loading: registryLoading, fetching: registryFetching, reverseMap } = useImageRegistry();
   const [isLoaded, setIsLoaded] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -443,6 +443,16 @@ export function UniversalImage({
   );
 
   if (!imageEntry && !isDirectPath) {
+    // SSR seeds a slim catalog. While the full gallery refetches (edit mode / variant
+    // preview), keep a skeleton instead of a false "unknown id" placeholder.
+    if (registryLoading || registryFetching) {
+      return (
+        <div
+          className={`bg-muted animate-pulse ${className}`}
+          data-testid={`img-skeleton-${id}`}
+        />
+      );
+    }
     if (showEditChrome) return renderBroken("unknown");
     return null;
   }
