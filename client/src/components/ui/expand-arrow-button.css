@@ -1,10 +1,14 @@
 /**
  * Expand-arrow CTA (CE landings). Colors come from the site theme
  * (--primary / --primary-foreground), not hardcoded hex.
+ *
+ * At rest the label must clear the 3rem circle (no overlap). On hover/focus
+ * the circle grows to full width and the label turns primary-foreground.
  */
 .expand-arrow-button {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   cursor: pointer;
   outline: none;
   border: 0;
@@ -14,20 +18,24 @@
   padding: 0;
   font-size: inherit;
   font-family: inherit;
-  width: 12rem;
-  height: auto;
+  width: auto;
+  min-width: 12rem;
   min-height: 3rem;
+  height: 3rem;
 }
 
 .expand-arrow-button .expand-arrow-button__circle {
   transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
-  position: relative;
+  position: absolute;
+  left: 0;
+  top: 0;
   display: block;
   margin: 0;
   width: 3rem;
   height: 3rem;
   background: hsl(var(--primary));
   border-radius: 1.625rem;
+  z-index: 0;
 }
 
 .expand-arrow-button .expand-arrow-button__icon {
@@ -59,24 +67,21 @@
 }
 
 .expand-arrow-button .expand-arrow-button__text {
-  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  transition: color 0.45s cubic-bezier(0.65, 0, 0.076, 1);
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 0.75rem 0;
-  margin: 0 0 0 1.85rem;
+  /* Clear the 3rem circle + a small gutter so labels never sit under the arrow. */
+  padding: 0 1.25rem 0 3.35rem;
   color: hsl(var(--primary));
   font-weight: 700;
-  line-height: 1.6;
-  text-align: center;
+  line-height: 1.2;
+  text-align: left;
   text-transform: uppercase;
   letter-spacing: 0.02em;
   font-size: 0.8125rem;
+  white-space: nowrap;
 }
 
 .expand-arrow-button:hover .expand-arrow-button__circle,
