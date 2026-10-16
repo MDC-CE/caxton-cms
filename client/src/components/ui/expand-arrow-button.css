@@ -1,0 +1,111 @@
+/**
+ * Expand-arrow CTA (CE landings). Colors come from the site theme
+ * (--primary / --primary-foreground), not hardcoded hex.
+ */
+.expand-arrow-button {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+  outline: none;
+  border: 0;
+  vertical-align: middle;
+  text-decoration: none;
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  font-family: inherit;
+  width: 12rem;
+  height: auto;
+  min-height: 3rem;
+}
+
+.expand-arrow-button .expand-arrow-button__circle {
+  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
+  position: relative;
+  display: block;
+  margin: 0;
+  width: 3rem;
+  height: 3rem;
+  background: hsl(var(--primary));
+  border-radius: 1.625rem;
+}
+
+.expand-arrow-button .expand-arrow-button__icon {
+  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  margin: auto;
+  background: hsl(var(--primary-foreground));
+}
+
+.expand-arrow-button .expand-arrow-button__icon--arrow {
+  left: 0.625rem;
+  width: 1.125rem;
+  height: 0.125rem;
+  background: none;
+}
+
+.expand-arrow-button .expand-arrow-button__icon--arrow::before {
+  position: absolute;
+  content: "";
+  top: -0.29rem;
+  right: 0.0625rem;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-top: 0.125rem solid hsl(var(--primary-foreground));
+  border-right: 0.125rem solid hsl(var(--primary-foreground));
+  transform: rotate(45deg);
+}
+
+.expand-arrow-button .expand-arrow-button__text {
+  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 0;
+  margin: 0 0 0 1.85rem;
+  color: hsl(var(--primary));
+  font-weight: 700;
+  line-height: 1.6;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-size: 0.8125rem;
+}
+
+.expand-arrow-button:hover .expand-arrow-button__circle,
+.expand-arrow-button:focus-visible .expand-arrow-button__circle {
+  width: 100%;
+}
+
+.expand-arrow-button:hover .expand-arrow-button__icon--arrow,
+.expand-arrow-button:focus-visible .expand-arrow-button__icon--arrow {
+  background: hsl(var(--primary-foreground));
+  transform: translate(1rem, 0);
+}
+
+.expand-arrow-button:hover .expand-arrow-button__text,
+.expand-arrow-button:focus-visible .expand-arrow-button__text {
+  color: hsl(var(--primary-foreground));
+}
+
+.expand-arrow-button:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
+  border-radius: 1.625rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .expand-arrow-button .expand-arrow-button__circle,
+  .expand-arrow-button .expand-arrow-button__icon,
+  .expand-arrow-button .expand-arrow-button__icon--arrow,
+  .expand-arrow-button .expand-arrow-button__text {
+    transition: none;
+  }
+}
