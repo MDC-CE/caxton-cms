@@ -735,7 +735,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
 
       <SystemAlertsPanel compact />
 
-      <div className="p-3 border-b pl-[8px] pr-[8px] pt-[3px] pb-[3px]">
+      <div className="sticky top-0 z-20 bg-background p-3 border-b pl-[8px] pr-[8px] pt-[3px] pb-[3px]">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <button

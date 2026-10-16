@@ -2342,10 +2342,10 @@ export function DebugBubble() {
             className="h-10 w-10 rounded-full shadow-lg flex-shrink-0"
             title={
               pageIsDetached
-                ? "Page Info (detached)"
+                ? "Page versions (detached). Edit|Read is at the top of this panel."
                 : pageIsSharedLayout
-                  ? "Page Info (linked)"
-                  : "Page Info"
+                  ? "Page versions (linked). Edit|Read is at the top of this panel."
+                  : "Page versions. Edit|Read is at the top of this panel."
             }
             data-testid="button-fork-bubble"
             onClick={() => {

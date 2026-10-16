@@ -662,51 +662,40 @@ export function EditModeWrapper({
     return <>{children}</>;
   }
   
-  // While auth is loading, provide EditModeProvider so the toggle can appear
-  // Once loaded, if user has no edit capabilities, they still see the toggle but can't edit
-  if (isLoading) {
-    // Provide context while loading so DebugBubble can show the toggle
-    return (
-      <EditModeProvider>
-        <PageHistoryProvider enabled={true}>
-          <FirstEditGate>
-            <EditModeInner 
-              sections={sections} 
-              contentType={contentType} 
-              slug={slug} 
-              locale={locale}
-            >
-              {children}
-            </EditModeInner>
-          </FirstEditGate>
-        </PageHistoryProvider>
-      </EditModeProvider>
-    );
-  }
-  
-  // No edit capability: render children directly
-  if (!canEdit) {
-    return <>{children}</>;
-  }
-  
-  // Has edit capability: provide EditModeProvider for toggle UI
-  // SyncWrapper only activates when user actually enters edit mode
-  return (
+  // Always provide EditModeProvider in debug mode so Dev Tools can show Edit|Read.
+  // SyncWrapper only mounts for staff who can edit content (avoids GitHub sync for view-only).
+  // While auth is loading, skip SyncWrapper until we know canEdit.
+  const inner = (
     <EditModeProvider>
       <PageHistoryProvider enabled={true}>
-        <SyncWrapper>
+        {canEdit && !isLoading ? (
+          <SyncWrapper>
+            <FirstEditGate>
+              <EditModeInner
+                sections={sections}
+                contentType={contentType}
+                slug={slug}
+                locale={locale}
+              >
+                {children}
+              </EditModeInner>
+            </FirstEditGate>
+          </SyncWrapper>
+        ) : (
           <FirstEditGate>
-            <EditModeInner 
-              sections={sections} 
-              contentType={contentType} 
-              slug={slug} 
+            <EditModeInner
+              sections={sections}
+              contentType={contentType}
+              slug={slug}
               locale={locale}
             >
               {children}
             </EditModeInner>
           </FirstEditGate>
-        </SyncWrapper>
+        )}
       </PageHistoryProvider>
     </EditModeProvider>
   );
+
+  return inner;
 }
