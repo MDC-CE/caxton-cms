@@ -5,10 +5,11 @@ import { mergeWidths } from "../../../server/image-optimizer";
 import type { Preset } from "../../../server/image-optimizer";
 import { IMAGE_OPTIMIZATION_ISSUE_CODES } from "./image-optimization.issueCodes";
 
-const REGISTRY_PATH = path.join(process.cwd(), "4geeks-com", "image-registry.json");
-
 const SKIP_EXTENSIONS = new Set([".svg", ".gif"]);
 const RASTER_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".avif"]);
+/** Soft floor for landing/hero photos at ~2x of a large CSS slot (~1000–2000px). */
+const RETINA_MASTER_MIN_WIDTH = 1920;
+const SMALL_PRESET_HINTS = new Set(["logo", "icon", "avatar"]);
 
 function getExtension(src: string): string {
   try {
@@ -39,7 +40,7 @@ export const imageOptimizationValidator: Validator = {
   estimatedDuration: "fast",
   category: "content",
 
-  async run(_context: ValidationContext): Promise<ValidatorResult> {
+  async run(context: ValidationContext): Promise<ValidatorResult> {
     const startTime = Date.now();
     const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
@@ -59,16 +60,21 @@ export const imageOptimizationValidator: Validator = {
       presets?: Record<string, Preset>;
     };
 
+    const contentRoot =
+      context.contentRoot ||
+      path.join(process.cwd(), "site_learning-mdc-edu");
+    const registryPath = path.join(contentRoot, "image-registry.json");
+
     try {
-      const raw = fs.readFileSync(REGISTRY_PATH, "utf-8");
+      const raw = fs.readFileSync(registryPath, "utf-8");
       registry = JSON.parse(raw);
     } catch (err) {
       errors.push({
         type: "error",
         code: "REGISTRY_LOAD_ERROR",
         message: `Failed to load image registry: ${err instanceof Error ? err.message : String(err)}`,
-        file: REGISTRY_PATH,
-        suggestion: "Ensure 4geeks-com/image-registry.json exists and is valid JSON",
+        file: registryPath,
+        suggestion: "Ensure image-registry.json exists under the active site content folder",
       });
       return {
         name: this.name,
@@ -115,7 +121,7 @@ export const imageOptimizationValidator: Validator = {
           type: "warning",
           code: "IMAGE_NOT_OPTIMIZED",
           message: `Image "${id}" is missing optimization data: ${missing.join(", ")}`,
-          file: REGISTRY_PATH,
+          file: registryPath,
           suggestion: "Run the backfill script or trigger batch optimization to generate responsive variants",
           fix: {
             type: "api",
@@ -127,6 +133,24 @@ export const imageOptimizationValidator: Validator = {
       }
 
       const presetNames = entry.preset ?? [];
+      const isSmallPreset =
+        presetNames.length > 0 && presetNames.every((p) => SMALL_PRESET_HINTS.has(p));
+      if (
+        !isSmallPreset &&
+        typeof entry.width === "number" &&
+        entry.width > 0 &&
+        entry.width < RETINA_MASTER_MIN_WIDTH
+      ) {
+        warnings.push({
+          type: "warning",
+          code: "IMAGE_TOO_SMALL_FOR_RETINA",
+          message: `Image "${id}" is ${entry.width}px wide — too soft for large landing frames (need ≥${RETINA_MASTER_MIN_WIDTH}px master for ~2x sharpness)`,
+          file: registryPath,
+          suggestion:
+            "Upload a larger original in Media Gallery (at least 2× the CSS display size), then re-optimize srcsets",
+        });
+      }
+
       if (presetNames.length > 0 && Object.keys(presets).length > 0) {
         const missing = missingWidths(
           presetNames,
@@ -140,7 +164,7 @@ export const imageOptimizationValidator: Validator = {
             type: "warning",
             code: "IMAGE_WIDTHS_OUTDATED",
             message: `Image "${id}" is missing srcset widths added to its preset (${presetNames.join(", ")}): ${missing.join(", ")}px`,
-            file: REGISTRY_PATH,
+            file: registryPath,
             suggestion: "Run the image optimization fixer to generate the missing width variants",
             fix: {
               type: "api",

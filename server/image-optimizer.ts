@@ -75,8 +75,11 @@ export function gcsKeyFromSrc(src: string): string | null {
 export function localKeyFromSrc(src: string): string | null {
   if (src.startsWith("/attached_assets/")) return null;
   if (src.startsWith("http://") || src.startsWith("https://")) return null;
-  const { getSiteContextMap } = require("./site-manager") as typeof import("./site-manager");
   try {
+    // ESM agents/CLIs (tsx) have no CommonJS require — keep lookup inside try
+    // so the path regex fallback still runs when site-manager is unavailable.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getSiteContextMap } = require("./site-manager") as typeof import("./site-manager");
     for (const [, site] of getSiteContextMap()) {
       const prefix = `/${site.contentRootName}/images/`;
       if (src.startsWith(prefix)) {
@@ -88,6 +91,9 @@ export function localKeyFromSrc(src: string): string | null {
     const match = src.match(/^\/([^/]+)\/images\//);
     if (match) return src.slice(1);
   }
+  // Same path shape when site map loaded but this folder is not registered yet
+  const match = src.match(/^\/([^/]+)\/images\//);
+  if (match) return src.slice(1);
   return null;
 }
 
