@@ -22,6 +22,8 @@ export type ExpandArrowButtonProps = ExpandArrowButtonAsButton | ExpandArrowButt
 function ExpandArrowInner({ children }: { children: ReactNode }) {
   return (
     <>
+      {/* In-flow spacer so the label always starts after the circle, even when the circle is absolute. */}
+      <span className="expand-arrow-button__spacer" aria-hidden="true" />
       <span className="expand-arrow-button__circle" aria-hidden="true">
         <span className="expand-arrow-button__icon expand-arrow-button__icon--arrow" />
       </span>

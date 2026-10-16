@@ -2,30 +2,44 @@
  * Expand-arrow CTA (CE landings). Colors come from the site theme
  * (--primary / --primary-foreground), not hardcoded hex.
  *
- * At rest the label must clear the 3rem circle (no overlap). On hover/focus
- * the circle grows to full width and the label turns primary-foreground.
+ * The circle is absolutely positioned so it can grow on hover. A matching
+ * in-flow spacer keeps the label to the right of that circle at rest.
+ * On hover/focus the circle grows behind the label and the label turns
+ * primary-foreground. The arrow stays inside the original circle.
  */
 .expand-arrow-button {
   position: relative;
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
+  gap: 0.7rem;
   cursor: pointer;
   outline: none;
   border: 0;
   vertical-align: middle;
   text-decoration: none;
   background: transparent;
-  padding: 0;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 100%;
+  height: 3rem;
+  min-height: 3rem;
+  padding: 0 1.15rem 0 0;
+  margin: 0;
   font-size: inherit;
   font-family: inherit;
-  width: auto;
-  min-width: 12rem;
-  min-height: 3rem;
+  overflow: visible;
+  border-radius: 1.625rem;
+}
+
+.expand-arrow-button .expand-arrow-button__spacer {
+  flex: 0 0 3rem;
+  width: 3rem;
   height: 3rem;
 }
 
 .expand-arrow-button .expand-arrow-button__circle {
-  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
+  transition: width 0.45s cubic-bezier(0.65, 0, 0.076, 1);
   position: absolute;
   left: 0;
   top: 0;
@@ -36,10 +50,10 @@
   background: hsl(var(--primary));
   border-radius: 1.625rem;
   z-index: 0;
+  pointer-events: none;
 }
 
 .expand-arrow-button .expand-arrow-button__icon {
-  transition: all 0.45s cubic-bezier(0.65, 0, 0.076, 1);
   position: absolute;
   top: 0;
   bottom: 0;
@@ -67,13 +81,11 @@
 }
 
 .expand-arrow-button .expand-arrow-button__text {
-  transition: color 0.45s cubic-bezier(0.65, 0, 0.076, 1);
   position: relative;
   z-index: 1;
-  display: flex;
-  align-items: center;
-  /* Clear the 3rem circle + a small gutter so labels never sit under the arrow. */
-  padding: 0 1.25rem 0 3.35rem;
+  display: block;
+  margin: 0;
+  padding: 0;
   color: hsl(var(--primary));
   font-weight: 700;
   line-height: 1.2;
@@ -89,12 +101,6 @@
   width: 100%;
 }
 
-.expand-arrow-button:hover .expand-arrow-button__icon--arrow,
-.expand-arrow-button:focus-visible .expand-arrow-button__icon--arrow {
-  background: hsl(var(--primary-foreground));
-  transform: translate(1rem, 0);
-}
-
 .expand-arrow-button:hover .expand-arrow-button__text,
 .expand-arrow-button:focus-visible .expand-arrow-button__text {
   color: hsl(var(--primary-foreground));
@@ -103,14 +109,10 @@
 .expand-arrow-button:focus-visible {
   outline: 2px solid hsl(var(--ring));
   outline-offset: 3px;
-  border-radius: 1.625rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .expand-arrow-button .expand-arrow-button__circle,
-  .expand-arrow-button .expand-arrow-button__icon,
-  .expand-arrow-button .expand-arrow-button__icon--arrow,
-  .expand-arrow-button .expand-arrow-button__text {
+  .expand-arrow-button .expand-arrow-button__circle {
     transition: none;
   }
 }
