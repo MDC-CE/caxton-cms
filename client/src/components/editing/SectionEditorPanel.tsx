@@ -3882,7 +3882,16 @@ export function SectionEditorPanel({
               .filter(([fieldPath, editorTypeRaw]) => {
                 if (fieldPath.includes("[]")) return false;
                 const { type: edType } = parseEditorType(editorTypeRaw);
-                return edType === "image-picker";
+                if (edType !== "image-picker") return false;
+                // When a rotating gallery is present, the single image_id is unused.
+                // Showing it next to the gallery makes a save look like it broke the photo.
+                if (fieldPath === "image_id" || fieldPath.endsWith(".image_id")) {
+                  const photos = (parsedSection as { photos?: unknown } | null)?.photos;
+                  if (Array.isArray(photos) && photos.length > 0 && !fieldPath.includes(".")) {
+                    return false;
+                  }
+                }
+                return true;
               })
               .map(([fieldPath, editorTypeRaw]) => {
                 const { variant } = parseEditorType(editorTypeRaw);
@@ -4882,9 +4891,13 @@ export function SectionEditorPanel({
                                                   srcField: fieldKey,
                                                   currentSrc: currentValue,
                                                   currentAlt:
-                                                    (item.name as string) || "",
+                                                    (item.image_alt as string) ||
+                                                    (item.alt as string) ||
+                                                    (item.name as string) ||
+                                                    "",
                                                   tagFilter:
                                                     configuredField.variant,
+                                                  clearFieldOnly: true,
                                                 });
                                                 setImagePickerOpen(true);
                                               }}
@@ -5201,6 +5214,7 @@ export function SectionEditorPanel({
                         >[];
 
                         const parentLabel =
+                          (parentItemObj.label as string) ||
                           (parentItemObj.title as string) ||
                           (parentItemObj.name as string) ||
                           `Slide ${parentIdx + 1}`;
@@ -5229,8 +5243,8 @@ export function SectionEditorPanel({
                         const extraTextFields = collectNestedKeys(nestedItems);
 
                         const fieldOrder = [
-                          ...extraTextFields,
                           ...fields.map((f) => f.leafField),
+                          ...extraTextFields,
                         ];
 
                         const buildNestedDefault = (): Record<
@@ -5428,10 +5442,12 @@ export function SectionEditorPanel({
                                                         currentSrc:
                                                           currentValue,
                                                         currentAlt:
+                                                          (nestedItem.image_alt as string) ||
                                                           (nestedItem.alt as string) ||
                                                           "",
                                                         tagFilter:
                                                           configuredField.variant,
+                                                        clearFieldOnly: true,
                                                       });
                                                       setImagePickerOpen(true);
                                                     }}
@@ -7246,69 +7262,86 @@ export function SectionEditorPanel({
                     );
                   }
 
-                  // Default image-picker behavior (simple thumbnails)
+                  // One row per image so changing photo 2 cannot rewrite photo 1.
                   return (
                     <div key={fieldPath} className="space-y-2">
-                      <Label className="text-sm font-medium capitalize">
-                        {getFieldLabel(itemField)}
+                      <Label className="text-sm font-medium">
+                        {arrayFieldLabel}
                       </Label>
-                      <div className="flex flex-wrap gap-2">
+                      <div className="space-y-2">
                         {safeArrayData.map((item, index) => {
                           const currentValue = String(getValueAtFieldPath(item, itemField) ?? "");
-                          const altValue = (item.alt as string) || "";
-                          // For ID fields, look up the actual src from registry
+                          const altValue =
+                            (item.image_alt as string) ||
+                            (item.alt as string) ||
+                            "";
                           const displaySrc =
                             imageRegistry?.images?.[currentValue]?.src ||
-                            currentValue;
+                            (currentValue.startsWith("/") ? currentValue : "");
+                          const rowLabel = altValue || `Photo ${index + 1}`;
 
                           return (
-                            <button
-                              key={index}
-                              type="button"
-                              onClick={() => {
-                                setImagePickerTarget({
-                                  arrayPath,
-                                  index,
-                                  srcField: itemField,
-                                  currentSrc: currentValue,
-                                  currentAlt: altValue,
-                                  tagFilter: variant, // e.g., "logo" from "image-picker:logo"
-                                });
-                                setImagePickerOpen(true);
-                              }}
-                              className="w-12 h-12 rounded-md overflow-hidden bg-muted border border-border hover:border-primary transition-colors flex-shrink-0 relative group"
-                              data-testid={`props-image-${arrayFieldLabel}-${index}`}
-                              title={altValue || `Image ${index + 1}`}
+                            <div
+                              key={`${itemField}-${index}`}
+                              className="flex items-center gap-2 rounded-md border border-border p-2"
                             >
-                              {currentValue ? (
-                                <img
-                                  src={displaySrc}
-                                  alt={altValue || `Image ${index + 1}`}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center text-muted-foreground text-xs">
-                                  ?
-                                </div>
-                              )}
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setImagePickerTarget({
+                                    arrayPath,
+                                    index,
+                                    srcField: itemField,
+                                    currentSrc: currentValue,
+                                    currentAlt: altValue,
+                                    tagFilter: variant,
+                                    clearFieldOnly: true,
+                                    label: rowLabel,
+                                  });
+                                  setImagePickerOpen(true);
+                                }}
+                                className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-input bg-muted/50 hover:bg-muted"
+                                data-testid={`props-image-${arrayFieldLabel}-${index}`}
+                                title={`Change ${rowLabel}`}
+                              >
+                                {displaySrc ? (
+                                  <img
+                                    src={displaySrc}
+                                    alt={rowLabel}
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                                    <Image className="h-5 w-5" />
+                                  </div>
+                                )}
+                              </button>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium">{rowLabel}</p>
+                                <p className="truncate text-xs text-muted-foreground">
+                                  {currentValue || "No photo yet"}
+                                </p>
+                              </div>
+                            </div>
                           );
                         })}
-                        <button
+                        <Button
                           type="button"
+                          variant="outline"
+                          size="sm"
                           onClick={() => {
-                            const defaultItem: Record<string, unknown> = {
-                              [itemField]: "",
-                              alt: "",
-                            };
+                            const defaultItem: Record<string, unknown> =
+                              itemField === "image_id" || itemField.endsWith("image_id")
+                                ? { [itemField]: "", image_alt: "" }
+                                : { [itemField]: "", alt: "" };
                             addArrayItem(arrayPath, defaultItem);
                           }}
-                          className="w-12 h-12 rounded-md border border-dashed border-muted-foreground/50 bg-transparent hover:bg-muted/30 hover:border-muted-foreground transition-colors flex items-center justify-center"
+                          className="w-full"
                           data-testid={`props-image-${arrayFieldLabel}-add`}
-                          title="Add image"
                         >
-                          <Plus className="h-5 w-5 text-muted-foreground" />
-                        </button>
+                          <Plus className="mr-1 h-4 w-4" />
+                          Add photo
+                        </Button>
                       </div>
                     </div>
                   );
@@ -10148,17 +10181,17 @@ export function SectionEditorPanel({
                       imagePickerTarget.index !== undefined &&
                       imagePickerTarget.srcField
                     ) {
+                      const srcField = imagePickerTarget.srcField;
                       const updates: Record<string, string> = {
-                        [imagePickerTarget.srcField]:
-                          imagePickerTarget.currentSrc,
-                        alt: imagePickerTarget.currentAlt,
+                        [srcField]: imagePickerTarget.currentSrc,
                       };
-                      if (imagePickerTarget.currentRegistryId) {
-                        updates.id =
-                          imagePickerTarget.currentRegistryId.replace(
-                            /_/g,
-                            "-",
-                          );
+                      const altText = imagePickerTarget.currentAlt?.trim();
+                      if (altText) {
+                        if (srcField === "image_id" || srcField.endsWith("image_id")) {
+                          updates.image_alt = altText;
+                        } else if (srcField !== "alt") {
+                          updates.alt = altText;
+                        }
                       }
                       updateArrayItemFields(
                         imagePickerTarget.arrayPath,
@@ -10190,9 +10223,21 @@ export function SectionEditorPanel({
 
                       if (replacementPairs.length > 0) {
                         let newYaml = yamlContent;
+                        let blocked = false;
                         for (const [oldVal, newVal] of replacementPairs) {
                           const escaped = oldVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                          const matches = newYaml.match(new RegExp(escaped, 'g'));
+                          if ((matches?.length ?? 0) > 1) {
+                            blocked = true;
+                            continue;
+                          }
                           newYaml = newYaml.replace(new RegExp(escaped, 'g'), newVal);
+                        }
+                        if (blocked) {
+                          toast({
+                            title: "That photo is used more than once",
+                            description: "Change it from its own row in Props so the other photos stay as they are.",
+                          });
                         }
                         if (newYaml !== yamlContent) {
                           pushUndoState(yamlContent);

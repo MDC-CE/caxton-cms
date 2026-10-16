@@ -442,6 +442,10 @@ export function UniversalImage({
     <BrokenImage id={resolvedId} reason={reason} className={className} style={style} />
   );
 
+  // Stay in the normal render when staff are editing, so a broken photo still
+  // has a Change button and the picker. Returning here used to hide both.
+  let brokenReason: BrokenImageReason | null = null;
+
   if (!imageEntry && !isDirectPath) {
     // SSR seeds a slim catalog. While the full gallery refetches (edit mode / variant
     // preview), keep a skeleton instead of a false "unknown id" placeholder.
@@ -453,14 +457,15 @@ export function UniversalImage({
         />
       );
     }
-    if (showEditChrome) return renderBroken("unknown");
-    return null;
+    if (showEditChrome) brokenReason = "unknown";
+    else return null;
   }
 
   // Id exists in the full gallery but would be blank on the public page.
   // Skip on private preview: staff review 0% variants / drafts whose images are
   // intentionally absent from the live (default) visitor subset.
   if (
+    !brokenReason &&
     showEditChrome &&
     !isPrivatePreview &&
     !isDirectUrl &&
@@ -468,7 +473,7 @@ export function UniversalImage({
     visitorSubset &&
     !inVisitorSubset
   ) {
-    return renderBroken("visitor-blank");
+    brokenReason = "visitor-blank";
   }
 
   const presetConfig = registry?.presets?.[preset];
@@ -524,8 +529,8 @@ export function UniversalImage({
     : {};
 
   if (hasError) {
-    if (showEditChrome) return renderBroken("load-failed");
-    return null;
+    if (showEditChrome) brokenReason = brokenReason ?? "load-failed";
+    else return null;
   }
 
   const borderClasses = bordered
@@ -830,12 +835,15 @@ export function UniversalImage({
       data-testid={`img-container-${id}`}
     >
       <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
-        {!isEager && !isLoaded && (
+        {!brokenReason && !isEager && !isLoaded && (
           <div
             className="absolute inset-0 bg-muted animate-pulse"
             data-testid={`img-loading-${id}`}
           />
         )}
+        {brokenReason ? (
+          renderBroken(brokenReason)
+        ) : (
         <img
           ref={imgRefCallback}
           src={src}
@@ -861,6 +869,7 @@ export function UniversalImage({
           }}
           data-testid={`img-${id}`}
         />
+        )}
         {overrideBadge}
         {statusBadge}
       </div>
