@@ -71,6 +71,7 @@ export const AGENTIC_SWARM_ROLES_BY_ID: Record<AgenticSwarmRoleId, AgenticSwarmR
     capabilities: [
       { name: "content_view", contentTypes: "*" },
       { name: "content_edit_structure", contentTypes: "*" },
+      { name: "content_edit_variant", contentTypes: "*" },
       { name: "proposals_create" },
     ],
   },
@@ -94,6 +95,7 @@ export const AGENTIC_SWARM_ROLES_BY_ID: Record<AgenticSwarmRoleId, AgenticSwarmR
       { name: "content_view", contentTypes: "*" },
       { name: "media_upload" },
       { name: "content_edit_media", contentTypes: "*" },
+      { name: "content_edit_variant", contentTypes: "*" },
       { name: "proposals_create" },
     ],
   },

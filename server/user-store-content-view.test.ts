@@ -6,6 +6,7 @@ import {
   getBuiltInRoleCodeDefinition,
   ensureContentViewOnEditorRoles,
   ensureDeleteVariantOnCreateVariantRoles,
+  ensureEditVariantOnContentEditors,
   ensureDatabasesEditDataOnAllContentEditors,
   grantAllowsAnyDatabasesEditDataAccess,
   grantAllowsCap,
@@ -119,6 +120,37 @@ describe("ensureDeleteVariantOnCreateVariantRoles", () => {
       },
     };
     expect(ensureDeleteVariantOnCreateVariantRoles(roles)).toBe(false);
+  });
+});
+
+describe("ensureEditVariantOnContentEditors", () => {
+  it("adds content_edit_variant with unioned scopes from editor caps", () => {
+    const roles: Record<string, RoleDefinition> = {
+      page_editor: {
+        label: "Page editor",
+        capabilities: [
+          { name: "content_edit_text", contentTypes: ["page"] },
+          { name: "content_edit_media", contentTypes: ["page", "landing"] },
+        ],
+      },
+    };
+    expect(ensureEditVariantOnContentEditors(roles)).toBe(true);
+    const edit = roles.page_editor.capabilities.find((g) => g.name === "content_edit_variant");
+    expect(edit?.contentTypes).toEqual(["page", "landing"]);
+    expect(ensureEditVariantOnContentEditors(roles)).toBe(false);
+  });
+
+  it("skips roles that already have content_edit_variant", () => {
+    const roles: Record<string, RoleDefinition> = {
+      already: {
+        label: "Already",
+        capabilities: [
+          { name: "content_edit_text", contentTypes: "*" },
+          { name: "content_edit_variant", contentTypes: ["blog"] },
+        ],
+      },
+    };
+    expect(ensureEditVariantOnContentEditors(roles)).toBe(false);
   });
 });
 

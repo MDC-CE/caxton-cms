@@ -542,6 +542,39 @@ export function migrateSeoEditSplit(roles: Record<string, RoleDefinition>): bool
 }
 
 /**
+ * Custom roles that already edit page content (text / media / structure / default)
+ * but predate the split "Edit variants" cap cannot save Props on draft/A/B files.
+ * Mirror their content-type scope onto content_edit_variant.
+ * Built-in and agentic swarm roles are skipped (synced from code).
+ */
+export function ensureEditVariantOnContentEditors(
+  roles: Record<string, RoleDefinition>,
+): boolean {
+  const sourceCaps = new Set([
+    "content_edit_text",
+    "content_edit_media",
+    "content_edit_structure",
+    "content_edit_default",
+  ]);
+  let changed = false;
+  for (const [roleId, role] of Object.entries(roles)) {
+    if (isBuiltInRole(roleId) || role?.agentic || isAgenticSwarmRoleId(roleId)) continue;
+    if (!role?.capabilities) continue;
+    if (role.capabilities.some((g) => g.name === "content_edit_variant")) continue;
+
+    const sources = role.capabilities.filter((g) => sourceCaps.has(g.name));
+    if (sources.length === 0) continue;
+
+    role.capabilities = [
+      ...role.capabilities,
+      { name: "content_edit_variant", contentTypes: unionContentTypeScopes(sources) },
+    ];
+    changed = true;
+  }
+  return changed;
+}
+
+/**
  * Soft-migrate custom roles that have Edit text on all content types:
  * add databases_edit_data with databases: "*".
  * Built-ins (incl. platform_steward) are skipped — steward keeps databases_manage only.
@@ -654,6 +687,9 @@ function finishLoad(persist: "local" | "all"): void {
   }
   if (ensureDeleteVariantOnCreateVariantRoles(state.roles)) {
     log.info("[UserStore] Migrated custom roles: added content_delete_variant from content_create_variant");
+  }
+  if (ensureEditVariantOnContentEditors(state.roles)) {
+    log.info("[UserStore] Migrated custom roles: added content_edit_variant from content editor capabilities");
   }
   if (ensureDatabasesEditDataOnAllContentEditors(state.roles)) {
     log.info("[UserStore] Migrated custom roles: added databases_edit_data from content_edit_text:*");
