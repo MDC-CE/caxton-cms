@@ -188,7 +188,6 @@ function walkObject(
     }
 
     if (Array.isArray(value)) {
-      if (grouped.has(path)) continue;
       const items = walkArray(path, value, configured, grouped);
       if (items) fields.push(items);
       continue;
@@ -216,11 +215,15 @@ function walkArray(
 ): ContentControl | null {
   const picker = configured[`${arrayPath}[]`];
   if (picker && editorBase(picker) === "cta-picker") return null;
+  // The grouped card already edits each item's text, photo, and icon.
+  // Nested lists and objects inside those items still need their own controls.
+  const nestedOnly = grouped.has(arrayPath);
 
   if (value.length === 0) {
+    if (nestedOnly) return null;
     return { kind: "array", path: arrayPath, label: humanLabel(arrayPath), items: [] };
   }
-  if (value.every((item) => typeof item === "string" || typeof item === "number")) {
+  if (!nestedOnly && value.every((item) => typeof item === "string" || typeof item === "number")) {
     return {
       kind: "strings",
       path: arrayPath,
@@ -255,6 +258,7 @@ function walkArray(
         }
         continue;
       }
+      if (nestedOnly) continue;
       const leaf = controlForLeaf(key, child, key, item);
       if (leaf) fields.push(leaf);
     }
@@ -266,30 +270,32 @@ function walkArray(
   return { kind: "array", path: arrayPath, label: humanLabel(arrayPath), items };
 }
 
-function flattenShown(controls: ContentControl[], into: string[]) {
-  for (const control of controls) {
-    if (control.kind === "strings") {
-      into.push(`${control.path}[]`);
-      continue;
-    }
-    if (control.kind === "group") {
-      flattenShown(control.fields, into);
-      continue;
-    }
-    if (control.kind === "array") {
-      for (const item of control.items) {
-        for (const field of item.fields) {
-          if (field.kind === "group" || field.kind === "array" || field.kind === "strings") {
-            flattenShown([field], into);
-          } else {
-            into.push(`${control.path}[].${field.path}`);
-          }
-        }
-      }
-      continue;
-    }
-    into.push(control.path);
+function absorb(field: ContentControl, prefix: string, into: string[]) {
+  const alreadyAbsolute = field.path.includes("[]") || /\.\d+/.test(field.path);
+  const full = alreadyAbsolute
+    ? field.path.replace(/\.\d+/g, "[]")
+    : prefix
+      ? `${prefix}.${field.path}`
+      : field.path;
+  if (field.kind === "strings") {
+    into.push(full.endsWith("[]") ? full : `${full}[]`);
+    return;
   }
+  if (field.kind === "group") {
+    for (const child of field.fields) absorb(child, prefix, into);
+    return;
+  }
+  if (field.kind === "array") {
+    for (const item of field.items) {
+      for (const child of item.fields) absorb(child, `${full}[]`, into);
+    }
+    return;
+  }
+  into.push(full);
+}
+
+function flattenShown(controls: ContentControl[], into: string[]) {
+  for (const control of controls) absorb(control, "", into);
 }
 
 function leafPaths(value: unknown, path: string, into: string[]) {
