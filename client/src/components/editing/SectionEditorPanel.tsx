@@ -596,6 +596,9 @@ export function SectionEditorPanel({
   const { toast } = useToast();
   const { session } = useSession();
   const [yamlContent, setYamlContent] = useState("");
+  const yamlContentRef = useRef(yamlContent);
+  yamlContentRef.current = yamlContent;
+  const yamlSourceKeyRef = useRef("");
   const [parseError, setParseError] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -793,7 +796,7 @@ export function SectionEditorPanel({
     simpleFieldPath?: string;
   } | null>(null);
   const [nestedUpdateFn, setNestedUpdateFn] = useState<
-    ((value: string) => void) | null
+    ((value: string) => Record<string, unknown> | void) | null
   >(null);
 
   // Image picker modal state
@@ -1264,6 +1267,12 @@ export function SectionEditorPanel({
       setHasChanges(false);
       return;
     }
+    // A photo confirm writes the file, then the page reloads. Do not replace
+    // in-progress text edits with that reload. Switching page or section still resets.
+    const sourceKey = `${slug ?? ""}:${sectionIndex}`;
+    const switchedSection = yamlSourceKeyRef.current !== sourceKey;
+    yamlSourceKeyRef.current = sourceKey;
+    if (!switchedSection && hasChangesRef.current) return;
     try {
       const sectionForEditor = stripTransientDynamicKeys(
         section,
@@ -1279,7 +1288,7 @@ export function SectionEditorPanel({
     } catch (error) {
       console.error("Error converting section to YAML:", error);
     }
-  }, [section, slug]); // intentionally excludes templateSectionsData — see comment above
+  }, [section, slug, sectionIndex]); // intentionally excludes templateSectionsData — see comment above
 
   const handleRequestUnbind = useCallback(
     (span: TemplateSpan) => {
@@ -2773,6 +2782,49 @@ export function SectionEditorPanel({
     } else {
       await executeSave();
     }
+  };
+
+  /** Write a confirmed photo to the page file. The dialog Save used to update only this panel. */
+  const persistPhotoChoice = async (
+    operations: Array<
+      | { action: "update_field"; path: string; value: string }
+      | { action: "update_section"; index: number; section: Record<string, unknown> }
+    >,
+  ): Promise<boolean> => {
+    if (!contentType || !slug || !locale || operations.length === 0) {
+      toast({
+        title: "Photo was not saved",
+        description: "Use the section Save button before you leave.",
+        variant: "destructive",
+      });
+      return false;
+    }
+    const urlParams = new URLSearchParams(window.location.search);
+    const effectiveVariant = urlParams.get("force_variant") ?? urlParams.get("variant") ?? variant;
+    const writeSharedTemplateVariant = !!(isSharedTemplate && effectiveVariant);
+    const result = await editContent({
+      contentType,
+      slug,
+      locale,
+      variant: effectiveVariant || undefined,
+      version: writeSharedTemplateVariant ? undefined : version,
+      ...(writeSharedTemplateVariant ? { layoutTarget: "type_template" } : {}),
+      operations,
+    });
+    if (!result.success) {
+      toast({
+        title: "Photo was not saved",
+        description: result.error || "Use the section Save button before you leave.",
+        variant: "destructive",
+      });
+      return false;
+    }
+    emitContentUpdated({ contentType, slug, locale });
+    toast({
+      title: "Photo saved",
+      description: "It stays when you leave this page and come back.",
+    });
+    return true;
   };
 
   // Save without closing editor
@@ -5974,6 +6026,7 @@ export function SectionEditorPanel({
                       setHasChanges(true);
                       setParseError(null);
                       if (onPreviewChange) onPreviewChange(parsed as Section);
+                      return parsed;
                     } catch (error) {
                       console.error("Error updating nested array item:", error);
                     }
@@ -10224,16 +10277,33 @@ export function SectionEditorPanel({
               </Button>
               <Button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
+                  const photoOps: Array<
+                    | { action: "update_field"; path: string; value: string }
+                    | { action: "update_section"; index: number; section: Record<string, unknown> }
+                  > = [];
+                  const wasDirty = hasChangesRef.current;
                   if (imagePickerTarget) {
                     if (nestedUpdateFn) {
-                      nestedUpdateFn(imagePickerTarget.currentSrc);
+                      const parsed = nestedUpdateFn(imagePickerTarget.currentSrc);
+                      if (parsed && typeof parsed === "object") {
+                        photoOps.push({
+                          action: "update_section",
+                          index: sectionIndex,
+                          section: parsed,
+                        });
+                      }
                       setNestedUpdateFn(null);
                     } else if (imagePickerTarget.fieldPath) {
                       updateProperty(
                         imagePickerTarget.fieldPath,
                         imagePickerTarget.currentSrc,
                       );
+                      photoOps.push({
+                        action: "update_field",
+                        path: `sections.${sectionIndex}.${imagePickerTarget.fieldPath}`,
+                        value: imagePickerTarget.currentSrc,
+                      });
                     } else if (
                       imagePickerTarget.arrayPath !== undefined &&
                       imagePickerTarget.index !== undefined &&
@@ -10256,6 +10326,26 @@ export function SectionEditorPanel({
                         imagePickerTarget.index,
                         updates,
                       );
+                      if (imagePickerTarget.arrayPath !== "__nested__") {
+                        photoOps.push({
+                          action: "update_field",
+                          path: `sections.${sectionIndex}.${imagePickerTarget.arrayPath}.${imagePickerTarget.index}.${srcField}`,
+                          value: imagePickerTarget.currentSrc,
+                        });
+                        if (updates.image_alt) {
+                          photoOps.push({
+                            action: "update_field",
+                            path: `sections.${sectionIndex}.${imagePickerTarget.arrayPath}.${imagePickerTarget.index}.image_alt`,
+                            value: updates.image_alt,
+                          });
+                        } else if (updates.alt) {
+                          photoOps.push({
+                            action: "update_field",
+                            path: `sections.${sectionIndex}.${imagePickerTarget.arrayPath}.${imagePickerTarget.index}.alt`,
+                            value: updates.alt,
+                          });
+                        }
+                      }
                     } else if (imagePickerTarget._fromImageClick && (imagePickerTarget._oldRegistryId || imagePickerTarget._oldSrc)) {
                       // YAML-level string replace fallback: no fieldPath or arrayPath provided.
                       // Type-preserving substitution:
@@ -10304,6 +10394,13 @@ export function SectionEditorPanel({
                           try {
                             const parsed = safeYamlLoad(newYaml) as Section;
                             if (parsed && onPreviewChange) onPreviewChange(parsed);
+                            if (parsed && typeof parsed === "object") {
+                              photoOps.push({
+                                action: "update_section",
+                                index: sectionIndex,
+                                section: parsed as Record<string, unknown>,
+                              });
+                            }
                           } catch (_err) { /* ignore parse errors */ }
                         }
                       }
@@ -10337,6 +10434,13 @@ export function SectionEditorPanel({
                         .catch((err) => {
                           console.warn(`[ImageClassify] ${classifyId}:`, err);
                         });
+                    }
+                    if (photoOps.length > 0) {
+                      const ok = await persistPhotoChoice(photoOps);
+                      if (ok && !wasDirty) {
+                        initialYamlRef.current = yamlContentRef.current;
+                        setHasChanges(false);
+                      }
                     }
                   }
                   setImagePickerOpen(false);
