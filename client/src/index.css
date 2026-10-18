@@ -2,6 +2,7 @@
    appear later, so these site styles never reach the browser. */
 @import "../../site_learning-mdc-edu/component-registry/article/article-prose.css";
 @import "../../site_learning-mdc-edu/component-registry/hero/hero-auto-video-right.css";
+/* Short intro stays on the left; card photos scroll on the right. */
 @import "../../site_learning-mdc-edu/component-registry/numbered_steps/numbered-steps-sticky-cards.css";
 @import "./components/ui/expand-arrow-button.css";
 
