@@ -378,6 +378,7 @@ export type {
   NumberedStepsVerticalCardsSection,
   NumberedStepsHorizontalStepper,
   NumberedStepsPhotoTimeline,
+  NumberedStepsStickyCards,
 } from "./site-component-schemas";
 
 // ============================================

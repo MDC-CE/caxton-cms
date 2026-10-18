@@ -320,6 +320,7 @@ export {
   type NumberedStepsVerticalCardsSection,
   type NumberedStepsHorizontalStepper,
   type NumberedStepsPhotoTimeline,
+  type NumberedStepsStickyCards,
 } from "../site_learning-mdc-edu/component-registry/numbered_steps/v1.0/schema";
 
 // og_image_preview

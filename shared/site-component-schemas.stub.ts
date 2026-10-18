@@ -384,6 +384,7 @@ export type MosaicHeroDefault = any;
 export type MosaicHeroCentered = any;
 export type NumberedStepsHorizontalStepper = any;
 export type NumberedStepsPhotoTimeline = any;
+export type NumberedStepsStickyCards = any;
 export type ProgramsShowcaseDefault = any;
 export type ProgramsShowcaseDateRows = any;
 export type ProgramsShowcaseDateChipCards = any;
