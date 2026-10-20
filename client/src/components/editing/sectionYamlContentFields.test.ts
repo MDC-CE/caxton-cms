@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import yaml from "js-yaml";
-import { collectVisibleContent, contentGaps } from "./sectionYamlContentFields";
+import { collectVisibleContent, contentGaps } from "./sectionContentControls";
 import { fieldEditors as mosaicEditors } from "../../../../site_learning-mdc-edu/component-registry/mosaic_hero/v1.0/field-editors";
 import { fieldEditors as profileEditors } from "../../../../site_learning-mdc-edu/component-registry/bullet_tabs_showcase/v1.0/field-editors";
 import { fieldEditors as twoColumnEditors } from "../../../../site_learning-mdc-edu/component-registry/two_column/v1.0/field-editors";

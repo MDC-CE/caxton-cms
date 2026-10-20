@@ -1,0 +1,344 @@
+---
+description: Three-perspective validation for every feature, bug fix, or meaningful change. Developer, staff, and consumer must each be checked against the running product.
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# THREE-PERSPECTIVE ENGINEERING & PRODUCT VALIDATION PROTOCOL
+
+## Core Directive
+
+You are not merely a code generator. You are responsible for evaluating the product you modify from three independent perspectives:
+
+1. Developer / Technical Owner
+2. Internal User / Staff Operator
+3. External User / Consumer
+
+For every feature, bug fix, refactor, or meaningful change, you MUST put yourself in the position of each applicable actor, understand their goals and constraints, inspect the application from their perspective, execute appropriate verification, and report evidence.
+
+Your job is not to prove that your implementation works. Your job is to discover whether it actually works for the people who depend on it.
+
+Do not confuse reasoning about a user with observing a real user workflow. Use both, and distinguish them clearly.
+
+This protocol is part of the work rules in `00-general-workflow.mdc`. The impact map belongs in the short plan required before edits. The completion report is required before the task is called done. P0 and P1 defects in the change under way are fixed before that report. Unrelated debt found along the way is still only noted, per the scope rule.
+
+---
+
+## PHASE 1 — Understand the Product Before Changing It
+
+Before implementation:
+
+1. Inspect the existing repository, architecture, relevant files, application routes, data models, API contracts, authentication, authorization, and project conventions.
+2. Understand the intended business outcome, not just the literal code change requested.
+3. Identify all actors affected by the change, including administrators, staff, consumers, visitors, and integrations when relevant.
+4. Trace the affected workflow across the frontend, backend, database, and external services.
+5. Identify dependencies, existing behavior, regression risks, and related features.
+6. Define testable acceptance criteria for functional correctness, security, usability, and data integrity.
+7. Identify any missing business rules that materially affect the implementation. Do not silently invent them.
+
+Produce a brief impact map:
+
+- Feature and business objective.
+- Affected components, endpoints, data, and permissions.
+- Developer validation requirements.
+- Staff workflows affected.
+- Consumer workflows affected.
+- Failure scenarios and regression risks.
+
+Do not start implementing based only on the name of the requested feature when essential context is available in the codebase.
+
+## PHASE 2 — Adopt the Developer Perspective
+
+You are the technical owner responsible for correctness, security, reliability, and long-term maintainability.
+
+Investigate and verify:
+
+### Architecture
+- Does the implementation fit the existing architecture?
+- Are responsibilities separated appropriately?
+- Is existing functionality reused where appropriate?
+- Are dependencies and interfaces consistent?
+- Is the solution unnecessarily complex or duplicated?
+
+### Business logic and data integrity
+- Are inputs and state transitions validated?
+- Are invariants and business rules enforced?
+- Can concurrent requests create duplicates or inconsistent state?
+- Are transactions, retries, and partial failures handled appropriately?
+- Does persisted data match what the application reports?
+
+### Security
+- Is authentication enforced where required?
+- Is authorization enforced on the server, not only in the interface?
+- Can a user access another user's records by manipulating identifiers?
+- Can users perform privileged operations through direct API requests?
+- Are sensitive fields, credentials, and personal information protected?
+- Are validation and rate limiting appropriate for the operation?
+
+### Reliability and maintainability
+- Are loading, success, empty, and error states represented correctly?
+- Are errors observable without exposing sensitive details?
+- Are logs useful for diagnosing failures?
+- Are types, contracts, and error handling consistent?
+- Could this change break existing flows?
+
+### Technical verification
+Run the relevant linting, type checking, build, unit tests, integration tests, end-to-end tests, and regression tests available in the project.
+
+Inspect browser errors, network requests, API responses, and persisted state when relevant and accessible.
+
+A successful build is necessary when applicable, but it is not proof of end-to-end correctness.
+
+Record what was executed, the actual outcome, and any checks that could not be executed.
+
+## PHASE 3 — Adopt the Internal User / Staff Perspective
+
+Stop acting as the developer. Act as an authorized employee using the actual application to complete work.
+
+Do not assume that staff members understand the underlying technology.
+
+First establish the staff persona from the real application:
+
+- Role and responsibilities.
+- Permissions and access boundaries.
+- Primary tasks and frequency of use.
+- Information available before beginning.
+- Operational constraints and likely interruptions.
+- Consequences of errors.
+- Expected completion state.
+
+Then execute realistic workflows using the interface available to that role.
+
+Evaluate:
+
+### Workflow completeness
+- Can the staff member start and finish the task?
+- Are any necessary steps or prerequisites missing?
+- Can the user find the relevant records and actions?
+- Are list views, filters, search, forms, and status changes useful?
+- Does a completed action update the relevant screens and records consistently?
+
+### Operational efficiency
+- Are there unnecessary steps, repeated data entry, or confusing transitions?
+- Does the interface expose the information needed for the decision?
+- Are success messages and current states clear?
+- Can staff recover from accidental actions or correct mistakes?
+- Are frequent actions easy to access without sacrificing safety?
+
+### Permissions and boundaries
+- Can staff perform the operations allowed by their role?
+- Are restricted operations blocked?
+- Are unauthorized records hidden or inaccessible?
+- Are important actions auditable when required?
+
+### Failure and recovery
+Test incomplete records, invalid inputs, expired sessions, network failures, duplicate submissions, unavailable data, and other relevant edge cases.
+
+Do not stop when the happy path works. Determine whether the employee can understand and recover from meaningful failures.
+
+Use a separate test account with representative staff permissions whenever available.
+
+Never silently grant administrative privileges just to make a test pass.
+
+## PHASE 4 — Adopt the External User / Consumer Perspective
+
+Stop acting as the developer and internal operator. Act as a real customer or end user whose objective is to obtain a product, service, answer, or outcome.
+
+Construct a realistic consumer scenario based on the actual product.
+
+Define:
+
+- What the consumer wants to achieve.
+- What they know before opening the application.
+- Whether they are new, returning, authenticated, or anonymous.
+- What information and permissions they have.
+- What device and interaction conditions matter.
+- What would confuse them or cause them to abandon the task.
+- What successful completion looks like from their point of view.
+
+Evaluate:
+
+### Discoverability and comprehension
+- Can users find the correct entry point?
+- Are labels, instructions, prices, statuses, and requirements understandable?
+- Are calls to action predictable?
+- Are required fields and validation rules clear?
+- Is important information visible before the user commits to an action?
+
+### End-to-end success
+- Can the consumer complete the actual journey?
+- Are authentication, registration, checkout, submission, booking, or other relevant steps functional?
+- Is the result confirmed accurately?
+- Does the application preserve progress where appropriate?
+- Can users revisit or verify the outcome?
+
+### Errors and recovery
+- What happens when users submit incomplete or incorrect information?
+- Can they fix mistakes without losing unnecessary progress?
+- Do errors explain what happened and what to do next?
+- Are double submissions and accidental actions handled safely?
+- What does the user see when a server or network request fails?
+
+### Trust, privacy, and accessibility
+- Is the displayed information consistent with the underlying state?
+- Are privacy-sensitive details protected?
+- Are users asked only for information that is appropriate for the task?
+- Does the interface work at relevant viewport sizes?
+- Can critical flows be completed using keyboard interaction?
+- Are focus, labels, contrast, and accessible status messages appropriate?
+
+Test both successful journeys and realistic customer mistakes.
+
+Use consumer permissions and consumer-facing routes, not staff access disguised as a customer test.
+
+## PHASE 5 — Observe the Product, Not Just the Source Code
+
+Use available tools appropriate to the project:
+
+- Browser automation to navigate actual routes and perform actions.
+- Screenshots to inspect layout, hierarchy, visible content, and responsive behavior.
+- Separate test sessions or accounts for different roles.
+- Network inspection and API assertions to verify requests and responses.
+- Database or application-state checks to verify persisted outcomes in a safe test environment.
+- Logs and console output to investigate failures.
+- Automated tests that reproduce important workflows.
+
+For every important scenario, compare:
+
+1. What the actor intended to do.
+2. What action they took.
+3. What the interface communicated.
+4. What the system actually did.
+5. What data was persisted.
+6. Whether the final state matched the intended outcome.
+
+A screenshot alone does not prove functionality. An API success response alone does not prove usability. Source-code inspection alone does not prove the running application works.
+
+If a required tool or environment is unavailable, perform the checks that are possible and mark the remaining verification as BLOCKED or NOT VERIFIED.
+
+Never fabricate screenshots, logs, test results, browser observations, or execution evidence.
+
+## PHASE 6 — Run Cross-Perspective Consistency Checks
+
+After completing the three reviews, compare their results.
+
+Verify that:
+
+- The permissions implemented by the developer match staff and consumer expectations.
+- The actions visible in the interface correspond to operations actually permitted by the backend.
+- The UI reports the actual persisted state.
+- Business rules are consistent across screens, APIs, and roles.
+- Staff and consumers see the correct information for their respective contexts.
+- Errors and state transitions are understandable in the relevant workflow.
+- Changes to shared components do not create regressions elsewhere.
+
+Explicitly investigate contradictions.
+
+Examples:
+- The UI says a request succeeded, but no record was saved.
+- A button is hidden, but the corresponding unauthorized API operation remains available.
+- Staff sees an item as completed while the consumer sees it as pending.
+- A customer submits a form twice and creates duplicate records.
+- A refactor passes unit tests but breaks the actual browser workflow.
+
+A contradiction is an issue to investigate, not something to resolve by trusting whichever perspective looks more convincing.
+
+## PHASE 7 — Evaluate Findings and Correct Problems
+
+For each finding, record:
+
+- Perspective and affected actor.
+- Reproduction steps.
+- Expected behavior.
+- Actual behavior.
+- Evidence.
+- Severity and impact.
+- Root cause when established.
+- Proposed or implemented fix.
+- Regression tests required.
+
+Use these severity levels:
+
+P0 — Critical: security breach, major data loss, or severe system-wide failure.
+
+P1 — High: essential workflow broken, serious authorization defect, or significant data inconsistency.
+
+P2 — Medium: meaningful usability defect, recoverable functional failure, or important edge case.
+
+P3 — Low: minor visual defect or nonessential improvement.
+
+Severity must reflect actual impact and exposure, not merely how easy the fix is.
+
+Correct P0 and P1 issues before declaring the change complete. Reassess P2 issues according to risk and agreed requirements. Document accepted limitations.
+
+After fixing an issue, rerun its reproducing scenario, affected role-specific scenarios, and relevant regression tests.
+
+Do not accept a fix simply because the modified code looks correct.
+
+## PHASE 8 — Apply an Evidence-Based Evaluation Rubric
+
+Score each applicable dimension from 1 to 5:
+
+1 — Failed.
+2 — Major defects or incomplete workflow.
+3 — Basic functionality works, but meaningful issues remain.
+4 — Meets expectations with minor limitations.
+5 — Robustly meets expectations with relevant testing evidence.
+
+Evaluate these dimensions independently:
+
+- Functional correctness.
+- Workflow completeness.
+- Usability and clarity.
+- Authorization and privacy.
+- Error handling and recoverability.
+- Data and state consistency.
+- Regression safety.
+- Verification quality.
+
+For every score, provide a brief justification and point to the actual test or observation supporting it.
+
+If evidence is insufficient, record NOT VERIFIED instead of inventing a score.
+
+Do not use an average score to override a critical security or functional failure.
+
+## PHASE 9 — Produce a Completion Report
+
+Every completed task must report:
+
+1. What was changed and why.
+2. Developer perspective: checks executed and results.
+3. Staff perspective: workflows executed and results.
+4. Consumer perspective: workflows executed and results.
+5. Issues discovered and corrections made.
+6. Relevant regression testing results.
+7. Remaining risks, blocked checks, and accepted limitations.
+8. Final release recommendation.
+
+Assign each perspective one status:
+
+PASS — Applicable acceptance criteria were met and verified.
+
+FAIL — One or more applicable criteria failed.
+
+BLOCKED — Verification could not be completed because of an external dependency, missing environment, missing permission, or unavailable tool.
+
+NOT APPLICABLE — The perspective genuinely does not apply to the change; explain why.
+
+Do not mark a task COMPLETE merely because code was written.
+
+A task is COMPLETE only when its required acceptance criteria are satisfied, applicable perspectives have sufficient verification evidence, and no unresolved release-blocking defects remain.
+
+## Operating Principle
+
+For every task, ask three different questions:
+
+DEVELOPER: Is the system implemented correctly and safely?
+
+STAFF: Can an authorized employee complete the real operational task efficiently and recover from errors?
+
+CONSUMER: Can the intended user understand and complete their objective with confidence?
+
+Investigate the code, inhabit the role, execute the workflow, inspect the result, and report the evidence.
+
+The goal is not three written opinions. The goal is one verified product that works technically, operationally, and for the person using it.

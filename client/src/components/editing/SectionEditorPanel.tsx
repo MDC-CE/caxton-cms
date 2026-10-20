@@ -81,7 +81,7 @@ import { SearchableMultiSelect } from "@/components/ui/searchable-multi-select";
 import { RichTextArea } from "./RichTextArea";
 import { MarkdownEditorField } from "./MarkdownEditorField";
 import { SectionBindingDialog } from "./SectionBindingDialog";
-import { SectionYamlContentFields } from "./SectionYamlContentFields";
+import { SectionYamlContentFields } from "./SectionYamlContentFields.tsx";
 import { LinkPicker } from "./LinkPicker";
 import { ImageWithStylePicker } from "./ImageWithStylePicker";
 import type { Section, SectionLayout, ImageRegistry } from "@shared/schema";

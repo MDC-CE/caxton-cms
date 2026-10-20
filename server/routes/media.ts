@@ -344,6 +344,7 @@ export function registerMediaRoutes(app: Express): void {
         contentIndex: ci,
         urlLocale,
         forceVariant,
+        versioningManager: site?.versioningManager,
       });
       res.json(subset);
     } catch (err: any) {

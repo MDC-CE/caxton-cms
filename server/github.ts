@@ -2118,6 +2118,8 @@ export async function getRemoteFileContent(
 ): Promise<{
   success: boolean;
   content?: string;
+  /** Raw bytes. Pull must write this — `content` is a UTF-8 view and corrupts images. */
+  buffer?: Buffer;
   sha?: string;
   error?: string;
 }> {
@@ -2164,8 +2166,8 @@ export async function getRemoteFileContent(
             },
           });
           if (dlResponse.ok) {
-            const content = await dlResponse.text();
-            return { success: true, content, sha: data.sha };
+            const buffer = Buffer.from(await dlResponse.arrayBuffer());
+            return { success: true, content: buffer.toString("utf-8"), buffer, sha: data.sha };
           }
         } catch (dlError) {
           log.error({ err: dlError }, 'Error downloading file via download_url:');
@@ -2174,10 +2176,10 @@ export async function getRemoteFileContent(
       return { success: false, error: "No content in response" };
     }
     
-    // GitHub returns content as base64
-    const content = Buffer.from(data.content, 'base64').toString('utf-8');
-    
-    return { success: true, content, sha: data.sha };
+    // GitHub returns content as base64. Keep the raw buffer: images are not UTF-8,
+    // and toString("utf-8") replaces bytes like 0xFF and makes the file unloadable.
+    const buffer = Buffer.from(String(data.content).replace(/\n/g, ""), "base64");
+    return { success: true, content: buffer.toString("utf-8"), buffer, sha: data.sha };
   } catch (error) {
     log.error({ err: error }, 'Error fetching remote file:');
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
@@ -2273,7 +2275,8 @@ export async function pullSingleFile(
     if (fs.existsSync(tmpPath)) {
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
-    fs.writeFileSync(tmpPath, remoteResult.content, 'utf-8');
+    const bytes = remoteResult.buffer ?? Buffer.from(remoteResult.content, "utf-8");
+    fs.writeFileSync(tmpPath, bytes);
     fs.renameSync(tmpPath, fullPath);
     
     // Fetch file-specific commit date from GitHub API for accurate lastmod in sitemap.

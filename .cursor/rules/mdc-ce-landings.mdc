@@ -1,10 +1,10 @@
 ---
-description: Five rules for MDC Continuing Education landings (new variants, dual-edit, gallery images)
+description: Rules for MDC Continuing Education landings, including progressive granularity when assembling a layout
 globs: site_learning-mdc-edu/**
 alwaysApply: true
 ---
 
-# MDC CE landings — five rules
+# MDC CE landings
 
 When building Continuing Education pages for Gabriel / Edwin / Alejandro:
 
@@ -17,3 +17,9 @@ When building Continuing Education pages for Gabriel / Edwin / Alejandro:
 4. **Images from Media Gallery only.** Upload to GCS first. Empty gallery is not done. No invented photos, no leftover grey placeholders.
 
 5. **Spacing and chrome are props** (`paddingY` sm/md/lg, background, button variant, photo frame none/line/glow). After a component is registered, put it on the page via YAML/agent — not only Debug Tools. Guide Gabriel one click at a time. Do not Publish unless asked.
+
+6. **Progressive granularity** when assembling a layout. Sections on one page are sequential modules: cohesive as a story, decoupled as pieces.
+
+   - **Sequential.** A, then B, then C. They do not show the same facts. B starts where A left off, so the page still makes sense in order.
+   - **Each section stands alone.** A visitor who only sees that section understands what it is for. Do not write “as the cards above said”, “not the row you just read”, or any line that only makes sense after another section.
+   - **Finer each time.** The next section goes one step later or one step more specific. It does not restate the previous section at the same level of detail. A promise, then the programs, then the fee and the exam day — not three sections that all say “pick a program”.

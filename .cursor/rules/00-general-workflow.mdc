@@ -1,0 +1,41 @@
+---
+description: Constitución general de trabajo para cualquier tarea en el repositorio Weblify.
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# SISTEMA DE TRABAJO GENERAL (WEBLIFY)
+
+Habla siempre en español (tú, nunca voseo). Opera bajo estas 5 reglas en CUALQUIER tarea (bugs, páginas, backend, UI del editor o componentes):
+
+## 1. REGLAS DE EJECUCIÓN (ESTILO CLAUDE CODE)
+1. **Plan Mode Obligatorio:** Antes de editar código, analiza los archivos involucrados y presenta un plan corto: qué causa el problema o qué se va a construir, qué archivos tocarás y por qué.
+2. **Read First, Write Later:** Lee siempre una implementación existente en el repo antes de escribir código nuevo para respetar las convenciones de `client/`, `server/`, `shared/` y `site_*`.
+3. **Respeto Estricto al Scope:** Resuelve únicamente lo que pide el ticket. Si encuentras bugs o deuda técnica al paso, anótalos al final de tu respuesta, no los edites sin autorización.
+4. **Cero Dependencias Nuevas:** No instales paquetes en `package.json` sin autorización explícita en el plan.
+5. **Regla de Honestidad:** Nunca digas que algo funciona o compila sin haber corrido los scripts de validación correspondientes en la terminal y reportar su salida real.
+
+## 2. MAPA DE TAREAS Y VALIDACIÓN SEGÚN EL TICKET
+Dependiendo de lo que pida la tarea hoy, aplica el cierre correspondiente antes de dar por terminado el ticket:
+
+- **Tipo A — Edición de Páginas / Contenido (`site_*/pages/**/*.yml`, `theme.json`):**
+  - Validar que los colores sean IDs del tema y las secciones respeten su schema.
+  - Correr: `npm run check:sites-yml && npm run check:sites`
+  - Recordar que cambios en `site_*` se empujan también al repo de contenido.
+
+- **Tipo B — Componentes y Variantes (`component-registry/`, `variants/`, `field-editors.ts`):**
+  - Seguir las 5 capas de `01-component-variants.mdc` (TSX, `schema.ts`, `schema.yml`, `field-editors.ts`, `examples/*.yml`).
+  - Correr: `npm run schema:sync && npm run ensure:registry && npm run check && npm run check:section-spacing`
+
+- **Tipo C — Plataforma / Editor Visual / Backend (`client/src/components/editing/`, `server/`, `shared/`):**
+  - Respetar aliases `@/` y `@shared/`.
+  - Correr: `npm run check && npm test` (y `npm run ssr:check` si afecta renderizado).
+
+## 3. VALIDACIÓN EN TRES PERSPECTIVAS
+
+Toda feature, bug fix, refactor o cambio con efecto visible sigue [02-three-perspective-validation.mdc](02-three-perspective-validation.mdc). No se da el ticket por terminado solo porque el código quedó escrito.
+
+- El mapa de impacto (objetivo, actores, riesgos) va dentro del plan corto de la regla 1, antes de editar.
+- Antes de cerrar, recorre desarrollador, personal interno y visitante público. Observa el producto en marcha; no basta con razonar el flujo.
+- El informe de cierre incluye qué se comprobó, con qué evidencia, y el estado PASS, FAIL, BLOCKED o NOT APPLICABLE de cada perspectiva.
+- Un defecto P0 o P1 del cambio en curso se corrige antes de ese informe. Un hallazgo ajeno al ticket se anota al final y no se edita, como dice la regla de scope.

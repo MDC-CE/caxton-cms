@@ -4,6 +4,11 @@
 @import "../../site_learning-mdc-edu/component-registry/hero/hero-auto-video-right.css";
 /* Short intro stays on the left; card photos scroll on the right. */
 @import "../../site_learning-mdc-edu/component-registry/numbered_steps/numbered-steps-sticky-cards.css";
+/* Stacked screens overlap from the tablet breakpoint. */
+@import "../../site_learning-mdc-edu/component-registry/hero/hero-stacked-screens.css";
+/* Service-row photos fill the card half. Browser-card photos fill a fixed frame. */
+@import "../../site_learning-mdc-edu/component-registry/two_column/two-column-service-rows.css";
+@import "../../site_learning-mdc-edu/component-registry/bento_cards/bento-browser-cards.css";
 @import "./components/ui/expand-arrow-button.css";
 
 /* =============================================================================

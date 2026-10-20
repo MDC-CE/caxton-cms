@@ -1,0 +1,82 @@
+---
+description: Reglas estrictas para crear o editar variantes de componentes, YAML, Zod schemas y Props en Weblify.
+globs: ["**/component-registry/**/*", "**/components/**/*", "**/pages/**/*.yml"]
+alwaysApply: false
+---
+
+# CONSTITUCIÓN DE VARIANTES Y PROPS (WEBLIFY)
+
+Cuando la tarea involucre crear o modificar un componente o variante del Page Builder, debes cumplir estrictamente con estas 5 capas y 7 invariantes.
+
+---
+
+## 1. EL MAPA REAL DE UNA VARIANTE (5 ARCHIVOS OBLIGATORIOS)
+
+Nunca crees un `type` nuevo (una tarjeta nueva en *Choose a Component*) si el bloque pertenece a una familia existente (`hero`, `numbered_steps`, etc.). Crea una **variante**.
+
+Toda variante en `site_learning-mdc-edu/component-registry/{type}/` (o en `client/src/components/{type}/` si es global) requiere tocar exactamente estas 5 piezas:
+
+1. **Componente TSX (`variants/{PascalType}{PascalVariant}.tsx`):**
+   - El nombre del archivo define el nombre camelCase de la variante (`NumberedStepsPhotoTimeline.tsx` → `photoTimeline`).
+   - Recibe `{ data }` como `export default`. No existe componente padre con `switch`; `sectionRegistry.ts` lo carga directo.
+   - `site_*/component-registry/{type}/variants/*.tsx` tiene prioridad sobre `client/src/components/{type}/variants/*.tsx`.
+
+2. **Contrato Zod (`v1.0/schema.ts`):**
+   - Define el schema con `variant: z.literal("nombreVariante")`.
+   - **REGLA CRÍTICA DE UNIÓN:** En el `z.union([...])` del componente, coloca SIEMPRE los schemas con `variant: z.literal(...)` **ANTES** del schema default (cuyo `variant` es opcional), o el schema default se tragará la validación.
+
+3. **Definición de Catálogo (`v1.0/schema.yml`):**
+   - Registra la variante bajo `variants:` y declara todas sus propiedades en `variant_props:`.
+
+4. **Controles Visuales del Editor (`v1.0/field-editors.ts`):**
+   - El formulario de `Props` cae en un simple input de texto si no declaras el control especializado aquí con el prefijo de la variante: `"nombreVariante:campo": "control"`.
+
+5. **Preset de Ejemplo (`v1.0/examples/{kebab-variant}.yml`):**
+   - **OBLIGATORIO** para que aparezca en el modal (`Version: v1.0` -> `Example`).
+   - **REGLA CRÍTICA DE PROPS VISIBLES:** `collectVisibleContent` (`sectionContentControls.ts`) solo renderiza en la pestaña `Props` las claves que YA existen en el YAML de la sección. El archivo `.yml` de ejemplo (y cualquier sección insertada en `pages/**/*.yml`) DEBE incluir todas las propiedades editables inicializadas con valores válidos para que el staff user vea todos los controles en la UI.
+
+---
+
+## 2. DICCIONARIO DE CONTROLES (`field-editors.ts`)
+
+Cuando el Team Lead pida que algo sea editable en `Props`, mapea cada propiedad en `v1.0/field-editors.ts` con el prefijo `{variante}:`:
+
+- **Imágenes de galería:** `"variante:image_id": "image-picker"` o en listas `"variante:photos[].image_id": "image-picker"` (o `"image-with-style-picker"`).
+- **Videos:** `"variante:video_url": "video-picker"`.
+- **Íconos (Lucide):** `"variante:steps[].icon": "icon-picker"`, `"variante:cta.icon": "icon-picker"`.
+- **Enlaces / URLs:** `"variante:cta.url": "link-picker"`.
+- **Selectores cerrados (Marcos, Radios, Estilos de botón):**
+  - `"variante:frame": "string-picker:none,line,glow"`
+  - `"variante:radius": "string-picker:none,sm,md,lg,full"`
+  - `"variante:button_style": "string-picker:solid,outline,ghost"`
+  - `"variante:cta.variant": "string-picker:primary,secondary,outline"`
+- **Textos de una línea forzados:** `"variante:cta.text": "text-input"`.
+- **Textos ricos / Markdown:** `"rich-text-editor"` o `"markdown"`.
+- **Toggles booleanos:** `"boolean-toggle"`.
+- **Colores de tema:** `"color-picker"` (accent), `"color-picker:background"`, `"color-picker:text"`, `"color-picker:courses"`.
+- **Listas y Grupos:** Los arrays (`steps[]`, `photos[]`) y objetos (`cta`) se arman solos desde la estructura del YAML, pero sus subcampos especiales llevan notación `array[].campo` o `objeto.campo`.
+
+---
+
+## 3. LOS 7 INVARIANTES (LO QUE NUNCA SE ROMPE)
+
+1. **Prohibido `py-*` o `my-*` / `mb-*` en la raíz del `.tsx`:** El wrapper (`SectionRenderer.tsx`) es dueño del espaciado vertical vía `paddingY` (`--section-pt`, `--section-pb`) y del `background`. Poner padding/margin vertical en el nodo raíz rompe el pre-commit (`check:section-spacing`).
+2. **Colores 100% del Tema (Cero Warning en Color Picker):** Prohibido usar `"white"`, `"black"`, hexadecimales o clases `bg-*` en la propiedad `background` del YAML. Usa exclusivamente IDs válidos de `SHARED_BASE_PALETTE` o `theme.json` (`background`, `muted`, `card`, `primary`, `secondary`, `accent`, `light-blue-5`, `light-blue-5-gradient`, `hero-orbit-gradient`).
+3. **Marcos y Radios Estándar:** Para `frame` (`none`, `line`, `glow`) y `radius` (`none`, `sm`, `md`, `lg`, `full`), usa los helpers existentes como `client/src/lib/photoFrame.ts` y `ceButtonUiVariant` para botones, manteniendo consistencia con el resto del sitio.
+4. **Cero Hardcoding en JSX:** Todo texto (eyebrow, title, subtitle, text, image_alt, cta), ícono, imagen (`image_id`), tiempo de rotación y opción de marco/estilo debe leerse de `data` y tener valor inicial en el `.yml`.
+5. **CSS Extra:** Si Tailwind no puede expresar algo, el archivo `.css` vive junto al componente y su `@import` va al inicio de `client/src/index.css`.
+6. **Bug conocido del Modal (`Version: variants`):** La carpeta `variants/` aparece por error en el selector `Version` del modal porque empieza con `v`. Nunca guardes `.yml` dentro de `variants/`. Los ejemplos van siempre en `v1.0/examples/`.
+7. **Sincronización de Repo de Contenido:** Si se tocan archivos bajo `site_*`, recuerda la regla `site-content-github.mdc`.
+
+---
+
+## 4. FLUJO DE CIERRE Y AUDITORÍA
+
+Al terminar cualquier variante o modificación de componente, corre en terminal:
+1. `npm run schema:sync`
+2. `npm run ensure:registry`
+3. `npm run check`
+4. `npm run check:registry && npm run check:sites-yml && npm run check:section-spacing`
+
+Entrega siempre al finalizar esta **Tabla de Auditoría de Simetría**:
+| Propiedad | Inicializada en `.yml` | En `schema.ts` / `schema.yml` | Control en `field-editors.ts` | Usada en `.tsx` |

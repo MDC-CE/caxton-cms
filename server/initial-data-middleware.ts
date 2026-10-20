@@ -35,6 +35,7 @@ import {
   isEmptyDetachedLocaleEntry,
 } from "./empty-locale";
 import {
+  appendCatalogOfferingImages,
   buildPageImageRegistrySubset,
   createEmptyImageRefs,
   extractImageRefsFromValue,
@@ -901,6 +902,7 @@ export async function resolveInitialData(
     const subset = buildPageImageRegistrySubset(registry as any, pageData, menuDatas, {
       variables: variablesQuery.data,
     });
+    appendCatalogOfferingImages(registry as any, subset, pageData, ci.contentRoot);
     queries.push({
       queryKey: ["/api/image-registry"],
       data: subset,

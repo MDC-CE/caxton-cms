@@ -16,7 +16,7 @@ import { LinkPicker } from "@/components/editing/LinkPicker";
 import {
   collectVisibleContent,
   type ContentControl,
-} from "@/components/editing/sectionYamlContentFields";
+} from "@/components/editing/sectionContentControls";
 
 interface SectionYamlContentFieldsProps {
   section: Record<string, unknown> | null;

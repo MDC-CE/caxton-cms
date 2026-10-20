@@ -231,6 +231,11 @@ export function buildVisitorImageRegistrySubset(opts: {
   urlLocale?: string;
   /** Staff preview of a named version (e.g. unpublished `draft`). */
   forceVariant?: string;
+  /**
+   * Site page loader. The process-wide manager can still be holding an older
+   * copy of the draft, which drops hover images from the public catalog.
+   */
+  versioningManager?: { getVariantContent: (contentType: string, slug: string, variantSlug: string, locale: string) => unknown };
 }): ImageRegistryLike {
   const {
     fullRegistry,
@@ -244,7 +249,7 @@ export function buildVisitorImageRegistrySubset(opts: {
   } = opts;
 
   let pageData: unknown = null;
-  const versioningManager = getVersioningManager();
+  const versioningManager = opts.versioningManager ?? getVersioningManager();
 
   if (forceVariant) {
     const forced = versioningManager.getVariantContent(contentType, slug, forceVariant, locale);
@@ -316,5 +321,46 @@ export function buildVisitorImageRegistrySubset(opts: {
 
   const variables = getVariableManager(contentRoot).getDefinitions();
 
-  return buildPageImageRegistrySubset(fullRegistry, pageData, menuDatas, { variables });
+  const subset = buildPageImageRegistrySubset(fullRegistry, pageData, menuDatas, { variables });
+  appendCatalogOfferingImages(fullRegistry, subset, pageData, contentRoot);
+  return subset;
+}
+
+/**
+ * Course cards read photos from data/ce-offerings.json, not from the page YAML.
+ * Those ids still appear on the public page, so the visitor subset has to include them
+ * or the editor draws them as missing.
+ */
+export function appendCatalogOfferingImages(
+  fullRegistry: ImageRegistryLike,
+  subset: ImageRegistryLike,
+  pageData: unknown,
+  contentRoot: string,
+): void {
+  const sections = (pageData as { sections?: Array<Record<string, unknown>> } | null)?.sections;
+  if (!Array.isArray(sections)) return;
+  const usesCatalog = sections.some(
+    (section) =>
+      section?.type === "programs_showcase" &&
+      typeof section.filter_by === "string" &&
+      section.filter_by.trim() &&
+      section.use_manual_tabs !== true,
+  );
+  if (!usesCatalog) return;
+
+  const file = path.join(contentRoot, "data", "ce-offerings.json");
+  if (!fs.existsSync(file)) return;
+  let offerings: Array<{ image_id?: string }> = [];
+  try {
+    const payload = JSON.parse(fs.readFileSync(file, "utf8")) as { offerings?: Array<{ image_id?: string }> };
+    offerings = Array.isArray(payload.offerings) ? payload.offerings : [];
+  } catch {
+    return;
+  }
+  for (const row of offerings) {
+    const id = row.image_id?.trim();
+    if (id && fullRegistry.images[id] && !subset.images[id]) {
+      subset.images[id] = fullRegistry.images[id];
+    }
+  }
 }

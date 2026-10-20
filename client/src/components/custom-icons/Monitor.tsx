@@ -19,6 +19,8 @@ export default function Monitor({
       height={height || "75"}
       viewBox="0 0 225 208"
       fill="none"
+      className={className}
+      style={style}
       xmlns="http://www.w3.org/2000/svg"
     >
       <rect
