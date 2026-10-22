@@ -352,6 +352,11 @@ export function useSession(): SessionContextValue {
   return context;
 }
 
+/** Same as useSession, but returns null outside a provider (HMR / rare mount races). */
+export function useSessionOptional(): SessionContextValue | null {
+  return useContext(SessionContext);
+}
+
 export function useLocation(): Location | null {
   const { session } = useSession();
   return session.location;

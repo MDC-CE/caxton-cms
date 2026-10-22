@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSession } from "@/contexts/SessionContext";
+import { useSession, useSessionOptional } from "@/contexts/SessionContext";
 import {
   resolveDeep,
   resolveTemplateString,
@@ -16,11 +16,14 @@ export function useVariableDefinitions() {
 }
 
 export function useVariableContext(): VariableContext {
-  const { session } = useSession();
+  // Soft-fallback: Vite HMR can briefly remount Page outside SessionProvider.
+  // Variable resolution must not blank the public page.
+  const ctx = useSessionOptional();
+  const session = ctx?.session;
   return {
-    location: session.location?.slug,
-    region: session.location?.region,
-    locale: session.language,
+    location: session?.location?.slug,
+    region: session?.location?.region,
+    locale: session?.language ?? "en",
   };
 }
 

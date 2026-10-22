@@ -295,9 +295,11 @@ export {
   modalSectionSchema,
   modalDefaultSectionSchema,
   modalTwoColumnSectionSchema,
+  modalSurveySectionSchema,
   type ModalSection,
   type ModalDefaultSection,
   type ModalTwoColumnSection,
+  type ModalSurveySection,
 } from "../site_learning-mdc-edu/component-registry/modal/v1.0/schema";
 
 // mosaic_hero
