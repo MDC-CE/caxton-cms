@@ -169,10 +169,11 @@ Key paths: bare key for top-level (`layout`), `"items[].icon"` for array childre
 ## 4. Verify
 
 1. `npm run schema:sync -- --component=<type>` (then fill `best_for` / `avoid_when` / `content_shape` if sync left gaps). `npm run ensure:schema-yml` also runs on `predev` / `prebuild`.
-2. `npm run build` (its `prebuild` runs `check:section-spacing`); related vitest (`npx vitest run <path>`).
-3. Ask the user to check the example in the running app (`npm run dev`); do not start the dev server yourself.
-4. MCP, when the server runs the new code: `create_component_section_demo` for a demo page; `review_page_render` needs a public `SITE_URL`.
-5. Site-registry files (`site_*`) must be pushed to the content repo with a commit SHA (`.cursor/rules/site-content-github.mdc`). Shared-registry and TSX files are app-repo changes (commit only when asked).
+2. **Dual edit:** every visible prop has a `field-editors.ts` control (or Props fallback). Confirm with `contentGaps` — extend `client/src/components/editing/sectionYamlContentFields.test.ts` to include a page/example that uses the new variant; expect zero gaps. Staff must be able to change the same keys from Props and from YAML.
+3. `npm run build` (its `prebuild` runs `check:section-spacing`); related vitest (`npx vitest run <path>`).
+4. Ask the user to check the example in the running app (`npm run dev`); do not start the dev server yourself. Spot-check: edit one string and one image in Props, confirm the YAML updates.
+5. MCP, when the server runs the new code: `create_component_section_demo` for a demo page; `review_page_render` needs a public `SITE_URL`.
+6. Site-registry files (`site_*`) must be pushed to the content repo with a commit SHA (`.cursor/rules/site-content-github.mdc`). Shared-registry and TSX files are app-repo changes (commit only when asked).
 
 ---
 

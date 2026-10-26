@@ -9,6 +9,7 @@ alwaysApply: true
 When building Continuing Education pages for Gabriel / Edwin / Alejandro:
 
 1. **Dual edit.** Every visible piece is editable in the CMS Props panel **and** in YAML/schema. Do not hardcode copy, images, CTAs, colors, or spacing in React. A card is its own piece: photo, photo description, step label, title, subtitle, paragraph, button text, button link, and button color (`button_style`: solid / outline / ghost) each live as keys on that card in the section YAML, so staff can change them in Props without a developer. If a card shows it, the key is in the YAML even when the subtitle is blank.
+   - **Gate before done:** every prop in `schema.ts` that the variant renders has a matching `field-editors.ts` entry (or is covered by the Props fallback via `contentGaps`). Run / extend `client/src/components/editing/sectionYamlContentFields.test.ts` for pages that use the new variant. Saving in Props must rewrite the same YAML keys staff would edit by hand.
 
 2. **Visitor first.** Public visitors should think less, act more. Short copy, one job per section. Build from mockup blocks that have a check — never X-blocks. Do not use the “Your next start date is weeks away” hero. Do **not** replace production `/en/home`; add a new landing.
 

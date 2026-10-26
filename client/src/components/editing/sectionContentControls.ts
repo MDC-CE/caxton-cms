@@ -123,6 +123,19 @@ function nestedArrayIsConfigured(
   return Object.keys(configured).some((path) => path.startsWith(needle));
 }
 
+/** True when field-editors already cover nested keys (e.g. rows[].button.url → skip whole button). */
+function objectKeyIsConfigured(
+  arrayPath: string,
+  childKey: string,
+  configured: Record<string, string>,
+): boolean {
+  const exact = `${arrayPath}[].${childKey}`;
+  const nested = `${arrayPath}[].${childKey}.`;
+  return Object.keys(configured).some(
+    (path) => path === exact || path.startsWith(nested),
+  );
+}
+
 function isDuplicatePhotoKey(key: string, source: Record<string, unknown>): boolean {
   if (key === "id" && ("image_id" in source || "src" in source)) return true;
   if (key === "alt" && "image_alt" in source) return true;
@@ -252,6 +265,7 @@ function walkArray(
         continue;
       }
       if (child && typeof child === "object") {
+        if (objectKeyIsConfigured(arrayPath, key, configured)) continue;
         const nested = walkObject(child as Record<string, unknown>, key, configured, grouped);
         if (nested.length) {
           fields.push({ kind: "group", path: key, label: humanLabel(key), fields: nested });

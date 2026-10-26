@@ -64,6 +64,29 @@ describe("extractImageRefsFromValue — Logo runtime fallbacks", () => {
     expect(refs.ids.has("graduates_team_1")).toBe(true);
     expect(refs.ids.has("graduates_coding")).toBe(true);
   });
+
+  it("collects blogHero / simpleTwoColumn image.src registry ids", () => {
+    const refs = createEmptyImageRefs();
+    extractImageRefsFromValue(
+      {
+        sections: [
+          {
+            type: "hero",
+            variant: "blogHero",
+            image: { src: "ce-step-choose", alt: "Advisor and student" },
+          },
+          {
+            type: "hero",
+            variant: "simpleTwoColumn",
+            image: "ce-hero-evening",
+          },
+        ],
+      },
+      refs,
+    );
+    expect(refs.ids.has("ce-step-choose")).toBe(true);
+    expect(refs.ids.has("ce-hero-evening")).toBe(true);
+  });
 });
 
 describe("extractBrandLogoRefsFromVariables", () => {

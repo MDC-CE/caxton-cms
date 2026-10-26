@@ -24,6 +24,16 @@ const IMAGE_URL_PATTERN = /\.(png|jpe?g|webp|avif|gif|svg)(\?|$)/i;
 /** Matches snake_case `image_id` / `*_image_id` and camelCase `imageId` / `imageIdDark`. */
 const IMAGE_ID_KEY_PATTERN = /(?:^|_)image_id$|^imageId$|^imageIdDark$/;
 
+/** True when `src` is a URL/path rather than a Media Gallery registry id. */
+function isDirectImageRef(src: string): boolean {
+  return (
+    src.startsWith("/") ||
+    src.startsWith("http://") ||
+    src.startsWith("https://") ||
+    src.startsWith("data:")
+  );
+}
+
 export interface ImageRefs {
   ids: Map<string, string | undefined>;
   directUrls: Set<string>;
@@ -72,6 +82,22 @@ export function extractImageRefsFromValue(
     if (typeof img.id === "string") {
       const preset = typeof img.preset === "string" ? img.preset : undefined;
       addId(refs, img.id, preset);
+    }
+    // blogHero / simpleTwoColumn: { src: "<registry-id>", alt }
+    if (typeof img.src === "string") {
+      const src = img.src.trim();
+      if (src && !src.includes("{{") && !isDirectImageRef(src)) {
+        const preset = typeof img.preset === "string" ? img.preset : undefined;
+        addId(refs, src, preset);
+      }
+    }
+  }
+
+  // Bare registry id: image: "ce-hero-evening"
+  if (typeof obj.image === "string") {
+    const src = obj.image.trim();
+    if (src && !src.includes("{{") && !isDirectImageRef(src)) {
+      addId(refs, src);
     }
   }
 

@@ -13,6 +13,10 @@ import { fieldEditors as stepsEditors } from "../../../../site_learning-mdc-edu/
 import { fieldEditors as graduatesEditors } from "../../../../site_learning-mdc-edu/component-registry/graduates_stats/v1.0/field-editors";
 import { fieldEditors as ctaEditors } from "../../../../site_learning-mdc-edu/component-registry/cta_banner/v1.0/field-editors";
 import { fieldEditors as modalEditors } from "../../../../site_learning-mdc-edu/component-registry/modal/v1.0/field-editors";
+import { fieldEditors as faqEditors } from "../../../../site_learning-mdc-edu/component-registry/faq/v1.0/field-editors";
+import { fieldEditors as heroEditors } from "../../../../site_learning-mdc-edu/component-registry/hero/v1.0/field-editors";
+import { fieldEditors as breadcrumbEditors } from "../../../../site_learning-mdc-edu/component-registry/breadcrumb/v1.0/field-editors";
+import { fieldEditors as articleEditors } from "../../../../site_learning-mdc-edu/component-registry/article/v1.0/field-editors";
 
 const photoTimeline = {
   type: "numbered_steps",
@@ -60,6 +64,10 @@ const editorsByType: Record<string, Record<string, string>> = {
   graduates_stats: graduatesEditors,
   cta_banner: ctaEditors,
   modal: modalEditors,
+  faq: faqEditors,
+  hero: heroEditors,
+  breadcrumb: breadcrumbEditors,
+  article: articleEditors,
 };
 
 function editorsForVariant(type: string, variant: string) {
@@ -111,14 +119,64 @@ describe("collectVisibleContent", () => {
 
   it("gives every saved field on the home draft a Props control", () => {
     const gaps: string[] = [];
-    for (const name of ["draft.es.yml", "draft.en.yml"]) {
+    for (const name of ["draft.es.yml", "draft.en.yml", "your-path.en.yml", "your-path.es.yml"]) {
       const file = path.resolve(process.cwd(), "site_learning-mdc-edu/pages/home", name);
+      if (!fs.existsSync(file)) continue;
       const doc = yaml.load(fs.readFileSync(file, "utf8")) as { sections: Record<string, unknown>[] };
       for (const section of doc.sections) {
         const type = String(section.type);
         const variant = String(section.variant || "default");
         const missing = contentGaps(section, editorsForVariant(type, variant));
         if (missing.length) gaps.push(`${name} ${type}/${variant}: ${missing.join(", ")}`);
+      }
+    }
+    expect(gaps).toEqual([]);
+  });
+
+  it("does not duplicate button as free-text when rows[].button.* editors exist", () => {
+    const section = {
+      type: "two_column",
+      variant: "serviceRows",
+      rows: [
+        {
+          title: "The fear is real",
+          text: "Short body",
+          image_id: "ce-step-listen",
+          button: {
+            text: "Find your ESOL path",
+            url: "#esol-quiz",
+            variant: "outline",
+          },
+        },
+      ],
+    };
+    const configured = editorsForVariant("two_column", "serviceRows");
+    const fields = collectVisibleContent(section, configured);
+    const dump = JSON.stringify(fields);
+    expect(dump).not.toContain('"path":"button"');
+    expect(dump).not.toContain('"path":"button.variant"');
+    expect(contentGaps(section, configured)).toEqual([]);
+  });
+
+  it("gives every saved field on ESOL persona, Your Path, and blog template a Props control", () => {
+    const gaps: string[] = [];
+    const files = [
+      "site_learning-mdc-edu/pages/esol-new-arrival-job-seeker/en.yml",
+      "site_learning-mdc-edu/pages/esol-new-arrival-job-seeker/es.yml",
+      "site_learning-mdc-edu/pages/home/your-path.en.yml",
+      "site_learning-mdc-edu/pages/home/your-path.es.yml",
+      "site_learning-mdc-edu/blog/template.en.yml",
+      "site_learning-mdc-edu/blog/template.es.yml",
+    ];
+    for (const rel of files) {
+      const file = path.resolve(process.cwd(), rel);
+      if (!fs.existsSync(file)) continue;
+      const doc = yaml.load(fs.readFileSync(file, "utf8")) as { sections: Record<string, unknown>[] };
+      for (const section of doc.sections ?? []) {
+        const type = String(section.type);
+        const variant = String(section.variant || "default");
+        const missing = contentGaps(section, editorsForVariant(type, variant));
+        if (missing.length) gaps.push(`${rel} ${type}/${variant}: ${missing.join(", ")}`);
       }
     }
     expect(gaps).toEqual([]);

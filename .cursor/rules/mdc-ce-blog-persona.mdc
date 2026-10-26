@@ -1,0 +1,47 @@
+---
+description: MDC CE blog + persona-leading posts and landings (TOFU/MOFU, structure, CTA)
+globs: site_learning-mdc-edu/blog/**,site_learning-mdc-edu/pages/esol*/**
+alwaysApply: false
+---
+
+# MDC CE blog and persona-leading
+
+Adapted from the team’s blog brief for Continuing Education (Gabriel / Edwin / Alejandro). Use with [mdc-ce-landings.mdc](mdc-ce-landings.mdc).
+
+## What the blog is for here
+
+- Bidirectional communication — not a static “About” page. Posts educate, answer doubts, invite share/comment when those surfaces exist.
+- **TOFU / MOFU:** teach the reader, speak to one persona’s fear and goal, guide organically to a next step (quiz, related article, ce.mdc.edu). No hard sell in the first screen.
+- Persona landings (`pages/esol-*`) and blog posts share the same voice: one real person, one problem, one clear next action.
+
+## Surfaces (this product)
+
+| Piece | Where it lives |
+| --- | --- |
+| Site header / footer | Site chrome (not per-post YAML) |
+| Blog feed | Blog listing pages |
+| Blog post | `blog/<slug>/` + shared `blog/template.en.yml` / `template.es.yml` |
+| Sidebar | Optional — only if the design system already has it; do not invent |
+| Comments | Only if the platform already supports them |
+| Post CTA | `entry.call_to_action` bound in the template — per-entry copy, not hardcoded ESOL quiz chrome on every post |
+| Persona quiz | On persona landings (`#esol-quiz` modal), not jammed into the shared blog template |
+
+## What a good article / persona page must carry
+
+1. **Magnetic title** — clear, curiosity or pain, not jargon.
+2. **Intro that names the pain** — first paragraphs = persona-leading; say what they will learn.
+3. **Hierarchy** — H2/H3 (or card titles) so scanners can move; short paragraphs (≤3–4 lines).
+4. **Visual support** — Media Gallery images only; cover on `blogHero`; serviceRows/mosaic photos with real alts.
+5. **Local authority** — Miami-Dade / MDC facts when true; never invent fees, dates, or wages.
+6. **Natural CTA** — quiz, related post, or ce.mdc.edu. Soft close. Reading the page does not enroll anyone.
+
+## Attractiveness checklist
+
+- Write for one persona (fears, objections, goals), not for the institution’s ego.
+- Bullets, bold key phrases, white space; conversational tone.
+- Responsive and fast — no layout that clips titles (`line-clamp` only when design requires it).
+- Interactivity where it fits: path quiz on persona landings; blog stays readable with entry CTAs.
+
+## Progressive story (landings)
+
+Same progressive granularity as landings: each card/section one job, next card one step more specific — fear → placement → schedule → enroll order → soft CTA — without restating the same level of detail.

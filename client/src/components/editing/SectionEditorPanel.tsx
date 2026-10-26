@@ -4625,6 +4625,14 @@ export function SectionEditorPanel({
                   url: "URL",
                   logo_height: "Altura del logo (px)",
                   "media.url": "Video / Media URL",
+                  "button.text": "Button text",
+                  "button.url": "Button URL",
+                  "button.variant": "Button style",
+                  "button.button_variant": "Fill color (Filled style)",
+                  "button.text_color": "Button text color",
+                  image_id: "Photo",
+                  image_alt: "Photo description",
+                  text: "Body",
                 };
 
                 const hiddenFields = new Set([
@@ -5042,8 +5050,14 @@ export function SectionEditorPanel({
 
                                     if (
                                       configuredField.editorType ===
-                                      "plain-text"
+                                        "plain-text" ||
+                                      configuredField.editorType ===
+                                        "text-input"
                                     ) {
+                                      const useArea =
+                                        fieldKey === "text" ||
+                                        fieldKey.endsWith(".text") ||
+                                        currentValue.length > 80;
                                       return (
                                         <div
                                           key={fieldKey}
@@ -5052,18 +5066,100 @@ export function SectionEditorPanel({
                                           <Label className="text-xs text-muted-foreground">
                                             {label}
                                           </Label>
-                                          <Input
-                                            value={currentValue}
-                                            onChange={(e) =>
+                                          {useArea ? (
+                                            <Textarea
+                                              value={currentValue}
+                                              onChange={(e) =>
+                                                updateNestedField(
+                                                  index,
+                                                  fieldKey,
+                                                  e.target.value,
+                                                )
+                                              }
+                                              rows={3}
+                                              className="text-sm resize-none"
+                                              data-testid={`props-grouped-text-${fieldKey}-${index}`}
+                                            />
+                                          ) : (
+                                            <Input
+                                              value={currentValue}
+                                              onChange={(e) =>
+                                                updateNestedField(
+                                                  index,
+                                                  fieldKey,
+                                                  e.target.value,
+                                                )
+                                              }
+                                              className="h-8 text-sm"
+                                              data-testid={`props-grouped-text-${fieldKey}-${index}`}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                    if (
+                                      configuredField.editorType ===
+                                      "string-picker"
+                                    ) {
+                                      const options = (
+                                        configuredField.variant || ""
+                                      )
+                                        .split(",")
+                                        .map((o) => o.trim())
+                                        .filter(Boolean);
+                                      const optionLabel = (opt: string) => {
+                                        if (
+                                          fieldKey === "button.variant" ||
+                                          fieldKey === "variant"
+                                        ) {
+                                          if (opt === "primary")
+                                            return "Filled";
+                                          if (opt === "secondary")
+                                            return "Secondary";
+                                          if (opt === "outline")
+                                            return "Outline";
+                                        }
+                                        return opt;
+                                      };
+                                      return (
+                                        <div
+                                          key={fieldKey}
+                                          className="space-y-1"
+                                        >
+                                          <Label className="text-xs text-muted-foreground">
+                                            {label}
+                                          </Label>
+                                          <Select
+                                            value={
+                                              options.includes(currentValue)
+                                                ? currentValue
+                                                : undefined
+                                            }
+                                            onValueChange={(v) =>
                                               updateNestedField(
                                                 index,
                                                 fieldKey,
-                                                e.target.value,
+                                                v,
                                               )
                                             }
-                                            className="h-8 text-sm"
-                                            data-testid={`props-grouped-text-${fieldKey}-${index}`}
-                                          />
+                                          >
+                                            <SelectTrigger
+                                              className="h-8 text-sm"
+                                              data-testid={`props-grouped-string-${fieldKey}-${index}`}
+                                            >
+                                              <SelectValue placeholder="Choose style…" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              {options.map((opt) => (
+                                                <SelectItem
+                                                  key={opt}
+                                                  value={opt}
+                                                >
+                                                  {optionLabel(opt)}
+                                                </SelectItem>
+                                              ))}
+                                            </SelectContent>
+                                          </Select>
                                         </div>
                                       );
                                     }
