@@ -47,10 +47,12 @@ export function parseRoute(
 
   const resolved = ci.resolveUrl(cleanUrl);
   if (resolved && !resolved.fromDatabase) {
-    let locale = cleanUrl.match(/^\/(es)\b/) ? "es" : "en";
+    const urlLocale = cleanUrl.match(/^\/([a-z]{2,3})(?=\/|$)/)?.[1];
+    const urlHasLocale = !!urlLocale && supportedLocales.includes(urlLocale);
+    let locale = urlHasLocale ? (urlLocale as string) : "en";
     if (resolved.params?.locale) {
       locale = resolved.params.locale;
-    } else if (!cleanUrl.match(/^\/(en|es)\b/)) {
+    } else if (!urlHasLocale) {
       const commonData = ci.loadCommonData(resolved.contentType, resolved.slug);
       if (commonData?.locale && typeof commonData.locale === "string") {
         locale = commonData.locale;

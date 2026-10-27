@@ -16,7 +16,7 @@ import { loadImageRegistry } from "./image-registry";
 import { getMergedImageRegistry } from "./image-registry-resolver";
 import type { SiteContext } from "./site-manager";
 import { readNavigationEagerManifest } from "./navigation-eager-manifest";
-import { getDefaultLocale, normalizeLocale, resolveEffectiveRobots } from "./settings";
+import { getDefaultLocale, getSupportedLocales, normalizeLocale, resolveEffectiveRobots } from "./settings";
 import { getApiPath } from "../shared/api-paths";
 import { toOgLocale } from "../shared/locale";
 import { attachVariableFieldsToSections } from "./database-single-loader";
@@ -232,10 +232,12 @@ export async function resolvePageQuery(
     }
 
     const apiPath = getApiPath(contentType);
-    let locale = cleanUrl.match(/^\/(es)\b/) ? "es" : "en";
+    const urlLocale = cleanUrl.match(/^\/([a-z]{2,3})(?=\/|$)/)?.[1];
+    const urlHasLocale = !!urlLocale && getSupportedLocales().includes(urlLocale);
+    let locale = urlHasLocale ? (urlLocale as string) : "en";
     if (resolved.params?.locale) {
       locale = resolved.params.locale;
-    } else if (!cleanUrl.match(/^\/(en|es)\b/)) {
+    } else if (!urlHasLocale) {
       const commonData = ci.loadCommonData(contentType, slug);
       if (commonData?.locale && typeof commonData.locale === "string") {
         locale = commonData.locale;
