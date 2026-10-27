@@ -8,6 +8,7 @@ import {
   SINGLE_LOCALE_CREATE_ERROR,
 } from "./content-editor";
 import { resetRegistry } from "./content-types";
+import { getSupportedLocales } from "./settings";
 import { isDraftEntry, rejectLiveWriteIfDraft } from "./draft-entry";
 
 const ORIGINAL_CWD = process.cwd();
@@ -67,7 +68,7 @@ describe("single-locale create (all types)", () => {
       type: "blog",
       title: "Test Post",
       slugEn: "test-post",
-      skipLocales: ["en", "es"],
+      skipLocales: getSupportedLocales(),
       contentRootName: rootName,
     });
     expect(result.success).toBe(false);
@@ -83,7 +84,7 @@ describe("shared-template create starts as a draft", () => {
       type: "blog",
       title: "Draft Post",
       slugEn: "draft-post",
-      skipLocales: ["es"],
+      skipLocales: getSupportedLocales().filter((l) => l !== "en"),
       contentRootName: rootName,
     });
     expect(result.success).toBe(true);

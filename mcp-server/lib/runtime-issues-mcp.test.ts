@@ -6,7 +6,8 @@ import {
   type RuntimeIssueMcpRow,
 } from "./runtime-issues-mcp.js";
 
-const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+// Rows must sit inside the 30-day window the query uses (it reads the real clock).
+const now = Date.now();
 
 function row(
   overrides: Partial<RuntimeIssueMcpRow> & { fingerprint: string; path: string },
