@@ -111,6 +111,8 @@ export default function Footer({ menuId = "main-footer" }: FooterProps) {
               <img src={logoSrc} alt="4Geeks Academy" className="h-9" />
             )}
           </a>
+          {/* Without social links the "Subscribe" label points at nothing, so hide the whole block. */}
+          {config.socials?.length ? (
           <div>
             <p className="text-center mb-1">
               {config.subscribe_text || "Subscribe for more"}
@@ -138,6 +140,7 @@ export default function Footer({ menuId = "main-footer" }: FooterProps) {
               })}
             </div>
           </div>
+          ) : null}
         </div>
         <div className="flex flex-col md:flex md:flex-row md:justify-between gap-8 md:gap-4">
           {config.columns?.map((column) => {
