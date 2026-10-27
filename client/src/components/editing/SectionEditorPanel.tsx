@@ -259,6 +259,12 @@ function buildOriginalTemplatePaths(
   return originalPaths;
 }
 import { usePageHistoryOptional } from "@/contexts/PageHistoryContext";
+import {
+  buttonLookOptions,
+  friendlyFieldLabel,
+  friendlyOptionLabel,
+  parseStringPickerOptions,
+} from "@/components/editing/propsLabels";
 import { useImagePickerContext } from "@/contexts/ImagePickerContext";
 import type { ImagePickerTarget } from "@/contexts/ImagePickerContext";
 import {
@@ -275,7 +281,24 @@ const POSITIONAL_LABELS: Record<string, string> = {
 };
 const ACRONYMS = new Set(["url", "cta", "id", "api", "seo"]);
 
-function getFieldLabel(fieldPath: string): string {
+const BUTTON_SAMPLE_FIELD_LABELS: Record<string, string> = {
+  title: "Título",
+  button_text: "Texto del botón",
+  button_url: "Enlace del botón",
+  button_style: "Estilo del botón",
+};
+
+const BUTTON_SAMPLE_STYLE_LABELS: Record<string, string> = {
+  filled: "Con relleno",
+  outline: "Sin relleno",
+};
+
+function getFieldLabel(fieldPath: string, sectionType?: string): string {
+  if (sectionType === "button_sample" && BUTTON_SAMPLE_FIELD_LABELS[fieldPath]) {
+    return BUTTON_SAMPLE_FIELD_LABELS[fieldPath];
+  }
+  const friendly = friendlyFieldLabel(fieldPath);
+  if (friendly) return friendly;
   const segments = fieldPath.split(".");
   const filtered = segments.filter(
     (s) => !TECHNICAL_SUFFIXES.has(s.toLowerCase()),
@@ -5893,7 +5916,7 @@ export function SectionEditorPanel({
                   };
 
                   const currentValue = getSimpleLinkValue();
-                  const fieldLabel = getFieldLabel(fieldPath);
+                  const fieldLabel = getFieldLabel(fieldPath, sectionType);
 
                   return (
                     <div key={fieldPath} className="space-y-2">
@@ -6482,7 +6505,7 @@ export function SectionEditorPanel({
                     return typeof current === "string" ? current : "";
                   };
                   const currentValue = getSimpleStringValue();
-                  const fieldLabel = getFieldLabel(fieldPath);
+                  const fieldLabel = getFieldLabel(fieldPath, sectionType);
                   return (
                     <div key={fieldPath} className="space-y-2">
                       <Label className="text-sm font-medium">{fieldLabel}</Label>
@@ -6531,7 +6554,8 @@ export function SectionEditorPanel({
                 }
 
                 if (isSimpleField && editorType === "string-picker") {
-                  const options = variant ? variant.split(",") : [];
+                  const parsedOptions = variant ? parseStringPickerOptions(variant) : [];
+                  const options = parsedOptions.map((o) => o.value);
                   const getSimpleStringValue = () => {
                     if (!parsedSection) return "";
                     const pathParts = fieldPath.split(".");
@@ -6543,7 +6567,11 @@ export function SectionEditorPanel({
                     return typeof current === "string" ? current : "";
                   };
                   const currentValue = getSimpleStringValue();
-                  const fieldLabel = getFieldLabel(fieldPath);
+                  const fieldLabel = getFieldLabel(fieldPath, sectionType);
+                  const optionLabel = (opt: string) =>
+                    sectionType === "button_sample" && fieldPath === "button_style"
+                      ? BUTTON_SAMPLE_STYLE_LABELS[opt] ?? opt
+                      : friendlyOptionLabel(fieldPath, opt, parsedOptions.find((o) => o.value === opt)?.label);
                   return (
                     <div key={fieldPath} className="space-y-2">
                       <Label className="text-sm font-medium">{fieldLabel}</Label>
@@ -6557,7 +6585,7 @@ export function SectionEditorPanel({
                         <SelectContent>
                           {options.map((opt) => (
                             <SelectItem key={opt} value={opt}>
-                              {opt}
+                              {optionLabel(opt)}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -7161,7 +7189,7 @@ export function SectionEditorPanel({
                                       />
                                     </div>
                                     <div className="space-y-1">
-                                      <Label className="text-xs text-muted-foreground">Variant</Label>
+                                      <Label className="text-xs text-muted-foreground">Estilo del botón</Label>
                                       <Select
                                         value={btnVariant || "primary"}
                                         onValueChange={(val) => updateCtaField(index, "variant", val)}
@@ -7170,9 +7198,11 @@ export function SectionEditorPanel({
                                           <SelectValue />
                                         </SelectTrigger>
                                         <SelectContent>
-                                          <SelectItem value="primary">Primary</SelectItem>
-                                          <SelectItem value="secondary">Secondary</SelectItem>
-                                          <SelectItem value="outline">Outline</SelectItem>
+                                          {buttonLookOptions(btnVariant).map((opt) => (
+                                            <SelectItem key={opt.value} value={opt.value}>
+                                              {opt.label}
+                                            </SelectItem>
+                                          ))}
                                         </SelectContent>
                                       </Select>
                                     </div>
