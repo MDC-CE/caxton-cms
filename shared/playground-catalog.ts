@@ -111,10 +111,11 @@ export function catalogListUrl(baseUrl: string, query: CatalogQuery = {}): strin
 
 export function catalogSearchUrl(
   baseUrl: string,
-  query: { q: string; offset?: number; limit?: number; lang?: CatalogLang },
+  query: { q: string; kind?: CatalogKind; offset?: number; limit?: number; lang?: CatalogLang },
 ): string {
   const url = new URL(`${baseUrl.replace(/\/$/, "")}/api/v2/destiny/catalog/search`);
   url.searchParams.set("q", query.q);
+  if (query.kind) url.searchParams.set("kind", query.kind);
   if (query.offset != null) url.searchParams.set("offset", String(query.offset));
   if (query.limit != null) url.searchParams.set("limit", String(query.limit));
   if (query.lang) url.searchParams.set("lang", query.lang);
@@ -276,7 +277,7 @@ function asSearchHit(raw: unknown, lang: CatalogLang): CatalogSearchHit | null {
 export async function fetchCatalogSearch(
   baseUrl: string,
   token: string,
-  query: { q: string; offset?: number; limit?: number; lang?: CatalogLang },
+  query: { q: string; kind?: CatalogKind; offset?: number; limit?: number; lang?: CatalogLang },
   fetchImpl: FetchLike = fetch as FetchLike,
 ): Promise<CatalogListPage & { results: CatalogSearchHit[] }> {
   if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");

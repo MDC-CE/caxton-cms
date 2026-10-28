@@ -9,6 +9,7 @@ import {
   fetchCatalogSearch,
   playgroundCatalogBaseUrl,
   toSearchDocuments,
+  type CatalogKind,
   type CatalogLang,
 } from "@shared/playground-catalog";
 import { databaseManager, type DatabaseManager } from "./database";
@@ -67,19 +68,20 @@ function catalogLang(locale?: string): CatalogLang | undefined {
   return undefined;
 }
 
-/** Playground ranked search, courses and content pieces. Null means try the local index. */
+/** Playground ranked search. Omitting kind keeps courses and content pieces. Null means try the local index. */
 async function searchPlaygroundCatalog(
   q: string,
-  limit: number,
-  locale?: string,
+  options: { limit: number; offset?: number; locale?: string; kind?: CatalogKind },
 ): Promise<DatabaseSearchResult | null> {
   const token = process.env.CAXTON_CATALOG_TOKEN?.trim() || "";
   if (!token) return null;
-  const lang = catalogLang(locale);
+  const lang = catalogLang(options.locale);
   try {
     const page = await fetchCatalogSearch(playgroundCatalogBaseUrl(), token, {
       q,
-      limit,
+      offset: options.offset ?? 0,
+      limit: options.limit,
+      ...(options.kind ? { kind: options.kind } : {}),
       ...(lang ? { lang } : {}),
     });
     const items = toSearchDocuments(page.results);
@@ -256,6 +258,9 @@ export async function invalidateDatabaseSearchCache(
 export interface SearchDatabaseItemsOptions {
   /** Requested slice size (after cache ceiling search). Default 20, max 100. */
   limit?: number;
+  offset?: number;
+  /** Playground catalog only: course, content_piece, or omit for both. */
+  kind?: CatalogKind;
   locale?: string;
   db?: DatabaseManager;
   contentFolder?: string;
@@ -282,9 +287,11 @@ export async function searchDatabaseItems(
     SEARCH_CACHE_CEILING,
   );
   const locale = options.locale;
+  const offset = Math.max(0, options.offset ?? 0);
+  const kind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
 
   if (dbName === CATALOG_DB_NAME) {
-    const playground = await searchPlaygroundCatalog(normalizedQ, limit, locale);
+    const playground = await searchPlaygroundCatalog(normalizedQ, { limit, offset, locale, kind });
     if (playground) return playground;
   }
   const dbm = options.db ?? databaseManager;

@@ -92,6 +92,15 @@ describe("playground catalog client", () => {
       expect(url).toBe(
         catalogSearchUrl("https://mdc-playground.herokuapp.com", { q: "esol", limit: 20 }),
       );
+      expect(catalogSearchUrl("https://mdc-playground.herokuapp.com", {
+        q: "esol",
+        kind: "content_piece",
+        offset: 0,
+        limit: 20,
+        lang: "es",
+      })).toBe(
+        "https://mdc-playground.herokuapp.com/api/v2/destiny/catalog/search?q=esol&kind=content_piece&offset=0&limit=20&lang=es",
+      );
       expect(new URL(url).searchParams.has("kind")).toBe(false);
       return jsonResponse({
         count: 1,
