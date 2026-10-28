@@ -2161,7 +2161,7 @@ export function SectionEditorPanel({
         // Get or create the array from the final path part
         const arrayField = pathParts[pathParts.length - 1];
         let array = current[arrayField] as
-          | Record<string, unknown>[]
+          | Array<Record<string, unknown> | string>
           | undefined;
 
         if (!Array.isArray(array)) {

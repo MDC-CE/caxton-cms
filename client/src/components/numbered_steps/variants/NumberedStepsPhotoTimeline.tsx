@@ -34,10 +34,9 @@ function StepMarker({
         {Icon
           ? createElement(Icon, {
               className: "h-5 w-5",
+              size: 20,
               width: "20",
               height: "20",
-              size: 20,
-              strokeWidth: 2,
             })
           : (
             <span className="text-sm font-bold leading-none">{index + 1}</span>

@@ -12,7 +12,8 @@ import {
 } from "./entry-preview-manager";
 import { getPreviewConfig, getLocaleKey, getContentTypeConfig } from "./content-types";
 import { isPreviewCaptureReady } from "./entry-preview-config";
-import { captureScreenshotToWebp, cloudflareBrowserConfigError } from "./cloudflare-browser";
+import { captureScreenshotToWebp, cloudflareBrowserConfigError, getPublicSiteUrl } from "./cloudflare-browser";
+import { buildPreviewPropResolveContext } from "./entry-preview-resolve";
 import { persistGeneratedOgImageToEntryYaml } from "./entry-preview-og-yaml";
 import {
   buildEntryCaptureHtml,
