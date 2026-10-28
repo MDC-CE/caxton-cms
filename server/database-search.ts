@@ -266,6 +266,8 @@ export interface SearchDatabaseItemsOptions {
   contentFolder?: string;
   /** Override keyword fallback fields (e.g. from listing search.fields). */
   keywordFields?: string[];
+  /** Service route: search the local ce-catalog index and do not call the playground. */
+  localOnly?: boolean;
 }
 
 /**
@@ -290,7 +292,7 @@ export async function searchDatabaseItems(
   const offset = Math.max(0, options.offset ?? 0);
   const kind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
 
-  if (dbName === CATALOG_DB_NAME) {
+  if (dbName === CATALOG_DB_NAME && !options.localOnly) {
     const playground = await searchPlaygroundCatalog(normalizedQ, { limit, offset, locale, kind });
     if (playground) return playground;
   }
