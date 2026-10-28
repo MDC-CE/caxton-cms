@@ -216,6 +216,7 @@ import {
 //   content.ts      /api/content, /api/landings, /api/locations, /api/pages,
 //                   /api/career-programs, /api/content-pages, /api/preview
 //   databases.ts    /api/databases, /api/db
+//   catalog-service.ts  /api/service/catalog/search
 //   sections.ts     /api/sections, /api/content-pages (section-level edits)
 //   seo.ts          /api/sitemap, /api/redirects, /api/schema, /api/seo
 //   admin.ts        /api/admin, /api/users, /api/roles, /api/sync-log
@@ -239,6 +240,7 @@ import { registerSettingsRoutes } from "./settings";
 import { registerContentRoutes } from "./content";
 import { registerDatabasesRoutes } from "./databases";
 import { registerListingsRoutes } from "./listings";
+import { registerCatalogServiceRoutes } from "./catalog-service";
 import { registerSectionsRoutes } from "./sections";
 import { registerSeoRoutes } from "./seo";
 import { registerAdminRoutes } from "./admin";
@@ -333,6 +335,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerContentRoutes(app);
   registerDatabasesRoutes(app);
   registerListingsRoutes(app);
+  registerCatalogServiceRoutes(app);
   registerSectionsRoutes(app);
   registerSeoRoutes(app);
   registerAdminRoutes(app);
