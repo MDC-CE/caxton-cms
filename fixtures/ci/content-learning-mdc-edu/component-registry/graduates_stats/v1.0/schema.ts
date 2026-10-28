@@ -111,3 +111,7 @@ export type GraduatesStatsStandard = z.infer<typeof graduatesStatsStandardSchema
 export type GraduatesStatsFullBleed = z.infer<typeof graduatesStatsFullBleedSchema>;
 export type GraduatesStatsAsymmetric = z.infer<typeof graduatesStatsAsymmetricSchema>;
 export type GraduatesStatsSection = z.infer<typeof graduatesStatsSectionSchema>;
+export type GraduatesStatsQuoteStory = GraduatesStatsSection;
+export type GraduatesStatsQuoteCard = GraduatesStatsSection;
+export type GraduatesStatsNumbersBand = GraduatesStatsSection;
+export type GraduatesStatsTiles = GraduatesStatsSection;

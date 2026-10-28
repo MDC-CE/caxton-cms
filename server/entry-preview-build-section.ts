@@ -22,7 +22,10 @@ export function buildPreviewSection(
   // Only required component props block capture. Optional mappings (category, author,
   // content → reading_time, etc.) simply omit that part of the card when empty.
   const schema = loadSchema(preview.component, preview.version || "1.0");
-  const mappable = collectMappablePropsFromSchema(schema, preview.variant || "default");
+  const mappable = collectMappablePropsFromSchema(
+    schema as Parameters<typeof collectMappablePropsFromSchema>[0],
+    preview.variant || "default",
+  );
   const requiredKeys = new Set(mappable.filter((p) => p.required).map((p) => p.key));
   const missingVisible = missing.filter((k) => requiredKeys.has(k));
 

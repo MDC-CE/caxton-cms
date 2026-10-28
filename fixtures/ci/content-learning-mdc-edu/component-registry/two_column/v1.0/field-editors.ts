@@ -1,0 +1,64 @@
+export type EditorType =
+  | "icon-picker"
+  | "image-picker"
+  | "image-with-style-picker"
+  | "link-picker"
+  | "text-input"
+  | "string-picker"
+  | "string-picker:none,line,glow"
+  | "string-picker:none,sm,md,lg,full"
+  | "string-picker:solid,outline,ghost"
+  | "string-picker:primary,secondary,outline"
+  | "color-picker:background"
+  | "color-picker:accent"
+  | "color-picker:text"
+  | "rich-text-editor"
+  | "markdown";
+
+export const fieldEditors: Record<string, EditorType> = {
+  "left.image": "image-with-style-picker",
+  "right.image": "image-with-style-picker",
+  "left.heading": "rich-text-editor",
+  "right.heading": "rich-text-editor",
+  "left.description": "rich-text-editor",
+  "right.description": "rich-text-editor",
+  "left.description_extended_md": "markdown",
+  "right.description_extended_md": "markdown",
+  "left.bullets[].icon": "icon-picker",
+  "right.bullets[].icon": "icon-picker",
+  "left.bullet_icon": "icon-picker",
+  "right.bullet_icon": "icon-picker",
+  "benefit_items[].icon": "icon-picker",
+  "cta_button.text": "text-input",
+  "cta_button.url": "link-picker",
+  "cta_button.variant": "string-picker:primary,secondary,outline",
+  "cta_button.icon": "icon-picker",
+  background: "color-picker:background",
+  "overlapCard:image_id": "image-with-style-picker",
+  "overlapCard:frame": "string-picker:none,line,glow",
+  "overlapCard:frame_color": "color-picker:accent",
+  "overlapCard:radius": "string-picker:none,sm,md,lg,full",
+  "overlapCard:button_style": "string-picker:solid,outline,ghost",
+  "overlapCard:cta.text": "text-input",
+  "overlapCard:cta.url": "link-picker",
+  "overlapCard:cta.variant": "string-picker:primary,secondary,outline",
+  "checklistNote:image_id": "image-with-style-picker",
+  "checklistNote:frame": "string-picker:none,line,glow",
+  "checklistNote:frame_color": "color-picker:accent",
+  "checklistNote:radius": "string-picker:none,sm,md,lg,full",
+  "checklistNote:button_style": "string-picker:solid,outline,ghost",
+  "checklistNote:cta.text": "text-input",
+  "checklistNote:cta.url": "link-picker",
+  "checklistNote:cta.variant": "string-picker:primary,secondary,outline",
+  "serviceRows:rows[].title": "text-input",
+  "serviceRows:rows[].text": "text-input",
+  "serviceRows:rows[].image_id": "image-picker",
+  "serviceRows:rows[].image_alt": "text-input",
+  "serviceRows:rows[].bullets[].text": "text-input",
+  "serviceRows:rows[].button.url": "link-picker",
+  "serviceRows:rows[].button.text": "text-input",
+  "serviceRows:rows[].button.variant": "string-picker:primary,secondary,outline",
+  /** Theme fill when Button style is Filled (primary). */
+  "serviceRows:rows[].button.button_variant": "color-picker:accent",
+  "serviceRows:rows[].button.text_color": "color-picker:text",
+};

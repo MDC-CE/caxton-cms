@@ -718,13 +718,13 @@ function PerformanceInner() {
     const behavior = reduce ? "auto" : "smooth";
     const gap = 140;
     const parent = scrollableParent(el);
-    if (parent === window) {
-      const top = window.scrollY + el.getBoundingClientRect().top - gap;
-      window.scrollTo({ top: Math.max(0, top), behavior });
+    if (parent instanceof HTMLElement) {
+      const top = parent.scrollTop + el.getBoundingClientRect().top - parent.getBoundingClientRect().top - gap;
+      parent.scrollTo({ top: Math.max(0, top), behavior });
       return;
     }
-    const top = parent.scrollTop + el.getBoundingClientRect().top - parent.getBoundingClientRect().top - gap;
-    parent.scrollTo({ top: Math.max(0, top), behavior });
+    const top = window.scrollY + el.getBoundingClientRect().top - gap;
+    window.scrollTo({ top: Math.max(0, top), behavior });
   }, [pinScroll, viewTab]);
   const selected = parsed.startingAt != null && parsed.endingAt != null;
 

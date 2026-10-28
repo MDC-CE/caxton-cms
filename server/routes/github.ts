@@ -30,7 +30,6 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
-import { api } from "../rate-limit/api";
 import { handleUpstreamSyncWebhook } from "../upstream-sync-webhook";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
