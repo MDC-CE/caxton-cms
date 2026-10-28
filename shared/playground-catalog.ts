@@ -57,6 +57,11 @@ export interface CatalogListPage {
   results: CatalogItem[];
 }
 
+/** Search rows keep score. A plain intersection with CatalogListPage types each row as CatalogItem. */
+export interface CatalogSearchPage extends Omit<CatalogListPage, "results"> {
+  results: CatalogSearchHit[];
+}
+
 export interface CatalogQuery {
   kind?: CatalogKind;
   offset?: number;
@@ -279,7 +284,7 @@ export async function fetchCatalogSearch(
   token: string,
   query: { q: string; kind?: CatalogKind; offset?: number; limit?: number; lang?: CatalogLang },
   fetchImpl: FetchLike = fetch as FetchLike,
-): Promise<CatalogListPage & { results: CatalogSearchHit[] }> {
+): Promise<CatalogSearchPage> {
   if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");
   const q = query.q.trim();
   if (!q) throw new Error("q is required");

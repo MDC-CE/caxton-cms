@@ -1,3 +1,4 @@
+// section-spacing: self-padded
 import React from "react";
 import { AlertTriangle, MessageCircle } from "lucide-react";
 import {
