@@ -7,7 +7,7 @@ export const CATALOG_LANGS = ["en", "es", "ht"] as const;
 export type CatalogLang = (typeof CATALOG_LANGS)[number];
 export type CatalogKind = "course" | "content_piece";
 
-export const DEFAULT_PLAYGROUND_CATALOG_BASE_URL = "http://127.0.0.1:3000";
+export const DEFAULT_PLAYGROUND_CATALOG_BASE_URL = "https://mdc-playground.herokuapp.com";
 export const CATALOG_PAGE_LIMIT = 100;
 export const CATALOG_DB_NAME = "ce-catalog";
 
@@ -41,6 +41,11 @@ export interface CatalogItem {
   landing_slug?: string | null;
   landing_version?: number | null;
   lang: CatalogLang;
+}
+
+export interface CatalogSearchHit extends CatalogItem {
+  score?: number;
+  matched_fields?: string[];
 }
 
 export interface CatalogListPage {
@@ -100,6 +105,18 @@ export function catalogListUrl(baseUrl: string, query: CatalogQuery = {}): strin
   if (query.limit != null) url.searchParams.set("limit", String(query.limit));
   if (query.program_area_id != null) url.searchParams.set("program_area_id", String(query.program_area_id));
   if (query.destiny_code) url.searchParams.set("destiny_code", query.destiny_code);
+  if (query.lang) url.searchParams.set("lang", query.lang);
+  return url.toString();
+}
+
+export function catalogSearchUrl(
+  baseUrl: string,
+  query: { q: string; offset?: number; limit?: number; lang?: CatalogLang },
+): string {
+  const url = new URL(`${baseUrl.replace(/\/$/, "")}/api/v2/destiny/catalog/search`);
+  url.searchParams.set("q", query.q);
+  if (query.offset != null) url.searchParams.set("offset", String(query.offset));
+  if (query.limit != null) url.searchParams.set("limit", String(query.limit));
   if (query.lang) url.searchParams.set("lang", query.lang);
   return url.toString();
 }
@@ -238,6 +255,44 @@ export async function fetchCatalogPage(
   const lang = query.lang ?? "en";
   const results = Array.isArray(data.results)
     ? data.results.map((row) => asItem(row, lang)).filter((row): row is CatalogItem => row !== null)
+    : [];
+  return { ...data, results };
+}
+
+function asSearchHit(raw: unknown, lang: CatalogLang): CatalogSearchHit | null {
+  const item = asItem(raw, lang);
+  if (!item || !raw || typeof raw !== "object") return item;
+  const row = raw as { score?: unknown; matched_fields?: unknown };
+  return {
+    ...item,
+    score: typeof row.score === "number" ? row.score : undefined,
+    matched_fields: Array.isArray(row.matched_fields)
+      ? row.matched_fields.filter((field): field is string => typeof field === "string")
+      : undefined,
+  };
+}
+
+/** Ranked search of courses and content pieces. Omitting kind keeps both. */
+export async function fetchCatalogSearch(
+  baseUrl: string,
+  token: string,
+  query: { q: string; offset?: number; limit?: number; lang?: CatalogLang },
+  fetchImpl: FetchLike = fetch as FetchLike,
+): Promise<CatalogListPage & { results: CatalogSearchHit[] }> {
+  if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");
+  const q = query.q.trim();
+  if (!q) throw new Error("q is required");
+  const response = await fetchImpl(catalogSearchUrl(baseUrl, { ...query, q }), {
+    headers: catalogAuthHeaders(token),
+  });
+  if (!response.ok) {
+    const message = await readError(response);
+    throw new Error(`Playground catalog search returned ${response.status}${message ? `: ${message}` : ""}`);
+  }
+  const data = (await response.json()) as Partial<CatalogListPage>;
+  const lang = query.lang ?? "en";
+  const results = Array.isArray(data.results)
+    ? data.results.map((row) => asSearchHit(row, lang)).filter((row): row is CatalogSearchHit => row !== null)
     : [];
   return { ...data, results };
 }

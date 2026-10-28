@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   catalogDetailUrl,
   catalogListUrl,
+  catalogSearchUrl,
   fetchAllCatalog,
   fetchCatalogDetail,
+  fetchCatalogSearch,
   msUntilCatalogPoll,
   nextCatalogPollAt,
   offeringsFromCatalog,
+  playgroundCatalogBaseUrl,
   toSearchDocuments,
   type CatalogItem,
 } from "./playground-catalog";
@@ -21,6 +24,10 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe("playground catalog client", () => {
+  it("defaults the catalog host to the deployed playground", () => {
+    expect(playgroundCatalogBaseUrl({})).toBe("https://mdc-playground.herokuapp.com");
+  });
+
   it("builds list and detail URLs", () => {
     expect(catalogListUrl("http://127.0.0.1:3000", { lang: "es", offset: 0, limit: 100 })).toBe(
       "http://127.0.0.1:3000/api/v2/destiny/catalog?offset=0&limit=100&lang=es",
@@ -77,6 +84,39 @@ describe("playground catalog client", () => {
     const esol = items.find((item) => item.destiny_code === "CM000061");
     expect(esol?.kind).toBe("content_piece");
     expect(esol?.lang).toBe("en");
+  });
+
+  it("searches courses and content pieces without dropping kind", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+      expect(init?.headers?.Authorization).toBe("Bearer test-token");
+      expect(url).toBe(
+        catalogSearchUrl("https://mdc-playground.herokuapp.com", { q: "esol", limit: 20 }),
+      );
+      expect(new URL(url).searchParams.has("kind")).toBe(false);
+      return jsonResponse({
+        count: 1,
+        q: "esol",
+        results: [{
+          kind: "content_piece",
+          destiny_code: "CM000061",
+          title: "ESOL",
+          description: "ESOL landing",
+          score: 8,
+          matched_fields: ["title", "description"],
+        }],
+      });
+    });
+    const page = await fetchCatalogSearch(
+      "https://mdc-playground.herokuapp.com",
+      "test-token",
+      { q: "esol", limit: 20 },
+      fetchImpl as never,
+    );
+    expect(page.results).toHaveLength(1);
+    expect(page.results[0]?.kind).toBe("content_piece");
+    expect(page.results[0]?.score).toBe(8);
+    const docs = toSearchDocuments(page.results);
+    expect(docs[0]?.kind).toBe("content_piece");
   });
 
   it("loads one content piece from the detail endpoint", async () => {
