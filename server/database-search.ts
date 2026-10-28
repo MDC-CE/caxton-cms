@@ -4,14 +4,7 @@
  */
 import { createHash } from "crypto";
 import { siteDbSearchCacheKey, siteDbSearchCachePrefix } from "@shared/gcsKeys";
-import {
-  CATALOG_DB_NAME,
-  fetchCatalogSearch,
-  playgroundCatalogBaseUrl,
-  toSearchDocuments,
-  type CatalogKind,
-  type CatalogLang,
-} from "@shared/playground-catalog";
+import type { CatalogKind } from "@shared/playground-catalog";
 import { databaseManager, type DatabaseManager } from "./database";
 import { gcs } from "./gcs";
 import { child } from "./logger";
@@ -63,44 +56,16 @@ export function normalizeSearchQuery(q: string): string {
   return q.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function catalogLang(locale?: string): CatalogLang | undefined {
-  if (locale === "en" || locale === "es" || locale === "ht") return locale;
-  return undefined;
-}
-
-/** Playground ranked search. Omitting kind keeps courses and content pieces. Null means try the local index. */
-async function searchPlaygroundCatalog(
-  q: string,
-  options: { limit: number; offset?: number; locale?: string; kind?: CatalogKind },
-): Promise<DatabaseSearchResult | null> {
-  const token = process.env.CAXTON_CATALOG_TOKEN?.trim() || "";
-  if (!token) return null;
-  const lang = catalogLang(options.locale);
-  try {
-    const page = await fetchCatalogSearch(playgroundCatalogBaseUrl(), token, {
-      q,
-      offset: options.offset ?? 0,
-      limit: options.limit,
-      ...(options.kind ? { kind: options.kind } : {}),
-      ...(lang ? { lang } : {}),
-    });
-    const items = toSearchDocuments(page.results);
-    const scores: Record<string, number> = {};
-    page.results.forEach((row, index) => {
-      const slug = String(items[index]?.slug ?? "");
-      if (slug && typeof row.score === "number") scores[slug] = row.score;
-    });
-    return {
-      items,
-      count: items.length,
-      semantic: true,
-      scores,
-      cache: "miss",
-    };
-  } catch (err) {
-    log.warn({ err }, "[database-search] playground catalog search failed; using the local index");
-    return null;
-  }
+/** Kind filter (catalog rows carry `kind`) then the offset/limit page. */
+function pageOf<T>(
+  rows: T[],
+  itemOf: (row: T) => Record<string, unknown>,
+  kind: CatalogKind | undefined,
+  offset: number,
+  limit: number,
+): { page: T[]; total: number } {
+  const kept = kind ? rows.filter((row) => itemOf(row).kind === kind) : rows;
+  return { page: kept.slice(offset, offset + limit), total: kept.length };
 }
 
 function cacheKey(dbName: string, normalizedQ: string, locale?: string): string {
@@ -259,7 +224,7 @@ export interface SearchDatabaseItemsOptions {
   /** Requested slice size (after cache ceiling search). Default 20, max 100. */
   limit?: number;
   offset?: number;
-  /** Playground catalog only: course, content_piece, or omit for both. */
+  /** Catalog rows only: course, content_piece, or omit for both. */
   kind?: CatalogKind;
   locale?: string;
   db?: DatabaseManager;
@@ -289,11 +254,6 @@ export async function searchDatabaseItems(
   const locale = options.locale;
   const offset = Math.max(0, options.offset ?? 0);
   const kind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
-
-  if (dbName === CATALOG_DB_NAME) {
-    const playground = await searchPlaygroundCatalog(normalizedQ, { limit, offset, locale, kind });
-    if (playground) return playground;
-  }
   const dbm = options.db ?? databaseManager;
   const contentFolder = options.contentFolder ?? getDefaultContentFolder();
   const memKey = cacheKey(dbName, normalizedQ, locale);
@@ -312,7 +272,7 @@ export async function searchDatabaseItems(
   const mem = memoryCache.get(memKey);
   if (mem && !isExpired(mem.writtenAt)) {
     const { items, scores } = resolveRefs(mem.payload.refs, allItems);
-    const sliced = items.slice(0, limit);
+    const { page: sliced } = pageOf(items, (i) => i, kind, offset, limit);
     return {
       items: sliced,
       count: sliced.length,
@@ -326,7 +286,7 @@ export async function searchDatabaseItems(
   if (gcsPayload) {
     writeMemory(memKey, gcsPayload);
     const { items, scores } = resolveRefs(gcsPayload.refs, allItems);
-    const sliced = items.slice(0, limit);
+    const { page: sliced } = pageOf(items, (i) => i, kind, offset, limit);
     return {
       items: sliced,
       count: sliced.length,
@@ -390,10 +350,10 @@ export async function searchDatabaseItems(
           writeMemory(memKey, payload);
           await writeGcsCache(dbName, normalizedQ, locale, contentFolder, payload);
 
-          const sliced = orderedWithScores.slice(0, limit);
+          const { page: sliced, total } = pageOf(orderedWithScores, (o) => o.item, kind, offset, limit);
           return {
             items: sliced.map((o) => o.item),
-            count: orderedWithScores.length,
+            count: total,
             semantic: true,
             scores: Object.fromEntries(
               sliced.map((o, i) => [
@@ -439,10 +399,10 @@ export async function searchDatabaseItems(
     });
   }
 
-  const sliced = fallback.slice(0, limit);
+  const { page: sliced, total } = pageOf(fallback, (i) => i, kind, offset, limit);
   return {
     items: sliced,
-    count: fallback.length,
+    count: total,
     semantic: false,
     cache: "miss",
     ...(fallbackReason && {
