@@ -630,6 +630,9 @@ app.use((req, res, next) => {
     void import("./jobs/definitions/proposal-maintenance")
       .then(({ scheduleProposalMaintenance }) => scheduleProposalMaintenance())
       .catch((err) => logger.warn({ err }, "failed to schedule proposal maintenance jobs"));
+    void import("./jobs/definitions/playground-catalog-poll")
+      .then(({ schedulePlaygroundCatalogPoll }) => schedulePlaygroundCatalogPoll())
+      .catch((err) => logger.warn({ err }, "failed to schedule playground catalog poll"));
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();
     }

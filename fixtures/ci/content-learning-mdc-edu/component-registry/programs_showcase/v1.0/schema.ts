@@ -32,3 +32,6 @@ export const programsShowcaseSectionSchema = z.object({
 
 export type ProgramItem = z.infer<typeof programItemSchema>;
 export type ProgramsShowcaseSection = z.infer<typeof programsShowcaseSectionSchema>;
+export type ProgramsShowcaseDefault = ProgramsShowcaseSection;
+export type ProgramsShowcaseDateRows = ProgramsShowcaseSection;
+export type ProgramsShowcaseDateChipCards = ProgramsShowcaseSection;

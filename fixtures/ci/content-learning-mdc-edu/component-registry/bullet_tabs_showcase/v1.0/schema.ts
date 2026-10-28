@@ -24,3 +24,8 @@ export const bulletTabsShowcaseSectionSchema = z.object({
 
 export type BulletTab = z.infer<typeof bulletTabSchema>;
 export type BulletTabsShowcaseSection = z.infer<typeof bulletTabsShowcaseSectionSchema>;
+export type BulletTabsDefaultSection = BulletTabsShowcaseSection;
+export type BulletTabsAudiencePathsSection = BulletTabsShowcaseSection;
+export type BulletTabsProfileListSection = BulletTabsShowcaseSection;
+export type AudiencePathTab = BulletTab;
+export type AudiencePathProgram = { title?: string; url?: string };

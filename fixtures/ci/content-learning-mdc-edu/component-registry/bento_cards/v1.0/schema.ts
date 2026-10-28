@@ -24,3 +24,6 @@ export const bentoCardsSectionSchema = z.object({
 
 export type BentoCardItem = z.infer<typeof bentoCardItemSchema>;
 export type BentoCardsSection = z.infer<typeof bentoCardsSectionSchema>;
+export type BentoPhotoCard = BentoCardsSection;
+export type BentoCardsPhotoTiles = BentoCardsSection;
+export type BentoCardsExpandingPhotos = BentoCardsSection;

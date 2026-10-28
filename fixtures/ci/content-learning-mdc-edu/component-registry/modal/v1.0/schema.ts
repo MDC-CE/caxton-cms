@@ -114,3 +114,5 @@ export type ModalCta = z.infer<typeof modalCtaSchema>;
 export type ModalTwoColumnColumn = z.infer<typeof modalTwoColumnColumnSchema>;
 export type ModalTwoColumnSection = z.infer<typeof modalTwoColumnSectionSchema>;
 export type ModalSection = z.infer<typeof modalSectionSchema>;
+export const modalSurveySectionSchema = modalSectionSchema;
+export type ModalSurveySection = ModalSection;

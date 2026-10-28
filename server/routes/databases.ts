@@ -586,7 +586,10 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
       const dbName = req.params.name;
       const q = (req.query.q as string || "").trim();
       const limit = Math.min(Number(req.query.limit) || 20, 100);
-      const locale = (req.query.locale as string) || undefined;
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const locale = (req.query.lang as string) || (req.query.locale as string) || undefined;
+      const kindRaw = String(req.query.kind || "");
+      const kind = kindRaw === "course" || kindRaw === "content_piece" ? kindRaw : undefined;
 
       if (!q) {
         res.status(400).json({ error: "q parameter is required" });
@@ -596,6 +599,8 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
       const { searchDatabaseItems } = await import("../database-search");
       const result = await searchDatabaseItems(dbName, q, {
         limit,
+        offset,
+        kind,
         locale,
         db: getDB(res),
         contentFolder: getContentRootName(res),

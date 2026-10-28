@@ -3,11 +3,13 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getDefaultContentFolder } from "./site-config";
 import { MediaGallery } from "./media-gallery";
 
 const probeName = "rehome-present-probe.mp4";
-const probeSrc = `/site_learning-mdc-edu/images/${probeName}`;
-const missingSrc = "/site_learning-mdc-edu/images/rehome-missing-probe.mp4";
+const contentFolder = getDefaultContentFolder();
+const probeSrc = `/${contentFolder}/images/${probeName}`;
+const missingSrc = `/${contentFolder}/images/rehome-missing-probe.mp4`;
 
 function sha256(data: Buffer): string {
   return crypto.createHash("sha256").update(data).digest("hex");
@@ -15,7 +17,7 @@ function sha256(data: Buffer): string {
 
 describe("uploadAndRegister restores a missing file", () => {
   const temps: string[] = [];
-  const probePath = path.join(process.cwd(), "site_learning-mdc-edu/images", probeName);
+  const probePath = path.join(process.cwd(), contentFolder, "images", probeName);
 
   afterEach(() => {
     if (fs.existsSync(probePath)) fs.unlinkSync(probePath);

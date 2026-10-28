@@ -244,7 +244,7 @@ describe("schemaCompletenessValidator PAGE_NO_SCHEMA", () => {
           type: "landing",
           url: "/landing/foo",
           filePath,
-          entryFields: { sections: [webPage("https://learning.mdc.edu/en/landing/foo")] },
+          entryFields: { sections: [webPage("/landing/not-foo")] },
         }),
       ),
     );

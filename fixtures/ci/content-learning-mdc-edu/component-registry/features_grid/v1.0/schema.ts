@@ -245,3 +245,5 @@ export type FeaturesGridTextOnlySection = z.infer<typeof featuresGridTextOnlySec
 export type FeaturesGridCardHeaderSection = z.infer<typeof featuresGridCardHeaderSectionSchema>;
 export type SpotlightConfig = z.infer<typeof spotlightConfigSchema>;
 export type FeaturesGridSection = z.infer<typeof featuresGridSectionSchema>;
+export type FeaturesGridScheduleOptions = FeaturesGridSection;
+export type FeaturesGridOpenColumns = FeaturesGridSection;

@@ -293,7 +293,7 @@ export function markdownPluginFlags(markdown: string): MarkdownPlugins {
 }
 
 async function buildProcessor(flags: MarkdownPlugins) {
-  let chain = unified().use(remarkParse).use(remarkGfm);
+  let chain: any = unified().use(remarkParse).use(remarkGfm);
   if (flags.katex) chain = chain.use(remarkMath, remarkMathOptions);
   chain = chain
     .use(remarkFenceMeta)
