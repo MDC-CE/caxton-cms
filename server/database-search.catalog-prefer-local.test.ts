@@ -10,14 +10,52 @@ vi.mock("./vector-search", () => ({
   isAvailable: (...args: unknown[]) => isAvailable(...args),
 }));
 
-const NURSING = {
-  slug: "en:course:nursing",
-  kind: "course",
-  destiny_code: "NURSE1",
-  title: "Practical Nursing",
-  description: "Patient care and clinical hours.",
-  locale: "en",
-  lang: "en",
+const ITEMS = [
+  {
+    slug: "en:course:nursing",
+    kind: "course",
+    destiny_code: "NURSE1",
+    title: "Practical Nursing",
+    description: "Patient care and clinical hours.",
+    locale: "en",
+    lang: "en",
+  },
+  {
+    slug: "en:course:health",
+    kind: "course",
+    destiny_code: "HLTH1",
+    title: "Health Sciences",
+    description: "Medicine and clinical practice.",
+    locale: "en",
+    lang: "en",
+  },
+  {
+    slug: "en:content_piece:esol",
+    kind: "content_piece",
+    destiny_code: "ESOL1",
+    title: "ESOL",
+    description: "English for speakers of other languages.",
+    locale: "en",
+    lang: "en",
+  },
+  {
+    slug: "en:course:code",
+    kind: "course",
+    destiny_code: "CODE1",
+    title: "Software Development",
+    description: "Programming and code.",
+    locale: "en",
+    lang: "en",
+  },
+];
+
+const HITS: Record<string, string> = {
+  nurse: "en:course:nursing",
+  nursing: "en:course:nursing",
+  health: "en:course:health",
+  medicine: "en:course:health",
+  esol: "en:content_piece:esol",
+  code: "en:course:code",
 };
 
 function catalogDb(options?: { missing?: boolean }): DatabaseManager {
@@ -33,7 +71,7 @@ function catalogDb(options?: { missing?: boolean }): DatabaseManager {
       };
     },
     async fetchItems() {
-      return { items: [NURSING] };
+      return { items: ITEMS };
     },
   } as unknown as DatabaseManager;
 }
@@ -47,7 +85,11 @@ beforeEach(() => {
   vectorSearch.mockReset();
   isAvailable.mockReset();
   isAvailable.mockResolvedValue(true);
-  vectorSearch.mockResolvedValue([{ slug: "en:course:nursing", score: 0.81, _idx: 0 }]);
+  vectorSearch.mockImplementation(async (_db: string, q: string) => {
+    const slug = HITS[q] ?? "en:course:nursing";
+    const index = ITEMS.findIndex((item) => item.slug === slug);
+    return [{ slug, score: 0.81, _idx: index }];
+  });
   fetchCalls = [];
   previousFetch = globalThis.fetch;
   previousToken = process.env.CAXTON_CATALOG_TOKEN;
@@ -61,7 +103,7 @@ beforeEach(() => {
           {
             kind: "course",
             destiny_code: "WORD1",
-            title: "Exact nurse word",
+            title: "10 Horas de Prácticas en el Cuidado de Niños",
             description: "nurse",
             score: 8,
           },
@@ -92,7 +134,7 @@ describe("ce-catalog prefers the local embedding index", () => {
     isAvailable.mockResolvedValue(false);
     const result = await searchDatabaseItems("ce-catalog", "nurse", { db: catalogDb(), limit: 20 });
     expect(result.semantic).toBe(true);
-    expect(result.items.map((item) => item.title)).toEqual(["Exact nurse word"]);
+    expect(result.items.map((item) => item.title)).toEqual(["10 Horas de Prácticas en el Cuidado de Niños"]);
     expect(result.scores?.["en:course:WORD1"]).toBe(8);
     expect(fetchCalls.some((url) => url.includes("/api/v2/destiny/catalog/search"))).toBe(true);
   });
@@ -105,5 +147,27 @@ describe("ce-catalog prefers the local embedding index", () => {
     expect(result.semantic).toBe(true);
     expect(result.items.map((item) => item.destiny_code)).toEqual(["WORD1"]);
     expect(fetchCalls.some((url) => url.includes("/api/v2/destiny/catalog/search"))).toBe(true);
+  });
+
+  it("keeps one-word intent on the embedding hit instead of the playground childcare row", async () => {
+    const expected: Record<string, string> = {
+      nurse: "Practical Nursing",
+      nursing: "Practical Nursing",
+      health: "Health Sciences",
+      medicine: "Health Sciences",
+      esol: "ESOL",
+      code: "Software Development",
+    };
+    for (const [q, title] of Object.entries(expected)) {
+      clearDatabaseSearchMemoryCacheForTests();
+      fetchCalls = [];
+      const result = await searchDatabaseItems("ce-catalog", q, { db: catalogDb(), limit: 20 });
+      expect(result.semantic).toBe(true);
+      expect(result.items[0]?.title).toBe(title);
+      expect(result.items.map((item) => item.title)).not.toContain(
+        "10 Horas de Prácticas en el Cuidado de Niños",
+      );
+      expect(fetchCalls.filter((url) => url.includes("/api/v2/destiny/catalog/search"))).toEqual([]);
+    }
   });
 });
