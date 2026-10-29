@@ -68,7 +68,7 @@ function catalogLang(locale?: string): CatalogLang | undefined {
   return undefined;
 }
 
-/** Playground ranked search. Omitting kind keeps courses and content pieces. Null means try the local index. */
+/** Playground word-score search. Used only when the local embedding index cannot answer. Null means keep going. */
 async function searchPlaygroundCatalog(
   q: string,
   options: { limit: number; offset?: number; locale?: string; kind?: CatalogKind },
@@ -293,8 +293,19 @@ export async function searchDatabaseItems(
   const kind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
 
   if (dbName === CATALOG_DB_NAME && !options.localOnly) {
+    // Embeddings win when the local index can answer. The playground word score
+    // is only the fallback (index missing, Qdrant down, or no vector hits).
+    let local: DatabaseSearchResult | null = null;
+    try {
+      local = await searchDatabaseItems(dbName, q, { ...options, localOnly: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      if (!message.includes("not found")) throw err;
+    }
+    if (local?.semantic && local.items.length > 0) return local;
     const playground = await searchPlaygroundCatalog(normalizedQ, { limit, offset, locale, kind });
     if (playground) return playground;
+    if (local) return local;
   }
   const dbm = options.db ?? databaseManager;
   const contentFolder = options.contentFolder ?? getDefaultContentFolder();
