@@ -67,6 +67,7 @@ export function registerListingsRoutes(app: Express): void {
           req.query.search_fields,
           "search_fields",
         );
+        const target = typeof req.query.target === "string" ? req.query.target : undefined;
 
         const result = await searchListingItems({
           database,
@@ -74,6 +75,7 @@ export function registerListingsRoutes(app: Express): void {
           locale,
           q,
           limit,
+          target,
           permanentFilters: filters,
           itemTemplate,
           searchFields,
@@ -95,7 +97,7 @@ export function registerListingsRoutes(app: Express): void {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error({ err }, "listing search error");
-        if (msg.includes("Invalid JSON")) {
+        if (msg.includes("Invalid JSON") || msg.includes("target must be")) {
           res.status(400).json({ error: msg });
           return;
         }

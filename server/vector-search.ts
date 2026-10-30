@@ -1,5 +1,6 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { createHash } from "crypto";
+import { CATALOG_CHUNKS_DB_NAME } from "@shared/playground-catalog";
 import { setJobState } from "./db-job-state";
 import { child } from "./logger";
 const log = child({ module: "vector-search" });
@@ -227,6 +228,40 @@ function itemId(item: Record<string, unknown>, index: number): number | string {
   return toQdrantId(raw, index + 1);
 }
 
+function localeOf(item: Record<string, unknown>): string | null {
+  if (typeof item.locale === "string") return item.locale;
+  if (typeof item.language === "string") return item.language;
+  if (typeof item.lang === "string") return item.lang;
+  return null;
+}
+
+/** Identity stored beside the vector. Meaning stays in the embedding. */
+export function pointPayload(item: Record<string, unknown>, index: number): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    _idx: index,
+    slug: String(item.slug ?? item.id ?? index),
+    locale: localeOf(item),
+  };
+  if (typeof item.kind === "string" && item.kind) payload.kind = item.kind;
+  if (item.destiny_code != null && String(item.destiny_code).trim()) {
+    payload.destiny_code = String(item.destiny_code);
+  }
+  return payload;
+}
+
+export function vectorSearchFilter(options: {
+  locale?: string;
+  kind?: string;
+  destinyCodes?: string[];
+}): { must: Array<{ key: string; match: { value?: string; any?: string[] } }> } | undefined {
+  const must: Array<{ key: string; match: { value?: string; any?: string[] } }> = [];
+  if (options.locale) must.push({ key: "locale", match: { value: options.locale } });
+  if (options.kind) must.push({ key: "kind", match: { value: options.kind } });
+  const codes = (options.destinyCodes ?? []).map((code) => code.trim()).filter(Boolean);
+  if (codes.length > 0) must.push({ key: "destiny_code", match: { any: codes } });
+  return must.length > 0 ? { must } : undefined;
+}
+
 export async function indexItems(
   dbName: string,
   items: Record<string, unknown>[],
@@ -258,14 +293,7 @@ export async function indexItems(
       const points = batch.map((item, i) => ({
         id: itemId(item, start + i),
         vector: embeddings[i],
-        payload: {
-          _idx: start + i,
-          slug: String(item.slug ?? item.id ?? start + i),
-          locale: typeof item.locale === "string" ? item.locale
-            : typeof item.language === "string" ? item.language
-            : typeof item.lang === "string" ? item.lang
-            : null,
-        },
+        payload: pointPayload(item, start + i),
       }));
 
       await client.upsert(name, { points });
@@ -338,13 +366,16 @@ export interface SearchResult {
   slug: string;
   score: number;
   _idx?: number;
+  destiny_code?: string;
+  kind?: string;
 }
 
 export async function search(
   dbName: string,
   query: string,
   limit = 20,
-  localeFilter?: string
+  localeFilter?: string,
+  kindFilter?: string,
 ): Promise<SearchResult[]> {
   if (!(await isAvailable())) {
     return [];
@@ -356,17 +387,7 @@ export async function search(
 
     const [queryEmbedding] = await generateEmbeddings([query]);
 
-    const filter =
-      localeFilter
-        ? {
-            must: [
-              {
-                key: "locale",
-                match: { value: localeFilter },
-              },
-            ],
-          }
-        : undefined;
+    const filter = vectorSearchFilter({ locale: localeFilter, kind: kindFilter });
 
     const results = await client.search(name, {
       vector: queryEmbedding,
@@ -381,10 +402,51 @@ export async function search(
         slug: String(payload?.slug ?? r.id),
         score: r.score,
         _idx: typeof payload?._idx === "number" ? payload._idx : undefined,
+        destiny_code: typeof payload?.destiny_code === "string" ? payload.destiny_code : undefined,
+        kind: typeof payload?.kind === "string" ? payload.kind : undefined,
       };
     });
   } catch (err) {
     log.error({ err: err }, `[vector-search] Search failed for "${dbName}":`);
+    resetAvailabilityCache();
+    return [];
+  }
+}
+
+/**
+ * Second pass: the same phrase, only against chunks of the codes the first pass returned.
+ * The home search and the nightly description sync do not call this.
+ */
+export async function searchChunks(
+  query: string,
+  destinyCodes: string[],
+  limit = 10,
+  localeFilter?: string,
+): Promise<SearchResult[]> {
+  const codes = destinyCodes.map((code) => code.trim()).filter(Boolean);
+  if (!query.trim() || codes.length === 0) return [];
+  if (!(await isAvailable())) return [];
+
+  try {
+    const client = getQdrantClient();
+    const [queryEmbedding] = await generateEmbeddings([query]);
+    const results = await client.search(collectionName(CATALOG_CHUNKS_DB_NAME), {
+      vector: queryEmbedding,
+      limit,
+      filter: vectorSearchFilter({ locale: localeFilter, destinyCodes: codes }),
+      with_payload: true,
+    });
+    return results.map((r) => {
+      const payload = r.payload as Record<string, unknown> | null | undefined;
+      return {
+        slug: String(payload?.slug ?? r.id),
+        score: r.score,
+        destiny_code: typeof payload?.destiny_code === "string" ? payload.destiny_code : undefined,
+        kind: typeof payload?.kind === "string" ? payload.kind : undefined,
+      };
+    });
+  } catch (err) {
+    log.error({ err }, "[vector-search] Chunk search failed");
     resetAvailabilityCache();
     return [];
   }

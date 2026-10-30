@@ -8,6 +8,7 @@ import {
 } from "./dynamic-entries";
 import { faqItemKey } from "@shared/faq-listing";
 import { LISTING_SEARCH_MIN_CHARS } from "@shared/listing-search-config";
+import { CATALOG_DESCRIPTIONS_DB_NAME, DESCRIPTION_SEARCH_LIMIT } from "@shared/playground-catalog";
 import { getDefaultContentFolder } from "./site-config";
 
 export interface ListingPermanentFilter {
@@ -34,6 +35,8 @@ export interface ListingSearchInput {
   userFilters?: ListingUserFilter[];
   sort?: string;
   searchFields?: string[];
+  /** Description catalog only: descriptions, course, or content_piece. */
+  target?: string;
   contentRoot?: string;
   db?: DatabaseManager;
   contentIndex?: ContentIndex;
@@ -151,9 +154,11 @@ export async function searchListingItems(
       intersectSearchWithFiltersAndBackfill,
     } = await import("./database-search");
 
+    const descriptionsDb = dbName === CATALOG_DESCRIPTIONS_DB_NAME;
     const searchResult = await searchDatabaseItems(dbName, q, {
-      limit: SEARCH_CACHE_CEILING,
+      limit: descriptionsDb ? Math.min(limit, DESCRIPTION_SEARCH_LIMIT) : SEARCH_CACHE_CEILING,
       locale,
+      target: descriptionsDb ? input.target : undefined,
       db,
       contentFolder: contentRoot,
       keywordFields: input.searchFields,
@@ -166,28 +171,32 @@ export async function searchListingItems(
 
     let searchHits = applyFilters(searchResult.items, filters);
 
-    const filterOnlyResult = await queryEntries(
-      {
-        from: { database: dbName },
-        locale,
-        filters,
-        sort: input.sort,
-        limit: undefined,
-      },
-      { db, contentIndex: ci, contentRoot },
-    );
-    const filterOnly = applyMatchCountSort(filterOnlyResult.items, filters, input.sort);
+    if (descriptionsDb) {
+      rawItems = searchHits.slice(0, limit);
+    } else {
+      const filterOnlyResult = await queryEntries(
+        {
+          from: { database: dbName },
+          locale,
+          filters,
+          sort: input.sort,
+          limit: undefined,
+        },
+        { db, contentIndex: ci, contentRoot },
+      );
+      const filterOnly = applyMatchCountSort(filterOnlyResult.items, filters, input.sort);
 
-    rawItems = intersectSearchWithFiltersAndBackfill(
-      searchHits,
-      filterOnly,
-      limit,
-      (item) => {
-        const slug = item.slug ?? item.id;
-        if (slug !== undefined && slug !== null && String(slug)) return `slug:${String(slug)}`;
-        return `q:${faqItemKey(String(item.question ?? item.title ?? ""))}`;
-      },
-    );
+      rawItems = intersectSearchWithFiltersAndBackfill(
+        searchHits,
+        filterOnly,
+        limit,
+        (item) => {
+          const slug = item.slug ?? item.id;
+          if (slug !== undefined && slug !== null && String(slug)) return `slug:${String(slug)}`;
+          return `q:${faqItemKey(String(item.question ?? item.title ?? ""))}`;
+        },
+      );
+    }
   } else {
     const from = contentType
       ? ({ contentType } as const)

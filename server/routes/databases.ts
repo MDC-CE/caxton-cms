@@ -35,6 +35,8 @@ import { markFileAsModified } from "../sync-state";
 import { deepMerge } from "../utils/deepMerge";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager, type DatabaseManager } from "../database";
+import { CATALOG_DESCRIPTIONS_DB_NAME, DESCRIPTION_SEARCH_LIMIT } from "@shared/playground-catalog";
+import { parseDescriptionSearchTarget } from "../database-search";
 import {
   jsonFieldFailureHttpBody,
   validateAndCoerceJsonFields,
@@ -585,11 +587,23 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
     try {
       const dbName = req.params.name;
       const q = (req.query.q as string || "").trim();
-      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const descriptionsDb = dbName === CATALOG_DESCRIPTIONS_DB_NAME;
+      const defaultLimit = descriptionsDb ? DESCRIPTION_SEARCH_LIMIT : 20;
+      const limit = Math.min(Number(req.query.limit) || defaultLimit, 100);
       const offset = Math.max(0, Number(req.query.offset) || 0);
       const locale = (req.query.lang as string) || (req.query.locale as string) || undefined;
       const kindRaw = String(req.query.kind || "");
       const kind = kindRaw === "course" || kindRaw === "content_piece" ? kindRaw : undefined;
+      let target: string | undefined;
+      try {
+        target = parseDescriptionSearchTarget(
+          typeof req.query.target === "string" ? req.query.target : undefined,
+        );
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Invalid target";
+        res.status(400).json({ error: message });
+        return;
+      }
 
       if (!q) {
         res.status(400).json({ error: "q parameter is required" });
@@ -601,6 +615,7 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
         limit,
         offset,
         kind,
+        target,
         locale,
         db: getDB(res),
         contentFolder: getContentRootName(res),
