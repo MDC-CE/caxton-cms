@@ -149,6 +149,32 @@ describe("ce-catalog prefers the local embedding index", () => {
     expect(fetchCalls.some((url) => url.includes("/api/v2/destiny/catalog/search"))).toBe(true);
   });
 
+  it("answers a phrase from the description index when the fat catalog vectors are off", async () => {
+    const db = {
+      get(name: string) {
+        if (name === "ce-catalog-descriptions") {
+          return {
+            vector_search: { enabled: true, fields: ["description"] },
+            search_fields: ["description", "destiny_code"],
+          };
+        }
+        return {
+          vector_search: { enabled: false, fields: ["title", "description"] },
+          search_fields: ["title", "description"],
+        };
+      },
+      async fetchItems() {
+        return { items: ITEMS };
+      },
+    } as unknown as DatabaseManager;
+
+    const result = await searchDatabaseItems("ce-catalog", "as a nurse", { db, limit: 20 });
+    expect(result.semantic).toBe(true);
+    expect(result.items.map((item) => item.title)).toEqual(["Practical Nursing"]);
+    expect(result.items[0]?.description).not.toContain("as a nurse");
+    expect(fetchCalls.filter((url) => url.includes("/api/v2/destiny/catalog/search"))).toEqual([]);
+  });
+
   it("keeps one-word intent on the embedding hit instead of the playground childcare row", async () => {
     const expected: Record<string, string> = {
       nurse: "Practical Nursing",
