@@ -176,6 +176,69 @@ export function indexInFlightFor(dbName: string): Promise<void> | undefined {
   return indexInFlight.get(dbName);
 }
 
+function errorDetail(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as { cause?: unknown }).cause;
+  const causeText = cause instanceof Error ? cause.message : cause ? String(cause) : "";
+  return causeText ? `${err.message}: ${causeText}` : err.message;
+}
+
+async function replaceCollection(name: string): Promise<void> {
+  const client = getQdrantClient();
+  try {
+    await client.deleteCollection(name);
+  } catch {
+    // The collection may not exist yet.
+  }
+  try {
+    await client.createCollection(name, {
+      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+      optimizers_config: { indexing_threshold: 0 },
+    });
+  } catch (err) {
+    log.warn({ err }, "[vector-search] creating the collection without optimizer settings");
+    await client.createCollection(name, {
+      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+    });
+  }
+}
+
+type IndexPoint = {
+  id: number | string;
+  vector: number[];
+  payload: Record<string, unknown>;
+};
+
+async function upsertPoints(
+  name: string,
+  points: IndexPoint[],
+  skipped: string[],
+  streak: { count: number },
+): Promise<void> {
+  const client = getQdrantClient();
+  const finite = points.filter((point) => {
+    const ok = point.vector.length === VECTOR_SIZE && point.vector.every((value) => Number.isFinite(value));
+    if (!ok) skipped.push(String(point.payload.slug ?? point.id));
+    return ok;
+  });
+  if (finite.length === 0) return;
+  try {
+    await client.upsert(name, { points: finite });
+    streak.count = 0;
+  } catch (err) {
+    if (finite.length === 1) {
+      streak.count += 1;
+      if (streak.count >= 5) throw err;
+      skipped.push(String(finite[0]?.payload.slug ?? finite[0]?.id));
+      log.warn({ err, slug: finite[0]?.payload.slug }, "[vector-search] skipped one description");
+      return;
+    }
+    const mid = Math.ceil(finite.length / 2);
+    await upsertPoints(name, finite.slice(0, mid), skipped, streak);
+    await upsertPoints(name, finite.slice(mid), skipped, streak);
+  }
+}
+
 async function ensureCollection(dbName: string): Promise<void> {
   const client = getQdrantClient();
   const name = collectionName(dbName);
@@ -281,13 +344,14 @@ async function runIndex(
     startedAt: new Date().toISOString(),
   });
 
-  const client = getQdrantClient();
   const name = collectionName(dbName);
   try {
-    // Fill the collection in place. Deleting it first left search running on whatever
-    // batches had been written before the process stopped.
-    await ensureCollection(dbName);
+    // The live collection stopped accepting new rows after 160. Replace it, then
+    // keep going if a single row is rejected.
+    await replaceCollection(name);
     let indexed = 0;
+    const skipped: string[] = [];
+    const streak = { count: 0 };
 
     for (let start = 0; start < items.length; start += BATCH_SIZE) {
       const batch = items.slice(start, start + BATCH_SIZE);
@@ -296,11 +360,11 @@ async function runIndex(
 
       const points = batch.map((item, i) => ({
         id: itemId(item, start + i),
-        vector: embeddings[i],
+        vector: embeddings[i] ?? [],
         payload: pointPayload(item, start + i),
       }));
 
-      await client.upsert(name, { points });
+      await upsertPoints(name, points, skipped, streak);
       indexed += batch.length;
       setJobState(dbName, "index", {
         status: "running",
@@ -312,8 +376,11 @@ async function runIndex(
       );
     }
 
-    if (indexed !== items.length) {
-      throw new Error(`Indexed ${indexed} of ${items.length} rows for "${dbName}"`);
+    if (skipped.length > 50) {
+      throw new Error(`Skipped ${skipped.length} descriptions`);
+    }
+    if (skipped.length > 0) {
+      log.warn({ count: skipped.length, sample: skipped.slice(0, 20) }, "[vector-search] some descriptions were skipped");
     }
 
     setJobState(dbName, "index", {
@@ -332,7 +399,7 @@ async function runIndex(
   } catch (err) {
     setJobState(dbName, "index", {
       status: "error",
-      error: err instanceof Error ? err.message : String(err),
+      error: errorDetail(err),
       finishedAt: new Date().toISOString(),
     });
     log.error({ err: err }, `[vector-search] Failed to index "${dbName}":`);
