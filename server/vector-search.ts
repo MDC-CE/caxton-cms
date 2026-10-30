@@ -169,6 +169,7 @@ function collectionName(dbName: string): string {
 }
 
 const indexInFlight = new Map<string, Promise<void>>();
+const indexLatest = new Map<string, { items: Record<string, unknown>[]; fields: string[] }>();
 
 /** The catalog sync waits on this so search does not run against a half-written index. */
 export function indexInFlightFor(dbName: string): Promise<void> | undefined {
@@ -345,9 +346,24 @@ export function indexItems(
   items: Record<string, unknown>[],
   fields: string[],
 ): Promise<void> {
+  indexLatest.set(dbName, { items, fields });
   const existing = indexInFlight.get(dbName);
   if (existing) return existing;
-  const run = runIndex(dbName, items, fields).finally(() => {
+  const run = (async () => {
+    let error: unknown;
+    for (;;) {
+      const next = indexLatest.get(dbName);
+      if (!next) break;
+      indexLatest.delete(dbName);
+      try {
+        await runIndex(dbName, next.items, next.fields);
+        error = undefined;
+      } catch (err) {
+        error = err;
+      }
+    }
+    if (error) throw error;
+  })().finally(() => {
     if (indexInFlight.get(dbName) === run) indexInFlight.delete(dbName);
   });
   indexInFlight.set(dbName, run);

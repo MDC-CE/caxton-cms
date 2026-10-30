@@ -93,7 +93,9 @@ export interface PlaygroundOffering {
   image_alt?: string;
 }
 
-type FetchLike = (input: string, init?: { headers?: Record<string, string> }) => Promise<{
+const CATALOG_FETCH_TIMEOUT_MS = 20_000;
+
+type FetchLike = (input: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
@@ -109,6 +111,13 @@ export function catalogAuthHeaders(token: string): Record<string, string> {
   return {
     Accept: "application/json",
     Authorization: `Bearer ${token}`,
+  };
+}
+
+function catalogRequestInit(token: string): { headers: Record<string, string>; signal: AbortSignal } {
+  return {
+    headers: catalogAuthHeaders(token),
+    signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS),
   };
 }
 
@@ -261,7 +270,7 @@ export async function fetchCatalogPage(
   fetchImpl: FetchLike = fetch as FetchLike,
 ): Promise<CatalogListPage> {
   if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");
-  const response = await fetchImpl(catalogListUrl(baseUrl, query), { headers: catalogAuthHeaders(token) });
+  const response = await fetchImpl(catalogListUrl(baseUrl, query), catalogRequestInit(token));
   if (!response.ok) {
     const message = await readError(response);
     throw new Error(`Playground catalog list returned ${response.status}${message ? `: ${message}` : ""}`);
@@ -297,9 +306,7 @@ export async function fetchCatalogSearch(
   if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");
   const q = query.q.trim();
   if (!q) throw new Error("q is required");
-  const response = await fetchImpl(catalogSearchUrl(baseUrl, { ...query, q }), {
-    headers: catalogAuthHeaders(token),
-  });
+  const response = await fetchImpl(catalogSearchUrl(baseUrl, { ...query, q }), catalogRequestInit(token));
   if (!response.ok) {
     const message = await readError(response);
     throw new Error(`Playground catalog search returned ${response.status}${message ? `: ${message}` : ""}`);
@@ -321,9 +328,7 @@ export async function fetchCatalogDetail(
   fetchImpl: FetchLike = fetch as FetchLike,
 ): Promise<CatalogItem> {
   if (!token.trim()) throw new Error("CAXTON_CATALOG_TOKEN is not set");
-  const response = await fetchImpl(catalogDetailUrl(baseUrl, kind, destinyCode, lang), {
-    headers: catalogAuthHeaders(token),
-  });
+  const response = await fetchImpl(catalogDetailUrl(baseUrl, kind, destinyCode, lang), catalogRequestInit(token));
   if (!response.ok) {
     const message = await readError(response);
     throw new Error(`Playground catalog detail returned ${response.status}${message ? `: ${message}` : ""}`);
