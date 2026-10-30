@@ -5,9 +5,14 @@
 import { createHash } from "crypto";
 import { siteDbSearchCacheKey, siteDbSearchCachePrefix } from "@shared/gcsKeys";
 import {
+  CATALOG_DB_NAME,
   CATALOG_DESCRIPTIONS_DB_NAME,
   DESCRIPTION_SEARCH_LIMIT,
+  fetchCatalogSearch,
+  playgroundCatalogBaseUrl,
+  toSearchDocuments,
   type CatalogKind,
+  type CatalogLang,
 } from "@shared/playground-catalog";
 import { databaseManager, type DatabaseManager } from "./database";
 import { gcs } from "./gcs";
@@ -59,6 +64,46 @@ const memoryCache = new Map<string, MemoryEntry>();
 
 export function normalizeSearchQuery(q: string): string {
   return q.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function catalogLang(locale?: string): CatalogLang | undefined {
+  if (locale === "en" || locale === "es" || locale === "ht") return locale;
+  return undefined;
+}
+
+/** Playground ranked search. Omitting kind keeps courses and content pieces. Null means try the local index. */
+async function searchPlaygroundCatalog(
+  q: string,
+  options: { limit: number; offset?: number; locale?: string; kind?: CatalogKind },
+): Promise<DatabaseSearchResult | null> {
+  const token = process.env.CAXTON_CATALOG_TOKEN?.trim() || "";
+  if (!token) return null;
+  const lang = catalogLang(options.locale);
+  try {
+    const page = await fetchCatalogSearch(playgroundCatalogBaseUrl(), token, {
+      q,
+      offset: options.offset ?? 0,
+      limit: options.limit,
+      ...(options.kind ? { kind: options.kind } : {}),
+      ...(lang ? { lang } : {}),
+    });
+    const items = toSearchDocuments(page.results);
+    const scores: Record<string, number> = {};
+    page.results.forEach((row, index) => {
+      const slug = String(items[index]?.slug ?? "");
+      if (slug && typeof row.score === "number") scores[slug] = row.score;
+    });
+    return {
+      items,
+      count: items.length,
+      semantic: true,
+      scores,
+      cache: "miss",
+    };
+  } catch (err) {
+    log.warn({ err }, "[database-search] playground catalog search failed; using the local index");
+    return null;
+  }
 }
 
 /** Kind filter (catalog rows carry `kind`) then the offset/limit page. */
@@ -278,6 +323,8 @@ export interface SearchDatabaseItemsOptions {
   contentFolder?: string;
   /** Override keyword fallback fields (e.g. from listing search.fields). */
   keywordFields?: string[];
+  /** Service route: search the local ce-catalog index and do not call the playground. */
+  localOnly?: boolean;
 }
 
 /**
@@ -306,6 +353,11 @@ export async function searchDatabaseItems(
   const kind = descriptionsDb && (target === "course" || target === "content_piece")
     ? target
     : requestedKind;
+
+  if (dbName === CATALOG_DB_NAME && !options.localOnly) {
+    const playground = await searchPlaygroundCatalog(normalizedQ, { limit, offset, locale, kind });
+    if (playground) return playground;
+  }
   const dbm = options.db ?? databaseManager;
   const contentFolder = options.contentFolder ?? getDefaultContentFolder();
   const identity = cacheIdentity(dbName, target);

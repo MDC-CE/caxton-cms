@@ -286,13 +286,13 @@ describe("playground catalog client", () => {
     });
   });
 
-  it("schedules the next poll at 03:00 America/New_York", () => {
-    const before = nextCatalogPollAt(new Date("2026-01-15T07:30:00.000Z"));
-    expect(before.toISOString()).toBe("2026-01-15T08:00:00.000Z");
-    const after = nextCatalogPollAt(new Date("2026-01-15T08:30:00.000Z"));
-    expect(after.toISOString()).toBe("2026-01-16T08:00:00.000Z");
-    const summer = nextCatalogPollAt(new Date("2026-07-15T06:30:00.000Z"));
-    expect(summer.toISOString()).toBe("2026-07-15T07:00:00.000Z");
-    expect(msUntilCatalogPoll(new Date("2026-01-15T07:30:00.000Z"))).toBe(30 * 60 * 1000);
+  it("schedules the next poll at 00:30 America/New_York", () => {
+    const before = nextCatalogPollAt(new Date("2026-01-15T05:00:00.000Z"));
+    expect(before.toISOString()).toBe("2026-01-15T05:30:00.000Z");
+    const after = nextCatalogPollAt(new Date("2026-01-15T05:45:00.000Z"));
+    expect(after.toISOString()).toBe("2026-01-16T05:30:00.000Z");
+    const summer = nextCatalogPollAt(new Date("2026-07-15T04:00:00.000Z"));
+    expect(summer.toISOString()).toBe("2026-07-15T04:30:00.000Z");
+    expect(msUntilCatalogPoll(new Date("2026-01-15T05:00:00.000Z"))).toBe(30 * 60 * 1000);
   });
 });

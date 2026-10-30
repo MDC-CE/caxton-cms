@@ -59,6 +59,7 @@ let baseUrl = "";
 let fetchCalls: string[] = [];
 let previousFetch: typeof fetch;
 let previousToken: string | undefined;
+let previousCatalogToken: string | undefined;
 
 async function getJson(path: string, token?: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -73,7 +74,9 @@ beforeEach(async () => {
   fetchCalls = [];
   previousFetch = globalThis.fetch;
   previousToken = process.env.CAXTON_SERVICE_SEARCH_TOKEN;
+  previousCatalogToken = process.env.CAXTON_CATALOG_TOKEN;
   process.env.CAXTON_SERVICE_SEARCH_TOKEN = SERVICE_TOKEN;
+  process.env.CAXTON_CATALOG_TOKEN = "catalog-token-must-not-be-used";
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) {
@@ -95,6 +98,8 @@ afterEach(async () => {
   globalThis.fetch = previousFetch;
   if (previousToken === undefined) delete process.env.CAXTON_SERVICE_SEARCH_TOKEN;
   else process.env.CAXTON_SERVICE_SEARCH_TOKEN = previousToken;
+  if (previousCatalogToken === undefined) delete process.env.CAXTON_CATALOG_TOKEN;
+  else process.env.CAXTON_CATALOG_TOKEN = previousCatalogToken;
   if (server) {
     await new Promise<void>((resolve, reject) => {
       server!.close((err) => (err ? reject(err) : resolve()));

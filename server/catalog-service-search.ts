@@ -67,6 +67,7 @@ export async function searchLocalCatalog(
     locale: query.lang,
     db,
     contentFolder: LEARNING_ROOT,
+    localOnly: true,
   });
   const matched = query.kind
     ? result.items.filter((item) => item.kind === query.kind)

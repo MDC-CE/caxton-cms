@@ -209,13 +209,13 @@ function addCalendarDays(year: number, month: number, day: number, days: number)
   return { year: utc.getUTCFullYear(), month: utc.getUTCMonth() + 1, day: utc.getUTCDate() };
 }
 
-/** Next 03:00 America/New_York. If that instant has passed, the following day. */
+/** Next 00:30 America/New_York. If that instant has passed, the following day. */
 export function nextCatalogPollAt(now = new Date()): Date {
   const parts = nyParts(now);
-  let target = zonedToUtc(parts.year, parts.month, parts.day, 3, 0);
+  let target = zonedToUtc(parts.year, parts.month, parts.day, 0, 30);
   if (target.getTime() <= now.getTime()) {
     const next = addCalendarDays(parts.year, parts.month, parts.day, 1);
-    target = zonedToUtc(next.year, next.month, next.day, 3, 0);
+    target = zonedToUtc(next.year, next.month, next.day, 0, 30);
   }
   return target;
 }

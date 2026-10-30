@@ -21,7 +21,7 @@ async function reschedule(): Promise<void> {
   }
 }
 
-/** Nightly pull at 03:00 America/New_York, after the midnight scrape. */
+/** Nightly pull at 00:30 America/New_York, after the midnight scrape. */
 export class PlaygroundCatalogPollJob extends Job {
   async run(): Promise<{ ok: boolean }> {
     try {
