@@ -4,7 +4,11 @@
  */
 import { createHash } from "crypto";
 import { siteDbSearchCacheKey, siteDbSearchCachePrefix } from "@shared/gcsKeys";
-import type { CatalogKind } from "@shared/playground-catalog";
+import {
+  CATALOG_DESCRIPTIONS_DB_NAME,
+  DESCRIPTION_SEARCH_LIMIT,
+  type CatalogKind,
+} from "@shared/playground-catalog";
 import { databaseManager, type DatabaseManager } from "./database";
 import { gcs } from "./gcs";
 import { child } from "./logger";
@@ -37,6 +41,7 @@ interface CacheRef {
   slug: string;
   _idx?: number;
   score: number;
+  destiny_code?: string;
 }
 
 interface CachePayload {
@@ -68,13 +73,42 @@ function pageOf<T>(
   return { page: kept.slice(offset, offset + limit), total: kept.length };
 }
 
-function cacheKey(dbName: string, normalizedQ: string, locale?: string): string {
+export type DescriptionSearchTarget = "descriptions" | "course" | "content_piece";
+
+export function parseDescriptionSearchTarget(raw: string | undefined): DescriptionSearchTarget | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  if (value === "descriptions" || value === "course" || value === "content_piece") return value;
+  throw new Error("target must be descriptions, course, or content_piece");
+}
+
+function descriptionTargetSlot(target?: string): "descriptions" | "course" | "content_piece" {
+  return target === "course" || target === "content_piece" ? target : "descriptions";
+}
+
+/** Cache identity. Description searches include the request target so course hits cannot answer a piece search. */
+export function databaseSearchCacheKey(
+  dbName: string,
+  normalizedQ: string,
+  locale?: string,
+  target?: string,
+): string {
+  if (dbName === CATALOG_DESCRIPTIONS_DB_NAME) {
+    return `${dbName}|${locale ?? ""}|${normalizedQ}|${descriptionTargetSlot(target)}|${DESCRIPTION_SEARCH_LIMIT}`;
+  }
   return `${dbName}|${locale ?? ""}|${normalizedQ}|${SEARCH_CACHE_CEILING}`;
 }
 
-function queryHash(normalizedQ: string, locale?: string): string {
+function cacheIdentity(dbName: string, target?: string): string {
+  if (dbName === CATALOG_DESCRIPTIONS_DB_NAME) {
+    return `${descriptionTargetSlot(target)}|${DESCRIPTION_SEARCH_LIMIT}`;
+  }
+  return String(SEARCH_CACHE_CEILING);
+}
+
+function queryHash(normalizedQ: string, locale: string | undefined, identity: string): string {
   return createHash("sha256")
-    .update(`${locale ?? ""}|${normalizedQ}|${SEARCH_CACHE_CEILING}`)
+    .update(`${locale ?? ""}|${normalizedQ}|${identity}`)
     .digest("hex")
     .slice(0, 40);
 }
@@ -91,7 +125,13 @@ function resolveRefs(
   const scores: Record<string, number> = {};
   for (const ref of refs) {
     let item: Record<string, unknown> | undefined;
-    if (ref._idx !== undefined && ref._idx >= 0 && ref._idx < allItems.length) {
+    if (ref.destiny_code) {
+      item = allItems.find((candidate) => (
+        String(candidate.destiny_code ?? "") === ref.destiny_code
+        && String(candidate.slug ?? candidate.id ?? "") === ref.slug
+      ));
+    }
+    if (!item && ref._idx !== undefined && ref._idx >= 0 && ref._idx < allItems.length) {
       const candidate = allItems[ref._idx];
       if (String(candidate.slug ?? candidate.id ?? "") === ref.slug || !ref.slug) {
         item = candidate;
@@ -113,12 +153,13 @@ async function readGcsCache(
   normalizedQ: string,
   locale: string | undefined,
   contentFolder: string,
+  identity: string,
 ): Promise<CachePayload | null> {
   if (!gcs.available) return null;
   const key = siteDbSearchCacheKey(
     contentFolder,
     dbName,
-    queryHash(normalizedQ, locale),
+    queryHash(normalizedQ, locale, identity),
   );
   try {
     const buf = await gcs.download(key);
@@ -140,13 +181,14 @@ async function writeGcsCache(
   normalizedQ: string,
   locale: string | undefined,
   contentFolder: string,
+  identity: string,
   payload: CachePayload,
 ): Promise<void> {
   if (!gcs.available) return;
   const key = siteDbSearchCacheKey(
     contentFolder,
     dbName,
-    queryHash(normalizedQ, locale),
+    queryHash(normalizedQ, locale, identity),
   );
   try {
     await gcs.upload(
@@ -226,6 +268,11 @@ export interface SearchDatabaseItemsOptions {
   offset?: number;
   /** Catalog rows only: course, content_piece, or omit for both. */
   kind?: CatalogKind;
+  /**
+   * Description database only. `descriptions` or omit searches every description.
+   * `course` and `content_piece` limit the group. Any other value is an error.
+   */
+  target?: string;
   locale?: string;
   db?: DatabaseManager;
   contentFolder?: string;
@@ -235,7 +282,7 @@ export interface SearchDatabaseItemsOptions {
 
 /**
  * Semantic search when enabled; keyword fallback otherwise.
- * Always fetches up to SEARCH_CACHE_CEILING, caches semantic hits, then slices to limit.
+ * Caches semantic hits, then slices to limit. Description search asks for 10 neighbors.
  */
 export async function searchDatabaseItems(
   dbName: string,
@@ -247,16 +294,22 @@ export async function searchDatabaseItems(
     return { items: [], count: 0, semantic: false, cache: "miss" };
   }
 
+  const descriptionsDb = dbName === CATALOG_DESCRIPTIONS_DB_NAME;
+  const target = parseDescriptionSearchTarget(options.target);
   const limit = Math.min(
-    Math.max(1, options.limit ?? 20),
+    Math.max(1, options.limit ?? (descriptionsDb ? DESCRIPTION_SEARCH_LIMIT : 20)),
     SEARCH_CACHE_CEILING,
   );
   const locale = options.locale;
   const offset = Math.max(0, options.offset ?? 0);
-  const kind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
+  const requestedKind = options.kind === "course" || options.kind === "content_piece" ? options.kind : undefined;
+  const kind = descriptionsDb && (target === "course" || target === "content_piece")
+    ? target
+    : requestedKind;
   const dbm = options.db ?? databaseManager;
   const contentFolder = options.contentFolder ?? getDefaultContentFolder();
-  const memKey = cacheKey(dbName, normalizedQ, locale);
+  const identity = cacheIdentity(dbName, target);
+  const memKey = databaseSearchCacheKey(dbName, normalizedQ, locale, target);
 
   const config = dbm.get(dbName);
   const vsConfig = (config as { vector_search?: { enabled?: boolean; fields?: string[] } })
@@ -282,7 +335,7 @@ export async function searchDatabaseItems(
     };
   }
 
-  const gcsPayload = await readGcsCache(dbName, normalizedQ, locale, contentFolder);
+  const gcsPayload = await readGcsCache(dbName, normalizedQ, locale, contentFolder, identity);
   if (gcsPayload) {
     writeMemory(memKey, gcsPayload);
     const { items, scores } = resolveRefs(gcsPayload.refs, allItems);
@@ -308,11 +361,13 @@ export async function searchDatabaseItems(
       fallbackMessage =
         'Vector store (Qdrant) is unreachable. Search fell back to exact keyword matching — related words like "certificate" / "certification" will not match unless the exact substring appears.';
     } else {
+      const neighborLimit = descriptionsDb ? DESCRIPTION_SEARCH_LIMIT : SEARCH_CACHE_CEILING;
       const searchResults = await vectorSearch(
         dbName,
         normalizedQ,
-        SEARCH_CACHE_CEILING,
+        neighborLimit,
         locale,
+        descriptionsDb ? kind : undefined,
       );
 
       if (searchResults.length > 0) {
@@ -323,11 +378,18 @@ export async function searchDatabaseItems(
         }> = [];
         for (const r of searchResults) {
           let item: Record<string, unknown> | undefined;
-          if (r._idx !== undefined && r._idx >= 0 && r._idx < allItems.length) {
-            item = allItems[r._idx];
-          }
-          if (!item) {
-            item = allItems.find((i) => String(i.slug ?? i.id ?? "") === r.slug);
+          if (descriptionsDb) {
+            item = allItems.find((candidate) => (
+              String(candidate.slug ?? candidate.id ?? "") === r.slug
+              && (!r.destiny_code || String(candidate.destiny_code ?? "") === r.destiny_code)
+            ));
+          } else {
+            if (r._idx !== undefined && r._idx >= 0 && r._idx < allItems.length) {
+              item = allItems[r._idx];
+            }
+            if (!item) {
+              item = allItems.find((i) => String(i.slug ?? i.id ?? "") === r.slug);
+            }
           }
           if (!item) continue;
           if (locale) {
@@ -337,7 +399,9 @@ export async function searchDatabaseItems(
           orderedWithScores.push({
             item,
             score: r.score,
-            ref: { slug: r.slug, _idx: r._idx, score: r.score },
+            ref: descriptionsDb
+              ? { slug: r.slug, score: r.score, destiny_code: String(item.destiny_code ?? r.destiny_code ?? "") }
+              : { slug: r.slug, _idx: r._idx, score: r.score },
           });
         }
 
@@ -348,7 +412,7 @@ export async function searchDatabaseItems(
             refs: orderedWithScores.map((o) => o.ref),
           };
           writeMemory(memKey, payload);
-          await writeGcsCache(dbName, normalizedQ, locale, contentFolder, payload);
+          await writeGcsCache(dbName, normalizedQ, locale, contentFolder, identity, payload);
 
           const { page: sliced, total } = pageOf(orderedWithScores, (o) => o.item, kind, offset, limit);
           return {
@@ -417,10 +481,11 @@ export function peekDatabaseSearchCacheL1(
   dbName: string,
   q: string,
   locale?: string,
+  target?: string,
 ): CacheRef[] | null {
   const normalizedQ = normalizeSearchQuery(q);
   if (!normalizedQ) return null;
-  const mem = memoryCache.get(cacheKey(dbName, normalizedQ, locale));
+  const mem = memoryCache.get(databaseSearchCacheKey(dbName, normalizedQ, locale, target));
   if (!mem || isExpired(mem.writtenAt) || !mem.payload.semantic) return null;
   return mem.payload.refs;
 }

@@ -631,7 +631,10 @@ app.use((req, res, next) => {
       .then(({ scheduleProposalMaintenance }) => scheduleProposalMaintenance())
       .catch((err) => logger.warn({ err }, "failed to schedule proposal maintenance jobs"));
     void import("./jobs/definitions/playground-catalog-poll")
-      .then(({ schedulePlaygroundCatalogPoll }) => schedulePlaygroundCatalogPoll())
+      .then(({ schedulePlaygroundCatalogPoll, syncCatalogNow }) => {
+        void syncCatalogNow().catch((err) => logger.warn({ err }, "playground catalog sync now failed"));
+        return schedulePlaygroundCatalogPoll();
+      })
       .catch((err) => logger.warn({ err }, "failed to schedule playground catalog poll"));
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();

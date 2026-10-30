@@ -37,6 +37,20 @@ export class PlaygroundCatalogPollJob extends Job {
   }
 }
 
+/** Pull the catalog immediately. The nightly schedule stays in place. */
+export async function syncCatalogNow(): Promise<{
+  items: number;
+  offerings: number;
+  documents: number;
+  descriptionDocuments: number;
+  contentRoot: string;
+}> {
+  const { syncPlaygroundCatalog } = await import("../../playground-catalog-sync");
+  const report = await syncPlaygroundCatalog();
+  log.info(report, "[playground-catalog] synced now");
+  return report;
+}
+
 export async function schedulePlaygroundCatalogPoll(): Promise<void> {
   await reschedule();
 }

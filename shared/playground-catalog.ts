@@ -10,6 +10,15 @@ export type CatalogKind = "course" | "content_piece";
 export const DEFAULT_PLAYGROUND_CATALOG_BASE_URL = "https://mdc-playground.herokuapp.com";
 export const CATALOG_PAGE_LIMIT = 100;
 export const CATALOG_DB_NAME = "ce-catalog";
+/** Description-only embeddings. The destiny code sits beside the vector. */
+export const CATALOG_DESCRIPTIONS_DB_NAME = "ce-catalog-descriptions";
+/** Finer texts for a later pass. The nightly catalog sync does not fill this. */
+export const CATALOG_CHUNKS_DB_NAME = "ce-catalog-chunks";
+export const DESCRIPTION_VECTOR_FIELDS = ["description"] as const;
+export const CHUNK_VECTOR_FIELDS = ["text"] as const;
+export const DESCRIPTION_SEARCH_LIMIT = 10;
+/** Chunks longer than this are left out. The writer does not split a page. */
+export const CHUNK_MAX_WORDS = 200;
 
 const NY_TZ = "America/New_York";
 
@@ -349,6 +358,83 @@ export async function fetchAllCatalog(
     }
   }
   return items;
+}
+
+export interface CatalogChunkInput {
+  lang: CatalogLang;
+  destiny_code: string;
+  kind: CatalogKind;
+  subtype: string;
+  text: string;
+}
+
+function wordCount(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+/** Text that is embedded for a description row. Code, title, and schedule stay out. */
+export function descriptionEmbeddingText(doc: Record<string, unknown>): string {
+  return String(doc.description ?? "").trim();
+}
+
+/**
+ * One row per language and destiny code, and only when the description has text.
+ * The nightly pull copies Destiny's description even when the YAML page does not exist yet.
+ */
+export function toDescriptionDocuments(items: CatalogItem[]): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const documents: Record<string, unknown>[] = [];
+  for (const item of items) {
+    const description = (item.description ?? "").trim();
+    const destinyCode = (item.destiny_code ?? "").trim();
+    if (!destinyCode || !description) continue;
+    const key = `${item.lang}:${destinyCode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const slug = `${item.lang}:${item.kind}:${destinyCode}`;
+    documents.push({
+      id: slug,
+      slug,
+      lang: item.lang,
+      locale: item.lang,
+      kind: item.kind,
+      destiny_code: destinyCode,
+      description,
+    });
+  }
+  return documents;
+}
+
+/**
+ * Rows for texts that are already short. Does not split a landing.
+ * The nightly description sync does not call this.
+ */
+export function toChunkDocuments(chunks: CatalogChunkInput[]): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const documents: Record<string, unknown>[] = [];
+  for (const chunk of chunks) {
+    const text = chunk.text.trim();
+    const destinyCode = chunk.destiny_code.trim();
+    const subtype = chunk.subtype.trim();
+    if (!destinyCode || !subtype || !text) continue;
+    if (wordCount(text) > CHUNK_MAX_WORDS) continue;
+    const slug = `${chunk.lang}:${chunk.kind}:${destinyCode}:${subtype}`;
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    documents.push({
+      id: slug,
+      slug,
+      lang: chunk.lang,
+      locale: chunk.lang,
+      kind: chunk.kind,
+      destiny_code: destinyCode,
+      subtype,
+      text,
+    });
+  }
+  return documents;
 }
 
 export function toSearchDocuments(items: CatalogItem[]): Record<string, unknown>[] {

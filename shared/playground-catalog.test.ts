@@ -10,7 +10,10 @@ import {
   nextCatalogPollAt,
   offeringsFromCatalog,
   playgroundCatalogBaseUrl,
+  toChunkDocuments,
+  toDescriptionDocuments,
   toSearchDocuments,
+  descriptionEmbeddingText,
   type CatalogItem,
 } from "./playground-catalog";
 
@@ -191,6 +194,96 @@ describe("playground catalog client", () => {
     expect(offerings[0].course_title).toBe("Photoshop");
     expect(offerings[0].campus).toBe("Hialeah");
     expect(offerings[0].course_url).toContain("courseId=20001023");
+  });
+
+  it("embeds only the description and keeps one row per language and destiny code", () => {
+    const items: CatalogItem[] = [
+      {
+        kind: "course",
+        destiny_code: "1170129",
+        title: "Practical Nursing",
+        lang: "en",
+        program_area_name: "Health",
+        description: "Patient care and the Florida exam.",
+        sections: [{ campus: "Wolfson", days: "Monday", start_date: "2026-11-02" }],
+      },
+      {
+        kind: "course",
+        destiny_code: "1170129",
+        title: "Practical Nursing copy",
+        lang: "en",
+        description: "A second English row for the same code.",
+        sections: [],
+      },
+      {
+        kind: "course",
+        destiny_code: "1170129",
+        title: "Enfermería",
+        lang: "es",
+        description: "Cuidado de pacientes.",
+        sections: [],
+      },
+      {
+        kind: "content_piece",
+        destiny_code: "CM000080",
+        title: "A blog post",
+        lang: "en",
+        description: "   ",
+        sections: [],
+      },
+    ];
+    const docs = toDescriptionDocuments(items);
+    expect(docs).toHaveLength(2);
+    expect(docs.map((doc) => doc.slug)).toEqual([
+      "en:course:1170129",
+      "es:course:1170129",
+    ]);
+    expect(descriptionEmbeddingText(docs[0])).toBe("Patient care and the Florida exam.");
+    expect(descriptionEmbeddingText(docs[0])).not.toContain("1170129");
+    expect(descriptionEmbeddingText(docs[0])).not.toContain("Wolfson");
+    expect(descriptionEmbeddingText(docs[0])).not.toContain("Practical Nursing");
+    expect(docs[0]).not.toHaveProperty("title");
+    expect(docs[0]).not.toHaveProperty("program_area_name");
+    expect(docs[1]).toMatchObject({ locale: "es", destiny_code: "1170129", kind: "course" });
+  });
+
+  it("keeps short chunks and does not split a long page", () => {
+    const docs = toChunkDocuments([
+      {
+        lang: "en",
+        kind: "content_piece",
+        destiny_code: "CM000080",
+        subtype: "module",
+        text: "How makeup works on a film set.",
+      },
+      {
+        lang: "en",
+        kind: "content_piece",
+        destiny_code: "CM000080",
+        subtype: "module",
+        text: "duplicate",
+      },
+      {
+        lang: "en",
+        kind: "course",
+        destiny_code: "1170129",
+        subtype: "outcomes",
+        text: new Array(201).fill("word").join(" "),
+      },
+      {
+        lang: "en",
+        kind: "course",
+        destiny_code: "1170129",
+        subtype: "outcomes",
+        text: "   ",
+      },
+    ]);
+    expect(docs).toHaveLength(1);
+    expect(docs[0]).toMatchObject({
+      slug: "en:content_piece:CM000080:module",
+      destiny_code: "CM000080",
+      text: "How makeup works on a film set.",
+    });
   });
 
   it("schedules the next poll at 03:00 America/New_York", () => {
