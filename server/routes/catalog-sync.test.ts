@@ -5,9 +5,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCatalogSyncRoutes } from "./catalog-sync";
 
 const syncPlaygroundCatalog = vi.fn();
+const startCatalogDescriptionReindex = vi.fn();
+const getJobState = vi.fn();
+const getStatus = vi.fn();
 
 vi.mock("../playground-catalog-sync", () => ({
   syncPlaygroundCatalog: (...args: unknown[]) => syncPlaygroundCatalog(...args),
+  startCatalogDescriptionReindex: (...args: unknown[]) => startCatalogDescriptionReindex(...args),
+}));
+
+vi.mock("../db-job-state", () => ({
+  getJobState: (...args: unknown[]) => getJobState(...args),
+}));
+
+vi.mock("../vector-search", () => ({
+  getStatus: (...args: unknown[]) => getStatus(...args),
 }));
 
 const TOKEN = "catalog-sync-test-token";
@@ -27,6 +39,15 @@ async function post(): Promise<{ status: number; body: Record<string, unknown> }
 
 beforeEach(async () => {
   syncPlaygroundCatalog.mockReset();
+  startCatalogDescriptionReindex.mockReset();
+  startCatalogDescriptionReindex.mockReturnValue({ documents: 4, indexing: "started" });
+  getJobState.mockReset();
+  getJobState.mockReturnValue({ index: { status: "running", fetched: 32, total: 4 } });
+  getStatus.mockReset();
+  getStatus.mockResolvedValue({
+    available: true,
+    collections: [{ name: "ce-catalog-descriptions", points_count: 4 }],
+  });
   syncPlaygroundCatalog.mockResolvedValue({
     items: 3,
     offerings: 1,
@@ -102,5 +123,33 @@ describe("POST /api/service/catalog/sync", () => {
     release();
     const done = await first;
     expect(done.status).toBe(200);
+  });
+});
+
+describe("catalog description reindex", () => {
+  it("starts a reindex of the saved descriptions and reports index progress", async () => {
+    const started = await fetch(`${baseUrl}/api/service/catalog/reindex`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(started.status).toBe(200);
+    expect(await started.json()).toEqual({ ok: true, documents: 4, indexing: "started" });
+    expect(startCatalogDescriptionReindex).toHaveBeenCalledTimes(1);
+
+    const status = await fetch(`${baseUrl}/api/service/catalog/index`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({
+      ok: true,
+      qdrant: true,
+      points: 4,
+      index: { status: "running", fetched: 32, total: 4, error: null },
+    });
+  });
+
+  it("rejects an index status request without the catalog token", async () => {
+    const status = await fetch(`${baseUrl}/api/service/catalog/index`);
+    expect(status.status).toBe(401);
   });
 });

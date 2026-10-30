@@ -631,7 +631,14 @@ app.use((req, res, next) => {
       .then(({ scheduleProposalMaintenance }) => scheduleProposalMaintenance())
       .catch((err) => logger.warn({ err }, "failed to schedule proposal maintenance jobs"));
     void import("./jobs/definitions/playground-catalog-poll")
-      .then(({ schedulePlaygroundCatalogPoll, syncCatalogNow }) => {
+      .then(async ({ schedulePlaygroundCatalogPoll, syncCatalogNow }) => {
+        const { startCatalogDescriptionReindex } = await import("./playground-catalog-sync");
+        try {
+          const started = startCatalogDescriptionReindex();
+          logger.info(started, "description reindex started from the saved catalog");
+        } catch (err) {
+          logger.warn({ err }, "description reindex skipped");
+        }
         void syncCatalogNow().catch((err) => logger.warn({ err }, "playground catalog sync now failed"));
         return schedulePlaygroundCatalogPoll();
       })

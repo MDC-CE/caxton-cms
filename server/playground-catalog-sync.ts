@@ -4,7 +4,7 @@
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
-import { indexInFlightFor } from "./vector-search";
+import { indexInFlightFor, indexItems } from "./vector-search";
 import { child } from "./logger";
 import { getSiteContextMap } from "./site-manager";
 import {
@@ -36,6 +36,23 @@ function learningSite() {
     if (ctx.contentRootName === CATALOG_CONTENT_ROOT_NAME) return ctx;
   }
   return null;
+}
+
+/**
+ * Save description fingerprints from the catalog already on disk.
+ * A hung playground download must not leave search on the old index.
+ */
+export function startCatalogDescriptionReindex(): { documents: number; indexing: "started" | "already_running" } {
+  const site = learningSite();
+  if (!site) throw new Error(`Site ${CATALOG_CONTENT_ROOT_NAME} is not loaded`);
+  const file = path.join(site.contentRoot, "db", CATALOG_DESCRIPTIONS_DB_NAME, "items.json");
+  if (!fs.existsSync(file)) throw new Error("Description rows are not on disk yet");
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Description rows are not on disk yet");
+  const already = Boolean(indexInFlightFor(CATALOG_DESCRIPTIONS_DB_NAME));
+  void indexItems(CATALOG_DESCRIPTIONS_DB_NAME, parsed as Record<string, unknown>[], [...DESCRIPTION_VECTOR_FIELDS])
+    .catch((err) => log.error({ err }, "[playground-catalog] description reindex failed"));
+  return { documents: parsed.length, indexing: already ? "already_running" : "started" };
 }
 
 /** Databases the nightly pull reloads. Chunks are not in this list. */
