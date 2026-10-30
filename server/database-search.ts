@@ -328,6 +328,75 @@ export interface SearchDatabaseItemsOptions {
 }
 
 /**
+ * The hero asks ce-catalog. That file has vectors turned off, so a phrase only
+ * matches when it is written in the description. The description index answers
+ * by meaning, then the row is joined back so the card still has its title.
+ */
+async function catalogItemsFromDescriptions(
+  q: string,
+  options: SearchDatabaseItemsOptions,
+  kind: CatalogKind | undefined,
+): Promise<DatabaseSearchResult | null> {
+  const dbm = options.db ?? databaseManager;
+  let described: DatabaseSearchResult;
+  try {
+    described = await searchDatabaseItems(CATALOG_DESCRIPTIONS_DB_NAME, q, {
+      limit: DESCRIPTION_SEARCH_LIMIT,
+      offset: 0,
+      locale: options.locale,
+      kind,
+      target: kind,
+      db: dbm,
+      contentFolder: options.contentFolder,
+      localOnly: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (message.includes("not found")) return null;
+    throw err;
+  }
+  if (!described.semantic || described.items.length === 0) return null;
+
+  let fatItems: Record<string, unknown>[] = [];
+  try {
+    fatItems = (await dbm.fetchItems(CATALOG_DB_NAME)).items;
+  } catch {
+    fatItems = [];
+  }
+
+  const items = described.items.map((row) => {
+    const code = String(row.destiny_code ?? "");
+    const lang = String(row.locale ?? row.lang ?? "");
+    const rowKind = String(row.kind ?? "");
+    const fat = fatItems.find((item) => (
+      String(item.destiny_code ?? "") === code
+      && String(item.locale ?? item.lang ?? "") === lang
+      && String(item.kind ?? "") === rowKind
+    ));
+    return fat ?? row;
+  });
+
+  const scores: Record<string, number> = {};
+  described.items.forEach((row, index) => {
+    const descSlug = String(row.slug ?? row.id ?? "");
+    const score = descSlug && described.scores ? described.scores[descSlug] : undefined;
+    const item = items[index];
+    const key = String(item?.slug ?? item?.id ?? descSlug);
+    if (key && typeof score === "number") scores[key] = score;
+  });
+
+  const offset = Math.max(0, options.offset ?? 0);
+  const limit = Math.min(Math.max(1, options.limit ?? 20), SEARCH_CACHE_CEILING);
+  return {
+    items: items.slice(offset, offset + limit),
+    count: items.length,
+    semantic: true,
+    ...(Object.keys(scores).length ? { scores } : {}),
+    cache: "miss",
+  };
+}
+
+/**
  * Semantic search when enabled; keyword fallback otherwise.
  * Caches semantic hits, then slices to limit. Description search asks for 10 neighbors.
  */
@@ -353,6 +422,11 @@ export async function searchDatabaseItems(
   const kind = descriptionsDb && (target === "course" || target === "content_piece")
     ? target
     : requestedKind;
+
+  if (dbName === CATALOG_DB_NAME && options.localOnly) {
+    const fromDescriptions = await catalogItemsFromDescriptions(q, options, requestedKind);
+    if (fromDescriptions) return fromDescriptions;
+  }
 
   if (dbName === CATALOG_DB_NAME && !options.localOnly) {
     // Embeddings win when the local index can answer. The playground word score

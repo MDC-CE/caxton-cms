@@ -8,7 +8,7 @@ import {
 } from "./dynamic-entries";
 import { faqItemKey } from "@shared/faq-listing";
 import { LISTING_SEARCH_MIN_CHARS } from "@shared/listing-search-config";
-import { CATALOG_DESCRIPTIONS_DB_NAME, DESCRIPTION_SEARCH_LIMIT } from "@shared/playground-catalog";
+import { CATALOG_DB_NAME, CATALOG_DESCRIPTIONS_DB_NAME, DESCRIPTION_SEARCH_LIMIT } from "@shared/playground-catalog";
 import { getDefaultContentFolder } from "./site-config";
 
 export interface ListingPermanentFilter {
@@ -171,7 +171,8 @@ export async function searchListingItems(
 
     let searchHits = applyFilters(searchResult.items, filters);
 
-    if (descriptionsDb) {
+    const catalogMeaning = descriptionsDb || (semantic && dbName === CATALOG_DB_NAME);
+    if (catalogMeaning) {
       rawItems = searchHits.slice(0, limit);
     } else {
       const filterOnlyResult = await queryEntries(
