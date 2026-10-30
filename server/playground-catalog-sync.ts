@@ -4,6 +4,7 @@
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
+import { indexInFlightFor } from "./vector-search";
 import { child } from "./logger";
 import { getSiteContextMap } from "./site-manager";
 import {
@@ -142,6 +143,8 @@ export async function syncPlaygroundCatalog(): Promise<{
   site.database.reload();
   for (const name of catalogDatabasesToRefresh()) {
     await site.database.fetchItems(name, true);
+    const pending = indexInFlightFor(name);
+    if (pending) await pending;
   }
 
   log.info(

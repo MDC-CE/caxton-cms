@@ -168,6 +168,31 @@ function collectionName(dbName: string): string {
   return dbName;
 }
 
+/** Point the live name at a finished build. A half-built collection never takes this name. */
+export function aliasSwapActions(
+  liveName: string,
+  buildName: string,
+  previousTarget: string | null,
+): Array<
+  | { delete_alias: { alias_name: string } }
+  | { create_alias: { collection_name: string; alias_name: string } }
+> {
+  const actions: Array<
+    | { delete_alias: { alias_name: string } }
+    | { create_alias: { collection_name: string; alias_name: string } }
+  > = [];
+  if (previousTarget) actions.push({ delete_alias: { alias_name: liveName } });
+  actions.push({ create_alias: { collection_name: buildName, alias_name: liveName } });
+  return actions;
+}
+
+const indexInFlight = new Map<string, Promise<void>>();
+
+/** The catalog sync waits on this so search does not run against a half-written index. */
+export function indexInFlightFor(dbName: string): Promise<void> | undefined {
+  return indexInFlight.get(dbName);
+}
+
 async function ensureCollection(dbName: string): Promise<void> {
   const client = getQdrantClient();
   const name = collectionName(dbName);
@@ -187,14 +212,29 @@ async function ensureCollection(dbName: string): Promise<void> {
   }
 }
 
-async function recreateCollection(dbName: string): Promise<void> {
+async function publishBuiltCollection(liveName: string, buildName: string): Promise<void> {
   const client = getQdrantClient();
-  const name = collectionName(dbName);
-  try { await client.deleteCollection(name); } catch {}
-  await client.createCollection(name, {
-    vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+  const aliases = await client.getAliases();
+  const current = (aliases.aliases ?? []).find((alias) => alias.alias_name === liveName);
+  const previousTarget = current?.collection_name ?? null;
+  if (!current) {
+    try {
+      await client.getCollection(liveName);
+      await client.deleteCollection(liveName);
+    } catch {
+      // The live name is free for the new alias.
+    }
+  }
+  await client.updateCollectionAliases({
+    actions: aliasSwapActions(liveName, buildName, previousTarget),
   });
-  log.info(`[vector-search] Recreated collection "${name}" (size=${VECTOR_SIZE})`);
+  if (previousTarget && previousTarget !== buildName) {
+    try {
+      await client.deleteCollection(previousTarget);
+    } catch (err) {
+      log.warn({ err, previousTarget }, "[vector-search] Old collection delete failed");
+    }
+  }
 }
 
 function buildText(item: Record<string, unknown>, fields: string[]): string {
@@ -262,13 +302,17 @@ export function vectorSearchFilter(options: {
   return must.length > 0 ? { must } : undefined;
 }
 
-export async function indexItems(
+async function runIndex(
   dbName: string,
   items: Record<string, unknown>[],
-  fields: string[]
+  fields: string[],
 ): Promise<void> {
   if (!(await isAvailable())) {
     log.info(`[vector-search] Qdrant not available — skipping index for "${dbName}"`);
+    return;
+  }
+  if (items.length === 0) {
+    log.info(`[vector-search] No rows to index for "${dbName}"`);
     return;
   }
 
@@ -279,10 +323,14 @@ export async function indexItems(
     startedAt: new Date().toISOString(),
   });
 
+  const client = getQdrantClient();
+  const buildName = `${collectionName(dbName)}__${Date.now()}`;
   try {
-    await recreateCollection(dbName);
-    const client = getQdrantClient();
-    const name = collectionName(dbName);
+    await client.createCollection(buildName, {
+      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+      // Plain scan. An unfinished vector index was returning the wrong courses.
+      optimizers_config: { indexing_threshold: 0 },
+    });
     let indexed = 0;
 
     for (let start = 0; start < items.length; start += BATCH_SIZE) {
@@ -296,7 +344,7 @@ export async function indexItems(
         payload: pointPayload(item, start + i),
       }));
 
-      await client.upsert(name, { points });
+      await client.upsert(buildName, { points });
       indexed += batch.length;
       setJobState(dbName, "index", {
         status: "running",
@@ -307,6 +355,12 @@ export async function indexItems(
         `[vector-search] Indexed batch ${Math.floor(start / BATCH_SIZE) + 1} (${batch.length} items) for "${dbName}"`
       );
     }
+
+    if (indexed !== items.length) {
+      throw new Error(`Indexed ${indexed} of ${items.length} rows for "${dbName}"`);
+    }
+
+    await publishBuiltCollection(collectionName(dbName), buildName);
 
     setJobState(dbName, "index", {
       status: "done",
@@ -322,6 +376,11 @@ export async function indexItems(
       log.warn({ err: invErr, dbName }, "[vector-search] Search cache invalidate failed");
     }
   } catch (err) {
+    try {
+      await client.deleteCollection(buildName);
+    } catch {
+      // The build collection may not exist yet.
+    }
     setJobState(dbName, "index", {
       status: "error",
       error: err instanceof Error ? err.message : String(err),
@@ -329,7 +388,22 @@ export async function indexItems(
     });
     log.error({ err: err }, `[vector-search] Failed to index "${dbName}":`);
     resetAvailabilityCache();
+    throw err;
   }
+}
+
+export function indexItems(
+  dbName: string,
+  items: Record<string, unknown>[],
+  fields: string[],
+): Promise<void> {
+  const existing = indexInFlight.get(dbName);
+  if (existing) return existing;
+  const run = runIndex(dbName, items, fields).finally(() => {
+    if (indexInFlight.get(dbName) === run) indexInFlight.delete(dbName);
+  });
+  indexInFlight.set(dbName, run);
+  return run;
 }
 
 export async function upsertItem(
