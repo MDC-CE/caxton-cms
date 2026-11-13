@@ -1,0 +1,496 @@
+faqs:
+  - id: opendoor#1
+    question: What are the eligibility requirements?
+    answer: >-
+      To be considered for Open Door Grant funding, students must:
+
+      - Be a Florida resident (Florida residency must be processed through the College's Admissions
+      Office).
+
+      - Be a United States citizen, permanent resident, or eligible noncitizen.
+
+      - Be enrolled in an eligible workforce program at Miami Dade College.
+
+      - Complete the Open Door Grant application provided by the Department of Continuing Education
+      and Professional Development (CEPD) if enrolled in a noncredit program.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#1-es
+    question: What are the eligibility requirements?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#2
+    question: How much funding can I receive?
+    answer: >-
+      The Open Door Grant provides a maximum award equal to the amount needed to cover up to 100% of
+      tuition and fees for eligible programs. Funding is subject to availability and approval.
+      Submission of an application does not guarantee an award.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#2-es
+    question: How much funding can I receive?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#3
+    question: What expenses are covered by the grant?
+    answer: The Open Door Grant covers tuition, exams, books, and uniforms.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#3-es
+    question: What expenses are covered by the grant?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#4
+    question: Which programs qualify for Open Door Grant funding?
+    answer: >-
+      Students must enroll in a program included in the School of Continuing Education and
+      Professional Development approved Open Door Grant course list. Please refer to the approved
+      courses listed on this webpage.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#4-es
+    question: Which programs qualify for Open Door Grant funding?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#5
+    question: When is Open Door Grant funding available?
+    answer: Eligible students may receive funding while funds remain available through June 30, 2027.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#5-es
+    question: When is Open Door Grant funding available?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#6
+    question: Do I need to complete the FAFSA?
+    answer: No. A Federal Student Aid (FAFSA) is not required for Open Door Grant funding.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#6-es
+    question: Do I need to complete the FAFSA?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#7
+    question: How do I apply?
+    answer: >-
+      Students interested in a noncredit program should complete the Open Door Grant application
+      using the application link provided on this webpage. Applicants must also complete the
+      applicable Florida Residency process through the Office of Admissions. Applications are
+      reviewed to determine whether students meet the applicable requirements and whether funding is
+      available.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#7-es
+    question: How do I apply?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#8
+    question: Does submitting an application guarantee funding?
+    answer: No. All funding requests are subject to review, approval, and the availability of grant funds.
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#8-es
+    question: Does submitting an application guarantee funding?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: opendoor#9
+    question: Who can I contact for additional information?
+    answer: >-
+      Contact the Department of Continuing Education and Professional Development at: Email:
+      cemain@mdc.edu | Telephone: (305) 237-0605. For additional information, visit the College's
+      main Open-Door Grant website: https://www.mdc.edu/opendoor/
+    locale: en
+    fuente: >-
+      playground:apps/playground/data/opendoor.yml (official_ce) |
+      https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-10-22"
+    last_updated: "2026-10-22"
+    priority: 1
+    locations:
+      - all
+    status: official_ce
+    topic: open_door_grant
+  - id: opendoor#9-es
+    question: Who can I contact for additional information?
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    locale: es
+    fuente: >-
+      no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019
+      EN-only; mdc.edu/es/opendoor 404) | pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 1
+    locations:
+      - all
+    status: pending_from_ce
+    topic: open_door_grant
+  - id: sample-faq-financial-aid
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: >-
+      mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce |
+      related=Open Door Grant https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: Can I get financial aid for Continuing Education courses?
+    locale: en
+  - id: sample-faq-financial-aid-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: >-
+      mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce |
+      related=Open Door Grant https://ce.mdc.edu/contentManagement.do?method=load&code=CM000019
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: ¿Puedo obtener ayuda financiera para cursos de Educación Continua?
+    locale: es
+  - id: sample-faq-register
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: registration
+    question: How do I register for a course?
+    locale: en
+  - id: sample-faq-register-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: registration
+    question: ¿Cómo me inscribo en un curso?
+    locale: es
+  - id: sample-faq-payment
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: How do I pay for a course?
+    locale: en
+  - id: sample-faq-payment-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: ¿Cómo pago un curso?
+    locale: es
+  - id: sample-faq-refunds
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: refunds
+    question: Can I get a refund if I drop a course?
+    locale: en
+  - id: sample-faq-refunds-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: refunds
+    question: ¿Puedo obtener un reembolso si cancelo un curso?
+    locale: es
+  - id: sample-faq-admission
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: registration
+    question: Do I need to be an MDC student to take a Continuing Education course?
+    locale: en
+  - id: sample-faq-admission-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: registration
+    question: ¿Tengo que ser estudiante de MDC para tomar un curso de Educación Continua?
+    locale: es
+  - id: sample-faq-length
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: schedule
+    question: How long does a Continuing Education course take?
+    locale: en
+  - id: sample-faq-length-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: schedule
+    question: ¿Cuánto dura un curso de Educación Continua?
+    locale: es
+  - id: sample-faq-cost
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: How much does a Continuing Education course cost?
+    locale: en
+  - id: sample-faq-cost-es
+    answer: >-
+      [Pending from CE. The official answer for Continuing Education is not published yet; nothing
+      is shown in its place.]
+    fuente: mdc-playground apps/destiny/data/search_demo_samples.json | status=pending_from_ce
+    fecha: "2026-11-13"
+    last_updated: "2026-11-13"
+    priority: 2
+    locations:
+      - all
+    status: pending_from_ce
+    topic: payment
+    question: ¿Cuánto cuesta un curso de Educación Continua?
+    locale: es
