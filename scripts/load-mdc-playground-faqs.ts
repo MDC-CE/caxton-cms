@@ -167,6 +167,19 @@ export function buildPendingFaqs(demoFaqs: DemoFaq[]): FaqBankItem[] {
   return out;
 }
 
+/**
+ * Official Spanish Open Door FAQ answers, when CE publishes them.
+ * Checked: playground only has English `opendoor.yml`; live CE CM000019 is EN-only;
+ * `mdc.edu/es/opendoor` 404. Leave empty → ES rows stay Pending from CE (no machine translation).
+ */
+export const OPEN_DOOR_OFFICIAL_ES: Record<
+  string,
+  { question: string; answer: string }
+> = {};
+
+const OPEN_DOOR_PENDING_ANSWER =
+  "[Pending from CE. The official answer for Continuing Education is not published yet; nothing is shown in its place.]";
+
 export function buildOpenDoorFaqs(
   opendoorYml: Record<string, unknown>,
   fecha: string,
@@ -185,8 +198,9 @@ export function buildOpenDoorFaqs(
     const answer = flattenOpenDoorAnswer(item.answer);
     if (!answer) continue;
     n += 1;
+    const id = `opendoor#${n}`;
     out.push({
-      id: `opendoor#${n}`,
+      id,
       question,
       answer,
       locale: "en",
@@ -198,8 +212,55 @@ export function buildOpenDoorFaqs(
       status: "official_ce",
       topic: "open_door_grant",
     });
+
+    const officialEs = OPEN_DOOR_OFFICIAL_ES[id];
+    if (officialEs?.answer?.trim() && !officialEs.answer.includes(PENDING_MARK)) {
+      out.push({
+        id: `${id}-es`,
+        question: officialEs.question.trim() || question,
+        answer: officialEs.answer.trim(),
+        locale: "es",
+        fuente: `official Spanish Open Door CE page | ${OPEN_DOOR_URL}`,
+        fecha,
+        last_updated: fecha,
+        priority: 1,
+        locations: ["all"],
+        status: "official_ce",
+        topic: "open_door_grant",
+      });
+    } else {
+      // No official ES copy found — keep EN question (do not machine-translate), Pending answer.
+      out.push({
+        id: `${id}-es`,
+        question,
+        answer: OPEN_DOOR_PENDING_ANSWER,
+        locale: "es",
+        fuente:
+          "no official Spanish Open Door FAQ found (playground opendoor.yml EN-only; ce.mdc.edu CM000019 EN-only; mdc.edu/es/opendoor 404) | pending_from_ce",
+        fecha: TODAY,
+        last_updated: TODAY,
+        priority: 1,
+        locations: ["all"],
+        status: "pending_from_ce",
+        topic: "open_door_grant",
+      });
+    }
   }
   return out;
+}
+
+/** Counts for Open Door locale=es rows after build. */
+export function summarizeOpenDoorEs(faqs: FaqBankItem[]): {
+  total: number;
+  official: number;
+  pending: number;
+} {
+  const es = faqs.filter(
+    (f) => f.locale === "es" && String(f.id || "").startsWith("opendoor#"),
+  );
+  const official = es.filter((f) => f.status === "official_ce").length;
+  const pending = es.filter((f) => f.status === "pending_from_ce").length;
+  return { total: es.length, official, pending };
 }
 
 export function buildFaqBank(opts: {
@@ -353,10 +414,27 @@ async function main(): Promise<void> {
     }
   }
   const written = writeFaqBank(contentRoot, faqs);
+  const openDoorEs = summarizeOpenDoorEs(faqs);
   console.log(
     `[load-mdc-playground-faqs] Wrote ${written.count} FAQs → ${written.faqsPath}`,
   );
   console.log(`[load-mdc-playground-faqs] Config → ${written.configPath}`);
+  console.log(
+    `[load-mdc-playground-faqs] Open Door ES: ${openDoorEs.total} total, ${openDoorEs.official} official, ${openDoorEs.pending} Pending from CE`,
+  );
+
+  // Checked-in snapshot for PRs (site_* is gitignored in the app repo).
+  const fixtureDir = path.resolve(
+    process.cwd(),
+    "scripts",
+    "fixtures",
+    "mdc-ce-frequently-asked-questions",
+  );
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  fs.copyFileSync(written.configPath, path.join(fixtureDir, "config.yml"));
+  fs.copyFileSync(written.faqsPath, path.join(fixtureDir, "faqs.yml"));
+  console.log(`[load-mdc-playground-faqs] Fixture snapshot → ${fixtureDir}`);
+
   if (reindex) {
     await maybeReindex(contentRoot, written.count);
   } else {

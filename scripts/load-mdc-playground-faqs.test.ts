@@ -7,6 +7,7 @@ import {
   buildFaqBank,
   buildPendingFaqs,
   faqDbConfig,
+  summarizeOpenDoorEs,
   writeFaqBank,
   type FaqBankItem,
 } from "./load-mdc-playground-faqs";
@@ -120,12 +121,28 @@ describe("load-mdc-playground-faqs", () => {
       opendoorYml,
       openDoorFecha: "2026-10-22",
     });
-    const openDoor = rows.filter((r) => r.status === "official_ce");
-    expect(openDoor.length).toBe(2);
-    expect(openDoor.every((r) => r.fecha === "2026-10-22")).toBe(true);
-    expect(openDoor.every((r) => r.locale === "en")).toBe(true);
-    expect(openDoor[0].answer).not.toMatch(/Pending from CE/);
-    expect(openDoor.some((r) => r.answer.includes("Be a Florida resident"))).toBe(true);
+    const openDoorEn = rows.filter(
+      (r) => r.status === "official_ce" && r.locale === "en",
+    );
+    expect(openDoorEn.length).toBe(2);
+    expect(openDoorEn.every((r) => r.fecha === "2026-10-22")).toBe(true);
+    expect(openDoorEn[0].answer).not.toMatch(/Pending from CE/);
+    expect(openDoorEn.some((r) => r.answer.includes("Be a Florida resident"))).toBe(
+      true,
+    );
+
+    const openDoorEs = rows.filter(
+      (r) => String(r.id || "").startsWith("opendoor#") && r.locale === "es",
+    );
+    expect(openDoorEs.length).toBe(2);
+    // No official Spanish Open Door page → Pending from CE (never machine-translated).
+    expect(openDoorEs.every((r) => r.status === "pending_from_ce")).toBe(true);
+    expect(openDoorEs.every((r) => r.answer.includes("Pending from CE"))).toBe(true);
+    expect(summarizeOpenDoorEs(rows)).toEqual({
+      total: 2,
+      official: 0,
+      pending: 2,
+    });
   });
 
   it("writes config + faqs.yml with required fields", () => {
