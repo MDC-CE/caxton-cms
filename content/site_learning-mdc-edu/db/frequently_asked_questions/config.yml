@@ -1,0 +1,64 @@
+name: frequently_asked_questions
+description: >-
+  Continuing Education FAQs for learning.mdc.edu (playground samples + Open Door). Pending answers
+  stay marked Pending from CE.
+source:
+  type: local
+  local:
+    filename: faqs.yml
+    results_path: faqs
+cache:
+  ttl_minutes: 60
+filter_by_locale: true
+vector_search:
+  enabled: true
+  fields:
+    - question
+    - answer
+    - fuente
+search_fields:
+  - question
+  - answer
+  - fuente
+  - topic
+  - id
+editor:
+  question:
+    type: text
+    description: Question visitors ask
+  answer:
+    type: textarea
+    description: Answer shown (Pending from CE until CE publishes)
+  locale:
+    type: select
+    options:
+      - en
+      - es
+    description: Language of this FAQ row
+  fuente:
+    type: text
+    description: Source of this answer
+  fecha:
+    type: text
+    description: Source date (YYYY-MM-DD)
+  last_updated:
+    type: text
+    description: Last reviewed (YYYY-MM-DD)
+  priority:
+    type: number
+    description: Lower numbers sort first
+  locations:
+    type: tags
+    description: Campus/location tags (all = everywhere)
+  status:
+    type: select
+    options:
+      - official_ce
+      - pending_from_ce
+    description: Official CE answer or still pending
+  topic:
+    type: text
+    description: Topic label
+  id:
+    type: text
+    description: Stable id from playground

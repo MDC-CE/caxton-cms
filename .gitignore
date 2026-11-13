@@ -7,8 +7,15 @@ tmp/
 # Site content folders — each site has its own repo (GITHUB_REPO_URL).
 # The site_*/ glob covers every site folder; the platform code repo does not contain content.
 site_*/
-# Legacy single-site default folder (no longer created; ignore if present locally)
-/content/
+# Legacy single-site default folder (no longer created; ignore if present locally).
+# Exception: tracked CE FAQ seed for reviewers (production content still lives in mdc-caxton).
+/content/*
+!/content/site_learning-mdc-edu/
+/content/site_learning-mdc-edu/*
+!/content/site_learning-mdc-edu/db/
+/content/site_learning-mdc-edu/db/*
+!/content/site_learning-mdc-edu/db/frequently_asked_questions/
+!/content/site_learning-mdc-edu/db/frequently_asked_questions/**
 marketing-content/*
 !marketing-content/.gitkeep
 !marketing-content/README.md
