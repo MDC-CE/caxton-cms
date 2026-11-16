@@ -643,6 +643,9 @@ app.use((req, res, next) => {
         return schedulePlaygroundCatalogPoll();
       })
       .catch((err) => logger.warn({ err }, "failed to schedule playground catalog poll"));
+    void import("./jobs/definitions/playground-faq-sync")
+      .then(({ schedulePlaygroundFaqSync }) => schedulePlaygroundFaqSync())
+      .catch((err) => logger.warn({ err }, "failed to schedule playground FAQ sync"));
     for (const ctx of getSiteContextMap().values()) {
       ctx.contentIndex.startSlowScanAsync();
     }

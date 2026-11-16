@@ -156,3 +156,66 @@ describe("description search target", () => {
     expect(result.items[0]?.slug).toBe("first");
   });
 });
+
+describe("frequently_asked_questions search after generic reindex", () => {
+  const FAQ = "frequently_asked_questions";
+  const pending = {
+    id: "sample-faq-pending",
+    question: "Pending question?",
+    answer: "[Pending from CE. nothing yet]",
+    locale: "en",
+    status: "pending_from_ce",
+    active: false,
+  };
+  const official = {
+    id: "sample-faq-register",
+    question: "How do I register for a course?",
+    answer: "Register online at ce.mdc.edu.",
+    locale: "en",
+    status: "official_ce",
+    active: true,
+  };
+
+  function dbWith(items: Record<string, unknown>[]) {
+    return {
+      get: (asked: string) => {
+        if (asked !== FAQ) throw new Error(`${asked} not found`);
+        return {
+          vector_search: { enabled: true, fields: ["question", "answer"] },
+          search_fields: ["question", "answer"],
+        };
+      },
+      fetchItems: async () => ({ items }),
+    };
+  }
+
+  beforeEach(() => {
+    clearDatabaseSearchMemoryCacheForTests();
+    vi.mocked(vectorSearch).mockReset();
+    vi.mocked(isAvailable).mockResolvedValue(true);
+  });
+
+  it("resolves by id so a stale _idx into pending does not win", async () => {
+    // Generic reindex used to index [pending, official] with _idx 0/1.
+    // Search filters to [official] only — _idx 0 would wrongly pick pending if used.
+    vi.mocked(vectorSearch).mockResolvedValue([
+      { slug: "sample-faq-register", score: 0.91, _idx: 0 },
+    ]);
+    const result = await searchDatabaseItems(FAQ, "how do I register", {
+      locale: "en",
+      db: dbWith([pending, official]) as never,
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe("sample-faq-register");
+    expect(result.items[0]?.answer).toBe("Register online at ce.mdc.edu.");
+  });
+
+  it("hides pending rows from keyword fallback", async () => {
+    vi.mocked(vectorSearch).mockResolvedValue([]);
+    const result = await searchDatabaseItems(FAQ, "pending question", {
+      locale: "en",
+      db: dbWith([pending, official]) as never,
+    });
+    expect(result.items.every((i) => i.id !== "sample-faq-pending")).toBe(true);
+  });
+});
