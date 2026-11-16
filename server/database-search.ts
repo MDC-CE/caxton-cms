@@ -177,14 +177,15 @@ function resolveRefs(
         && String(candidate.slug ?? candidate.id ?? "") === ref.slug
       ));
     }
+    // Prefer stable id/slug before positional _idx (filtered FAQ lists shift indices).
+    if (!item) {
+      item = allItems.find((i) => String(i.slug ?? i.id ?? "") === ref.slug);
+    }
     if (!item && ref._idx !== undefined && ref._idx >= 0 && ref._idx < allItems.length) {
       const candidate = allItems[ref._idx];
       if (String(candidate.slug ?? candidate.id ?? "") === ref.slug || !ref.slug) {
         item = candidate;
       }
-    }
-    if (!item) {
-      item = allItems.find((i) => String(i.slug ?? i.id ?? "") === ref.slug);
     }
     if (item) {
       items.push(item);
@@ -458,10 +459,12 @@ export async function searchDatabaseItems(
     vsConfig.fields.length > 0;
 
   const cacheResult = await dbm.fetchItems(dbName);
+  const rawItems = cacheResult.items;
+  // FAQ search only surfaces indexable rows; resolve vector hits by id (not _idx).
   const allItems =
     dbName === FAQ_DB_NAME
-      ? cacheResult.items.filter((item) => isFaqIndexable(item))
-      : cacheResult.items;
+      ? rawItems.filter((item) => isFaqIndexable(item))
+      : rawItems;
 
   const mem = memoryCache.get(memKey);
   if (mem && !isExpired(mem.writtenAt)) {
@@ -524,6 +527,13 @@ export async function searchDatabaseItems(
               String(candidate.slug ?? candidate.id ?? "") === r.slug
               && (!r.destiny_code || String(candidate.destiny_code ?? "") === r.destiny_code)
             ));
+          } else if (dbName === FAQ_DB_NAME) {
+            const key = String(r.slug ?? "");
+            item = rawItems.find(
+              (candidate) =>
+                String(candidate.id ?? "") === key || String(candidate.slug ?? "") === key,
+            );
+            if (item && !isFaqIndexable(item)) item = undefined;
           } else {
             if (r._idx !== undefined && r._idx >= 0 && r._idx < allItems.length) {
               item = allItems[r._idx];
@@ -542,7 +552,9 @@ export async function searchDatabaseItems(
             score: r.score,
             ref: descriptionsDb
               ? { slug: r.slug, score: r.score, destiny_code: String(item.destiny_code ?? r.destiny_code ?? "") }
-              : { slug: r.slug, _idx: r._idx, score: r.score },
+              : dbName === FAQ_DB_NAME
+                ? { slug: String(item.id ?? item.slug ?? r.slug), score: r.score }
+                : { slug: r.slug, _idx: r._idx, score: r.score },
           });
         }
 

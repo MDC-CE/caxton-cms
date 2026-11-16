@@ -10,7 +10,7 @@ import {
   FAQ_DB_NAME,
   assessFaqSyncPayload,
   fetchPlaygroundFaqs,
-  isFaqIndexable,
+  itemsForVectorIndex,
   mergeFaqBankFromApi,
   playgroundFaqsUrl,
   type FaqBankRow,
@@ -72,7 +72,7 @@ export async function reindexFaqBank(dbName = FAQ_DB_NAME): Promise<{ ok: boolea
   if (!(await isAvailable())) {
     return { ok: false, count: cached.items.length, skipped: "Qdrant not available" };
   }
-  const indexable = cached.items.filter((item) => isFaqIndexable(item));
+  const indexable = itemsForVectorIndex(dbName, cached.items);
   await indexItems(dbName, indexable, vs.fields);
   return { ok: true, count: indexable.length };
 }

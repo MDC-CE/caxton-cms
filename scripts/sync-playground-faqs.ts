@@ -22,7 +22,7 @@ import {
   FAQ_DB_NAME,
   assessFaqSyncPayload,
   fetchPlaygroundFaqs,
-  isFaqIndexable,
+  itemsForVectorIndex,
   mergeFaqBankFromApi,
   playgroundFaqsUrl,
   type FaqBankRow,
@@ -72,7 +72,7 @@ async function reindexFromYaml(contentRoot: string, faqs: FaqBankRow[]): Promise
     );
     return;
   }
-  const indexable = faqs.filter((f) => isFaqIndexable(f));
+  const indexable = itemsForVectorIndex(FAQ_DB_NAME, faqs as unknown as Record<string, unknown>[]);
   await indexItems(FAQ_DB_NAME, indexable, fields);
   console.log(`[sync-playground-faqs] reindex ok (${indexable.length} indexable items)`);
 }

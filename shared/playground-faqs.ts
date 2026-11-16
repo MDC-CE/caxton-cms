@@ -173,6 +173,15 @@ export function isFaqIndexable(row: FaqBankRow | Record<string, unknown>): boole
   return true;
 }
 
+/** Filter before every vector index path (sync, POST /reindex, DatabaseManager). */
+export function itemsForVectorIndex(
+  dbName: string,
+  items: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  if (dbName !== FAQ_DB_NAME) return items;
+  return items.filter((item) => isFaqIndexable(item));
+}
+
 export function apiRowToBankItem(row: PlaygroundFaqApiRow, now = new Date()): FaqBankRow {
   const fecha = (row.date && String(row.date).trim()) || todayKey(now);
   const source = row.source == null ? "" : String(row.source);

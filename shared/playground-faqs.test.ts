@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  FAQ_DB_NAME,
   FAQ_SYNC_ORIGIN,
   apiRowToBankItem,
   assessFaqSyncPayload,
   isFaqIndexable,
+  itemsForVectorIndex,
   mergeFaqBankFromApi,
   parseFaqApiRows,
   playgroundFaqsUrl,
@@ -239,6 +241,24 @@ describe("mergeFaqBankFromApi", () => {
     expect(merged.faqs[0].answer).toBe("Staff wrote this.");
   });
 
+  it("does not overwrite a manual row when API sends the same colliding id", () => {
+    const existing: FaqBankRow[] = [
+      {
+        id: "sample-faq-register",
+        question: "Manual register FAQ",
+        answer: "Ask an advisor in person.",
+        locale: "en",
+        active: true,
+        status: "official_ce",
+      },
+    ];
+    const merged = mergeFaqBankFromApi(existing, [officialApiRow]);
+    expect(merged.upserted).toBe(0);
+    expect(merged.faqs).toHaveLength(1);
+    expect(merged.faqs[0].answer).toBe("Ask an advisor in person.");
+    expect(merged.faqs[0].sync_origin).toBeUndefined();
+  });
+
   it("does not let pending API overwrite an official managed answer", () => {
     const existing: FaqBankRow[] = [
       {
@@ -265,6 +285,41 @@ describe("mergeFaqBankFromApi", () => {
     expect(merged.upserted).toBe(1);
     expect(isFaqIndexable(merged.faqs[0])).toBe(true);
     expect(merged.faqs[0].source_url).toBe("https://ce.mdc.edu/register");
+  });
+});
+
+describe("itemsForVectorIndex (generic reindex / DatabaseManager)", () => {
+  it("drops pending and inactive FAQ rows before indexing", () => {
+    const items = [
+      {
+        id: "sample-faq-pending",
+        question: "Pending?",
+        answer: PENDING,
+        status: "pending_from_ce",
+        active: false,
+      },
+      {
+        id: "sample-faq-register",
+        question: "How do I register?",
+        answer: "Register online.",
+        status: "official_ce",
+        active: true,
+      },
+      {
+        id: "sample-faq-empty",
+        question: "Empty?",
+        answer: "",
+        status: "pending_from_ce",
+        active: true,
+      },
+    ];
+    const indexed = itemsForVectorIndex(FAQ_DB_NAME, items);
+    expect(indexed.map((i) => i.id)).toEqual(["sample-faq-register"]);
+  });
+
+  it("leaves non-FAQ databases unchanged", () => {
+    const items = [{ id: "a", answer: PENDING }];
+    expect(itemsForVectorIndex("ce-catalog", items)).toEqual(items);
   });
 });
 

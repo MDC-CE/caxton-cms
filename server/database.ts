@@ -923,8 +923,12 @@ export class DatabaseManager {
 
     const vsConfig = (config as DatabaseConfig).vector_search;
     if (vsConfig?.enabled && vsConfig.fields?.length > 0) {
-      import("./vector-search").then(({ indexItems }) => {
-        indexItems(name, items, vsConfig.fields).catch((err) => {
+      Promise.all([
+        import("./vector-search"),
+        import("@shared/playground-faqs"),
+      ]).then(([{ indexItems }, { itemsForVectorIndex }]) => {
+        const toIndex = itemsForVectorIndex(name, items);
+        indexItems(name, toIndex, vsConfig.fields).catch((err) => {
           log.error({ err: err }, `[DatabaseManager] Background vector indexing failed for "${name}":`);
         });
       }).catch((err) => {

@@ -931,11 +931,13 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
         return;
       }
       const cached = await dbm.fetchItems(name, false);
+      const { itemsForVectorIndex } = await import("@shared/playground-faqs");
+      const toIndex = itemsForVectorIndex(name, cached.items);
       const { indexItems } = await import("../vector-search");
-      indexItems(name, cached.items, vsConfig.fields).catch((err: unknown) => {
+      indexItems(name, toIndex, vsConfig.fields).catch((err: unknown) => {
         log.error({ err: err }, `[reindex] Background indexing error for "${name}":`);
       });
-      res.json({ success: true, count: cached.items.length });
+      res.json({ success: true, count: toIndex.length });
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
