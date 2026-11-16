@@ -16,6 +16,7 @@ import { HtmlPageRebuildJob } from "./definitions/html-page-rebuild";
 import { HtmlDbReaderRebuildJob } from "./definitions/html-db-reader-rebuild";
 import { HtmlContentTypeListingRebuildJob } from "./definitions/html-content-type-listing-rebuild";
 import { PlaygroundCatalogPollJob } from "./definitions/playground-catalog-poll";
+import { PlaygroundFaqSyncJob } from "./definitions/playground-faq-sync";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -36,4 +37,5 @@ export function registerAllJobs(): void {
   registerJobClass("html_db_reader_rebuild", HtmlDbReaderRebuildJob);
   registerJobClass("html_content_type_listing_rebuild", HtmlContentTypeListingRebuildJob);
   registerJobClass("playground_catalog_poll", PlaygroundCatalogPollJob);
+  registerJobClass("playground_faq_sync", PlaygroundFaqSyncJob);
 }
