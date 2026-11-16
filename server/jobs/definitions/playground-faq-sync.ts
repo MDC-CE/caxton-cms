@@ -1,7 +1,7 @@
 import { Job } from "sidequest";
 import { child } from "../../logger";
 import { enqueueJob } from "../queue";
-import { msUntilFaqSync } from "@shared/playground-faqs";
+import { msUntilFaqSync, playgroundFaqsUrl } from "@shared/playground-faqs";
 
 const log = child({ module: "job:playground-faq-sync" });
 
@@ -23,14 +23,17 @@ async function reschedule(): Promise<void> {
 
 /**
  * Daily pull at 01:00 America/New_York (after catalog poll at 00:30).
- * Same idea as Edwin's Luma calendar sync: fetch remote list, upsert by id,
- * deactivate rows that disappeared, then reindex the FAQ bank.
+ * Requires PLAYGROUND_FAQS_URL — does not fall back to a default host.
  */
 export class PlaygroundFaqSyncJob extends Job {
-  async run(): Promise<{ ok: boolean }> {
+  async run(): Promise<{ ok: boolean; skipped?: boolean }> {
     try {
+      if (!playgroundFaqsUrl()) {
+        log.warn("[PlaygroundFaqSyncJob] PLAYGROUND_FAQS_URL is not set — skipping sync");
+        return { ok: true, skipped: true };
+      }
       const { syncPlaygroundFaqs } = await import("../../playground-faq-sync");
-      const report = await syncPlaygroundFaqs({ reindex: true });
+      const report = await syncPlaygroundFaqs({ reindex: true, requireEnvUrl: true });
       log.info(report, "[PlaygroundFaqSyncJob] done");
     } catch (err) {
       log.error({ err }, "[PlaygroundFaqSyncJob] failed");
@@ -48,9 +51,14 @@ export async function syncFaqsNow(): Promise<{
   deactivated: number;
   total: number;
   reindexed: boolean;
+  aborted?: boolean;
 }> {
+  if (!playgroundFaqsUrl()) {
+    log.warn("[playground-faq-sync] PLAYGROUND_FAQS_URL is not set — sync now skipped");
+    return { fetched: 0, upserted: 0, deactivated: 0, total: 0, reindexed: false, aborted: true };
+  }
   const { syncPlaygroundFaqs } = await import("../../playground-faq-sync");
-  const report = await syncPlaygroundFaqs({ reindex: true });
+  const report = await syncPlaygroundFaqs({ reindex: true, requireEnvUrl: true });
   log.info(report, "[playground-faq-sync] synced now");
   return {
     fetched: report.fetched,
@@ -58,6 +66,7 @@ export async function syncFaqsNow(): Promise<{
     deactivated: report.deactivated,
     total: report.total,
     reindexed: report.reindexed,
+    aborted: report.aborted,
   };
 }
 

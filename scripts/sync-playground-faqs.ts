@@ -2,14 +2,13 @@
  * Sync CE FAQ bank from playground GET /api/search/faqs.
  *
  * Usage:
- *   npx tsx scripts/sync-playground-faqs.ts
+ *   PLAYGROUND_FAQS_URL=https://mdc-playground.herokuapp.com/api/search/faqs npx tsx scripts/sync-playground-faqs.ts
  *   npx tsx scripts/sync-playground-faqs.ts --no-reindex
  *   npx tsx scripts/sync-playground-faqs.ts --url "https://mdc-playground.herokuapp.com/api/search/faqs"
  *   npx tsx scripts/sync-playground-faqs.ts --content-root "C:/path/to/site_learning-mdc-edu"
  *
  * Env:
- *   PLAYGROUND_FAQS_URL — full URL (preferred)
- *   PLAYGROUND_CATALOG_BASE_URL — host only; path /api/search/faqs is appended
+ *   PLAYGROUND_FAQS_URL — full URL (required unless --url is passed). No default host.
  *
  * No secrets. Public endpoint. Does not invent FAQ answers.
  *
@@ -21,24 +20,26 @@ import path from "path";
 import yaml from "js-yaml";
 import {
   FAQ_DB_NAME,
+  assessFaqSyncPayload,
   fetchPlaygroundFaqs,
+  isFaqIndexable,
   mergeFaqBankFromApi,
   playgroundFaqsUrl,
   type FaqBankRow,
 } from "../shared/playground-faqs";
 import {
-  FAQ_CONTENT_ROOT_NAME,
   readExistingFaqBank,
   writeFaqBankYaml,
 } from "../server/playground-faq-sync";
+import { getDefaultContentRoot } from "../server/site-config";
 
 function parseArgs(argv: string[]): {
   url: string;
   contentRoot: string;
   reindex: boolean;
 } {
-  let url = playgroundFaqsUrl();
-  let contentRoot = path.resolve(process.cwd(), FAQ_CONTENT_ROOT_NAME);
+  let url = playgroundFaqsUrl() || "";
+  let contentRoot = getDefaultContentRoot();
   let reindex = true;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -46,6 +47,9 @@ function parseArgs(argv: string[]): {
     else if (a === "--reindex") reindex = true;
     else if (a === "--url" && argv[i + 1]) url = argv[++i];
     else if (a === "--content-root" && argv[i + 1]) contentRoot = path.resolve(argv[++i]);
+  }
+  if (!url) {
+    throw new Error("Set PLAYGROUND_FAQS_URL or pass --url (no default host)");
   }
   return { url, contentRoot, reindex };
 }
@@ -68,20 +72,26 @@ async function reindexFromYaml(contentRoot: string, faqs: FaqBankRow[]): Promise
     );
     return;
   }
-  const active = faqs.filter((f) => f.active !== false);
-  await indexItems(FAQ_DB_NAME, active, fields);
-  console.log(`[sync-playground-faqs] reindex ok (${active.length} active items)`);
+  const indexable = faqs.filter((f) => isFaqIndexable(f));
+  await indexItems(FAQ_DB_NAME, indexable, fields);
+  console.log(`[sync-playground-faqs] reindex ok (${indexable.length} indexable items)`);
 }
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   console.log(`[sync-playground-faqs] GET ${opts.url}`);
-  const { rows } = await fetchPlaygroundFaqs(opts.url);
+  const { rows, notModified } = await fetchPlaygroundFaqs(opts.url);
   const existing = readExistingFaqBank(opts.contentRoot);
+  const guard = assessFaqSyncPayload(existing, rows, { notModified });
+  if (!guard.ok) {
+    console.warn(`[sync-playground-faqs] aborted: ${guard.detail}`);
+    return;
+  }
+
   const merged = mergeFaqBankFromApi(existing, rows);
   const faqsPath = writeFaqBankYaml(opts.contentRoot, merged.faqs);
   console.log(
-    `[sync-playground-faqs] wrote ${merged.faqs.length} rows (upserted=${merged.upserted}, deactivated=${merged.deactivated}) → ${faqsPath}`,
+    `[sync-playground-faqs] wrote ${merged.faqs.length} rows (upserted=${merged.upserted}, deactivated=${merged.deactivated}, preservedOfficial=${merged.preservedOfficial}) → ${faqsPath}`,
   );
 
   if (!opts.reindex) {

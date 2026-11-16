@@ -6,11 +6,11 @@
  * id, question, answer, locale, source, date, differs_by_course.
  */
 
-import { playgroundCatalogBaseUrl } from "./playground-catalog";
-
 export const FAQ_DB_NAME = "frequently_asked_questions";
 export const FAQ_SYNC_ORIGIN = "playground_search_faqs";
 export const DEFAULT_PLAYGROUND_FAQS_PATH = "/api/search/faqs";
+/** Abort when the payload has fewer than this share of already-managed rows. */
+export const FAQ_SYNC_MIN_FRACTION = 0.5;
 
 const NY_TZ = "America/New_York";
 const FAQ_FETCH_TIMEOUT_MS = 20_000;
@@ -31,6 +31,7 @@ export type FaqBankRow = {
   answer: string;
   locale: string;
   fuente?: string;
+  source_url?: string;
   fecha?: string;
   last_updated?: string;
   priority?: number;
@@ -51,16 +52,20 @@ type FetchLike = (
   text: () => Promise<string>;
 }>;
 
-/** Full URL for GET /api/search/faqs. Prefer PLAYGROUND_FAQS_URL; else base + path. */
-export function playgroundFaqsUrl(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * Full URL for GET /api/search/faqs.
+ * Requires PLAYGROUND_FAQS_URL — no default host fallback.
+ */
+export function playgroundFaqsUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const explicit = env.PLAYGROUND_FAQS_URL?.trim();
-  if (explicit) return explicit.replace(/\/$/, "");
-  const base = playgroundCatalogBaseUrl(env);
-  return `${base}${DEFAULT_PLAYGROUND_FAQS_PATH}`;
+  if (!explicit) return null;
+  return explicit.replace(/\/$/, "");
 }
 
-function todayKey(now = new Date()): string {
-  return now.toISOString().slice(0, 10);
+/** Calendar date in America/New_York (YYYY-MM-DD). */
+export function todayKey(now = new Date()): string {
+  const parts = nyParts(now);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
 function nyParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number } {
@@ -143,29 +148,49 @@ export function msUntilFaqSync(now = new Date()): number {
   return Math.max(0, nextFaqSyncAt(now).getTime() - now.getTime());
 }
 
+export function isPendingFaqAnswer(answer: string | undefined | null): boolean {
+  const text = String(answer ?? "").trim();
+  return !text || /Pending from CE/i.test(text);
+}
+
+/** Only rows tagged by this sync. Manual rows (even sample-faq*) are left alone. */
 export function isPlaygroundManagedFaq(row: FaqBankRow): boolean {
-  if (row.sync_origin === FAQ_SYNC_ORIGIN) return true;
-  const id = String(row.id || "");
-  return id.startsWith("sample-faq");
+  return row.sync_origin === FAQ_SYNC_ORIGIN;
+}
+
+export function isOfficialFaqRow(row: FaqBankRow): boolean {
+  if (row.status === "official_ce") return true;
+  if (row.status === "pending_from_ce") return false;
+  return !isPendingFaqAnswer(row.answer) && row.active !== false;
+}
+
+/** Active official answers only — used by reindex and search. */
+export function isFaqIndexable(row: FaqBankRow | Record<string, unknown>): boolean {
+  const r = row as FaqBankRow;
+  if (r.active === false) return false;
+  if (r.status === "pending_from_ce") return false;
+  if (isPendingFaqAnswer(r.answer)) return false;
+  return true;
 }
 
 export function apiRowToBankItem(row: PlaygroundFaqApiRow, now = new Date()): FaqBankRow {
   const fecha = (row.date && String(row.date).trim()) || todayKey(now);
   const source = row.source == null ? "" : String(row.source);
   const answer = row.answer == null ? "" : String(row.answer);
-  const pending = /Pending from CE/i.test(answer) || !source.trim();
+  const pending = isPendingFaqAnswer(answer);
   return {
     id: String(row.id),
     question: String(row.question || "").trim(),
     answer,
     locale: String(row.locale || "en").trim() || "en",
     fuente: source,
+    source_url: source,
     fecha,
     last_updated: fecha,
     priority: 2,
     locations: ["all"],
     status: pending ? "pending_from_ce" : "official_ce",
-    active: true,
+    active: pending ? false : true,
     differs_by_course: Boolean(row.differs_by_course),
     sync_origin: FAQ_SYNC_ORIGIN,
   };
@@ -195,16 +220,43 @@ export function parseFaqApiRows(payload: unknown): PlaygroundFaqApiRow[] {
   return rows;
 }
 
+export type FaqSyncGuard =
+  | { ok: true }
+  | { ok: false; reason: "not_modified" | "empty_payload" | "too_few_rows"; detail: string };
+
+/** Skip write on 304 / empty / under half of previously managed rows. */
+export function assessFaqSyncPayload(
+  existing: FaqBankRow[],
+  incoming: PlaygroundFaqApiRow[],
+  opts?: { notModified?: boolean },
+): FaqSyncGuard {
+  if (opts?.notModified) {
+    return { ok: false, reason: "not_modified", detail: "HTTP 304 Not Modified — left bank unchanged" };
+  }
+  if (incoming.length === 0) {
+    return { ok: false, reason: "empty_payload", detail: "Playground returned 0 FAQ rows — left bank unchanged" };
+  }
+  const managed = existing.filter(isPlaygroundManagedFaq).length;
+  if (managed > 0 && incoming.length < managed * FAQ_SYNC_MIN_FRACTION) {
+    return {
+      ok: false,
+      reason: "too_few_rows",
+      detail: `Playground returned ${incoming.length} rows but bank has ${managed} managed rows (need ≥ ${Math.ceil(managed * FAQ_SYNC_MIN_FRACTION)})`,
+    };
+  }
+  return { ok: true };
+}
+
 /**
- * Upsert by id from the playground list. Rows managed by this sync that are
- * missing from the payload are marked active: false (Luma-style deactivate).
- * Open Door and other non-managed rows are left alone.
+ * Upsert by id from the playground list. Only rows with sync_origin=playground_search_faqs
+ * are overwritten or deactivated. Pending placeholders stay active:false and never replace
+ * an official answer already in the bank.
  */
 export function mergeFaqBankFromApi(
   existing: FaqBankRow[],
   incoming: PlaygroundFaqApiRow[],
   now = new Date(),
-): { faqs: FaqBankRow[]; upserted: number; deactivated: number; fetched: number } {
+): { faqs: FaqBankRow[]; upserted: number; deactivated: number; fetched: number; preservedOfficial: number } {
   const byId = new Map<string, FaqBankRow>();
   for (const row of existing) {
     const id = String(row.id || "").trim();
@@ -214,11 +266,23 @@ export function mergeFaqBankFromApi(
 
   const seen = new Set<string>();
   let upserted = 0;
+  let preservedOfficial = 0;
   for (const apiRow of incoming) {
     const mapped = apiRowToBankItem(apiRow, now);
     const id = String(mapped.id);
     seen.add(id);
     const prev = byId.get(id);
+
+    if (prev && !isPlaygroundManagedFaq(prev)) {
+      // Manual / Open Door / other origins — never overwrite.
+      continue;
+    }
+
+    if (prev && isOfficialFaqRow(prev) && isPendingFaqAnswer(mapped.answer)) {
+      preservedOfficial += 1;
+      continue;
+    }
+
     if (prev) {
       byId.set(id, {
         ...prev,
@@ -243,7 +307,7 @@ export function mergeFaqBankFromApi(
   }
 
   const faqs = [...byId.values()];
-  return { faqs, upserted, deactivated, fetched: incoming.length };
+  return { faqs, upserted, deactivated, fetched: incoming.length, preservedOfficial };
 }
 
 export async function fetchPlaygroundFaqs(

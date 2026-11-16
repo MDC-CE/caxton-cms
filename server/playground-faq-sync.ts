@@ -8,7 +8,9 @@ import { child } from "./logger";
 import { getSiteContextMap } from "./site-manager";
 import {
   FAQ_DB_NAME,
+  assessFaqSyncPayload,
   fetchPlaygroundFaqs,
+  isFaqIndexable,
   mergeFaqBankFromApi,
   playgroundFaqsUrl,
   type FaqBankRow,
@@ -70,21 +72,25 @@ export async function reindexFaqBank(dbName = FAQ_DB_NAME): Promise<{ ok: boolea
   if (!(await isAvailable())) {
     return { ok: false, count: cached.items.length, skipped: "Qdrant not available" };
   }
-  const active = cached.items.filter((item) => (item as { active?: boolean }).active !== false);
-  await indexItems(dbName, active, vs.fields);
-  return { ok: true, count: active.length };
+  const indexable = cached.items.filter((item) => isFaqIndexable(item));
+  await indexItems(dbName, indexable, vs.fields);
+  return { ok: true, count: indexable.length };
 }
 
 export type SyncPlaygroundFaqsReport = {
   url: string;
   contentRoot: string;
-  faqsPath: string;
+  faqsPath?: string;
   fetched: number;
   upserted: number;
   deactivated: number;
+  preservedOfficial?: number;
   total: number;
   reindexed: boolean;
   reindexSkipped?: string;
+  aborted?: boolean;
+  abortReason?: string;
+  wrote: boolean;
 };
 
 export async function syncPlaygroundFaqs(opts?: {
@@ -92,16 +98,58 @@ export async function syncPlaygroundFaqs(opts?: {
   contentRoot?: string;
   reindex?: boolean;
   fetchImpl?: typeof fetch;
+  /** When true, require PLAYGROUND_FAQS_URL (job path). */
+  requireEnvUrl?: boolean;
 }): Promise<SyncPlaygroundFaqsReport> {
-  const url = opts?.url || playgroundFaqsUrl();
+  const envUrl = playgroundFaqsUrl();
+  if (opts?.requireEnvUrl && !envUrl) {
+    const report: SyncPlaygroundFaqsReport = {
+      url: "",
+      contentRoot: opts?.contentRoot || "",
+      fetched: 0,
+      upserted: 0,
+      deactivated: 0,
+      total: 0,
+      reindexed: false,
+      aborted: true,
+      abortReason: "PLAYGROUND_FAQS_URL is not set",
+      wrote: false,
+    };
+    log.warn(report, "[playground-faq-sync] skipped — PLAYGROUND_FAQS_URL is not set");
+    return report;
+  }
+
+  const url = opts?.url || envUrl;
+  if (!url) {
+    throw new Error("PLAYGROUND_FAQS_URL is not set (pass --url or set the env var)");
+  }
+
   const site = learningSite();
   const contentRoot =
     opts?.contentRoot ||
     site?.contentRoot ||
     path.resolve(process.cwd(), FAQ_CONTENT_ROOT_NAME);
 
-  const { rows } = await fetchPlaygroundFaqs(url, { fetchImpl: opts?.fetchImpl });
+  const { rows, notModified } = await fetchPlaygroundFaqs(url, { fetchImpl: opts?.fetchImpl });
   const existing = readExistingFaqBank(contentRoot);
+  const guard = assessFaqSyncPayload(existing, rows, { notModified });
+  if (!guard.ok) {
+    const report: SyncPlaygroundFaqsReport = {
+      url,
+      contentRoot,
+      fetched: rows.length,
+      upserted: 0,
+      deactivated: 0,
+      total: existing.length,
+      reindexed: false,
+      aborted: true,
+      abortReason: guard.detail,
+      wrote: false,
+    };
+    log.warn(report, "[playground-faq-sync] aborted — bank unchanged");
+    return report;
+  }
+
   const merged = mergeFaqBankFromApi(existing, rows);
   const faqsPath = writeFaqBankYaml(contentRoot, merged.faqs);
 
@@ -126,9 +174,11 @@ export async function syncPlaygroundFaqs(opts?: {
     fetched: merged.fetched,
     upserted: merged.upserted,
     deactivated: merged.deactivated,
+    preservedOfficial: merged.preservedOfficial,
     total: merged.faqs.length,
     reindexed,
     reindexSkipped,
+    wrote: true,
   };
   log.info(report, "[playground-faq-sync] done");
   return report;

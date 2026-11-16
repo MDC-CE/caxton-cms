@@ -24,3 +24,4 @@ export { HtmlPageRebuildJob } from "./server/jobs/definitions/html-page-rebuild"
 export { HtmlDbReaderRebuildJob } from "./server/jobs/definitions/html-db-reader-rebuild";
 export { HtmlContentTypeListingRebuildJob } from "./server/jobs/definitions/html-content-type-listing-rebuild";
 export { PlaygroundCatalogPollJob } from "./server/jobs/definitions/playground-catalog-poll";
+export { PlaygroundFaqSyncJob } from "./server/jobs/definitions/playground-faq-sync";

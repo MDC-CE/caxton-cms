@@ -14,6 +14,7 @@ import {
   type CatalogKind,
   type CatalogLang,
 } from "@shared/playground-catalog";
+import { FAQ_DB_NAME, isFaqIndexable } from "@shared/playground-faqs";
 import { databaseManager, type DatabaseManager } from "./database";
 import { gcs } from "./gcs";
 import { child } from "./logger";
@@ -457,7 +458,10 @@ export async function searchDatabaseItems(
     vsConfig.fields.length > 0;
 
   const cacheResult = await dbm.fetchItems(dbName);
-  const allItems = cacheResult.items;
+  const allItems =
+    dbName === FAQ_DB_NAME
+      ? cacheResult.items.filter((item) => isFaqIndexable(item))
+      : cacheResult.items;
 
   const mem = memoryCache.get(memKey);
   if (mem && !isExpired(mem.writtenAt)) {

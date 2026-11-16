@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FAQ_SYNC_ORIGIN,
   apiRowToBankItem,
+  assessFaqSyncPayload,
+  isFaqIndexable,
   mergeFaqBankFromApi,
   parseFaqApiRows,
   playgroundFaqsUrl,
@@ -10,12 +12,14 @@ import {
   type PlaygroundFaqApiRow,
 } from "./playground-faqs";
 
+const PENDING =
+  "[Pending from CE. The official answer for Continuing Education is not published yet; nothing is shown in its place.]";
+
 const sampleRows: PlaygroundFaqApiRow[] = [
   {
     id: "sample-faq-cost",
     question: "How much does a Continuing Education course cost?",
-    answer:
-      "[Pending from CE. The official answer for Continuing Education is not published yet; nothing is shown in its place.]",
+    answer: PENDING,
     locale: "en",
     source: "",
     date: null,
@@ -24,14 +28,23 @@ const sampleRows: PlaygroundFaqApiRow[] = [
   {
     id: "sample-faq-cost-es",
     question: "¿Cuánto cuesta un curso de Educación Continua?",
-    answer:
-      "[Pending from CE. The official answer for Continuing Education is not published yet; nothing is shown in its place.]",
+    answer: PENDING,
     locale: "es",
     source: "",
     date: null,
     differs_by_course: true,
   },
 ];
+
+const officialApiRow: PlaygroundFaqApiRow = {
+  id: "sample-faq-register",
+  question: "How do I register for a course?",
+  answer: "Register online at ce.mdc.edu.",
+  locale: "en",
+  source: "https://ce.mdc.edu/register",
+  date: "2026-11-01",
+  differs_by_course: false,
+};
 
 describe("playgroundFaqsUrl", () => {
   it("uses PLAYGROUND_FAQS_URL when set", () => {
@@ -42,12 +55,13 @@ describe("playgroundFaqsUrl", () => {
     ).toBe("https://example.test/api/search/faqs");
   });
 
-  it("falls back to catalog base + /api/search/faqs", () => {
+  it("returns null when PLAYGROUND_FAQS_URL is missing (no default host)", () => {
     expect(
       playgroundFaqsUrl({
         PLAYGROUND_CATALOG_BASE_URL: "https://mdc-playground.herokuapp.com",
       }),
-    ).toBe("https://mdc-playground.herokuapp.com/api/search/faqs");
+    ).toBeNull();
+    expect(playgroundFaqsUrl({})).toBeNull();
   });
 });
 
@@ -68,31 +82,90 @@ describe("parseFaqApiRows", () => {
 });
 
 describe("apiRowToBankItem", () => {
-  it("maps source/date to fuente/fecha without inventing answers", () => {
+  it("maps pending placeholders to active:false and sets source_url", () => {
     const row = apiRowToBankItem(sampleRows[0], new Date("2026-11-13T12:00:00Z"));
     expect(row.answer).toBe(sampleRows[0].answer);
     expect(row.fuente).toBe("");
+    expect(row.source_url).toBe("");
     expect(row.fecha).toBe("2026-11-13");
-    expect(row.last_updated).toBe("2026-11-13");
     expect(row.status).toBe("pending_from_ce");
-    expect(row.active).toBe(true);
+    expect(row.active).toBe(false);
+    expect(isFaqIndexable(row)).toBe(false);
     expect(row.sync_origin).toBe(FAQ_SYNC_ORIGIN);
-    expect(row.differs_by_course).toBe(true);
   });
 
-  it("uses API date and official status when source is set", () => {
-    const row = apiRowToBankItem({
-      id: "sample-faq-aid",
-      question: "Can I get aid?",
-      answer: "Apply for Open Door.",
-      locale: "en",
-      source: "https://ce.mdc.edu/opendoor",
-      date: "2026-10-22",
-      differs_by_course: false,
-    });
-    expect(row.fuente).toBe("https://ce.mdc.edu/opendoor");
-    expect(row.fecha).toBe("2026-10-22");
+  it("uses ET calendar date when API date is null", () => {
+    // 2026-11-13 03:30 UTC → still 2026-11-12 in America/New_York
+    const row = apiRowToBankItem(sampleRows[0], new Date("2026-11-13T03:30:00Z"));
+    expect(row.fecha).toBe("2026-11-12");
+  });
+
+  it("maps official rows with source_url and active true", () => {
+    const row = apiRowToBankItem(officialApiRow);
+    expect(row.fuente).toBe("https://ce.mdc.edu/register");
+    expect(row.source_url).toBe("https://ce.mdc.edu/register");
+    expect(row.fecha).toBe("2026-11-01");
     expect(row.status).toBe("official_ce");
+    expect(row.active).toBe(true);
+    expect(isFaqIndexable(row)).toBe(true);
+  });
+
+  it("treats empty answer as pending inactive", () => {
+    const row = apiRowToBankItem({
+      id: "sample-faq-empty",
+      question: "Empty?",
+      answer: "  ",
+      locale: "en",
+      source: "https://example.test",
+      date: "2026-11-01",
+    });
+    expect(row.active).toBe(false);
+    expect(row.status).toBe("pending_from_ce");
+    expect(isFaqIndexable(row)).toBe(false);
+  });
+});
+
+describe("assessFaqSyncPayload", () => {
+  it("aborts on notModified (304)", () => {
+    const g = assessFaqSyncPayload([], sampleRows, { notModified: true });
+    expect(g.ok).toBe(false);
+    if (!g.ok) expect(g.reason).toBe("not_modified");
+  });
+
+  it("aborts on empty payload", () => {
+    const g = assessFaqSyncPayload([], []);
+    expect(g.ok).toBe(false);
+    if (!g.ok) expect(g.reason).toBe("empty_payload");
+  });
+
+  it("aborts when incoming is under 50% of managed rows", () => {
+    const existing: FaqBankRow[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `sample-faq-${i}`,
+      question: `Q${i}?`,
+      answer: "Official answer.",
+      locale: "en",
+      sync_origin: FAQ_SYNC_ORIGIN,
+      active: true,
+      status: "official_ce",
+    }));
+    const g = assessFaqSyncPayload(existing, [officialApiRow]);
+    expect(g.ok).toBe(false);
+    if (!g.ok) expect(g.reason).toBe("too_few_rows");
+  });
+
+  it("allows a full enough payload", () => {
+    const existing: FaqBankRow[] = [
+      {
+        id: "sample-faq-cost",
+        question: "q",
+        answer: PENDING,
+        locale: "en",
+        sync_origin: FAQ_SYNC_ORIGIN,
+        active: false,
+        status: "pending_from_ce",
+      },
+    ];
+    expect(assessFaqSyncPayload(existing, sampleRows).ok).toBe(true);
   });
 });
 
@@ -119,46 +192,79 @@ describe("mergeFaqBankFromApi", () => {
         fecha: "2026-01-01",
         last_updated: "2026-01-01",
         sync_origin: FAQ_SYNC_ORIGIN,
+        status: "official_ce",
         active: true,
       },
       {
         id: "sample-faq-gone",
         question: "Removed from playground?",
-        answer: "[Pending from CE. x]",
+        answer: PENDING,
         locale: "en",
         sync_origin: FAQ_SYNC_ORIGIN,
         active: true,
+        status: "pending_from_ce",
       },
     ];
 
     const merged = mergeFaqBankFromApi(existing, sampleRows, new Date("2026-11-13T12:00:00Z"));
     expect(merged.fetched).toBe(2);
-    expect(merged.upserted).toBe(2);
+    expect(merged.upserted).toBe(1); // only -es is new; -cost keeps official
     expect(merged.deactivated).toBe(1);
+    expect(merged.preservedOfficial).toBe(1);
 
     const byId = Object.fromEntries(merged.faqs.map((f) => [f.id!, f]));
-    expect(byId["sample-faq-cost"].question).toBe(sampleRows[0].question);
-    expect(byId["sample-faq-cost"].answer).toBe(sampleRows[0].answer);
+    // Official existing is preserved when API sends pending for same id
+    expect(byId["sample-faq-cost"].answer).toBe("old answer");
     expect(byId["sample-faq-cost"].active).toBe(true);
-    expect(byId["sample-faq-cost-es"].locale).toBe("es");
+    expect(byId["sample-faq-cost-es"].active).toBe(false);
+    expect(byId["sample-faq-cost-es"].status).toBe("pending_from_ce");
     expect(byId["sample-faq-gone"].active).toBe(false);
     expect(byId["opendoor#1"].answer).toBe("Be a Florida resident.");
-    expect(byId["opendoor#1"].active).not.toBe(false);
   });
 
-  it("treats legacy sample-faq ids without sync_origin as managed", () => {
+  it("does not deactivate or overwrite manual sample-faq rows without sync_origin", () => {
     const existing: FaqBankRow[] = [
       {
         id: "sample-faq-orphan",
-        question: "Legacy row",
-        answer: "[Pending from CE. x]",
+        question: "Manual row",
+        answer: "Staff wrote this.",
         locale: "en",
         active: true,
+        status: "official_ce",
       },
     ];
     const merged = mergeFaqBankFromApi(existing, [], new Date("2026-11-13T12:00:00Z"));
-    expect(merged.deactivated).toBe(1);
-    expect(merged.faqs[0].active).toBe(false);
+    expect(merged.deactivated).toBe(0);
+    expect(merged.faqs[0].active).toBe(true);
+    expect(merged.faqs[0].answer).toBe("Staff wrote this.");
+  });
+
+  it("does not let pending API overwrite an official managed answer", () => {
+    const existing: FaqBankRow[] = [
+      {
+        id: "sample-faq-cost",
+        question: "How much?",
+        answer: "It depends on the course and campus.",
+        locale: "en",
+        sync_origin: FAQ_SYNC_ORIGIN,
+        status: "official_ce",
+        active: true,
+        fuente: "https://ce.mdc.edu",
+        source_url: "https://ce.mdc.edu",
+      },
+    ];
+    const merged = mergeFaqBankFromApi(existing, sampleRows.slice(0, 1));
+    expect(merged.preservedOfficial).toBe(1);
+    expect(merged.faqs[0].answer).toBe("It depends on the course and campus.");
+    expect(merged.faqs[0].active).toBe(true);
+    expect(isFaqIndexable(merged.faqs[0])).toBe(true);
+  });
+
+  it("upserts official API rows as indexable", () => {
+    const merged = mergeFaqBankFromApi([], [officialApiRow]);
+    expect(merged.upserted).toBe(1);
+    expect(isFaqIndexable(merged.faqs[0])).toBe(true);
+    expect(merged.faqs[0].source_url).toBe("https://ce.mdc.edu/register");
   });
 });
 
