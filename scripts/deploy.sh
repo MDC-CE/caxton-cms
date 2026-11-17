@@ -584,6 +584,24 @@ if [[ "$ok" -ne 1 ]]; then
   exit 1
 fi
 
+# Post-flip FAQ sync from playground (non-fatal). Waits for boot content
+# alignment (.bootstrap-complete) so the hash-diff pull does not overwrite it.
+if [[ -n "${PLAYGROUND_FAQS_URL:-}" ]]; then
+  echo "[deploy] waiting for boot content alignment before FAQ sync"
+  for _ in $(seq 1 60); do
+    if compgen -G "$RELEASE/site_*/.bootstrap-complete" >/dev/null; then
+      break
+    fi
+    sleep 3
+  done
+  echo "[deploy] syncing playground FAQs"
+  if ! timeout 300 npx tsx scripts/sync-playground-faqs.ts; then
+    echo "[deploy] WARNING: FAQ sync failed (non-fatal); the nightly job will retry" >&2
+  fi
+else
+  echo "[deploy] PLAYGROUND_FAQS_URL not set — skipping FAQ sync"
+fi
+
 echo "[deploy] pruning old releases (keep active + $KEEP_RELEASES others)"
 ACTIVE="$(live_release_path)"
 # shellcheck disable=SC2012
