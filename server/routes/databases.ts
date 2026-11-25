@@ -222,6 +222,7 @@ import {
   FixerItemStatus,
 } from "./_helpers";
 import { child } from "../logger";
+import { serializeLocalItems } from "../local-items-file";
 import { api } from "../rate-limit/api";
 import {
   defaultMigrationDeps,
@@ -711,8 +712,8 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
       }
 
       const data: unknown = resultsPath ? { [resultsPath]: items } : items;
-      const yamlStr = safeYamlDump(data, { lineWidth: 120 });
-      fs.writeFileSync(filePath, yamlStr);
+      fs.writeFileSync(filePath, serializeLocalItems(data, filename, (d) => safeYamlDump(d, { lineWidth: 120 })));
+      log.info({ db: dbName, file: filename, count: items.length }, "[local-items] replaced items");
 
       dbm.clearCache(dbName);
 
@@ -765,11 +766,12 @@ Keep normalized keys lowercase with underscores. Aim for 10-25 of the most usefu
     contentRoot: string,
   ) {
     const data: unknown = resultsPath ? { [resultsPath]: items } : items;
-    const yamlStr = safeYamlDump(data, { lineWidth: 120 });
+    const body = serializeLocalItems(data, filename, (d) => safeYamlDump(d, { lineWidth: 120 }));
     if (!fs.existsSync(path.dirname(filePath))) {
       throw new Error(`Database directory not found`);
     }
-    fs.writeFileSync(filePath, yamlStr);
+    fs.writeFileSync(filePath, body);
+    log.info({ db: dbName, file: filename, count: items.length }, "[local-items] wrote items");
     dbm.clearCache(dbName);
     const relPath = `db/${dbName}/${filename}`;
     markFileAsModified(relPath, "api", undefined, contentRoot);

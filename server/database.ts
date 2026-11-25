@@ -15,6 +15,7 @@ import { expandEditorFieldTokens } from "@shared/editor-field-values";
 import { resolveCacheTtlMinutes, resolveRefreshRetryMinutes, type DbCacheTtlConfig } from "@shared/db-cache-ttl";
 import { freezeShared } from "./utils/deepFreeze";
 import { child } from "./logger";
+import { parseJsonItemsFile } from "./local-items-file";
 const log = child({ module: "database" });
 
 
@@ -178,10 +179,10 @@ function collectAllPaths(obj: unknown, prefix: string, keys: Set<string>): void 
 
 const DATASET_EXTENSIONS = [".json", ".csv", ".yaml", ".yml"];
 
-function parseFileContent(content: string, ext: string, resultsPath?: string): unknown[] {
+function parseFileContent(content: string, ext: string, resultsPath?: string, localLabel?: string): unknown[] {
   let data: unknown;
   if (ext === ".json") {
-    data = JSON.parse(content);
+    data = localLabel ? parseJsonItemsFile(content, localLabel) : JSON.parse(content);
   } else if (ext === ".yaml" || ext === ".yml") {
     data = yaml.load(content);
   } else if (ext === ".csv") {
@@ -239,7 +240,7 @@ async function fetchFromLocal(
   if (!DATASET_EXTENSIONS.includes(ext)) {
     throw new Error(`Unsupported file extension "${ext}". Allowed: ${DATASET_EXTENSIONS.join(", ")}`);
   }
-  return parseFileContent(content, ext, localConfig.results_path);
+  return parseFileContent(content, ext, localConfig.results_path, `db/${dbSlug}/${localConfig.filename}`);
 }
 
 async function fetchFromRemote(
