@@ -928,7 +928,7 @@ export function registerVersioningRoutes(app: Express): void {
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const contentDir = versioningManager.getVersioningContentDir(contentType, resolved.slug);
     const root = getContentRoot(res);
-    const folder = getFolder(contentType as ContentType);
+    const folder = getFolder(contentType as ContentType, root);
 
     if (!fs.existsSync(contentDir)) {
       res.status(404).json({ error: "Content folder not found" });
@@ -1078,8 +1078,8 @@ export function registerVersioningRoutes(app: Express): void {
   api.post(app, "/api/versioning/:contentType/:contentSlug/register", { rate: "staffWrite" }, async (req, res) => {
     const { contentType, contentSlug } = req.params;
 
-    if (!isValidType(contentType)) {
-      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+    if (!isValidType(contentType, getContentRoot(res))) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
       return;
     }
 
@@ -1201,7 +1201,7 @@ export function registerVersioningRoutes(app: Express): void {
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const contentDir = path.resolve(versioningManager.getVersioningContentDir(contentType, resolved.slug));
     const root = getContentRoot(res);
-    const folder = getFolder(contentType as ContentType);
+    const folder = getFolder(contentType as ContentType, root);
 
     if (!fs.existsSync(contentDir)) {
       res.status(404).json({ error: "Content folder not found" });
@@ -1378,7 +1378,7 @@ export function registerVersioningRoutes(app: Express): void {
 
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const root = getContentRoot(res);
-    const folder = getFolder(contentType as ContentType);
+    const folder = getFolder(contentType as ContentType, root);
     const { promoteVariantWithOptionalTeardown } = await import("../versioning/promote-with-teardown");
     const { findOpenProposalLinkForDraft } = await import("../content-proposals/service");
     const siteName = getContentRootName(res);
@@ -1552,8 +1552,8 @@ export function registerVersioningRoutes(app: Express): void {
     "/api/versioning/:contentType/:contentSlug/:locale/:variantSlug/unlink-proposal",
     async (req, res) => {
       const { contentType, contentSlug, locale, variantSlug } = req.params;
-      if (!isValidType(contentType)) {
-        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      if (!isValidType(contentType, getContentRoot(res))) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
       const auth = await requireCapability(req, res, "content_promote_variant", contentType);
@@ -1653,7 +1653,7 @@ export function registerVersioningRoutes(app: Express): void {
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const contentDir = path.resolve(versioningManager.getVersioningContentDir(contentType, resolved.slug));
     const root = getContentRoot(res);
-    const folder = getFolder(contentType as ContentType);
+    const folder = getFolder(contentType as ContentType, root);
 
     if (!fs.existsSync(contentDir)) {
       res.status(404).json({ error: "Content folder not found" });

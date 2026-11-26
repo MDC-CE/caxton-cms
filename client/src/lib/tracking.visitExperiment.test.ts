@@ -7,6 +7,7 @@ function fakeDocument() {
   return {
     jar,
     maxAge,
+    getElementById: (_id: string) => null,
     get cookie() {
       return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
     },
@@ -24,7 +25,15 @@ type Push = Record<string, unknown>;
 
 async function load() {
   vi.resetModules();
-  return import("./tracking");
+  const mod = await import("./tracking");
+  // Skip the 500ms page-context wait so fire-and-forget track() pushes stay testable.
+  mod.setPageTrackingContext({}, window.location.pathname);
+  return mod;
+}
+
+/** trackPageVersion calls async track() without awaiting; flush one microtask after context is set. */
+async function flushTrack() {
+  await Promise.resolve();
 }
 
 describe("visit experiment (first test seen this visit)", () => {
@@ -46,6 +55,7 @@ describe("visit experiment (first test seen this visit)", () => {
     const t = await load();
     t.trackPageVersion({ experiment_id: "landing:promo:en@2026-10-01", variant: "default" });
     t.trackPageVersion({ experiment_id: "landing:promo:en@2026-10-01", variant: "default" });
+    await flushTrack();
     const exposures = pushes().filter((p) => p.event === "experiment_exposure");
     expect(exposures).toHaveLength(1);
     expect(exposures[0]).toMatchObject({ experiment_id: "landing:promo:en@2026-10-01", variant: "default" });
@@ -55,6 +65,7 @@ describe("visit experiment (first test seen this visit)", () => {
     const t = await load();
     t.trackPageVersion({ experiment_id: "landing:promo:en@2026-10-01", variant: "b" });
     (window as unknown as { location: { pathname: string } }).location.pathname = "/en/landing/other";
+    t.setPageTrackingContext({}, "/en/landing/other");
     t.trackPageVersion({ experiment_id: "landing:other:en@2026-10-05", variant: "default" });
     t.trackPageVersion(null);
     expect(t.getVisitExperiment()).toEqual({ experiment_id: "landing:promo:en@2026-10-01", variant: "b" });
@@ -80,7 +91,7 @@ describe("visit experiment (first test seen this visit)", () => {
     const t = await load();
     t.trackPageVersion({ experiment_id: "landing:promo:en@2026-10-01", variant: "b" });
     doc.maxAge.set("4g_visit_exp", 0);
-    t.track("cta_click", { label: "Apply" });
+    await t.track("cta_click", { label: "Apply" });
     expect(doc.maxAge.get("4g_visit_exp")).toBe(1800);
   });
 

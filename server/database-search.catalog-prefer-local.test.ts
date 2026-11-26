@@ -8,6 +8,11 @@ const isAvailable = vi.fn();
 vi.mock("./vector-search", () => ({
   search: (...args: unknown[]) => vectorSearch(...args),
   isAvailable: (...args: unknown[]) => isAvailable(...args),
+  siteCollectionName: (folder: string, dbName: string) =>
+    `${String(folder).replace(/\\/g, "/").split("/").filter(Boolean).pop() || "site"}__${dbName}`,
+  legacyCollectionName: (dbName: string) => dbName,
+  collectionExists: vi.fn(async () => true),
+  vectorItemKey: (item: Record<string, unknown>) => String(item.slug ?? ""),
 }));
 
 const ITEMS = [
@@ -88,7 +93,7 @@ beforeEach(() => {
   vectorSearch.mockImplementation(async (_db: string, q: string) => {
     const slug = HITS[q] ?? "en:course:nursing";
     const index = ITEMS.findIndex((item) => item.slug === slug);
-    return [{ slug, score: 0.81, _idx: index }];
+    return { missingCollection: false, hits: [{ slug, score: 0.81, _idx: index }] };
   });
   fetchCalls = [];
   previousFetch = globalThis.fetch;

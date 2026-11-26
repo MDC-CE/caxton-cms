@@ -8,10 +8,18 @@ import { registerCatalogServiceRoutes } from "./routes/catalog-service";
 
 vi.mock("./vector-search", () => ({
   isAvailable: vi.fn(async () => true),
-  search: vi.fn(async () => [
-    { slug: "en:course:20001023", score: 0.42, _idx: 0 },
-    { slug: "en:content_piece:CM000061", score: 0.91, _idx: 1 },
-  ]),
+  search: vi.fn(async () => ({
+    missingCollection: false,
+    hits: [
+      { slug: "en:course:20001023", score: 0.42, _idx: 0 },
+      { slug: "en:content_piece:CM000061", score: 0.91, _idx: 1 },
+    ],
+  })),
+  siteCollectionName: (folder: string, dbName: string) =>
+    `${String(folder).replace(/\\/g, "/").split("/").filter(Boolean).pop() || "site"}__${dbName}`,
+  legacyCollectionName: (dbName: string) => dbName,
+  collectionExists: vi.fn(async () => true),
+  vectorItemKey: (item: Record<string, unknown>) => String(item.slug ?? ""),
 }));
 
 const ITEMS = [

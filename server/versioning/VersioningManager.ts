@@ -188,7 +188,7 @@ export class VersioningManager {
       const locale = m[2];
       if (variantSlug.startsWith("_") || isReservedTemplateVariantSlug(variantSlug)) return null;
       const folder = parts[1];
-      const contentType = getType(folder);
+      const contentType = getType(folder, this.contentRoot);
       return { contentType, slug: TEMPLATE_VERSIONING_SLUG, variantSlug, locale };
     }
 
@@ -208,14 +208,14 @@ export class VersioningManager {
 
     const folder = parts[1];
     const slug = parts[2];
-    const contentType = getType(folder);
+    const contentType = getType(folder, this.contentRoot);
 
     return { contentType, slug, variantSlug, locale };
   }
 
   /** Directory that holds versioning.yml and variant YAML files. */
   public getVersioningContentDir(contentType: string, slug: string): string {
-    const folder = getFolder(contentType);
+    const folder = getFolder(contentType, this.contentRoot);
     if (isTemplateVersioningSlug(slug)) {
       return path.join(this.contentDir(), folder);
     }
@@ -875,8 +875,8 @@ export class VersioningManager {
     const templateMode = isTemplateVersioningSlug(slug);
     const contentDir = this.getVersioningContentDir(contentType, slug);
     const folderPath = templateMode
-      ? `${this.contentFolderName()}/${getFolder(contentType)}`
-      : `${this.contentFolderName()}/${getFolder(contentType)}/${slug}`;
+      ? `${this.contentFolderName()}/${getFolder(contentType, this.contentRoot)}`
+      : `${this.contentFolderName()}/${getFolder(contentType, this.contentRoot)}/${slug}`;
 
     if (!fs.existsSync(contentDir)) {
       return null;

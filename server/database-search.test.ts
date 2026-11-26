@@ -17,7 +17,14 @@ import {
   searchDatabaseItems,
 } from "./database-search";
 import { setJobState } from "./db-job-state";
-import { __setVectorSearchTestDoubles, syncIndex, vectorItemKey, search as vectorSearch, isAvailable } from "./vector-search";
+import {
+  __setVectorSearchTestDoubles,
+  syncIndex,
+  vectorItemKey,
+  search as vectorSearch,
+  isAvailable,
+  collectionExists,
+} from "./vector-search";
 import { makeFakeEmbedder, makeFakeQdrant } from "./test-helpers/fake-qdrant";
 import type { DatabaseManager } from "./database";
 
@@ -25,9 +32,14 @@ vi.mock("./vector-search", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./vector-search")>();
   return {
     ...actual,
-    search: vi.fn(),
+    // Default: real search (collection-choice tests use fake Qdrant). Suites that need a
+    // canned response call vi.mocked(search).mockResolvedValue(...).
+    search: vi.fn((...args: Parameters<typeof actual.search>) => actual.search(...args)),
     isAvailable: vi.fn(async () => true),
     searchChunks: vi.fn(async () => []),
+    collectionExists: vi.fn((...args: Parameters<typeof actual.collectionExists>) =>
+      actual.collectionExists(...args),
+    ),
   };
 });
 
@@ -213,6 +225,8 @@ describe("description search target", () => {
     clearDatabaseSearchMemoryCacheForTests();
     vi.mocked(vectorSearch).mockReset();
     vi.mocked(isAvailable).mockResolvedValue(true);
+    // No job-state “ready” site collection in these stubs — use the legacy name.
+    vi.mocked(collectionExists).mockResolvedValue(true);
   });
 
   it("rejects an unknown target", () => {
@@ -231,9 +245,10 @@ describe("description search target", () => {
   });
 
   it("filters description hits by target and resolves the destiny code, not the old index", async () => {
-    vi.mocked(vectorSearch).mockResolvedValue([
-      { slug: course.slug, score: 0.8, _idx: 0, destiny_code: "1170129", kind: "course" },
-    ]);
+    vi.mocked(vectorSearch).mockResolvedValue({
+      missingCollection: false,
+      hits: [{ slug: course.slug, score: 0.8, _idx: 0, destiny_code: "1170129", kind: "course" }],
+    });
     const result = await searchDatabaseItems(CATALOG_DESCRIPTIONS_DB_NAME, "to code", {
       target: "course",
       locale: "en",
@@ -253,9 +268,10 @@ describe("description search target", () => {
   });
 
   it("keeps the wide neighbor search for other databases", async () => {
-    vi.mocked(vectorSearch).mockResolvedValue([
-      { slug: "other", score: 0.5, _idx: 0 },
-    ]);
+    vi.mocked(vectorSearch).mockResolvedValue({
+      missingCollection: false,
+      hits: [{ slug: "first", score: 0.5, _idx: 0 }],
+    });
     const first = { slug: "first", question: "first row" };
     const result = await searchDatabaseItems("faqs", "job", {
       db: dbWith("faqs", [first], ["question"]) as never,
@@ -269,7 +285,8 @@ describe("description search target", () => {
     );
     expect(result.items[0]?.slug).toBe("first");
   });
-}
+});
+
 describe("frequently_asked_questions search after generic reindex", () => {
   const FAQ = "frequently_asked_questions";
   const pending = {
@@ -306,14 +323,16 @@ describe("frequently_asked_questions search after generic reindex", () => {
     clearDatabaseSearchMemoryCacheForTests();
     vi.mocked(vectorSearch).mockReset();
     vi.mocked(isAvailable).mockResolvedValue(true);
+    vi.mocked(collectionExists).mockResolvedValue(true);
   });
 
   it("resolves by id so a stale _idx into pending does not win", async () => {
     // Generic reindex used to index [pending, official] with _idx 0/1.
     // Search filters to [official] only — _idx 0 would wrongly pick pending if used.
-    vi.mocked(vectorSearch).mockResolvedValue([
-      { slug: "sample-faq-register", score: 0.91, _idx: 0 },
-    ]);
+    vi.mocked(vectorSearch).mockResolvedValue({
+      missingCollection: false,
+      hits: [{ slug: "sample-faq-register", score: 0.91, _idx: 0 }],
+    });
     const result = await searchDatabaseItems(FAQ, "how do I register", {
       locale: "en",
       db: dbWith([pending, official]) as never,
@@ -324,11 +343,12 @@ describe("frequently_asked_questions search after generic reindex", () => {
   });
 
   it("hides pending rows from keyword fallback", async () => {
-    vi.mocked(vectorSearch).mockResolvedValue([]);
+    vi.mocked(vectorSearch).mockResolvedValue({ missingCollection: false, hits: [] });
     const result = await searchDatabaseItems(FAQ, "pending question", {
       locale: "en",
       db: dbWith([pending, official]) as never,
     });
     expect(result.items.every((i) => i.id !== "sample-faq-pending")).toBe(true);
   });
-}
+});
+

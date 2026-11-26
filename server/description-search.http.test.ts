@@ -14,6 +14,11 @@ vi.mock("./vector-search", () => ({
   isAvailable: vi.fn(async () => true),
   searchChunks: vi.fn(async () => []),
   indexItems: vi.fn(),
+  siteCollectionName: (folder: string, dbName: string) =>
+    `${String(folder).replace(/\\/g, "/").split("/").filter(Boolean).pop() || "site"}__${dbName}`,
+  legacyCollectionName: (dbName: string) => dbName,
+  collectionExists: vi.fn(async () => true),
+  vectorItemKey: (item: Record<string, unknown>) => String(item.slug ?? ""),
 }));
 
 vi.mock("./routes/_helpers", async (importOriginal) => {
@@ -89,7 +94,8 @@ describe("description search over HTTP", () => {
         { slug: piece.slug, score: 0.99, destiny_code: "CM000080", kind: "content_piece" as const },
         { slug: course.slug, score: 0.7, destiny_code: "1170129", kind: "course" as const },
       ];
-      return kind ? rows.filter((row) => row.kind === kind) : rows;
+      const hits = kind ? rows.filter((row) => row.kind === kind) : rows;
+      return { missingCollection: false, hits };
     });
   });
 

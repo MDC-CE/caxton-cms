@@ -25,7 +25,7 @@ import { canonicalHtmlCachePath, listStoredHtmlCacheKeys, parseHtmlCacheKey } fr
 import { sitesInheritingThemeFrom } from "../theme-config";
 import { isSharedTemplateBasename } from "../shared-layout-paths";
 import type { RefreshedDatabaseRow } from "../database-refresh-diff";
-import { getContentTypeConfig as getYamlContentTypeConfig } from "../content-types";
+import type { ContentTypeConfig } from "../content-types";
 import type { ContentEvent } from "./types";
 
 export type HtmlEventSite = {
@@ -68,10 +68,9 @@ function isLocalDatabase(ci: ContentIndex, dbName: string): boolean {
 }
 
 /** Page slugs for this type, from the database copy the refresh already stored. Null when the type has no page gate. */
-function pageKeys(ci: ContentIndex, dbName: string, contentType: string): Set<string> | null {
-  const config = getYamlContentTypeConfig(contentType, ci.contentRoot);
-  const filters = (config?.entry_filters ?? []).filter(
-    (filter: { item_property_slug?: string }) => String(filter?.item_property_slug ?? "").trim(),
+function pageKeys(ci: ContentIndex, dbName: string, config: ContentTypeConfig): Set<string> | null {
+  const filters = (config.entry_filters ?? []).filter((filter) =>
+    String(filter?.item_property_slug ?? "").trim(),
   );
   if (filters.length === 0) return null;
   let items: Record<string, unknown>[] = [];
@@ -85,8 +84,7 @@ function pageKeys(ci: ContentIndex, dbName: string, contentType: string): Set<st
     const slug = String(item.slug ?? "");
     if (!slug) continue;
     const passes = filters.every(
-      (filter: { item_property_slug?: string; value?: unknown }) =>
-        String(item[filter.item_property_slug ?? ""] ?? "") === String(filter.value ?? ""),
+      (filter) => String(item[filter.item_property_slug] ?? "") === String(filter.value ?? ""),
     );
     if (!passes) continue;
     const locale = String(item.locale ?? item.lang ?? item._locale ?? "");
@@ -106,7 +104,7 @@ export function refreshedRowPaths(
     const config = ci.getContentTypeConfig(contentType);
     if (config?.database?.slug !== dbName || !config.url_pattern) continue;
     if (includeType && !includeType(contentType)) continue;
-    const keys = pageKeys(ci, dbName, contentType);
+    const keys = pageKeys(ci, dbName, config);
     const locales = Object.keys(config.url_pattern).filter((locale) => locale !== "default");
     for (const row of rows) {
       if (!row.slug || (keys && !keys.has(`${row.locale ?? ""}\0${row.slug}`))) continue;
