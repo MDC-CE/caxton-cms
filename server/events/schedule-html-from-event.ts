@@ -5,7 +5,7 @@
 
 import path from "path";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
-import type { ContentIndex } from "../content-index";
+import type { ContentIndex, ContentTypeConfig } from "../content-index";
 import {
   classifyTouchedContentFiles,
   collectAttachedHtmlPaths,
@@ -25,7 +25,6 @@ import { canonicalHtmlCachePath, listStoredHtmlCacheKeys, parseHtmlCacheKey } fr
 import { sitesInheritingThemeFrom } from "../theme-config";
 import { isSharedTemplateBasename } from "../shared-layout-paths";
 import type { RefreshedDatabaseRow } from "../database-refresh-diff";
-import type { ContentTypeConfig } from "../content-types";
 import type { ContentEvent } from "./types";
 
 export type HtmlEventSite = {
@@ -67,9 +66,11 @@ function isLocalDatabase(ci: ContentIndex, dbName: string): boolean {
   }
 }
 
+type EntryFilter = { item_property_slug: string; value: unknown };
+
 /** Page slugs for this type, from the database copy the refresh already stored. Null when the type has no page gate. */
 function pageKeys(ci: ContentIndex, dbName: string, config: ContentTypeConfig): Set<string> | null {
-  const filters = (config.entry_filters ?? []).filter((filter) =>
+  const filters = (config.entry_filters ?? []).filter((filter: EntryFilter) =>
     String(filter?.item_property_slug ?? "").trim(),
   );
   if (filters.length === 0) return null;
@@ -84,7 +85,8 @@ function pageKeys(ci: ContentIndex, dbName: string, config: ContentTypeConfig): 
     const slug = String(item.slug ?? "");
     if (!slug) continue;
     const passes = filters.every(
-      (filter) => String(item[filter.item_property_slug] ?? "") === String(filter.value ?? ""),
+      (filter: EntryFilter) =>
+        String(item[filter.item_property_slug] ?? "") === String(filter.value ?? ""),
     );
     if (!passes) continue;
     const locale = String(item.locale ?? item.lang ?? item._locale ?? "");

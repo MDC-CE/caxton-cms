@@ -9,6 +9,7 @@ import {
   effectiveRequiredMode,
   type EditorRequiredHint,
 } from "../../../shared/validateRequiredFields";
+import { fieldMappingSource } from "../../../shared/validateEditorFieldTypes";
 import { validateFieldMapping } from "../shared/fieldMappingValidator";
 import { FIELD_MAPPINGS_ISSUE_CODES } from "./field-mappings.issueCodes";
 
@@ -103,9 +104,10 @@ export const fieldMappingsValidator: Validator = {
         if (key.startsWith("_")) continue;
         if (typeof value === "string") {
           normalizedMapping[key] = value;
-        } else if (value && typeof value === "object" && typeof value.source === "string") {
-          normalizedMapping[key] = value.source;
+          continue;
         }
+        const source = fieldMappingSource(value);
+        if (source) normalizedMapping[key] = source;
       }
 
       if (Object.keys(normalizedMapping).length === 0) continue;

@@ -92,6 +92,8 @@ export type LoadContentResult<T> =
 export interface ContentTypeConfig {
   directory: string;
   url_pattern: Record<string, string>;
+  /** Which cached rows become pages (all filters must match). Missing = every row. */
+  entry_filters?: Array<{ item_property_slug: string; value: unknown }>;
   database?: {
     slug: string;
     field_mapping?: Record<string, string | { source: string; default: string }>;

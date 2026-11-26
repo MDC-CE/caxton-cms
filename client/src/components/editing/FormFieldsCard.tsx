@@ -1104,7 +1104,7 @@ export function FormFieldsCard({
         ? ((databasesRaw as { databases: unknown[] }).databases)
         : []
   )
-    .map((raw) => {
+    .map((raw): { slug: string; name: string } | null => {
       const db = raw as { slug?: string; name?: string; label?: string };
       const slug = String(db.slug ?? db.name ?? "").trim();
       if (!slug) return null;
@@ -1113,7 +1113,7 @@ export function FormFieldsCard({
         name: typeof db.label === "string" && db.label.trim() ? db.label : db.name || slug,
       };
     })
-    .filter((db): db is { slug: string; name?: string } => db != null);
+    .filter((db): db is { slug: string; name: string } => db != null);
 
   function startAdd() {
     const name = nextUniqueFieldName(new Set(names));
