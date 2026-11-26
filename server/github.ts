@@ -1835,7 +1835,12 @@ export async function autoPullNonConflicting(changedFiles?: string[], remoteComm
       if (touchesPublicHtml) {
         void import("./html-rebuild")
           .then(({ scheduleHotHtmlRebuild }) => {
-            scheduleHotHtmlRebuild("content-pull", opts?.contentRoot);
+            scheduleHotHtmlRebuild(
+              "content-pull",
+              opts?.contentRoot
+                ? { siteIds: [path.basename(opts.contentRoot)] }
+                : undefined,
+            );
           })
           .catch(() => {});
       }

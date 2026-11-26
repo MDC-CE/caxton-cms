@@ -643,15 +643,17 @@ export function registerVersioningRoutes(app: Express): void {
 
         const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
         const prevVariants = existing[locale]?.variants ?? [];
-        const prevBySlug = new Map(
-          prevVariants.map((v: { slug: string; allocation: number }) => [v.slug, v.allocation]),
+        const prevBySlug = new Map<string, number>(
+          prevVariants.map((v: { slug: string; allocation: number }) => [v.slug, Number(v.allocation) || 0]),
         );
         const newVariants = parseResult.data.variants;
-        const newSlugSet = new Set(newVariants.map((v) => v.slug));
+        const newSlugSet = new Set(newVariants.map((v: { slug: string }) => v.slug));
 
         // Starting a test or raising a split needs A/B testing set up and a passing check.
         // Lowering (including to 0%) is always allowed.
-        const raised = newVariants.filter((v) => v.allocation > (prevBySlug.get(v.slug) ?? 0));
+        const raised = newVariants.filter(
+          (v: { slug: string; allocation: number }) => v.allocation > (prevBySlug.get(v.slug) ?? 0),
+        );
         if (raised.length > 0) {
           const abSite = { contentRoot: root, contentRootName: getContentRootName(res) };
           if (!isAbTestingSetUp(abSite)) {
@@ -822,8 +824,8 @@ export function registerVersioningRoutes(app: Express): void {
           }
         }
 
-        const hadTraffic = prevVariants.some((v) => v.allocation > 0);
-        const hasTraffic = newVariants.some((v) => v.allocation > 0);
+        const hadTraffic = prevVariants.some((v: { allocation: number }) => v.allocation > 0);
+        const hasTraffic = newVariants.some((v: { allocation: number }) => v.allocation > 0);
         const prevStartedAt = existing[locale]?.started_at;
         const startedAt =
           !hadTraffic && hasTraffic ? new Date().toISOString().slice(0, 10) : prevStartedAt;
@@ -1046,7 +1048,7 @@ export function registerVersioningRoutes(app: Express): void {
         ? { ...existing[locale], variants: [...(existing[locale].variants || [])] }
         : { variants: [] as Array<{ slug: string; allocation: number }> };
 
-      if (!localeData.variants.some((v) => v.slug === variantSlug)) {
+      if (!localeData.variants.some((v: { slug: string }) => v.slug === variantSlug)) {
         localeData.variants.push({ slug: variantSlug, allocation: 0 });
       }
 
@@ -1319,7 +1321,7 @@ export function registerVersioningRoutes(app: Express): void {
           .then(({ scheduleHotHtmlRebuild }) => {
             scheduleHotHtmlRebuild(
               `publish-all:${contentType}/${resolved.slug}/${variantSlug}`,
-              root,
+              { siteIds: [getContentRootName(res)] },
             );
           })
           .catch(() => {});
@@ -1424,7 +1426,9 @@ export function registerVersioningRoutes(app: Express): void {
     if (result.dryRun !== true) {
       void import("../html-rebuild")
         .then(({ scheduleHotHtmlRebuild }) => {
-          scheduleHotHtmlRebuild(`promote:${contentType}/${resolved.slug}/${locale}`, root);
+          scheduleHotHtmlRebuild(`promote:${contentType}/${resolved.slug}/${locale}`, {
+            siteIds: [siteName],
+          });
         })
         .catch(() => {});
     }
